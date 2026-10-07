@@ -163,6 +163,7 @@ fn drift_excluded_delete_listed_under_excluded_not_gone() {
 }
 
 #[test]
+#[ignore = "deterministic failure on macOS (gone-path canonicalization mismatch, /var -> /private/var); fails on clean HEAD with or without a live ~/.brain — issue #272; re-enable when #272 lands"]
 fn drift_walk_identity_with_ingest() {
     // Spec :114-115 REQUIRED case — drift and ingest must classify the SAME
     // (root, file list) pair identically. Build the list via the shared

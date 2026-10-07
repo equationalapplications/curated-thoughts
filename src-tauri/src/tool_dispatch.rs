@@ -1690,6 +1690,32 @@ mod dispatch_tool_call_tests {
             .unwrap_err();
         assert!(err.to_string().contains("unknown tool"));
     }
+
+    /// Spec §2.5 / §6 item 7: the ontology writer is NOT registered in the
+    /// MCP catalog — COMPILE-TIME absence, not a runtime gate. The only
+    /// supported manifest-writer surface is the `ct ontology set` CLI
+    /// (spec §2.11); any agent-facing spelling must fall through to the
+    /// unknown-tool error.
+    #[tokio::test]
+    async fn ontology_writer_is_not_in_the_mcp_catalog() {
+        let ctx = seeded_ctx();
+        for name in [
+            "ontology_set",
+            "set_ontology",
+            "set_ontology_mode",
+            "ontology_set_mode",
+            "apply_ontology_change",
+        ] {
+            let err = dispatch_tool_call(&ctx, name, serde_json::json!({ "mode": "strict" }))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("unknown tool"),
+                "ontology writer {name} must NOT be registered in the MCP catalog; got: {err}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ pub mod merge_duplicates;
 pub mod migration;
 pub mod okf_ddl;
 pub mod okf_migration;
+pub mod ontology_set;
 pub mod outbox_format;
 pub mod proposals;
 pub mod proposals_review;

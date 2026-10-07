@@ -56,6 +56,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: WikiCmd,
     },
+    /// Ontology configuration (spec 2026-10-03 §2.11).
+    Ontology {
+        #[command(subcommand)]
+        cmd: OntologyCmd,
+    },
     /// Librarian evidence operations (#186 provenance).
     Evidence {
         #[command(subcommand)]
@@ -200,11 +205,56 @@ enum WikiCmd {
     },
     /// Sweep edges whose `edge_type` is not declared by the entity's strict
     /// ontology manifest (spec §4 trigger (c)). Refuses without `--yes` so a
-    /// mistyped intent never silently deletes live rows.
+    /// mistyped intent never silently deletes live rows. Also carries the
+    /// §2.10 node-type extension: a node-type drift pass over the same
+    /// resolved vocabulary + alias table `ct heal` uses (report-only; with
+    /// `--yes` the pass applies).
     Sweep {
         /// Confirm the write.
         #[arg(long)]
         yes: bool,
+    },
+    /// ONE-TIME duplicate merge sweep (spec §2.7): group live entities by
+    /// punctuation-normalized name, demote losers behind `merged_into`
+    /// redirects. Report-only without `--yes`; refuses until `ct heal --yes`
+    /// has run the signed-alias remap. Same `--confirm-drift`/`--waive-drift`
+    /// FINAL-RULE flags as `ct heal`; the merge never writes the watermark.
+    MergeDuplicates {
+        /// Confirm the destructive merge.
+        #[arg(long)]
+        yes: bool,
+        /// Confirm the drift report's echoed old hash and proceed (requires --yes).
+        #[arg(long, requires = "yes", conflicts_with = "waive_drift")]
+        confirm_drift: Option<String>,
+        /// Acknowledge the drift report and proceed without watermark storage
+        /// (requires --yes).
+        #[arg(long, requires = "yes")]
+        waive_drift: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum OntologyCmd {
+    /// Set an ontology mode target (spec §2.11). Bare `--mode` (no --entity,
+    /// no --dir) writes the host-wide `ingest.ontology_default` config
+    /// default; `--dir <prefix>` writes the `ingest.folder_ontology` config
+    /// map; `--entity <id>` targets one entity — `--mode off` writes a
+    /// deliberate `ct_entity_optouts` row, `--mode strict` DELETES that row
+    /// in the same transaction as a strict manifest-ROW write whose
+    /// `node_types` + `fallback_node_type` are copied verbatim from the
+    /// resolved `tier_fact` manifest (r13-MAJOR-2 / r13-m4). `--fallback
+    /// <type>` writes `fallback_node_type` into the target manifest
+    /// (`tier_fact` unless `--entity` names one). One target per invocation:
+    /// `--entity` and `--dir` are mutually exclusive.
+    Set {
+        #[arg(long)]
+        mode: String,
+        #[arg(long, conflicts_with = "dir")]
+        entity: Option<String>,
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        fallback: Option<String>,
     },
 }
 
@@ -542,6 +592,26 @@ fn run(cmd: Cmd) -> Result<i32> {
                 yes,
             } => cli_common::wiki_forget_cmd(refs, like, dry_run, yes),
             WikiCmd::Sweep { yes } => cli_common::wiki_sweep_cmd(yes),
+            WikiCmd::MergeDuplicates {
+                yes,
+                confirm_drift,
+                waive_drift,
+            } => {
+                curated_thoughts_tools::cmds::merge_duplicates_run(confirm_drift, waive_drift, yes)
+            }
+        },
+        Cmd::Ontology { cmd } => match cmd {
+            OntologyCmd::Set {
+                mode,
+                entity,
+                dir,
+                fallback,
+            } => curated_thoughts_tools::cmds::ontology_set_run(
+                &mode,
+                entity.as_deref(),
+                dir.as_deref(),
+                fallback.as_deref(),
+            ),
         },
         Cmd::Evidence { cmd } => match cmd {
             EvidenceCmd::Regrade { yes } => cli_common::evidence_regrade_cmd(yes),

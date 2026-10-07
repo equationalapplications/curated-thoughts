@@ -679,13 +679,59 @@ pub fn wiki_sweep_cmd(yes: bool) -> Result<i32> {
              (a write). Pass --yes to proceed.",
             brain.paths.db_path.display()
         );
+        // §2.10 node-type extension, report-only arm: the SAME resolved
+        // vocabulary + alias table the heal pass uses, strictly read-only
+        // (`apply == false` — nothing retyped, no watermark). Human-readable
+        // census/drift text comes from inside the pass on STDERR; the
+        // summary line below is the sweep's own display of it.
+        if let Ok(mut ro) = tauri_app_lib::retrieval::open_brain_readonly(&brain.paths.db_path) {
+            let report = tauri_app_lib::db::heal_ontology::ontology_heal_pass(
+                &mut ro,
+                tauri_app_lib::db::heal_ontology::DriftFlag::None,
+                false,
+            );
+            print_ontology_pass_summary(&report, true);
+        }
         return Ok(1);
     }
     let brain = resolve()?;
-    let conn = open_rw(&brain)?;
+    let mut conn = open_rw(&brain)?;
     let removed = tauri_app_lib::db::edge_purge::purge_off_manifest_edges_all(&conn)?;
     println!("purged {removed} off-manifest edge(s)");
+    // §2.10 node-type extension, apply arm: the heal pass applies alias
+    // retypes with the same vocabulary + alias table (heal remains the sole
+    // watermark writer — it is the heal pass writing). Report-only in
+    // spirit for the EDGE half; the node half applies, and its drift gate /
+    // degraded refusal is the pass's own (a refusal prints, never masks the
+    // edge purge that already ran).
+    let report = tauri_app_lib::db::heal_ontology::ontology_heal_pass(
+        &mut conn,
+        tauri_app_lib::db::heal_ontology::DriftFlag::None,
+        true,
+    );
+    print_ontology_pass_summary(&report, false);
     Ok(0)
+}
+
+/// One-line human display of the ontology pass result for `ct wiki sweep`
+/// (§2.10 census display; Task 8 owns the display only — the flags/exit
+/// contract stays `ct heal`'s). Human text on STDERR; the sweep's stdout
+/// stays the edge-purge line.
+fn print_ontology_pass_summary(
+    report: &tauri_app_lib::db::heal_ontology::OntologyHealReport,
+    read_only: bool,
+) {
+    let scope = if read_only { " (read-only)" } else { "" };
+    eprintln!(
+        "ontology node-type pass{scope}: retyped {}, queued {}, report-only {}",
+        report.retyped, report.queued, report.report_only
+    );
+    if let Some(reason) = &report.skipped_reason {
+        eprintln!("ontology node-type pass: skipped ({reason})");
+    }
+    if let Some(err) = &report.error {
+        eprintln!("ontology node-type pass: error: {err}");
+    }
 }
 
 // ---------------------------------------------------------------------------
