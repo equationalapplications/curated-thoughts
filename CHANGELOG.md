@@ -1,3 +1,9 @@
+## [3.3.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.2.0...v3.3.0) (2026-10-07)
+
+### Features
+
+* **wisdom:** ct wisdom match ([#265](https://github.com/equationalapplications/curated-thoughts/issues/265)) — relevance-gated read-only match + corrections ([#266](https://github.com/equationalapplications/curated-thoughts/issues/266)) ([e83156b](https://github.com/equationalapplications/curated-thoughts/commit/e83156b2b21b7e032a52b9c2497d58095be6428b))
+
 ## [3.2.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.1.0...v3.2.0) (2026-10-03)
 
 ### Features
