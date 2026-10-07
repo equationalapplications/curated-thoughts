@@ -112,7 +112,22 @@ floor  hit@2   fp_rate
   0.25 at 0.60) while hit@2 recovers to 0.94 only at ≤ 0.50. Relevant and
   irrelevant probes overlap heavily on raw cosine for this model.
 
-## Not measured
+## Latency (Linux, 2026-10-07)
 
-- **Latency** (plan Task 5 Step 4: 50 `ct wisdom match` calls against a scratch
-  copy of a real brain, target p95 ≤ 1.5 s warm) — not run in this pass.
+Plan Task 5 Step 4: 50 `ct wisdom match --json -- "<probe text>"` calls against
+a scratch copy of the live brain (consistent SQLite `.backup` snapshot, config
+copied; `CURATED_BRAIN_DIR=/tmp/ct-pr266-brain`), probes = the first 50
+relevant fixtures in `probes.jsonl`. Build:
+`cargo build --release --manifest-path tools/Cargo.toml --bin ct` at commit
+`7950b56` (fresh-clone sidecar placeholder applied per README).
+
+- **Machine:** Ubuntu 22.04, Intel Core i5-2410M (2×2 cores, 2.30 GHz), 7 GB RAM.
+- **All 50 calls passed; the gate opened on every call** — the live brain's
+  embedded entries clear the 0.70 floor against real messages.
+- **p50 440 ms, p95 1215 ms** (nearest-rank over calls 2–50; warm target
+  p95 ≤ 1.5 s — **pass**). Cold first call: 901 ms. Raw per-call data:
+  calls ranged 365–1466 ms; the three > 1.2 s outliers are consistent with
+  OpenRouter network jitter, not local compute.
+
+Result: **target met** on hardware far slower than the macBook calibration
+machine; the gate adds well under 1.5 s p95 to a caller's turn.

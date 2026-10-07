@@ -1,7 +1,7 @@
 # `ct wisdom match`: relevance-gated, read-only wisdom match (issue #265)
 
 **Date:** 2026-10-06
-**Status:** implemented; calibrated 2026-10-07 for `external:qwen/qwen3-embedding-4b` (floor 0.70, hit@2 0.44, FP 0.05 — `docs/benchmarks/2026-10-07-wisdom-gate-qwen3-embedding-4b.md`). Latency (p95 ≤ 1.5 s) not yet measured.
+**Status:** implemented; calibrated 2026-10-07 for `external:qwen/qwen3-embedding-4b` (floor 0.70, hit@2 0.44, FP 0.05 — `docs/benchmarks/2026-10-07-wisdom-gate-qwen3-embedding-4b.md`). Latency measured 2026-10-07 on Linux: p50 0.44 s / p95 1.21 s warm over 50 calls (target ≤ 1.5 s — pass).
 **Branch:** `feat/issue-265-wisdom-match`
 **Issue:** #265
 **Consumer:** curated-thoughts-integrations (CTI) live wisdom delivery. CTI spec
