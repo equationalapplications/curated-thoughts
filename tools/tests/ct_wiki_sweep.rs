@@ -69,3 +69,82 @@ fn sweep_with_yes_purges_edges_then_reports_node_type_pass() {
         assert!(err.contains("ontology node-type pass"), "{err}");
     });
 }
+
+/// Controller ruling R10 (Task 8 fix round 1): the sweep's `--yes` apply arm
+/// is the RETYPING-ONLY pass — it applies an alias retype (agent→role) but
+/// must write NONE of heal's bookkeeping: no `ontology_config_watermark`
+/// stamp (heal is the sole watermark writer, R2.2.8) and no
+/// `alias_remap_completed` marker (the R2.7.1 merge precondition must not be
+/// claimable by a sweep).
+#[test]
+fn sweep_yes_applies_retype_but_writes_no_heal_bookkeeping() {
+    with_brain(|dir| {
+        // tier_fact manifest declares `role` (the alias target) AND a
+        // fallback: the retyping-only pass skips the §2.4.4 ensure, so a
+        // strict row WITHOUT a fallback resolves StrictNoVocab and retypes
+        // nothing (rows queue until `ct heal --yes` runs the ensure) — this
+        // fixture pins the post-ensure state.
+        let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
+        let manifest = r#"{"node_types":[{"type":"action"},{"type":"role"},{"type":"service"}],"edge_types":[],"fallback_node_type":"role"}"#;
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', ?1, 1)",
+            [manifest],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
+             VALUES ('ent_drift', 'Drifted', 'agent', 's', NULL, 1, 1, NULL)",
+            [],
+        )
+        .unwrap();
+        // A resolvable source fact: source-less entities climb the host
+        // default (rung 3), which SKIPs on a configless fixture — the
+        // remap pass needs a resolved path to reach the strict tier_fact
+        // row via rung 4 (same shape as the ct_heal fixtures).
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_ref, created_at, updated_at, deleted_at
+             ) VALUES ('f1', 'ent_drift', 't', 'b', '[]', 'inferred',
+                       'user', 'documents/note.md', 1, 1, NULL)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let out = run_ct(dir, &["wiki", "sweep", "--yes"]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("retyped 1"), "retype applied: {err}");
+
+        // The retype landed...
+        let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
+        let t: String = conn
+            .query_row(
+                "SELECT entity_type FROM curated_entities WHERE id = 'ent_drift'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(t, "role", "agent→role alias retype");
+        // ...but heal's bookkeeping did NOT.
+        let bookkeeping: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_meta \
+                 WHERE key IN ('ontology_config_watermark', 'alias_remap_completed')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            bookkeeping, 0,
+            "sweep --yes must not stamp the watermark or the remap marker"
+        );
+    });
+}

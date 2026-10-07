@@ -698,17 +698,14 @@ pub fn wiki_sweep_cmd(yes: bool) -> Result<i32> {
     let mut conn = open_rw(&brain)?;
     let removed = tauri_app_lib::db::edge_purge::purge_off_manifest_edges_all(&conn)?;
     println!("purged {removed} off-manifest edge(s)");
-    // §2.10 node-type extension, apply arm: the heal pass applies alias
-    // retypes with the same vocabulary + alias table (heal remains the sole
-    // watermark writer — it is the heal pass writing). Report-only in
-    // spirit for the EDGE half; the node half applies, and its drift gate /
-    // degraded refusal is the pass's own (a refusal prints, never masks the
-    // edge purge that already ran).
-    let report = tauri_app_lib::db::heal_ontology::ontology_heal_pass(
-        &mut conn,
-        tauri_app_lib::db::heal_ontology::DriftFlag::None,
-        true,
-    );
+    // §2.10 node-type extension, apply arm: the RETYPING-ONLY pass
+    // (`ontology_retype_pass`, controller ruling R10) — alias retypes with
+    // the same vocabulary + alias table and the same degraded/drift
+    // refusals, but NONE of heal's bookkeeping: no §2.4.4 ensure, no
+    // watermark stamp (heal stays the sole watermark writer), no
+    // alias_remap_completed marker. The edge half already ran above; a
+    // refusal here prints, never masks it.
+    let report = tauri_app_lib::db::heal_ontology::ontology_retype_pass(&mut conn);
     print_ontology_pass_summary(&report, false);
     Ok(0)
 }

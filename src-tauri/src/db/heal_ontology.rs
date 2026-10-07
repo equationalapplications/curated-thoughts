@@ -120,10 +120,47 @@ pub fn ontology_heal_pass(
     report
 }
 
+/// Retyping-ONLY ontology pass (review round on Task 8, controller ruling
+/// R10): the §2.10 `ct wiki sweep --yes` surface. Applies the alias remap
+/// with the SAME resolution/degraded/drift refusals as the heal pass but
+/// performs NONE of heal's bookkeeping — no §2.4.4 ensure, no watermark
+/// stamp (heal stays the SOLE watermark writer, R2.2.8), no
+/// `alias_remap_completed` marker (the marker vouches for a heal remap
+/// pass; a sweep must not claim one, else `ct wiki merge-duplicates`'s
+/// R2.7.1 precondition would be satisfied by a sweep).
+///
+/// Ensure dependency, deliberately NOT forced: alias retypes consult the
+/// manifest rows AS THEY ARE. On a pre-wave-1 manifest the ensure has not
+/// yet declared `document`/`process`, so alias targets onto those types are
+/// undeclared and those rows conservatively QUEUE (r2-M1) until
+/// `ct heal --yes` runs the ensure — the sweep reports them queued rather
+/// than writing the manifest extension itself.
+pub fn ontology_retype_pass(conn: &mut Connection) -> OntologyHealReport {
+    let mut report = OntologyHealReport::default();
+    if let Err(e) = run_inner(conn, DriftFlag::None, true, false, &mut report) {
+        report.error = Some(format!("{e:#}"));
+    }
+    report
+}
+
 fn run(
     conn: &mut Connection,
     flag: DriftFlag,
     apply: bool,
+    report: &mut OntologyHealReport,
+) -> Result<()> {
+    run_inner(conn, flag, apply, true, report)
+}
+
+/// `bookkeeping == false` strips heal's writes (ensure, marker, watermark)
+/// for the sweep's retyping-only surface ([`ontology_retype_pass`]); the
+/// degraded/ties and drift refusals stay — a sweep cannot clear a drift
+/// gate (DriftFlag::None there by construction).
+fn run_inner(
+    conn: &mut Connection,
+    flag: DriftFlag,
+    apply: bool,
+    bookkeeping: bool,
     report: &mut OntologyHealReport,
 ) -> Result<()> {
     if !table_exists(conn, "llm_wiki_meta")? || !table_exists(conn, "entity_type_origin")? {
@@ -253,24 +290,28 @@ fn run(
         return Ok(());
     }
 
-    // 4. Ensure BEFORE census (plan-p7-m2).
-    match crate::db::entity_gate::ensure_all_manifest_vocabularies(conn) {
-        Ok(s) => {
-            if s.extended + s.fallbacks_set + s.foreign_no_preferred_fallback + s.malformed > 0 {
-                eprintln!(
-                    "ontology ensure: visited={} extended={} fallbacks_set={} \
-                     foreign_no_preferred_fallback={} malformed={}",
-                    s.visited,
-                    s.extended,
-                    s.fallbacks_set,
-                    s.foreign_no_preferred_fallback,
-                    s.malformed
-                );
+    // 4. Ensure BEFORE census (plan-p7-m2). The retyping-only surface
+    //    (bookkeeping == false) skips it — see [`ontology_retype_pass`].
+    if bookkeeping {
+        match crate::db::entity_gate::ensure_all_manifest_vocabularies(conn) {
+            Ok(s) => {
+                if s.extended + s.fallbacks_set + s.foreign_no_preferred_fallback + s.malformed > 0
+                {
+                    eprintln!(
+                        "ontology ensure: visited={} extended={} fallbacks_set={} \
+                         foreign_no_preferred_fallback={} malformed={}",
+                        s.visited,
+                        s.extended,
+                        s.fallbacks_set,
+                        s.foreign_no_preferred_fallback,
+                        s.malformed
+                    );
+                }
             }
-        }
-        Err(e) => {
-            report.error = Some(format!("manifest ensure failed: {e:#}"));
-            return Ok(());
+            Err(e) => {
+                report.error = Some(format!("manifest ensure failed: {e:#}"));
+                return Ok(());
+            }
         }
     }
 
@@ -285,7 +326,13 @@ fn run(
 
     // 7. Marker at the END of a successful remap pass (§2.7.1), then the
     //    watermark — heal is the sole watermark writer (R2.2.8). Waive
-    //    returned above, so reaching here means confirmed-or-no-drift.
+    //    returned above, so reaching here means confirmed-or-no-drift. The
+    //    retyping-only surface (bookkeeping == false) writes NEITHER — a
+    //    sweep must not change what the next `ct heal` drift report compares
+    //    against, nor claim the remap marker.
+    if !bookkeeping {
+        return Ok(());
+    }
     let (_, now_ms) = crate::db::commit::now_timestamps();
     conn.execute(
         "INSERT OR REPLACE INTO llm_wiki_meta (key, value) VALUES (?1, ?2)",
@@ -812,6 +859,39 @@ mod tests {
         )
         .optional()
         .unwrap()
+    }
+
+    /// Ruling R10 (Task 8 fix round 1): [`ontology_retype_pass`] applies the
+    /// alias retype but writes NONE of heal's bookkeeping — no
+    /// `ontology_config_watermark`, no `alias_remap_completed` marker, no
+    /// manifest ensure (the tier row here is already ensure-complete; a
+    /// pre-wave-1 row would leave alias targets undeclared and queued).
+    #[test]
+    fn retype_pass_applies_retype_and_writes_no_bookkeeping() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        let r = ontology_retype_pass(&mut conn);
+        assert_eq!(r.error, None, "{r:?}");
+        assert_eq!(r.retyped, 1, "{r:?}");
+        assert_eq!(entity_type(&conn, "e1"), "role");
+        assert!(meta(&conn, WATERMARK_KEY).is_none(), "no watermark stamp");
+        assert!(
+            meta(&conn, ALIAS_REMAP_MARKER_KEY).is_none(),
+            "no remap marker"
+        );
+        // The ensure also did not run: the EA-seed manifest stays
+        // un-extended (no `document` declared).
+        let vocab = crate::db::entity_gate::NodeVocabulary::from_manifest(
+            &crate::wiki_graph::wiki_get_ontology(&conn, "tier_fact")
+                .unwrap()
+                .manifest
+                .unwrap(),
+        );
+        assert!(
+            !vocab.contains("document"),
+            "retype pass must not run the manifest ensure"
+        );
     }
 
     /// Pre-wave-1 `agent` row (no ledger row) → alias retype to `role`,
