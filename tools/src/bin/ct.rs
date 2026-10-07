@@ -98,6 +98,14 @@ enum Cmd {
         /// Confirm the write.
         #[arg(long)]
         yes: bool,
+        /// Confirm the drift report's echoed old hash and proceed with
+        /// retypes/remaps + watermark storage (requires --yes).
+        #[arg(long, requires = "yes", conflicts_with = "waive_drift")]
+        confirm_drift: Option<String>,
+        /// Acknowledge the drift report and proceed WITHOUT retypes,
+        /// remaps, or watermark storage (requires --yes).
+        #[arg(long, requires = "yes")]
+        waive_drift: Option<String>,
     },
     /// Approve, list, or revoke symlinks the ingest walker may follow.
     Trust {
@@ -607,7 +615,11 @@ fn run(cmd: Cmd) -> Result<i32> {
             }
         },
         Cmd::Drift { json } => curated_thoughts_tools::drift::drift_cmd(json),
-        Cmd::Heal { yes } => {
+        Cmd::Heal {
+            yes,
+            confirm_drift,
+            waive_drift,
+        } => {
             if !yes {
                 // Path-only resolution so a fresh brain (no brain.db yet)
                 // can still print the refusal with the planned db path
@@ -641,10 +653,28 @@ fn run(cmd: Cmd) -> Result<i32> {
                     "refusing: `ct heal` would evaluate {live} live librarian_inferred row(s) and soft-delete the ungrounded ones in {} (a write). Pass --yes to proceed.",
                     db_path.display()
                 );
+                // Read-only ontology census + drift section (plan-p3-M1):
+                // the SAME computation as the --yes pass but strictly
+                // read-only — the manifest ensure is computed in memory and
+                // reported as "ensure pending (read-only)" (R2.4.4 r12-m4),
+                // NO watermark stamp, NO brain.db creation. All census and
+                // drift text goes to STDERR; stdout stays empty so scripts
+                // reading stdout keep working (plan-p10-m8). On an
+                // old-schema database the census reports "schema pending
+                // (read-only)" instead of failing (plan-p9-M3).
+                if let Ok(mut ro) = tauri_app_lib::retrieval::open_brain_readonly(&db_path) {
+                    let _ = tauri_app_lib::db::heal_ontology::ontology_heal_pass(
+                        &mut ro,
+                        tauri_app_lib::db::heal_ontology::DriftFlag::None,
+                        false,
+                    );
+                }
                 return Ok(1);
             }
-            cli_common::heal_run()?;
-            Ok(0)
+            // plan-p6-m1: the --yes arm returns the heal's own exit code —
+            // an unconfirmed drift report or a refused ontology section is
+            // exit 1 even though the source-heal above it succeeded.
+            cli_common::heal_run(confirm_drift, waive_drift)
         }
         Cmd::Trust { link, list, revoke } => trust_cmd(link, list, revoke),
         Cmd::Watch {

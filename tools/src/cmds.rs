@@ -241,14 +241,34 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
 // Heal
 // ---------------------------------------------------------------------------
 
-/// `ct heal` body (spec 2026-09-24 §6): run the invalid-source heal core over
-/// the brain DB through the SAME `db::heal::heal_invalid_sources_conn` the GUI
-/// scheduler uses, then print the summary as a single JSON object on stdout.
+/// `ct heal` body (spec 2026-09-24 §6 + ontology spec §2.6): run the
+/// invalid-source heal core over the brain DB through the SAME
+/// `db::heal::heal_invalid_sources_conn` the GUI scheduler uses, then the
+/// ontology heal pass (Task 5), then print ONE JSON object on stdout — a
+/// flattened `HealSummary` plus the `ontology` section. Human-readable
+/// drift/census text goes to STDERR from inside the pass; a stray
+/// `println!` here would break every `ct heal --yes | jq` script.
 /// The write gate lives in the caller (bin/ct.rs), mirroring `Ingest`.
+///
+/// Returns the process exit code: 0 on success (including a waived drift
+/// report), 1 when the ontology section was refused/skipped for a reason
+/// the operator must act on (unconfirmed drift, degraded config, census
+/// fault). Source-heal errors still propagate as `Err`.
 ///
 /// Concurrency: `open_rw` sets a 5s busy timeout, matching every other
 /// concurrent-writer participant (desktop per-event connections, watchdog).
-pub fn heal_run() -> Result<()> {
+pub fn heal_run(
+    confirm_drift: Option<String>,
+    waive_drift: Option<String>,
+) -> Result<i32> {
+    use tauri_app_lib::db::heal_ontology::DriftFlag;
+
+    let flag = match (confirm_drift, waive_drift) {
+        (Some(h), None) => DriftFlag::Confirm(h),
+        (None, Some(h)) => DriftFlag::Waive(h),
+        (None, None) => DriftFlag::None,
+        (Some(_), Some(_)) => bail!("--confirm-drift and --waive-drift are mutually exclusive"),
+    };
     let brain = crate::write::resolve()?;
     let mut conn = crate::write::open_rw(&brain)?;
     // `/fix-pr` PRRT_kwDOSVmXas6lvgUV: `open_rw` is migration-free by design
@@ -276,11 +296,40 @@ pub fn heal_run() -> Result<()> {
             .unwrap_or_else(|| retrieval::resolve_brain_paths().brain_dir)
     };
     let summary = tauri_app_lib::db::heal::heal_invalid_sources_conn(&mut conn, vault)?;
-    // Serialize the struct directly (m2): `HealSummary` derives `Serialize`,
-    // so the stdout contract stays tied to the struct instead of a
-    // hand-built field list that can drift from it.
-    println!("{}", serde_json::to_string(&summary)?);
-    Ok(())
+    // Ontology pass COMPOSES after the source-heal (plan-p1-M3): the drift
+    // gate and the degraded-config refusal scope to the ONTOLOGY section
+    // only, so source-heal mutations above stand either way. The pass
+    // catches its own faults into `ontology.error` (plan-p8-m1) so the
+    // single JSON object below ALWAYS prints.
+    let ontology =
+        tauri_app_lib::db::heal_ontology::ontology_heal_pass(&mut conn, flag, true);
+    let out = CtHealOutput {
+        summary,
+        ontology: ontology.clone(),
+    };
+    println!("{}", serde_json::to_string(&out)?);
+    let exit = if ontology.error.is_some()
+        || matches!(
+            ontology.skipped_reason.as_deref(),
+            Some("unconfirmed_drift") | Some("degraded_config")
+        ) {
+        1
+    } else {
+        0
+    };
+    Ok(exit)
+}
+
+/// The `ct heal --yes` stdout shape (plan-p8-MAJOR-1): `HealSummary` stays
+/// `Copy` with three `usize` fields (the GUI/scheduler path returns it
+/// directly), so the CLI flattens it here — `evaluated`/`soft_deleted`/
+/// `edges_purged` remain top-level and the ontology section rides along
+/// as `ontology`.
+#[derive(serde::Serialize)]
+pub struct CtHealOutput {
+    #[serde(flatten)]
+    pub summary: tauri_app_lib::db::heal::HealSummary,
+    pub ontology: tauri_app_lib::db::heal_ontology::OntologyHealReport,
 }
 
 // ---------------------------------------------------------------------------

@@ -568,7 +568,7 @@ impl IngestConfig {
                 {
                     OntologyLookup::Hold
                 } else {
-                    OntologyLookup::Climb
+                    rung3_resolution(self, schema)
                 }
             }
             PrefixOutcome::NoMatch => {
@@ -582,10 +582,37 @@ impl IngestConfig {
                 if self.ontology_default.is_none() && schema.is_none() && schema_unparseable {
                     return OntologyLookup::Hold;
                 }
-                OntologyLookup::Climb
+                // (2c) Rung 3 (spec R2.2.3 / §6 item 8 grid, Task 5 parked
+                // finding): an explicit `ontology_default` decides the mode;
+                // an ABSENT default resolves LIVE from `ontology.schema`
+                // (Off → off; every other selection climbs to rung 4).
+                // Pre-Task-5 this arm always Climbed, so a host-wide
+                // `ontology_default: "off"` was silently overridden by a
+                // strict tier_fact row at rung 4 — the D8 case the grid
+                // pins as SKIP.
+                rung3_resolution(self, schema)
             }
         }
     }
+}
+
+/// Rung-3 mode resolution for a path no `folder_ontology` entry decided
+/// (spec R2.2.3, r5-M2/r6-M2 live rule): an explicit `ontology_default`
+/// wins; an absent default resolves LIVE from `ontology.schema` (`Off`
+/// selection → off, everything else → climb to rung 4). Shared by the
+/// NoMatch and Unplaceable arms of [`IngestConfig::ontology_lookup`] so the
+/// two "nothing path-specific is known" shapes cannot disagree.
+fn rung3_resolution(
+    ingest: &IngestConfig,
+    schema: Option<crate::ontology_config::OntologySelection>,
+) -> OntologyLookup {
+    if let Some(mode) = ingest.ontology_default {
+        return OntologyLookup::Mode(mode);
+    }
+    if schema == Some(crate::ontology_config::OntologySelection::Off) {
+        return OntologyLookup::Mode(OntologyMode::Off);
+    }
+    OntologyLookup::Climb
 }
 
 /// The degraded/failed state carried OUT of config loading, consumed by
@@ -2406,6 +2433,67 @@ mod tests {
                 None,
                 &OntologyDegradedState::default(),
                 None,
+                false
+            ),
+            OntologyLookup::Climb
+        );
+    }
+
+    /// Rung 3 (Task 5 parked finding, spec §6 item 8 grid): NoMatch resolves
+    /// the mode from `ontology_default` when set, else LIVE from the schema
+    /// selection (`Off` → off; other selections → climb to rung 4). A
+    /// host-wide off default must NOT be overridden by a strict rung 4.
+    #[test]
+    fn rung3_resolves_default_and_live_schema_on_no_match() {
+        let mut cfg = IngestConfig {
+            ontology_default: Some(OntologyMode::Off),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.ontology_lookup(
+                "anywhere/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                Some(OntologySelection::SchemaOrg),
+                false
+            ),
+            OntologyLookup::Mode(OntologyMode::Off),
+            "explicit off default wins over schema strict"
+        );
+        cfg = IngestConfig {
+            ontology_default: Some(OntologyMode::Strict),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.ontology_lookup(
+                "anywhere/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                Some(OntologySelection::Off),
+                false
+            ),
+            OntologyLookup::Mode(OntologyMode::Strict),
+            "explicit strict default wins over an Off schema selection"
+        );
+        // Absent default: schema Off resolves off LIVE; other selections
+        // climb (the grid's ABSENT column).
+        let absent = IngestConfig::default();
+        assert_eq!(
+            absent.ontology_lookup(
+                "anywhere/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                Some(OntologySelection::Off),
+                false
+            ),
+            OntologyLookup::Mode(OntologyMode::Off)
+        );
+        assert_eq!(
+            absent.ontology_lookup(
+                "anywhere/x.md",
+                None,
+                &OntologyDegradedState::default(),
+                Some(OntologySelection::Emergent),
                 false
             ),
             OntologyLookup::Climb
