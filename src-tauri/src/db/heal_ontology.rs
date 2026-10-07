@@ -632,7 +632,7 @@ fn ensure_pending_readonly(conn: &Connection) -> Result<(usize, usize)> {
 /// best-effort initial stamp (r13-MAJOR-3) so gate-era config changes are
 /// still visible to the first `heal --yes`. Value shapes: JSON
 /// `{"hash":..,"stamped_at":..}` or a bare hash string.
-fn read_watermark(conn: &Connection) -> Result<Option<(String, i64)>> {
+pub(crate) fn read_watermark(conn: &Connection) -> Result<Option<(String, i64)>> {
     if let Some(v) = conn
         .query_row(
             "SELECT value FROM llm_wiki_meta WHERE key = ?1",

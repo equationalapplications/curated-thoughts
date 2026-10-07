@@ -14,6 +14,7 @@ pub mod evidence_regrade;
 pub mod evidence_repair;
 pub mod heal;
 pub mod heal_ontology;
+pub mod merge_duplicates;
 pub mod migration;
 pub mod okf_ddl;
 pub mod okf_migration;

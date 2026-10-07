@@ -51,6 +51,9 @@ const EXPECTED_FIXTURE_COUNTS: &[(&str, usize)] = &[
     ("src/db/bundle_io.rs", 2),
     ("src/db/evidence_regrade.rs", 1),
     ("src/db/heal.rs", 1),
+    // merge_duplicates.rs: in-memory fixture for the R2.7.5 self-loop
+    // census test (report lists resolved self-loops) — read-side only.
+    ("src/db/merge_duplicates.rs", 1),
     ("src/db/queries.rs", 1),
     ("src/db/wiki_forget.rs", 1),
     ("src/db/wisdom.rs", 3),
