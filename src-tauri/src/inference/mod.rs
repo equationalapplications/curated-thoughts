@@ -758,11 +758,9 @@ mod tests {
             GenerationProvider::Unconfigured
         ));
         // Sanity: the file is still loadable and carries the unknown key.
-        let cfg = BrainConfig::load_lenient(
-            &crate::retrieval::brain_paths_for(temp.path()),
-        )
-        .unwrap()
-        .config;
+        let cfg = BrainConfig::load_lenient(&crate::retrieval::brain_paths_for(temp.path()))
+            .unwrap()
+            .config;
         assert_eq!(
             cfg.preserved_keys.as_ref().and_then(|v| v.get("x_custom")),
             Some(&serde_json::json!(1))
@@ -789,11 +787,7 @@ mod tests {
         .unwrap();
         let before = std::fs::read_to_string(&config_path).unwrap();
 
-        std::fs::set_permissions(
-            temp.path(),
-            std::fs::Permissions::from_mode(0o555),
-        )
-        .unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let state = InferenceState(Mutex::new(GenerationProvider::Unconfigured));
         let err = update_provider_with_brain_path(
@@ -809,11 +803,7 @@ mod tests {
         .unwrap_err();
 
         // Restore before TempDir drop (remove_dir_all needs write access).
-        std::fs::set_permissions(
-            temp.path(),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(
             err.starts_with("settings could not be saved to disk:"),
