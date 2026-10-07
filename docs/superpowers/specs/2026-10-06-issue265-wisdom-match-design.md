@@ -1,7 +1,7 @@
 # `ct wisdom match`: relevance-gated, read-only wisdom match (issue #265)
 
 **Date:** 2026-10-06
-**Status:** implemented
+**Status:** implemented; calibration pending (plan Task 5, Linux reference machine). Until then `local:nomic-embed-code` reports `"gate": "uncalibrated"`.
 **Branch:** `feat/issue-265-wisdom-match`
 **Issue:** #265
 **Consumer:** curated-thoughts-integrations (CTI) live wisdom delivery. CTI spec

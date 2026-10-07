@@ -4,6 +4,7 @@
 #![cfg(feature = "slow-tests")]
 
 use rusqlite::params;
+use sha2::{Digest, Sha256};
 use std::io::Read;
 
 const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wisdom_gate");
@@ -11,22 +12,31 @@ const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wisdom_ga
 #[test]
 fn wisdom_gate_floor_still_holds() {
     // The freeze files are produced by `calibrate_wisdom_gate --freeze <dir>`
-    // on the Linux reference machine with Ollama (issue #265 / spec §
-    // "Calibration"). Until they land, skip rather than panic so the test
-    // binary still compiles under `--features slow-tests` and a runner gets a
-    // clear pointer to the missing step.
+    // on the Linux reference machine with Ollama (spec § "Calibration").
+    // Until they land there is nothing to replay, but the skip stays fail-closed:
+    // a half-written freeze, or a production floor without its snapshot, fails.
     let expected_path = format!("{DIR}/expected.json");
     let vectors_path = format!("{DIR}/vectors.json.gz");
-    if !std::path::Path::new(&expected_path).exists()
-        || !std::path::Path::new(&vectors_path).exists()
-    {
+    let have_expected = std::path::Path::new(&expected_path).exists();
+    let have_vectors = std::path::Path::new(&vectors_path).exists();
+    assert_eq!(
+        have_expected, have_vectors,
+        "partial freeze: expected.json and vectors.json.gz must be committed together"
+    );
+    if !have_expected {
+        let uncovered: Vec<&str> = tauri_app_lib::wisdom_match::WISDOM_GATE_FLOORS
+            .iter()
+            .map(|(k, _)| *k)
+            .filter(|k| !k.starts_with("stub:"))
+            .collect();
+        assert!(
+            uncovered.is_empty(),
+            "WISDOM_GATE_FLOORS has {uncovered:?} but no calibration snapshot in {DIR}"
+        );
         eprintln!(
-            "wisdom_gate_floor_still_holds: SKIPPED — freeze files missing \
-             ({expected_path}, {vectors_path}). Run \
-             `calibrate_wisdom_gate --facts facts.jsonl --probes probes.jsonl \
-              --freeze <DIR>` on the Linux reference machine (Ollama required) \
-             and commit the generated `expected.json` + `vectors.json.gz` to \
-             enable this regression guard."
+            "wisdom_gate_floor_still_holds: SKIPPED (no freeze files in {DIR}). Run \
+             `calibrate_wisdom_gate --facts facts.jsonl --probes probes.jsonl --freeze <DIR>` \
+             on the Linux reference machine and commit expected.json + vectors.json.gz."
         );
         return;
     }
@@ -37,6 +47,21 @@ fn wisdom_gate_floor_still_holds() {
         .read_to_end(&mut raw)
         .unwrap();
     let frozen: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    // expected.json pins the fixture hashes: editing facts.jsonl or
+    // probes.jsonl under a frozen snapshot fails until calibration is rerun.
+    for (file, field) in [
+        ("facts.jsonl", "facts_sha256"),
+        ("probes.jsonl", "probes_sha256"),
+    ] {
+        let digest = hex::encode(Sha256::digest(
+            std::fs::read(format!("{DIR}/{file}")).unwrap(),
+        ));
+        assert_eq!(
+            Some(digest.as_str()),
+            expected[field].as_str(),
+            "{file} changed since calibration; rerun calibrate_wisdom_gate --freeze"
+        );
+    }
     let key = expected["model_key"].as_str().unwrap();
     let floor = expected["floor"].as_f64().unwrap() as f32;
     assert_eq!(
