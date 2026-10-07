@@ -1,7 +1,7 @@
 # `ct wisdom match`: relevance-gated, read-only wisdom match (issue #265)
 
 **Date:** 2026-10-06
-**Status:** Draft (brainstorm-approved 2026-10-06; dual review pending)
+**Status:** implemented
 **Branch:** `feat/issue-265-wisdom-match`
 **Issue:** #265
 **Consumer:** curated-thoughts-integrations (CTI) live wisdom delivery. CTI spec
