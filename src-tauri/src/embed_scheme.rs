@@ -35,6 +35,19 @@ pub const WRITE_SCHEME: &str = "instr1";
 /// Floor-key suffix for `instr1` (`<key>:instr1`); raw keys are unchanged.
 pub const SCHEME_SUFFIX_INSTR1: &str = ":instr1";
 
+/// The WRITE-scheme document text for an entry: under `instr1` the canonical
+/// instruction is prepended (byte-exact, direct concatenation) to the raw
+/// `title\n\nbody` prose; under `raw` the text is verbatim.
+///
+/// This is the parity text function: the sweep, both write-time paths, and the
+/// phase-2 pre-embed all derive the embedded text through it, so a stored
+/// vector always describes exactly the text the WRITE scheme feeds the
+/// provider. One function, not per-site `format!`s — a scheme drift here would
+/// silently desync parity from what was actually embedded.
+pub fn doc_text_for_entry(title: &str, body: &str) -> String {
+    format!("{QUERY_INSTRUCTION_PREFIX}{title}\n\n{body}")
+}
+
 /// `llm_wiki_meta` key holding the active read scheme.
 pub const ACTIVE_SCHEME_META_KEY: &str = "wisdom_active_scheme";
 
@@ -100,6 +113,177 @@ pub fn floor_key_for(model_key: &str, scheme: Scheme) -> String {
 mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
+    use std::path::Path;
+
+    #[test]
+    fn write_path_text_carries_the_instruction_prefix() {
+        // Test (c), spec §4: the WRITE-scheme document text is
+        // `<prefix><title>\n\n<body>` — the prefix glued directly onto the
+        // title (no space), raw prose untouched.
+        let text = doc_text_for_entry("A title", "A body.");
+        assert_eq!(
+            text,
+            format!("{QUERY_INSTRUCTION_PREFIX}A title\n\nA body.")
+        );
+        assert!(
+            text.starts_with(&format!("{QUERY_INSTRUCTION_PREFIX}A title")),
+            "the prefix must be directly concatenated onto the title"
+        );
+        // The doc side differs from the raw text exactly by the prefix.
+        assert_eq!(
+            text.strip_prefix(QUERY_INSTRUCTION_PREFIX),
+            Some("A title\n\nA body.")
+        );
+    }
+
+    /// Recursively collect `*.rs` files under `dir` (std-only; the inventory
+    /// test must not depend on extra crates).
+    fn collect_rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Extract every SQL statement window that starts a string literal with
+    /// `INSERT INTO llm_wiki_entries` or `UPDATE llm_wiki_entries`. A window
+    /// runs until the statement's closing `)?;` (capped at 80 lines).
+    fn sql_windows(lines: &[&str]) -> Vec<(usize, String)> {
+        let mut windows = Vec::new();
+        let mut i = 0usize;
+        while i < lines.len() {
+            let trimmed = lines[i].trim_start();
+            let is_start = trimmed.starts_with('"')
+                && (trimmed.contains("INSERT INTO llm_wiki_entries")
+                    || trimmed.contains("UPDATE llm_wiki_entries"));
+            if is_start {
+                let start = i;
+                let mut j = i;
+                while j < lines.len() && j - start < 80 {
+                    let t = lines[j].trim_end();
+                    if t.ends_with(")?;") || t.ends_with("?);") || t.ends_with("\")?;") {
+                        break;
+                    }
+                    j += 1;
+                }
+                windows.push((start, lines[start..=j.min(lines.len() - 1)].join("\n")));
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+        windows
+    }
+
+    #[test]
+    fn writer_inventory_every_embedding_blob_write_stamps_embed_scheme() {
+        // Plan-review F4 (docs/superpowers/plans/2026-10-07-issue265-wisdom-
+        // instruction-prefix.md): a grep-level inventory over the crate source.
+        // Every SQL statement that writes `embedding_blob` must also reference
+        // `embed_scheme` in the same statement — a vector may never land
+        // without its scheme stamp. Test-seed INSERTs (which stage fixture
+        // blobs for unrelated tests) are exempted explicitly by
+        // `file: first SQL line`; adding an exemption must be a conscious
+        // review decision, never an accident.
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src, &mut files);
+        files.sort();
+
+        let exempt_first_lines = [
+            // Test seeds that stage a fixture blob (or none) and do not test
+            // the scheme stamp itself; the stamping writers have their own
+            // dedicated tests.
+            "embed_sweep.rs: \"INSERT INTO llm_wiki_entries (",
+            "db/commit.rs: \"INSERT INTO llm_wiki_entries (",
+            "db/commit.rs:             \"INSERT INTO llm_wiki_entries (",
+            "db/commit.rs:             \"UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id IN ('fact_b', 'fact_c')\",",
+            "db/commit.rs:             \"UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'fact_a'\",",
+            "db/wisdom.rs:             \"INSERT INTO llm_wiki_entries (",
+            "wisdom_match.rs:             \"INSERT INTO llm_wiki_entries (",
+            "wisdom_match.rs: \"INSERT INTO llm_wiki_entries VALUES ('a', 'ent', 'T', 'B', 'user_stated', ?1, NULL)\",",
+            "wiki_graph.rs:             \"INSERT INTO llm_wiki_entries (",
+            "tool_dispatch.rs:                 \"INSERT INTO llm_wiki_entries (id, entity_id, title, tier, embedding_blob)",
+            // Test seeds staging fixture rows (blob NULL or dummy) for tests
+            // that do not exercise the scheme stamp; the stamping writers
+            // have dedicated tests.
+            "db/drafts.rs:             \"INSERT INTO llm_wiki_entries (",
+            "db/edge_purge.rs:             \"INSERT INTO llm_wiki_entries (",
+            "db/wiki_forget.rs:             \"INSERT INTO llm_wiki_entries (",
+            "lib.rs:             \"INSERT INTO llm_wiki_entries (",
+            "wisdom_deposit.rs:                     \"INSERT INTO llm_wiki_entries (",
+        ];
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut writer_windows = 0usize;
+        for file in &files {
+            let rel = file
+                .strip_prefix(&src)
+                .unwrap_or(file)
+                .to_string_lossy()
+                .to_string();
+            let content = match std::fs::read_to_string(file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let lines: Vec<&str> = content.lines().collect();
+            for (start, window) in sql_windows(&lines) {
+                let writes_blob = window.contains("embedding_blob")
+                    && (window.contains("VALUES") || window.contains("SET "));
+                if !writes_blob {
+                    continue;
+                }
+                writer_windows += 1;
+                if window.contains("embed_scheme") {
+                    continue;
+                }
+                let key = format!("{}: {}", rel, lines[start].trim_end());
+                if exempt_first_lines.contains(&key.as_str()) {
+                    continue;
+                }
+                offenders.push(format!("{rel}:{}", start + 1));
+            }
+        }
+
+        assert!(
+            writer_windows >= 5,
+            "inventory ran cold — expected the production + seed blob writers, got {writer_windows}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "embedding_blob written without an embed_scheme stamp at:\n  {}\n\
+             Either stamp the statement with embed_scheme (from \
+             crate::embed_scheme::WRITE_SCHEME) or, for a test-seed INSERT, \
+             add an explicit exemption in writer_inventory_…",
+            offenders.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn the_sql_blob_writers_reference_the_write_constant() {
+        // The three files owning direct SQL blob writes must drive the stamp
+        // from the WRITE_SCHEME constant (not a string literal), so a scheme
+        // rename is a compile error. (entities_api.rs writes through
+        // db/wisdom.rs; schema_guard.rs only pins the column; both
+        // graph_reanchor paths funnel through embed_sweep.rs.)
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for rel in ["embed_sweep.rs", "db/commit.rs", "db/wisdom.rs"] {
+            let content =
+                std::fs::read_to_string(src.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            assert!(
+                content.contains("crate::embed_scheme::WRITE_SCHEME"),
+                "{rel} must stamp embed_scheme from the WRITE_SCHEME constant"
+            );
+        }
+    }
 
     #[test]
     fn instruction_prefix_is_byte_exact() {

@@ -27,13 +27,17 @@ pub struct SweepReport {
     pub remaining_null: usize,
 }
 
-/// The text an entry embeds to. Title and body joined by a blank line — the
-/// prose the librarian actually curated, same convention as chunk text.
+/// The text an entry embeds to: the WRITE-scheme document text (see
+/// [`crate::embed_scheme::doc_text_for_entry`]). Under the `instr1` WRITE
+/// scheme (issue #265) the canonical instruction prefix is prepended to the
+/// raw `title\n\nbody` prose.
 ///
 /// Both the sweep and the write-time path call this so a re-embed always
-/// produces a vector comparable to the original.
+/// produces a vector comparable to the original, and write-time parity
+/// (`db/commit.rs`) compares against this same function — parity and write
+/// must never disagree about what was fed to the provider.
 pub fn embed_text_for_entry(title: &str, body: &str) -> String {
-    format!("{title}\n\n{body}")
+    crate::embed_scheme::doc_text_for_entry(title, body)
 }
 
 /// SELECT one batch of live entries with `embedding_blob IS NULL`, ordered by
@@ -89,11 +93,14 @@ pub fn apply_embeddings(
     let mut filled = 0usize;
     for ((id, _, _), vector) in batch.iter().zip(vectors.iter()) {
         let blob = f32_vec_to_blob(vector);
+        // Issue #265: the stamp rides the same statement as the blob — a
+        // vector must never exist under a stale or unknown scheme. The
+        // sweep always embeds under the WRITE scheme.
         let updated = tx.execute(
             "UPDATE llm_wiki_entries
-                SET embedding_blob = ?1
-              WHERE id = ?2 AND embedding_blob IS NULL AND deleted_at IS NULL",
-            params![blob, id],
+                SET embedding_blob = ?1, embed_scheme = ?2
+              WHERE id = ?3 AND embedding_blob IS NULL AND deleted_at IS NULL",
+            params![blob, crate::embed_scheme::WRITE_SCHEME, id],
         )?;
         filled += updated;
     }
@@ -245,10 +252,54 @@ mod tests {
 
     #[test]
     fn embed_text_joins_title_and_body() {
+        // Under the instr1 WRITE scheme (issue #265) the canonical instruction
+        // is prepended to the raw prose — same shape the query side uses.
         assert_eq!(
             embed_text_for_entry("A title", "A body."),
-            "A title\n\nA body."
+            format!(
+                "{}A title\n\nA body.",
+                crate::embed_scheme::QUERY_INSTRUCTION_PREFIX
+            )
         );
+    }
+
+    /// Test (c), spec §4 (write path): the sweep's `apply_embeddings` — the
+    /// single writer behind both the runtime sweep and the `graph_reanchor`
+    /// migration bin — stamps `embed_scheme = WRITE_SCHEME` in the same
+    /// UPDATE as the blob.
+    #[test]
+    fn apply_embeddings_stamps_embed_scheme() {
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
+            let conn = open_in_memory().unwrap();
+            seed_entry(&conn, "fact_stamp_a", None, None);
+
+            let report = sweep_null_embeddings(&conn, &EmbedProfile::default(), 1).unwrap();
+            assert_eq!(report.filled, 1);
+
+            let scheme: String = conn
+                .query_row(
+                    "SELECT embed_scheme FROM llm_wiki_entries WHERE id = 'fact_stamp_a'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(scheme, crate::embed_scheme::WRITE_SCHEME);
+
+            // The migration-bin path uses `apply_embeddings` directly; prove
+            // the stamp rides there too (same statement as the blob write).
+            seed_entry(&conn, "fact_stamp_b", None, None);
+            let batch = vec![("fact_stamp_b".to_string(), "t".to_string(), "b".to_string())];
+            let filled = apply_embeddings(&conn, &batch, &[vec![0.5_f32; 8]]).unwrap();
+            assert_eq!(filled, 1);
+            let scheme_b: String = conn
+                .query_row(
+                    "SELECT embed_scheme FROM llm_wiki_entries WHERE id = 'fact_stamp_b'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(scheme_b, crate::embed_scheme::WRITE_SCHEME);
+        });
     }
 
     #[test]

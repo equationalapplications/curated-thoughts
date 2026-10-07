@@ -1530,7 +1530,9 @@ fn commit_fact_add(
 
     // Use the precomputed vector only if it describes the text we are about
     // to write — see `PrecomputedEmbedding`. A stale vector is worse than no
-    // vector: NULL is retried by the sweep, a wrong vector is not.
+    // vector: NULL is retried by the sweep, a wrong vector is not. The
+    // comparison is against the WRITE-scheme text function — the same
+    // function the phase-2 pre-embed fed the provider (spec §4).
     let embedding_blob: Option<Vec<u8>> = ctx
         .entry_embeddings
         .get(&item.id)
@@ -1547,8 +1549,8 @@ fn commit_fact_add(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type,
             source_hash, source_ref, created_at, updated_at, last_accessed_at,
-            access_count, deleted_at, embedding_blob, embedding, tier
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9, NULL, 0, NULL, ?10, NULL, ?11)",
+            access_count, deleted_at, embedding_blob, embed_scheme, embedding, tier
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9, NULL, 0, NULL, ?10, ?11, NULL, ?12)",
         params![
             fact_id,
             ctx.entity_id,
@@ -1560,6 +1562,7 @@ fn commit_fact_add(
             source_ref,
             ctx.now_ms,
             embedding_blob,
+            crate::embed_scheme::WRITE_SCHEME,
             tier,
         ],
     )?;
@@ -1717,19 +1720,23 @@ fn commit_fact_update(
     // vector describing text the entry no longer contains. The text check
     // matters here specifically: the caller embeds a body loaded before the
     // `DbState` mutex was dropped, and `resolve_proposal` re-loads items after
-    // re-acquiring it (see `PrecomputedEmbedding`).
+    // re-acquiring it (see `PrecomputedEmbedding`). The comparison is against
+    // the WRITE-scheme text function — the same function the pre-embed fed
+    // the provider (spec §4).
     let embedding_blob: Option<Vec<u8>> = ctx
         .entry_embeddings
         .get(&item.id)
         .filter(|e| e.embed_text == crate::embed_sweep::embed_text_for_entry(&title, &body))
         .map(|e| crate::wiki_graph::f32_vec_to_blob(&e.vector));
 
+    // Issue #265: the scheme stamp rides in the same statement as the blob —
+    // a vector must never exist under a stale or unknown scheme.
     if body_changed {
         conn.execute(
             "UPDATE llm_wiki_entries
              SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5,
-                 embedding_blob = ?6
-             WHERE id = ?7 AND entity_id = ?8",
+                 embedding_blob = ?6, embed_scheme = ?7
+             WHERE id = ?8 AND entity_id = ?9",
             params![
                 title,
                 body,
@@ -1737,6 +1744,7 @@ fn commit_fact_update(
                 confidence,
                 ctx.now_ms,
                 embedding_blob,
+                crate::embed_scheme::WRITE_SCHEME,
                 fact_id,
                 ctx.entity_id,
             ],
@@ -1746,12 +1754,16 @@ fn commit_fact_update(
         // must be preserved — but if the row is NULL (an earlier write-time
         // embed failed and the sweep has not run yet) this is the moment to
         // fill it: we already paid for the vector and it matches the body.
-        // COALESCE does both: overwrite when we have one, keep otherwise.
+        // COALESCE does both: overwrite when we have one, keep otherwise. The
+        // scheme stamp follows the blob: a fresh vector re-stamps, an
+        // untouched row keeps whatever scheme its surviving blob was written
+        // under (never blind-write the stamp over a blob we did not write).
         conn.execute(
             "UPDATE llm_wiki_entries
              SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5,
-                 embedding_blob = COALESCE(?6, embedding_blob)
-             WHERE id = ?7 AND entity_id = ?8",
+                 embedding_blob = COALESCE(?6, embedding_blob),
+                 embed_scheme = CASE WHEN ?6 IS NOT NULL THEN ?7 ELSE embed_scheme END
+             WHERE id = ?8 AND entity_id = ?9",
             params![
                 title,
                 body,
@@ -1759,6 +1771,7 @@ fn commit_fact_update(
                 confidence,
                 ctx.now_ms,
                 embedding_blob,
+                crate::embed_scheme::WRITE_SCHEME,
                 fact_id,
                 ctx.entity_id,
             ],
@@ -2855,18 +2868,198 @@ mod tests {
     /// Build the `LoadedItem` a fact_add commit consumes. `evidence` carries the
     /// chunk anchors; an empty vec is the unanchored case.
     fn fact_add_item(evidence: Vec<StoredEvidenceChunk>) -> LoadedItem {
+        fact_add_item_with_body("A fact worth storing.", evidence)
+    }
+
+    /// `fact_add_item` with a caller-chosen payload body — distinct bodies
+    /// keep phase-1 dedupe out of the way in multi-commit tests.
+    fn fact_add_item_with_body(body: &str, evidence: Vec<StoredEvidenceChunk>) -> LoadedItem {
         LoadedItem {
             id: "item_t".into(),
             item_type: "fact_add".into(),
             target_id: None,
             payload: serde_json::json!({
-                "body": "A fact worth storing.",
+                "body": body,
                 "tags": [],
                 "confidence": "inferred"
             }),
             evidence,
             edited_payload: None,
         }
+    }
+
+    /// Test (c), spec §4 (write path): the fact_add INSERT stamps
+    /// `embed_scheme = WRITE_SCHEME` whether or not the row carries a blob,
+    /// and a precomputed vector passes parity only when it was embedded from
+    /// the WRITE-scheme text — the raw-text vector is discarded (NULL → the
+    /// sweep re-embeds). Each commit uses a DISTINCT payload body so the
+    /// phase-1 dedupe never masks the scheme assertions.
+    #[test]
+    fn fact_add_stamps_embed_scheme_and_parity_uses_the_write_scheme_text() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-sc", "Test Entity", "summary", 100);
+        let doc_id = seed_document(&conn, "notes.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        let content_hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let body = "A scheme-stamped fact.";
+        let title = fact_title_from_body(body);
+        let mut ctx = test_ctx("ent-sc");
+        // A vector embedded from the RAW (pre-#265) text function: parity
+        // under the WRITE scheme must reject it.
+        ctx.entry_embeddings.insert(
+            "item_t".to_string(),
+            PrecomputedEmbedding {
+                embed_text: format!("{title}\n\n{body}"),
+                vector: vec![0.5_f32; 8],
+            },
+        );
+        let item = fact_add_item_with_body(
+            "A scheme-stamped fact.",
+            vec![StoredEvidenceChunk {
+                chunk_id: Some(chunk_id),
+                content_hash,
+                quote: "evidence".into(),
+                start_line: Some(1),
+                end_line: Some(2),
+                source_kind: None,
+            }],
+        );
+        let outcome = commit_fact_add(&conn, &mut ctx, &item, &item.payload).unwrap();
+        assert!(matches!(outcome, FactAddOutcome::Applied));
+        let entry_id = ctx.committed.last().unwrap().record_id.clone();
+
+        // Raw-text vector discarded: NULL blob for the sweep to re-embed.
+        let (blob, scheme): (Option<Vec<u8>>, String) = conn
+            .query_row(
+                "SELECT embedding_blob, embed_scheme FROM llm_wiki_entries WHERE id = ?1",
+                [&entry_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            blob, None,
+            "a raw-text vector must fail WRITE-scheme parity"
+        );
+        assert_eq!(scheme, crate::embed_scheme::WRITE_SCHEME);
+
+        // Now a vector embedded from the WRITE-scheme text: parity accepts it.
+        let mut ctx2 = test_ctx("ent-sc");
+        let chunk2 = seed_chunk(&conn, doc_id);
+        let hash2: String = conn
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [chunk2],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // The WRITE-scheme text of the SECOND fact's own body/title.
+        let body2 = "A second, distinct scheme-stamped fact.";
+        let title2 = fact_title_from_body(body2);
+        ctx2.entry_embeddings.insert(
+            "item_t".to_string(),
+            PrecomputedEmbedding {
+                embed_text: crate::embed_sweep::embed_text_for_entry(&title2, body2),
+                vector: vec![0.25_f32; 8],
+            },
+        );
+        let item2 = fact_add_item_with_body(
+            "A second, distinct scheme-stamped fact.",
+            vec![StoredEvidenceChunk {
+                chunk_id: Some(chunk2),
+                content_hash: hash2,
+                quote: "evidence".into(),
+                start_line: Some(1),
+                end_line: Some(2),
+                source_kind: None,
+            }],
+        );
+        let outcome2 = commit_fact_add(&conn, &mut ctx2, &item2, &item2.payload).unwrap();
+        assert!(matches!(outcome2, FactAddOutcome::Applied));
+        let entry_id2 = ctx2.committed.last().unwrap().record_id.clone();
+
+        let (blob2, scheme2): (Option<Vec<u8>>, String) = conn
+            .query_row(
+                "SELECT embedding_blob, embed_scheme FROM llm_wiki_entries WHERE id = ?1",
+                [&entry_id2],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            blob2,
+            Some(crate::wiki_graph::f32_vec_to_blob(&[0.25_f32; 8])),
+            "the WRITE-scheme vector must pass parity and land"
+        );
+        assert_eq!(scheme2, crate::embed_scheme::WRITE_SCHEME);
+    }
+
+    /// Test (c), spec §4: the fact_update paths re-stamp `embed_scheme` in the
+    /// same statement that writes the blob — a fresh vector re-stamps to the
+    /// WRITE scheme, and a row whose body changed lands consistent even when
+    /// the blob goes NULL for the sweep.
+    #[test]
+    fn fact_update_re_stamps_embed_scheme_with_the_blob() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-su", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_su", "ent-su", "The original body.");
+        // Stage a pre-#265 blob under the raw scheme.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'fact_su'",
+            params![vec![1u8; 32]],
+        )
+        .unwrap();
+
+        // Body changed, no fresh vector: blob NULLed AND scheme re-stamped —
+        // never a stale raw blob/stamp pair stranded for the sweep to trip on.
+        let mut ctx = test_ctx("ent-su");
+        let item = test_item("item-1", "fact_update", Some("fact_su"));
+        let payload = serde_json::json!({ "body": "A completely different body." });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+        let (blob, scheme): (Option<Vec<u8>>, String) = conn
+            .query_row(
+                "SELECT embedding_blob, embed_scheme FROM llm_wiki_entries WHERE id = 'fact_su'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(blob, None);
+        assert_eq!(scheme, crate::embed_scheme::WRITE_SCHEME);
+
+        // Fresh WRITE-scheme vector on an unchanged body: the COALESCE branch
+        // writes both blob and stamp.
+        let body = "The original body.";
+        let mut ctx2 = test_ctx("ent-su");
+        ctx2.entry_embeddings.insert(
+            "item-2".to_string(),
+            PrecomputedEmbedding {
+                embed_text: crate::embed_sweep::embed_text_for_entry(
+                    &fact_title_from_body(body),
+                    body,
+                ),
+                vector: vec![0.5_f32; 8],
+            },
+        );
+        let item2 = test_item("item-2", "fact_update", Some("fact_su"));
+        let payload2 = serde_json::json!({ "body": body });
+        commit_fact_update(&conn, &mut ctx2, &item2, &payload2).unwrap();
+        let (blob2, scheme2): (Option<Vec<u8>>, String) = conn
+            .query_row(
+                "SELECT embedding_blob, embed_scheme FROM llm_wiki_entries WHERE id = 'fact_su'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            blob2,
+            Some(crate::wiki_graph::f32_vec_to_blob(&[0.5_f32; 8]))
+        );
+        assert_eq!(scheme2, crate::embed_scheme::WRITE_SCHEME);
     }
 
     #[test]
