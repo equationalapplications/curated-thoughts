@@ -62,7 +62,7 @@ stdout with `--json`:
 | Success, including zero matches and the `uncalibrated` gate | 0 | JSON |
 | Brain cannot be resolved or opened, or the embed profile cannot be loaded | 1 | Message on stderr |
 | Query embedding fails (backend down, timeout) | 1 | Message on stderr |
-| Usage error (missing `--`, bad `--exclude` id, too many excludes) | 2 | clap's usage exit |
+| Usage error (missing `--`, bad `--exclude` id, too many excludes) | 1 | Message on stderr. `ct`'s `main` maps every parse error to 1 (`tools/src/bin/ct.rs`), and exit 2 already means "no results" (`EXIT_NO_RESULTS`); `wisdom match` never returns 2 |
 
 `ct wisdom match --help` exits 0. CTI uses it as the capability probe.
 
@@ -72,10 +72,10 @@ stdout with `--json`:
 
 | Unit | Location | Responsibility |
 |---|---|---|
-| `wisdom_match` | `src-tauri/src/wiki_graph.rs` (next to `wiki_search`) | Pure, read-only. `(conn, query_vec, gate_key, max, exclude, now_ms) -> Result<WisdomMatch>` |
-| `gate_model_key` | `src-tauri/src/embedder/mod.rs` | `(&EmbedProfile) -> String` |
-| `WISDOM_GATE_FLOORS` + `gate_floor(key) -> Option<f32>` | `src-tauri/src/wiki_graph.rs` | Floor table and lookup |
-| `ct wisdom match` | `tools/src/bin/ct.rs` (new `Wisdom { cmd: WisdomCmd }` group) + `tools/src/queries.rs` (`wisdom_match_cmd`) | Argument parsing, brain/profile resolution exactly like `run_query`, embedding the text, calling `wisdom_match`, printing |
+| `wisdom_match` (+ `wisdom_match_with_floor` for tests and calibration) | new `src-tauri/src/wisdom_match.rs`, a sibling of `wiki_graph.rs` (already 1,908 lines); reuses `search::{bytes_to_f32, cosine_similarity}` and `wiki_graph::tier_weight` | Pure, read-only. `(conn, query_vec, gate_key, max, exclude, now_ms) -> Result<WisdomMatch>` |
+| `gate_model_key(&EmbedProfile, stub: Option<&str>) -> String` | `src-tauri/src/wisdom_match.rs` (the stub value is passed in, so it is testable without env) | Gate key |
+| `WISDOM_GATE_FLOORS` + `gate_floor(key) -> Option<f32>` | `src-tauri/src/wisdom_match.rs` | Floor table and lookup |
+| `ct wisdom match` | `tools/src/bin/ct.rs` (new `Match` variant in the **existing** `WisdomCmd` group, next to `deposit` / `status` / `propose-supersession` / `pending`) + `tools/src/queries.rs` (`wisdom_match_cmd`) | Argument parsing, brain/profile resolution exactly like `run_query`, embedding the text, calling `wisdom_match`, printing |
 | `calibrate_wisdom_gate` | `tools/src/bin/calibrate_wisdom_gate.rs` | Calibration on a scratch brain (see "Calibration") |
 
 `ct recall` and MCP `wiki_search` are unchanged.
