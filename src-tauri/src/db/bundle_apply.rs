@@ -755,7 +755,8 @@ fn ensure_entity(
     //   `gate_skipped` row with original_type = NULL.
     let conn: &Connection = tx;
     if existing.is_none() {
-        let (decision, _gate) = resolve_bundle_gate(tx, target_entity_id);
+        let (decision, _gate) =
+            crate::db::entity_gate::resolve_production_gate(tx, target_entity_id, &[]);
         let outcome = crate::db::entity_gate::shared_insert_entity(
             tx,
             Some(target_entity_id),
@@ -841,75 +842,6 @@ fn ensure_entity(
         )?;
     }
     Ok(())
-}
-
-/// Resolve the bundle import's gate decision. Bundle entries have no
-/// proposal (R2.3.4), so the §2.3 ladder starts at rung 3. The resolver
-/// here walks rung 1 (opt-out + entity manifest) + rung 4 (`tier_fact`) —
-/// the same conservative shape `resolve_llm_synthesis_gate` /
-/// `resolve_gui_gate` use, since bundle mints have no proposal-supplied
-/// source paths to drive rung 2/3.
-fn resolve_bundle_gate(
-    tx: &ImmediateTx<'_>,
-    entity_id: &str,
-) -> (
-    crate::db::entity_gate::GateDecision,
-    crate::db::entity_gate::NodeGateDecision,
-) {
-    let conn: &Connection = tx;
-    if crate::db::entity_gate::entity_has_optout(conn, entity_id).unwrap_or(false) {
-        let node = crate::db::entity_gate::NodeGateDecision {
-            verdict: crate::db::entity_gate::ModeVerdict::OptOut,
-            vocabulary: None,
-            source_directory: None,
-        };
-        return (node.clone().into_gate_decision(), node);
-    }
-    match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
-        Ok(o) if o.mode == "strict" => {
-            let vocab = o
-                .manifest
-                .as_ref()
-                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
-                    crate::db::entity_gate::ModeVerdict::Gate
-                } else {
-                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
-                },
-                vocabulary: vocab,
-                source_directory: None,
-            };
-            return (node.clone().into_gate_decision(), node);
-        }
-        _ => {}
-    }
-    match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
-        Ok(o) if o.mode == "strict" => {
-            let vocab = o
-                .manifest
-                .as_ref()
-                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
-                    crate::db::entity_gate::ModeVerdict::Gate
-                } else {
-                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
-                },
-                vocabulary: vocab,
-                source_directory: None,
-            };
-            (node.clone().into_gate_decision(), node)
-        }
-        _ => {
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: crate::db::entity_gate::ModeVerdict::Off,
-                vocabulary: None,
-                source_directory: None,
-            };
-            (node.clone().into_gate_decision(), node)
-        }
-    }
 }
 
 /// Wipe an entity's entries, tasks and events for a Replace-mode import.

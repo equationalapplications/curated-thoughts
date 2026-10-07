@@ -969,6 +969,10 @@ pub fn resolve_node_gate_decision(
     // Rungs 2-3 — folder_ontology + ontology_default + schema (strict-wins
     // across all source paths; an `off` loses to any strict rung).
     let mut strict_source_dir: Option<String> = None;
+    // First `off` resolution seen at rung 2/3 — when the ladder's final
+    // verdict is Off (SKIP), the r21 ledger table records "the `off` folder
+    // if rung 2 caused the SKIP" as the row's `source_directory`.
+    let mut off_source_dir: Option<String> = None;
     for source in source_paths {
         match ingest.ontology_lookup(source, vault_root, degraded, schema, schema_unparseable) {
             crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Strict) => {
@@ -978,7 +982,9 @@ pub fn resolve_node_gate_decision(
             }
             crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Off) => {
                 // Off found, but continue to look for any strict rung
-                // (strict-wins, R2.3.3).
+                // (strict-wins, R2.3.3). Remember the off folder for the
+                // SKIP ledger row's source_directory (R2.4.6 r21).
+                off_source_dir.get_or_insert_with(|| source.clone());
                 continue;
             }
             crate::config::OntologyLookup::Hold => {
@@ -1034,11 +1040,13 @@ pub fn resolve_node_gate_decision(
             }
         }
         Ok(_) => {
-            // Unmarked/off tier_fact row: §2.3.1 SKIP.
+            // Unmarked/off tier_fact row: §2.3.1 SKIP. If a rung 2/3 lookup
+            // resolved off, record that folder — the r21 `gate_skipped` row
+            // carries it as `source_directory`.
             NodeGateDecision {
                 verdict: ModeVerdict::Off,
                 vocabulary: None,
-                source_directory: None,
+                source_directory: off_source_dir,
             }
         }
         Err(_) => {
@@ -1050,6 +1058,109 @@ pub fn resolve_node_gate_decision(
             }
         }
     }
+}
+
+/// The SINGLE production entry point for the four insert sites (LLM
+/// synthesis / GUI / bundle / okf_migration). Loads the ingest policy for
+/// the connection's brain dir ([`crate::config::ingest_policy_for_db`] —
+/// cached per config-file bytes), stamps the initial drift watermark at
+/// the first gate resolution (r13-MAJOR-3), and walks the FULL §2.3
+/// ladder — rungs 1a/1b/1c/1d, the rung 2/3 `folder_ontology` /
+/// `ontology_default` climb via [`resolve_node_gate_decision`], and the
+/// rung 4 `tier_fact` fallback.
+///
+/// `source_paths` per site (spec R2.3.4): LLM synthesis passes the
+/// proposal's trigger document paths; okf_migration passes the wiki-page
+/// vault-relative path; GUI and bundle import pass `&[]` (no proposal, no
+/// document path — the ladder starts at rung 3 and falls to rung 4).
+///
+/// Watermark placement (fix-round-1 C1): `ImmediateTx::begin` takes only
+/// `&mut Connection`, so the config hash cannot reach it without a config
+/// load inside `begin` — that would violate the hold-time rule (config is
+/// loaded at resolution time, not transaction-open time). The stamp is
+/// therefore wired HERE, at every `resolve_*` production call, inside the
+/// same IMMEDIATE transaction as the mint: it commits with the insert and
+/// rolls back with a Held/abort (the next successful resolution re-stamps;
+/// `INSERT OR IGNORE` keeps the FIRST successful stamp, which is the
+/// watermark's definition). Best-effort per the spec — the `let _ =`
+/// swallows read-only/contended failures.
+pub fn resolve_production_gate(
+    tx: &ImmediateTx<'_>,
+    entity_id: &str,
+    source_paths: &[String],
+) -> (GateDecision, NodeGateDecision) {
+    let conn: &Connection = tx;
+    let policy = crate::config::ingest_policy_for_db(conn.path());
+    let degraded = policy.ontology_degraded_state();
+
+    // C1 (r13-MAJOR-3): the INITIAL watermark is stamped at the first gate
+    // resolution so gate-time degrade decisions are always made under a
+    // recorded config hash.
+    let config_hash = crate::config::ontology_config_watermark_hash(
+        &policy.tiers,
+        policy.ontology_selection,
+        policy.ontology_unparseable,
+    );
+    let _ = stamp_initial_watermark(tx, &config_hash);
+
+    let ctx = GateResolutionContext {
+        ingest: &policy.tiers,
+        degraded: &degraded,
+        schema: policy.ontology_selection,
+        schema_unparseable: policy.ontology_unparseable,
+        vault_root: policy.vault_root.as_deref(),
+    };
+    let node = resolve_node_gate_decision(conn, entity_id, source_paths, ctx);
+    (node.clone().into_gate_decision(), node)
+}
+
+/// The SINGLE origin-ledger writer for gate outcomes shared by the insert
+/// sites (fix-round-1 I3; replaces the former per-site copies in
+/// `commit.rs` / `entities.rs`). Row shape per the R2.4.6 r21 table:
+///
+///   * SKIP outcome → `gate_skipped` row; `original_type` = the label the
+///     outcome carried (the proposed label, or `None` when the caller
+///     supplied none — never `''`); `source_directory` = the `off` folder
+///     when rung 2 caused the SKIP, else NULL.
+///   * `DegradedToFallback` → `degraded` row with the original label,
+///     trimmed, pre-canonicalization; `source_directory` NULL (degrade
+///     rows only carry a directory when off-sourced, which cannot happen
+///     on a Gate verdict).
+///   * Admitted-as-declared / alias-admitted / held → NO row.
+///
+/// Bundle import's `unlabeled_landing` row and okf_migration's
+/// `Some("concept")` skip-row original_type are site-specific per the same
+/// table and stay at their sites.
+pub fn write_gate_origin_ledger(
+    tx: &ImmediateTx<'_>,
+    entity_id: &str,
+    outcome: &AdmitOutcome,
+    decision: GateDecision,
+    skip_source_directory: Option<&str>,
+) -> Result<()> {
+    match (decision, outcome) {
+        (GateDecision::Skip, AdmitOutcome::Skipped { original_label }) => {
+            write_origin_ledger_row(
+                tx,
+                entity_id,
+                original_label.as_deref(),
+                OriginReason::GateSkipped,
+                skip_source_directory,
+            )?;
+        }
+        (_, AdmitOutcome::DegradedToFallback { original_label, .. }) => {
+            let label: Option<&str> = if !original_label.is_empty() {
+                Some(original_label.as_str())
+            } else {
+                None
+            };
+            write_origin_ledger_row(tx, entity_id, label, OriginReason::Degraded, None)?;
+        }
+        _ => {
+            // Admitted-as-declared, alias-admitted, held: NO ledger row.
+        }
+    }
+    Ok(())
 }
 
 /// Look up the tier_fact vocabulary (the rung 4 fallback when a strict rung
@@ -2017,5 +2128,122 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, AdmitOutcome::Held { .. }));
         tx.commit().unwrap();
+    }
+
+    /// Fix-round-1 C1 (r13-MAJOR-3): the production gate resolver stamps
+    /// the INITIAL watermark at the FIRST gate resolution, and the stamp is
+    /// idempotent across re-resolutions (`INSERT OR IGNORE` keeps the first
+    /// value — the watermark's definition).
+    #[test]
+    fn production_gate_stamps_initial_watermark() {
+        let mut conn = open_in_memory().unwrap();
+        // Fresh brain: no manifest rows → ladder falls to rung 4 → Off/SKIP.
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let (decision, _node) = resolve_production_gate(&tx, "ent_new", &[]);
+        assert!(matches!(decision, GateDecision::Skip));
+        tx.commit().unwrap();
+
+        let stamped: Option<String> = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'initial_drift_watermark'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert!(
+            stamped.is_some(),
+            "first gate resolution must stamp initial_drift_watermark"
+        );
+
+        // Re-resolution does not duplicate or overwrite the row.
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let _ = resolve_production_gate(&tx, "ent_other", &[]);
+        tx.commit().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_meta WHERE key = 'initial_drift_watermark'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "watermark stamp must be idempotent");
+    }
+
+    /// Fix-round-1 I2 (Ruling R6): the production resolver walks rungs 2/3
+    /// of the §2.3 ladder via the connection's ingest policy — a strict
+    /// `folder_ontology` prefix GATEs (vocabulary pulled from tier_fact),
+    /// an `off` prefix SKIPs with the off folder recorded as the ledger
+    /// `source_directory` (R2.4.6 r21).
+    #[test]
+    fn production_gate_walks_rung_2_folder_ontology() {
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                // Strict case: `ops` folder is strict; tier_fact carries a
+                // strict manifest with fallback → Gate with tier_fact vocab.
+                {
+                    let brain = tempfile::TempDir::new().unwrap();
+                    std::fs::write(
+                        brain.path().join("config.json"),
+                        r#"{"vault_path":"/v","ingest":{"folder_ontology":{"ops":"strict"}}}"#,
+                    )
+                    .unwrap();
+                    let mut conn =
+                        crate::db::connection::open_app_db(&brain.path().join("brain.db"), None)
+                            .unwrap();
+                    let manifest = serde_json::json!({
+                        "node_types": [{"type": "person"}],
+                        "edge_types": [],
+                        "fallback_node_type": "person",
+                    });
+                    insert_manifest(
+                        &conn,
+                        "tier_fact",
+                        "strict",
+                        &serde_json::to_string(&manifest).unwrap(),
+                    );
+
+                    let tx = ImmediateTx::begin(&mut conn).unwrap();
+                    let (decision, node) =
+                        resolve_production_gate(&tx, "ent_new", &["ops/a.md".to_string()]);
+                    tx.commit().unwrap();
+                    assert!(
+                        matches!(decision, GateDecision::Gate(_)),
+                        "strict folder_ontology rung must Gate, got {decision:?}"
+                    );
+                    assert_eq!(node.source_directory.as_deref(), Some("ops/a.md"));
+                    assert_eq!(node.verdict, ModeVerdict::Gate);
+                }
+
+                // Off case: `ops` folder is off; fresh brain (no manifest
+                // rows) → Off/SKIP with the off folder recorded.
+                {
+                    let brain = tempfile::TempDir::new().unwrap();
+                    std::fs::write(
+                        brain.path().join("config.json"),
+                        r#"{"vault_path":"/v","ingest":{"folder_ontology":{"ops":"off"}}}"#,
+                    )
+                    .unwrap();
+                    let mut conn =
+                        crate::db::connection::open_app_db(&brain.path().join("brain.db"), None)
+                            .unwrap();
+
+                    let tx = ImmediateTx::begin(&mut conn).unwrap();
+                    let (decision, node) =
+                        resolve_production_gate(&tx, "ent_new", &["ops/a.md".to_string()]);
+                    tx.commit().unwrap();
+                    assert!(matches!(decision, GateDecision::Skip));
+                    assert_eq!(node.verdict, ModeVerdict::Off);
+                    assert_eq!(
+                        node.source_directory.as_deref(),
+                        Some("ops/a.md"),
+                        "rung-2-caused SKIP must record the off folder (R2.4.6 r21)"
+                    );
+                }
+            },
+        );
     }
 }

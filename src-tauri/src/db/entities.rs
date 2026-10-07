@@ -612,7 +612,7 @@ pub fn create_entity(conn: &mut Connection, input: &CreateEntityInput) -> Result
     // gate; a plain `&Connection` is a compile-time impossibility now that
     // the helper is the single insert point.
     let tx = crate::db::entity_gate::ImmediateTx::begin(conn)?;
-    let (decision, _gate) = resolve_gui_gate(&tx, &id);
+    let (decision, gate) = crate::db::entity_gate::resolve_production_gate(&tx, &id, &[]);
     let outcome = crate::db::entity_gate::shared_insert_entity(
         &tx,
         Some(&id),
@@ -651,124 +651,17 @@ pub fn create_entity(conn: &mut Connection, input: &CreateEntityInput) -> Result
         }
     }
 
-    write_origin_ledger_for_gui(&tx, &id, proposed_label, &outcome, decision)?;
+    crate::db::entity_gate::write_gate_origin_ledger(
+        &tx,
+        &id,
+        &outcome,
+        decision,
+        gate.source_directory.as_deref(),
+    )?;
 
     tx.commit()?;
 
     get_entity(conn, &id)?.context("entity missing immediately after insert")
-}
-
-/// Resolve the GUI mint's gate decision. Mirrors `resolve_llm_synthesis_gate`
-/// in `commit.rs` — same rung 1 (opt-out + entity manifest) + rung 4
-/// (`tier_fact`) walk; no source paths, so rung 2/3 are skipped (GUI has no
-/// proposal, per R2.3.4).
-fn resolve_gui_gate(
-    tx: &crate::db::entity_gate::ImmediateTx<'_>,
-    entity_id: &str,
-) -> (
-    crate::db::entity_gate::GateDecision,
-    crate::db::entity_gate::NodeGateDecision,
-) {
-    let conn: &Connection = tx;
-    if crate::db::entity_gate::entity_has_optout(conn, entity_id).unwrap_or(false) {
-        let node = crate::db::entity_gate::NodeGateDecision {
-            verdict: crate::db::entity_gate::ModeVerdict::OptOut,
-            vocabulary: None,
-            source_directory: None,
-        };
-        return (node.clone().into_gate_decision(), node);
-    }
-    match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
-        Ok(o) if o.mode == "strict" => {
-            let vocab = o
-                .manifest
-                .as_ref()
-                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
-                    crate::db::entity_gate::ModeVerdict::Gate
-                } else {
-                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
-                },
-                vocabulary: vocab,
-                source_directory: None,
-            };
-            return (node.clone().into_gate_decision(), node);
-        }
-        _ => {}
-    }
-    match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
-        Ok(o) if o.mode == "strict" => {
-            let vocab = o
-                .manifest
-                .as_ref()
-                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
-                    crate::db::entity_gate::ModeVerdict::Gate
-                } else {
-                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
-                },
-                vocabulary: vocab,
-                source_directory: None,
-            };
-            (node.clone().into_gate_decision(), node)
-        }
-        _ => {
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: crate::db::entity_gate::ModeVerdict::Off,
-                vocabulary: None,
-                source_directory: None,
-            };
-            (node.clone().into_gate_decision(), node)
-        }
-    }
-}
-
-/// Write the origin-ledger row for a GUI mint. Mirrors
-/// `commit::write_origin_ledger_for_outcome`; copied here so each insert
-/// site owns its own ledger-writer rather than sharing a private helper
-/// across modules.
-fn write_origin_ledger_for_gui(
-    tx: &crate::db::entity_gate::ImmediateTx<'_>,
-    entity_id: &str,
-    proposed_label: Option<&str>,
-    outcome: &crate::db::entity_gate::AdmitOutcome,
-    decision: crate::db::entity_gate::GateDecision,
-) -> Result<()> {
-    use crate::db::entity_gate::AdmitOutcome;
-    use crate::db::entity_gate::GateDecision;
-    use crate::db::schema::OriginReason;
-
-    let source_directory: Option<&str> = None;
-    match (decision, outcome) {
-        (GateDecision::Skip, AdmitOutcome::Skipped { original_label }) => {
-            crate::db::entity_gate::write_origin_ledger_row(
-                tx,
-                entity_id,
-                original_label.as_deref(),
-                OriginReason::GateSkipped,
-                source_directory,
-            )?;
-        }
-        (_, AdmitOutcome::DegradedToFallback { original_label, .. }) => {
-            let label: Option<&str> = if !original_label.is_empty() {
-                Some(original_label.as_str())
-            } else {
-                None
-            };
-            crate::db::entity_gate::write_origin_ledger_row(
-                tx,
-                entity_id,
-                label,
-                OriginReason::Degraded,
-                source_directory,
-            )?;
-        }
-        _ => {}
-    }
-    let _ = proposed_label;
-    Ok(())
 }
 
 /// Replace entity summary; clears `summary_embedding` for lazy re-embed.

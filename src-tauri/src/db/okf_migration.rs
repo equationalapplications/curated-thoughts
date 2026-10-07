@@ -116,7 +116,11 @@ fn migrate_approved_wiki_pages(tx: &ImmediateTx<'_>, vault_root: &Path, now: i64
         // a `bail!` here rolls back the entire batch and the caller
         // observes the abort at the `AppDb::open_with_config` site
         // (Task 9 owns the loud logging there).
-        let (decision, _gate) = resolve_okf_gate(conn, &entity_id, &path);
+        let (decision, gate) = crate::db::entity_gate::resolve_production_gate(
+            tx,
+            &entity_id,
+            std::slice::from_ref(&path),
+        );
         let outcome = crate::db::entity_gate::shared_insert_entity(
             tx,
             Some(&entity_id),
@@ -153,7 +157,7 @@ fn migrate_approved_wiki_pages(tx: &ImmediateTx<'_>, vault_root: &Path, now: i64
                     &entity_id,
                     Some("concept"),
                     OriginReason::GateSkipped,
-                    None,
+                    gate.source_directory.as_deref(),
                 )?;
             }
             (AdmitOutcome::Held { .. }, _) => {
@@ -195,74 +199,6 @@ fn migrate_approved_wiki_pages(tx: &ImmediateTx<'_>, vault_root: &Path, now: i64
         count += 1;
     }
     Ok(count)
-}
-
-/// Resolve the §2.3 ladder for an okf_migration mint (spec §2.5).
-///
-/// `path` is the wiki-page vault-relative path; the §2.3 rung 2 lookup
-/// uses it as the source path. Rungs 1 and 4 mirror the LLM/GUI/bundle
-/// paths: opt-out + entity manifest → tier_fact fallback.
-fn resolve_okf_gate(
-    conn: &Connection,
-    entity_id: &str,
-    _path: &str,
-) -> (
-    crate::db::entity_gate::GateDecision,
-    crate::db::entity_gate::NodeGateDecision,
-) {
-    if crate::db::entity_gate::entity_has_optout(conn, entity_id).unwrap_or(false) {
-        let node = crate::db::entity_gate::NodeGateDecision {
-            verdict: crate::db::entity_gate::ModeVerdict::OptOut,
-            vocabulary: None,
-            source_directory: None,
-        };
-        return (node.clone().into_gate_decision(), node);
-    }
-    match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
-        Ok(o) if o.mode == "strict" => {
-            let vocab = o
-                .manifest
-                .as_ref()
-                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
-                    crate::db::entity_gate::ModeVerdict::Gate
-                } else {
-                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
-                },
-                vocabulary: vocab,
-                source_directory: None,
-            };
-            return (node.clone().into_gate_decision(), node);
-        }
-        _ => {}
-    }
-    match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
-        Ok(o) if o.mode == "strict" => {
-            let vocab = o
-                .manifest
-                .as_ref()
-                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
-                    crate::db::entity_gate::ModeVerdict::Gate
-                } else {
-                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
-                },
-                vocabulary: vocab,
-                source_directory: None,
-            };
-            (node.clone().into_gate_decision(), node)
-        }
-        _ => {
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: crate::db::entity_gate::ModeVerdict::Off,
-                vocabulary: None,
-                source_directory: None,
-            };
-            (node.clone().into_gate_decision(), node)
-        }
-    }
 }
 
 fn drop_pending_wiki_proposals(conn: &Connection, vault_root: &Path) -> Result<()> {

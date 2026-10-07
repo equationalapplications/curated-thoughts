@@ -1391,7 +1391,8 @@ fn create_entity_if_needed(
     // walks every path and strict-wins across them (R2.3.3).
     let conn: &Connection = tx;
     let source_paths = load_proposal_source_paths(conn, &proposal.id)?;
-    let (decision, _gate) = resolve_llm_synthesis_gate(tx, &entity_id, &source_paths);
+    let (decision, gate) =
+        crate::db::entity_gate::resolve_production_gate(tx, &entity_id, &source_paths);
     let proposed_label = proposed_type
         .as_deref()
         .map(str::trim)
@@ -1440,8 +1441,16 @@ fn create_entity_if_needed(
         }
     }
 
-    // Ledger row — first-origin-wins via INSERT OR IGNORE.
-    write_origin_ledger_for_outcome(tx, &entity_id, proposed_label, &outcome, decision)?;
+    // Ledger row — first-origin-wins via INSERT OR IGNORE. The skip row's
+    // `source_directory` is the `off` folder when rung 2 caused the SKIP
+    // (R2.4.6 r21), carried on the ladder's NodeGateDecision.
+    crate::db::entity_gate::write_gate_origin_ledger(
+        tx,
+        &entity_id,
+        &outcome,
+        decision,
+        gate.source_directory.as_deref(),
+    )?;
 
     tx.execute(
         "UPDATE curated_proposals SET entity_id = ?1 WHERE id = ?2",
@@ -1463,139 +1472,6 @@ fn load_proposal_source_paths(conn: &Connection, proposal_id: &str) -> Result<Ve
         .query_map([proposal_id], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
-}
-
-/// Resolve the gate for an LLM-synthesis mint. Reads the current config
-/// (`BrainConfig::ingest_ontology_degraded` + `ingest.ontology_default` via
-/// the per-config-path cache at `config/mod.rs:182`), passes them to the
-/// §2.3 ladder, and translates to a `GateDecision`.
-///
-/// When no config has been hydrated for the current path (no proposal mints
-/// have happened yet on this path), the resolver falls back to the
-/// conservative rung-1/rung-4 path that consults the manifest rows
-/// directly. This is intentional — a fresh open with a fresh migration
-/// may not have hydrated the IngestConfig cache yet, and the gate must not
-/// refuse a mint whose config would have admitted it.
-fn resolve_llm_synthesis_gate(
-    tx: &crate::db::entity_gate::ImmediateTx<'_>,
-    entity_id: &str,
-    _source_paths: &[String],
-) -> (
-    crate::db::entity_gate::GateDecision,
-    crate::db::entity_gate::NodeGateDecision,
-) {
-    let conn: &Connection = tx;
-    // Walk rung 1: ct_entity_optouts + entity manifest row.
-    if crate::db::entity_gate::entity_has_optout(conn, entity_id).unwrap_or(false) {
-        let node = crate::db::entity_gate::NodeGateDecision {
-            verdict: crate::db::entity_gate::ModeVerdict::OptOut,
-            vocabulary: None,
-            source_directory: None,
-        };
-        return (node.clone().into_gate_decision(), node);
-    }
-    match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
-        Ok(o) if o.mode == "strict" => {
-            let vocab = o
-                .manifest
-                .as_ref()
-                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
-                    crate::db::entity_gate::ModeVerdict::Gate
-                } else {
-                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
-                },
-                vocabulary: vocab,
-                source_directory: None,
-            };
-            return (node.clone().into_gate_decision(), node);
-        }
-        _ => {}
-    }
-    // Rung 4 fallback: tier_fact manifest row.
-    match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
-        Ok(o) if o.mode == "strict" => {
-            let vocab = o
-                .manifest
-                .as_ref()
-                .map(crate::db::entity_gate::NodeVocabulary::from_manifest);
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: if vocab.as_ref().and_then(|v| v.fallback()).is_some() {
-                    crate::db::entity_gate::ModeVerdict::Gate
-                } else {
-                    crate::db::entity_gate::ModeVerdict::StrictNoVocab
-                },
-                vocabulary: vocab,
-                source_directory: None,
-            };
-            (node.clone().into_gate_decision(), node)
-        }
-        _ => {
-            // No strict rung; SKIP. This is the common path on a fresh
-            // brain with no manifest rows.
-            let node = crate::db::entity_gate::NodeGateDecision {
-                verdict: crate::db::entity_gate::ModeVerdict::Off,
-                vocabulary: None,
-                source_directory: None,
-            };
-            (node.clone().into_gate_decision(), node)
-        }
-    }
-}
-
-/// Write the origin-ledger row in the SAME transaction as the insert,
-/// per the spec's R2.4.6 r21 table. First-origin-wins (`INSERT OR IGNORE`).
-/// `original_type` is `None` when the caller supplied no label; never `''`.
-///
-/// Decision + outcome decide the row:
-///   * Gate → Skipped outcome → `gate_skipped` row.
-///   * Gate → Declared/Aliased outcome → no row (admitted-as-declared).
-///   * Gate → DegradedToFallback outcome → `degraded` row with the
-///     original label pre-canonicalization.
-///   * Held outcome → no row (held; the proposal's facts survive).
-fn write_origin_ledger_for_outcome(
-    tx: &crate::db::entity_gate::ImmediateTx<'_>,
-    entity_id: &str,
-    proposed_label: Option<&str>,
-    outcome: &crate::db::entity_gate::AdmitOutcome,
-    decision: crate::db::entity_gate::GateDecision,
-) -> Result<()> {
-    use crate::db::entity_gate::AdmitOutcome;
-    use crate::db::entity_gate::GateDecision;
-    use crate::db::schema::OriginReason;
-
-    let source_directory: Option<&str> = None;
-    match (decision, outcome) {
-        (GateDecision::Skip, AdmitOutcome::Skipped { original_label }) => {
-            crate::db::entity_gate::write_origin_ledger_row(
-                tx,
-                entity_id,
-                original_label.as_deref(),
-                OriginReason::GateSkipped,
-                source_directory,
-            )?;
-        }
-        (_, AdmitOutcome::DegradedToFallback { original_label, .. }) => {
-            let label: Option<&str> = if !original_label.is_empty() {
-                Some(original_label.as_str())
-            } else {
-                None
-            };
-            crate::db::entity_gate::write_origin_ledger_row(
-                tx,
-                entity_id,
-                label,
-                OriginReason::Degraded,
-                source_directory,
-            )?;
-        }
-        _ => {
-            // Admitted-as-declared, alias-admitted, held: NO ledger row.
-        }
-    }
-    let _ = proposed_label;
-    Ok(())
 }
 
 fn resolve_edge_ref(
