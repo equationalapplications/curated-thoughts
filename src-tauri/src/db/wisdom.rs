@@ -341,11 +341,16 @@ pub fn update_wisdom_in_tx(
     // Write the caller's freshly computed vector, or NULL when there is none
     // so the sweep re-derives it — never leave a vector describing text the
     // entry no longer contains. Mirrors `commit_fact_update`.
+    //
+    // The lookup above matched anywhere in the survivor's redirect cluster,
+    // so a pre-merge row may still be keyed to a loser — rekey it to the
+    // survivor here so the persisted row and the outbox payload agree (the
+    // #132 prisma-outbox divergence class `create_task` guards against).
     tx.execute(
         "UPDATE llm_wiki_entries
-            SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = ?4
+            SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = ?4, entity_id = ?6
           WHERE id = ?5",
-        params![title, body, now_ms, embedding_blob, wisdom_id],
+        params![title, body, now_ms, embedding_blob, wisdom_id, entity_id],
     )?;
     let tags: Vec<String> = serde_json::from_str(&tags_raw).unwrap_or_default();
     push_entries_outbox(
@@ -395,12 +400,30 @@ pub fn archive_wisdom(conn: &mut Connection, entity_id: &str, wisdom_id: &str) -
 pub fn archive_wisdom_in_tx(tx: &Transaction<'_>, entity_id: &str, wisdom_id: &str) -> Result<()> {
     let (now_secs, now_ms) = now_timestamps();
 
-    assert_entity_active(tx, entity_id)?;
+    let entity_id = assert_entity_active(tx, entity_id)?;
+    // Transitive fact closure (r13-m3), same as `update_wisdom_in_tx`: the
+    // row may still be keyed to a redirected loser from before the merge.
+    // Widen the match to the survivor's cluster and rekey the row to the
+    // survivor in the same UPDATE, so the archived row and the outbox
+    // payload agree (#132 prisma-outbox divergence class) — without this,
+    // archiving a loser-keyed row bails "not found" even though reads
+    // surface it through the redirect.
+    let cluster = crate::db::entities::cluster_ids(tx, &entity_id)?;
+    let placeholders = (4..4 + cluster.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut bind: Vec<&dyn rusqlite::ToSql> = vec![&now_ms, &entity_id, &wisdom_id];
+    for id in &cluster {
+        bind.push(id);
+    }
     let changes = tx.execute(
-        "UPDATE llm_wiki_entries
-         SET deleted_at = ?1, updated_at = ?1
-         WHERE id = ?2 AND entity_id = ?3 AND deleted_at IS NULL",
-        params![now_ms, wisdom_id, entity_id],
+        &format!(
+            "UPDATE llm_wiki_entries
+             SET deleted_at = ?1, updated_at = ?1, entity_id = ?2
+             WHERE id = ?3 AND entity_id IN ({placeholders}) AND deleted_at IS NULL"
+        ),
+        bind.as_slice(),
     )?;
     if changes == 0 {
         bail!("wisdom not found or already archived: {wisdom_id}");
@@ -411,7 +434,7 @@ pub fn archive_wisdom_in_tx(tx: &Transaction<'_>, entity_id: &str, wisdom_id: &s
 
     push_entries_outbox(
         tx,
-        entity_id,
+        &entity_id,
         wisdom_id,
         OutboxOperation::Delete,
         serde_json::json!({
@@ -421,7 +444,7 @@ pub fn archive_wisdom_in_tx(tx: &Transaction<'_>, entity_id: &str, wisdom_id: &s
         }),
         now_ms,
     )?;
-    touch_entity(tx, entity_id, now_secs)?;
+    touch_entity(tx, &entity_id, now_secs)?;
     Ok(())
 }
 
@@ -725,5 +748,97 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
             .unwrap();
         assert_eq!(remaining, 1, "an edge between two live facts must survive");
+    }
+
+    /// Review fix (final review): a loser-keyed row updated through the
+    /// survivor's redirect cluster must be REKEYED to the survivor — the row
+    /// and the outbox payload have to agree (#132 prisma-outbox divergence
+    /// class, same guard as `create_task_via_loser_keys_row_outbox_and_result_to_survivor`).
+    #[test]
+    fn update_wisdom_via_loser_rekeys_row_and_outbox_to_survivor() {
+        let mut conn = open_in_memory().unwrap();
+        let surv = make_entity(&mut conn);
+        let loser = make_entity(&mut conn);
+        let fact = add_wisdom(&mut conn, &surv, "Pre-merge body.").unwrap();
+        // Simulate a pre-merge row: keyed to the entity that later lost the merge.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET entity_id = ?1 WHERE id = ?2",
+            params![loser, fact.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?2, 1)",
+            params![loser, surv],
+        )
+        .unwrap();
+
+        update_wisdom(&mut conn, &surv, &fact.id, "Post-merge body.").unwrap();
+
+        let (stored_entity, payload): (String, String) = conn
+            .query_row(
+                "SELECT e.entity_id, o.payload FROM llm_wiki_entries e
+                 JOIN llm_wiki_outbox o ON o.record_id = e.id
+                 WHERE e.id = ?1 AND o.table_name = 'entries' AND o.operation = 'UPDATE'
+                 ORDER BY o.id DESC LIMIT 1",
+                [&fact.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_entity, surv, "the row is rekeyed to the survivor");
+        let payload_json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            payload_json["entity_id"].as_str().unwrap(),
+            surv,
+            "the replica payload is keyed to the survivor, never the loser"
+        );
+        assert_ne!(payload_json["entity_id"].as_str().unwrap(), loser);
+    }
+
+    /// Review fix (final review): archiving a loser-keyed row through the
+    /// survivor must succeed (not bail "not found"), soft-delete it, and
+    /// rekey it so the archived row and the DELETE payload agree.
+    #[test]
+    fn archive_wisdom_via_loser_soft_deletes_and_rekeys_to_survivor() {
+        let mut conn = open_in_memory().unwrap();
+        let surv = make_entity(&mut conn);
+        let loser = make_entity(&mut conn);
+        let fact = add_wisdom(&mut conn, &surv, "Pre-merge body.").unwrap();
+        conn.execute(
+            "UPDATE llm_wiki_entries SET entity_id = ?1 WHERE id = ?2",
+            params![loser, fact.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?2, 1)",
+            params![loser, surv],
+        )
+        .unwrap();
+
+        archive_wisdom(&mut conn, &surv, &fact.id).unwrap();
+
+        let (deleted_at, stored_entity, payload): (Option<i64>, String, String) = conn
+            .query_row(
+                "SELECT e.deleted_at, e.entity_id, o.payload FROM llm_wiki_entries e
+                 JOIN llm_wiki_outbox o ON o.record_id = e.id
+                 WHERE e.id = ?1 AND o.table_name = 'entries' AND o.operation = 'DELETE'
+                 ORDER BY o.id DESC LIMIT 1",
+                [&fact.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(deleted_at.is_some(), "the loser-keyed row is soft-deleted");
+        assert_eq!(
+            stored_entity, surv,
+            "the archived row is rekeyed to the survivor"
+        );
+        let payload_json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            payload_json["entity_id"].as_str().unwrap(),
+            surv,
+            "the DELETE payload is keyed to the survivor, never the loser"
+        );
+        assert_ne!(payload_json["entity_id"].as_str().unwrap(), loser);
     }
 }
