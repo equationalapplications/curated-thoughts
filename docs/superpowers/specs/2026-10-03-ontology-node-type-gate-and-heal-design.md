@@ -54,6 +54,20 @@ enforced at resolution (it previously gated and landed the undeclared
 type). Every hold names its cause (R2.4.5 diagnostics), and
 `ct ontology set --entity <id> --mode strict` refuses to write an
 unusable strict row (§2.11).
+r26 (2026-10-08, `/code-review high` wave): the ensure stamps health
+only on rows the gate can run — an EA-family row whose
+`fallback_node_type` names no declared type is REPAIRED (replaced with
+the preferred declared choice); a foreign row whose planned vocabulary
+still cannot gate (an existing fallback naming no declared type, or an
+empty declared set) is REPORTED via a new `unusable_vocabulary`
+ensure/heal count and never memoized — closing the gap where
+`ct heal --yes` stamped `Complete` on rows r25 holds every mint on.
+Degraded mints land the fallback's DECLARED spelling (a case-variant
+fallback `Person` beside `person` lands `person` — one spelling per
+type, matching the declared/alias arms). EmptyNodeTypes fix-lines route
+entity-row holds to the `ct ontology set --entity … --mode strict`
+re-copy (the wiki engine never rewrites an entity-scoped row), and
+unnamed-row `--fallback` fix-lines print a pasteable command.
 **Date:** 2026-10-03 (written 2026-10-04; r21 2026-10-07)
 **Baseline:** `main` @ `9c2281b` (v3.2.0) for the design; line citations
 re-anchored (r21) to branch tip after merging `main` @ `0f7ea9f` (v3.3.0).
@@ -1107,7 +1121,14 @@ hard-coded literal). Single consolidated rule:
     writes it as `fallback_node_type`; if NEITHER is declared it
     writes NOTHING and reports loudly (heal report + warn) — never a
     type the manifest doesn't declare (that would be a fabricated
-    §2.4.5 error on every new-entity mint — r25). EA/`SchemaSoftwareOrg`
+    §2.4.5 error on every new-entity mint — r25). r26: the same rule
+    governs an EXISTING key — an EA-family (seed-set-guard) row whose
+    fallback names no declared type has it REPLACED with the preferred
+    declared choice (one always exists there: `project` is a seed
+    type); a FOREIGN row with such a value, or with an empty declared
+    set, is beyond declare-or-report — nothing is written, and the row
+    is counted `unusable_vocabulary` in the ensure/heal report (never
+    memoized; re-reported until fixed via `ct ontology set --fallback`). EA/`SchemaSoftwareOrg`
     17-type set → `project`; the live ThinkPad row (18 types incl.
     `concept`) → `concept`; SchemaOrg (9 types, declares `project`,
     not `concept`) → `project` — no first-party brain stalls. NOTE — this CORRECTS the frozen investigation
@@ -1265,7 +1286,9 @@ nowhere to go):**
 - **Bundle import (`ensure_entity`):** wave-1 bundles carry NO graph type
   label (export drops entity_type — there is no label to remap from).
   Import lands untyped entities as the MANIFEST'S DECLARED FALLBACK
-  (never the literal `concept`). If no fallback is declared, the import
+  (never the literal `concept`), in the declared entry's spelling
+  (r26: a case-variant fallback lands the DECLARED spelling, one
+  spelling per type). If no fallback is declared, the import
   ABORTS ATOMICALLY with a report, facts intact. If a fallback IS
   declared, the entity + its facts import and the entity goes to the
   review queue — the queue cost is ACCEPTED for wave 1. **When the gate
@@ -1712,7 +1735,9 @@ vocabulary check exists; report-only like its edge half unless `--yes`.
   resolving through it) or on this entity only (`--entity <id> --mode
   strict --fallback <type>`). CT cannot prevent the engine seeding an
   unusable `tier_fact`; `ct heal --yes` reports that case (the ensure
-  pass's `foreign_no_preferred_fallback` count) and every held mint
+  pass's `foreign_no_preferred_fallback` and `unusable_vocabulary`
+  counts — the latter covers an existing fallback naming no declared
+  type and the empty-declared-set shape, r26) and every held mint
   names it.
 - `--fallback <type>` writes `fallback_node_type` into the target
   manifest's `manifest_json` (tier/manifest-level, unlike the

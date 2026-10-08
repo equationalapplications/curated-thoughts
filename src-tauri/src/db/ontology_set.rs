@@ -174,7 +174,9 @@ pub fn set_entity_strict(
 /// where `--fallback` can still fix it. Parsed exactly as the gate reads it.
 fn refuse_unusable_strict_row(manifest: &serde_json::Value, entity_id: &str) -> Result<()> {
     use crate::db::entity_gate::{HoldReason, NodeVocabulary};
-    let parsed = crate::wiki_graph::parse_manifest(&manifest.to_string())?;
+    // The Value-form reader — no serialize→reparse round-trip (the &str
+    // form's only fallible step is the JSON parse we already did).
+    let parsed = crate::wiki_graph::parse_manifest_value(manifest);
     // The vocabulary is copied from `tier_fact`, so the reason names that
     // row: fixing `tier_fact` fixes every mint resolving through it.
     let Some(reason) = NodeVocabulary::from_manifest(&parsed).hold_reason(Some(TIER_FACT)) else {

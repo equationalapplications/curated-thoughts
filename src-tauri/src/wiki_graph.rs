@@ -120,6 +120,16 @@ impl WikiManifest {
 /// Crate-visible so a manifest WRITER can check its row exactly as the gate
 /// will read it (`ct ontology set`'s R2.4.5 write-time refusal).
 pub(crate) fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
+    let root: serde_json::Value = serde_json::from_str(manifest_json)?;
+    Ok(parse_manifest_value(&root))
+}
+
+/// The lenient reader's body over an ALREADY-PARSED root, split out so a
+/// caller holding a `Value` (e.g. `ct ontology set`'s write-time refusal)
+/// pays no serialize→reparse round-trip. Infallible by construction —
+/// every missing or ill-typed field degrades to absent/default rather
+/// than failing the read, exactly as the string form does.
+pub(crate) fn parse_manifest_value(root: &serde_json::Value) -> WikiManifest {
     fn entries(value: Option<&serde_json::Value>) -> Vec<&serde_json::Value> {
         value
             .and_then(|v| v.as_array())
@@ -132,8 +142,6 @@ pub(crate) fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty())
     }
-
-    let root: serde_json::Value = serde_json::from_str(manifest_json)?;
 
     let node_types = entries(root.get("node_types"))
         .into_iter()
@@ -166,13 +174,13 @@ pub(crate) fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
         })
         .collect();
 
-    let fallback_node_type = field(&root, "fallback_node_type");
+    let fallback_node_type = field(root, "fallback_node_type");
 
-    Ok(WikiManifest {
+    WikiManifest {
         node_types,
         edge_types,
         fallback_node_type,
-    })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

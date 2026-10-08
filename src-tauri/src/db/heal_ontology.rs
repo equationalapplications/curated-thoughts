@@ -274,17 +274,20 @@ fn run_inner(
                 if s.extended
                     + s.fallbacks_set
                     + s.foreign_no_preferred_fallback
+                    + s.unusable_vocabulary
                     + s.malformed
                     + s.raced
                     > 0
                 {
                     eprintln!(
                         "ontology ensure: visited={} extended={} fallbacks_set={} \
-                         foreign_no_preferred_fallback={} malformed={} raced={}",
+                         foreign_no_preferred_fallback={} unusable_vocabulary={} \
+                         malformed={} raced={}",
                         s.visited,
                         s.extended,
                         s.fallbacks_set,
                         s.foreign_no_preferred_fallback,
+                        s.unusable_vocabulary,
                         s.malformed,
                         s.raced
                     );
@@ -339,16 +342,18 @@ fn run_inner(
         // watermark stamp, no writes; counts are "would" counts. The
         // ensure report is HEAL-scope only — the retype-only apply never
         // performs it, so its preview must not promise it.
-        let (pending, foreign) = if scope == PassScope::Heal {
+        let (pending, foreign, unusable) = if scope == PassScope::Heal {
             ensure_pending_readonly(conn)?
         } else {
-            (0, 0)
+            (0, 0, 0)
         };
-        if pending > 0 || foreign > 0 {
+        if pending > 0 || foreign > 0 || unusable > 0 {
             eprintln!(
                 "ontology heal: ensure pending (read-only): {pending} manifest(s) would \
                  be extended/ensured, {foreign} foreign manifest(s) lack a preferred \
-                 fallback"
+                 fallback, {unusable} manifest(s) carry a vocabulary that cannot gate \
+                 (every new-entity mint held; fix with `ct ontology set --fallback \
+                 <type>`)"
             );
         }
         report.census = census(conn)?;
@@ -717,8 +722,9 @@ fn census(conn: &Connection) -> Result<CensusReport> {
 
 /// Read-only "would the ensure act?" computation (R2.4.4 r12-m4) for the
 /// non-`--yes` arm — reports "ensure pending (read-only)" instead of
-/// writing. Returns `(would_write, foreign_no_preferred_fallback)`.
-fn ensure_pending_readonly(conn: &Connection) -> Result<(usize, usize)> {
+/// writing. Returns `(would_write, foreign_no_preferred_fallback,
+/// unusable_vocabulary)`.
+fn ensure_pending_readonly(conn: &Connection) -> Result<(usize, usize, usize)> {
     let rows: Vec<String> = {
         let mut stmt = conn.prepare("SELECT manifest_json FROM llm_wiki_entity_manifests")?;
         let mut rs = stmt.query([])?;
@@ -730,6 +736,7 @@ fn ensure_pending_readonly(conn: &Connection) -> Result<(usize, usize)> {
     };
     let mut would_write = 0;
     let mut foreign_no_choice = 0;
+    let mut unusable = 0;
     for manifest_json in rows {
         // The SAME pure planner the real ensure runs — the read-only report
         // cannot drift from what `--yes` writes.
@@ -738,11 +745,12 @@ fn ensure_pending_readonly(conn: &Connection) -> Result<(usize, usize)> {
             crate::db::entity_gate::EnsurePlan::ForeignNoPreferredFallback => {
                 foreign_no_choice += 1
             }
+            crate::db::entity_gate::EnsurePlan::UnusableVocabulary { .. } => unusable += 1,
             crate::db::entity_gate::EnsurePlan::Malformed(_)
             | crate::db::entity_gate::EnsurePlan::Complete => {}
         }
     }
-    Ok((would_write, foreign_no_choice))
+    Ok((would_write, foreign_no_choice, unusable))
 }
 
 /// R2.2.8 drift compare, shared by every destructive surface (heal, merge):

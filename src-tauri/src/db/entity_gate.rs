@@ -133,11 +133,17 @@ impl NodeVocabulary {
 
     /// Build the vocabulary from a manifest.
     ///
-    /// Empty-declared-set rule (spec §2.4.5): if a strict manifest declares
-    /// zero node types, every write is held — there is nothing to admit, and
-    /// `is_empty()` exposes that fact. The fallback is parsed even on an
-    /// empty manifest so a manifest that names a fallback but no declared
-    /// set can still degrade via §2.4.5.
+    /// Empty-declared-set rule (spec §2.4.5, r25): if a strict manifest
+    /// declares zero node types, every write is held — there is nothing to
+    /// admit, and `is_empty()` exposes that fact. A fallback named over an
+    /// empty declared set does NOT soften this: `hold_reason` checks
+    /// `is_empty()` first, so the mints hold rather than degrade onto it.
+    ///
+    /// A fallback that names a DECLARED type is stored in that entry's
+    /// canonical spelling — the spelling the degrade ladder lands (R2.4.4:
+    /// one spelling per type, same rule as the declared and alias arms). An
+    /// UNDECLARED fallback keeps its raw spelling: it can never land, and
+    /// `FallbackNotDeclared`'s message names exactly what the row says.
     pub fn from_manifest(manifest: &WikiManifest) -> Self {
         let mut by_key: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
@@ -150,14 +156,13 @@ impl NodeVocabulary {
                 .entry(k)
                 .or_insert_with(|| node.type_name.trim().to_string());
         }
-        Self {
-            by_key,
-            fallback: manifest
-                .fallback_node_type
-                .as_ref()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-        }
+        let fallback = manifest
+            .fallback_node_type
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(|f| by_key.get(&Self::key(&f)).cloned().unwrap_or(f));
+        Self { by_key, fallback }
     }
 
     /// The manifest's declared fallback, if any.
@@ -311,13 +316,22 @@ impl HoldReason {
     /// The `ct ontology set` target flag for a manifest row: `tier_fact` is
     /// the default target; an entity row needs `--entity`.
     fn fallback_command(manifest: &Option<String>, declared: &[String]) -> String {
-        let target = match manifest.as_deref() {
-            Some(crate::db::ontology_set::TIER_FACT) => String::new(),
-            Some(id) => format!("--entity {id} "),
-            None => "[--entity <id>] ".to_string(),
+        // The command must stay pasteable shell — no `[--entity <id>]`
+        // bracket placeholders (glob characters in zsh/bash). When the
+        // caller cannot name the row, print the default (`tier_fact`)
+        // command and name the entity-row variant in prose.
+        let (target, note) = match manifest.as_deref() {
+            Some(crate::db::ontology_set::TIER_FACT) => (String::new(), String::new()),
+            Some(id) => (format!("--entity {id} "), String::new()),
+            None => (
+                String::new(),
+                " (add `--entity <id>` before `--fallback` when an entity row holds \
+                 the mint)"
+                    .to_string(),
+            ),
         };
         format!(
-            "fix: `ct ontology set {target}--fallback <type>` with one of: {}",
+            "fix: `ct ontology set {target}--fallback <type>` with one of: {}{note}",
             declared.join(", ")
         )
     }
@@ -330,12 +344,29 @@ impl std::fmt::Display for HoldReason {
             None => "the strict manifest".to_string(),
         };
         match self {
-            Self::EmptyNodeTypes { manifest } => write!(
-                f,
-                "{} declares no node types, so there is nothing to admit (§2.4.5); \
-                 fix: add node types to that manifest (the wiki engine owns manifest rows)",
-                named(manifest)
-            ),
+            Self::EmptyNodeTypes { manifest } => {
+                // The fix-line must name a writer that can actually repair
+                // the row: `tier_fact` (and unnamed rows) belong to the
+                // wiki engine, but an entity strict row is CT-written — a
+                // verbatim `tier_fact` copy (§2.11) — which the engine will
+                // never rewrite. Repair the tier row, then re-copy it.
+                let fix = match manifest.as_deref() {
+                    Some(id) if id != crate::db::ontology_set::TIER_FACT => format!(
+                        "fix: repair the `tier_fact` manifest (the wiki engine owns \
+                         it), then re-copy it with `ct ontology set --entity {id} \
+                         --mode strict`"
+                    ),
+                    _ => "fix: add node types to that manifest (the wiki engine \
+                          owns manifest rows)"
+                        .to_string(),
+                };
+                write!(
+                    f,
+                    "{} declares no node types, so there is nothing to admit (§2.4.5); \
+                     {fix}",
+                    named(manifest)
+                )
+            }
             Self::NoFallback { manifest, declared } => write!(
                 f,
                 "{} declares no `fallback_node_type`, so every new-entity mint is held — \
@@ -696,6 +727,13 @@ pub(crate) enum EnsurePlan {
     Complete,
     /// Foreign manifest with no declared fallback and no preferred choice.
     ForeignNoPreferredFallback,
+    /// The PLANNED row still carries a vocabulary the gate cannot run
+    /// (R2.4.5: an existing fallback naming no declared type, or an empty
+    /// declared set) — every mint on it holds. Foreign-row shapes the
+    /// ensure must not rewrite (§2.4.4 declare-or-report); reported loudly
+    /// via heal instead, never memoized, so the pass re-reports until the
+    /// operator fixes it with `ct ontology set --fallback`.
+    UnusableVocabulary { reason: HoldReason },
     /// The edited manifest to write back.
     Edit {
         new_json: String,
@@ -771,14 +809,21 @@ pub(crate) fn plan_manifest_ensure(manifest_json: &str) -> Result<EnsurePlan> {
                 did_extend = true;
             }
         }
-        // Set fallback_node_type if not already present AND we have a choice.
+        // Set `fallback_node_type` when the key is absent OR names no
+        // declared type (r25: both leave every mint held). Replacing an
+        // undeclared fallback with the preferred DECLARED choice keeps the
+        // row usable; the EA family always has one (`project` is a seed
+        // type), so this arm cannot fall through to the unusable report.
         let existing_fallback = root
             .get("fallback_node_type")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        if existing_fallback.is_none() {
+        let fallback_usable = existing_fallback
+            .as_ref()
+            .is_some_and(|f| declared_lower.contains(&NodeVocabulary::key(f)));
+        if !fallback_usable {
             if let Some(choice) = fallback_choice {
                 root["fallback_node_type"] = json!(choice);
                 did_set_fallback = true;
@@ -797,13 +842,29 @@ pub(crate) fn plan_manifest_ensure(manifest_json: &str) -> Result<EnsurePlan> {
         }
         // Foreign manifest with a declared fallback — fine. With no declared
         // fallback but `project` declared — declare it. With nothing
-        // declared — the loud signal above.
+        // declared — the loud signal above. An EXISTING fallback naming no
+        // declared type is left untouched here (declare-or-report) and
+        // caught by the post-edit usability check below.
         if existing_fallback.is_none() {
             if let Some(choice) = fallback_choice {
                 root["fallback_node_type"] = json!(choice);
                 did_set_fallback = true;
             }
         }
+    }
+
+    // R2.4.5 post-edit usability check: the PLANNED row must leave a
+    // vocabulary the gate can run — the ensure must not stamp healthy
+    // (`Complete`) a row that holds every mint. Evaluated through the
+    // gate's own reader on the post-edit state, so the planner and the
+    // gate can never disagree about usability. EA-family rows were
+    // repaired above; this fires for foreign rows the ensure must not
+    // rewrite: an existing fallback naming no declared type, or an empty
+    // declared set.
+    let planned_vocab =
+        NodeVocabulary::from_manifest(&crate::wiki_graph::parse_manifest_value(&root));
+    if let Some(reason) = planned_vocab.hold_reason(None) {
+        return Ok(EnsurePlan::UnusableVocabulary { reason });
     }
 
     if did_set_fallback || did_extend {
@@ -860,6 +921,12 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
         EnsurePlan::ForeignNoPreferredFallback => {
             return Ok(EnsureOutcome::ForeignNoPreferredFallback {
                 entity_id: entity_id.to_string(),
+            });
+        }
+        EnsurePlan::UnusableVocabulary { reason } => {
+            return Ok(EnsureOutcome::UnusableVocabulary {
+                entity_id: entity_id.to_string(),
+                reason,
             });
         }
         EnsurePlan::Complete => (None, false, false),
@@ -941,6 +1008,14 @@ pub enum EnsureOutcome {
     /// Foreign manifest without a preferred-fallback option declared; the
     /// ensure refused to inject and surfaced a §2.4.5 loud diagnostic.
     ForeignNoPreferredFallback { entity_id: String },
+    /// The row (post any ensure edits) still carries a vocabulary the gate
+    /// cannot run — R2.4.5 holds every mint on it. The ensure writes
+    /// nothing and records no memo; heal reports the row until the
+    /// operator fixes it (`ct ontology set --fallback`).
+    UnusableVocabulary {
+        entity_id: String,
+        reason: HoldReason,
+    },
     /// The compare-and-swap write changed zero rows — the manifest was
     /// rewritten concurrently between read and UPDATE. Nothing was written
     /// and no memo recorded; the next pass re-reads the newer bytes.
@@ -993,6 +1068,9 @@ pub fn ensure_all_manifest_vocabularies(conn: &Connection) -> Result<EnsureSumma
                     EnsureOutcome::ForeignNoPreferredFallback { .. } => {
                         summary.foreign_no_preferred_fallback += 1;
                     }
+                    EnsureOutcome::UnusableVocabulary { .. } => {
+                        summary.unusable_vocabulary += 1;
+                    }
                     EnsureOutcome::Malformed(_) => summary.malformed += 1,
                     EnsureOutcome::RacedConcurrentWrite => {
                         summary.raced += 1;
@@ -1029,6 +1107,9 @@ pub struct EnsureSummary {
     pub extended: usize,
     pub fallbacks_set: usize,
     pub foreign_no_preferred_fallback: usize,
+    /// Rows whose post-ensure vocabulary still cannot gate (R2.4.5) —
+    /// reported, not repaired.
+    pub unusable_vocabulary: usize,
     pub malformed: usize,
     /// Rows whose CAS write lost a concurrent rewrite (nothing written).
     pub raced: usize,
@@ -2123,6 +2204,109 @@ mod tests {
         );
     }
 
+    /// r25/r26: an EA-family row whose `fallback_node_type` names no
+    /// declared type would hold every mint — the ensure REPLACES it with
+    /// the preferred declared choice (here `concept`, declared beside the
+    /// seeds) instead of stamping the row healthy.
+    #[test]
+    fn ensure_replaces_undeclared_ea_fallback() {
+        let conn = open_in_memory().unwrap();
+        let mut types: Vec<serde_json::Value> =
+            EA_SEED_TYPES.iter().map(|s| json!({"type": s})).collect();
+        types.push(json!({"type": "concept"}));
+        let manifest = serde_json::json!({
+            "node_types": types,
+            "edge_types": [],
+            "fallback_node_type": "ghost",
+        });
+        insert_manifest(&conn, "tier_fact", "strict", &manifest.to_string());
+
+        let outcome = ensure_manifest_vocabulary(&conn, "tier_fact").unwrap();
+        match outcome {
+            EnsureOutcome::Ensured { fallback_set, .. } => assert!(fallback_set),
+            other => panic!("expected Ensured, got {other:?}"),
+        }
+        let stored: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed["fallback_node_type"].as_str(), Some("concept"));
+
+        // The replacement left a usable vocabulary: a memo-cleared re-run
+        // is AlreadyComplete, not another repair or report.
+        conn.execute("DELETE FROM manifest_ensure_memo", [])
+            .unwrap();
+        let outcome = ensure_manifest_vocabulary(&conn, "tier_fact").unwrap();
+        assert_eq!(outcome, EnsureOutcome::AlreadyComplete);
+    }
+
+    /// r25/r26: a FOREIGN row whose fallback names no declared type is
+    /// beyond the ensure's declare-or-report charter — nothing is written
+    /// and the row is REPORTED (heal's `unusable_vocabulary` count),
+    /// never stamped healthy. No memo: every pass reports it again until
+    /// the operator fixes it.
+    #[test]
+    fn ensure_reports_foreign_undeclared_fallback() {
+        let conn = open_in_memory().unwrap();
+        let manifest = serde_json::json!({
+            "node_types": [{"type": "person"}, {"type": "place"}],
+            "edge_types": [],
+            "fallback_node_type": "ghost",
+        });
+        let manifest_json = manifest.to_string();
+        insert_manifest(&conn, "foreign_vault", "strict", &manifest_json);
+
+        let expected = EnsureOutcome::UnusableVocabulary {
+            entity_id: "foreign_vault".to_string(),
+            reason: HoldReason::FallbackNotDeclared {
+                manifest: None,
+                fallback: "ghost".to_string(),
+                declared: vec!["person".to_string(), "place".to_string()],
+            },
+        };
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "foreign_vault").unwrap(),
+            expected
+        );
+        let stored: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'foreign_vault'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, manifest_json, "nothing was written");
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "foreign_vault").unwrap(),
+            expected,
+            "unusable rows are re-reported every pass (no memo)"
+        );
+    }
+
+    /// r25/r26: an empty declared set holds every mint even WITH a
+    /// fallback named over it — reported, never degraded onto.
+    #[test]
+    fn ensure_reports_empty_node_types_with_fallback() {
+        let conn = open_in_memory().unwrap();
+        let manifest = serde_json::json!({
+            "node_types": [],
+            "edge_types": [],
+            "fallback_node_type": "person",
+        });
+        insert_manifest(&conn, "foreign_vault", "strict", &manifest.to_string());
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "foreign_vault").unwrap(),
+            EnsureOutcome::UnusableVocabulary {
+                entity_id: "foreign_vault".to_string(),
+                reason: HoldReason::EmptyNodeTypes { manifest: None },
+            }
+        );
+    }
+
     /// Hand-stripped `fallback_node_type` → ensure re-runs and writes it.
     #[test]
     fn ensure_hand_stripped_key_re_runs() {
@@ -2677,6 +2861,45 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(outcome, AdmitOutcome::Held { .. }));
+        tx.commit().unwrap();
+    }
+
+    /// R2.4.4 (r26): a case-variant fallback (`Person` beside the declared
+    /// `person`) is USABLE — membership is key-based — but must LAND in
+    /// the declared entry's spelling, the same rule the declared and
+    /// alias arms follow, so one type never splits into two exact-match
+    /// buckets in `entity_type`.
+    #[test]
+    fn case_variant_fallback_lands_the_declared_spelling() {
+        let manifest = crate::wiki_graph::parse_manifest_value(&serde_json::json!({
+            "node_types": [{"type": "person"}, {"type": "place"}],
+            "edge_types": [],
+            "fallback_node_type": "Person",
+        }));
+        let vocab = NodeVocabulary::from_manifest(&manifest);
+        assert_eq!(vocab.hold_reason(None), None, "case variant is usable");
+        assert_eq!(vocab.fallback(), Some("person"), "stored canonically");
+
+        let conn = open_in_memory().unwrap();
+        let mut conn = conn;
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            None,
+            "Unlabeled-mint",
+            None,
+            "",
+            100,
+            GateDecision::Gate(vocab),
+            false,
+        )
+        .unwrap();
+        match outcome {
+            AdmitOutcome::DegradedToFallback { landed_as, .. } => {
+                assert_eq!(landed_as, "person");
+            }
+            other => panic!("expected DegradedToFallback, got {other:?}"),
+        }
         tx.commit().unwrap();
     }
 
@@ -3338,6 +3561,39 @@ mod tests {
             entity.contains("`ct ontology set --entity ent_x --fallback <type>`"),
             "{entity}"
         );
+
+        // r26: the unnamed-row arm still prints a PASTEABLE command — no
+        // bracket placeholders (glob characters in zsh/bash) — with the
+        // entity-row variant named in prose.
+        let unnamed = HoldReason::NoFallback {
+            manifest: None,
+            declared: vec!["person".to_string()],
+        }
+        .to_string();
+        assert!(!unnamed.contains('['), "{unnamed}");
+        assert!(
+            unnamed.contains("`ct ontology set --fallback <type>`"),
+            "{unnamed}"
+        );
+        assert!(unnamed.contains("--entity <id>"), "{unnamed}");
+
+        // r26: an entity strict row is CT-written (a `tier_fact` copy) —
+        // its EmptyNodeTypes fix names the re-copy, not the wiki engine
+        // (which never rewrites an entity-scoped row).
+        let entity_empty = HoldReason::EmptyNodeTypes {
+            manifest: Some("ent_x".to_string()),
+        }
+        .to_string();
+        assert!(
+            entity_empty.contains("`ct ontology set --entity ent_x --mode strict`"),
+            "{entity_empty}"
+        );
+
+        let tier_empty = HoldReason::EmptyNodeTypes {
+            manifest: Some("tier_fact".to_string()),
+        }
+        .to_string();
+        assert!(tier_empty.contains("wiki engine"), "{tier_empty}");
 
         for reason in [
             HoldReason::TierFactUnreadable,
