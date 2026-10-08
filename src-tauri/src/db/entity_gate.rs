@@ -262,7 +262,7 @@ pub fn shared_insert_entity(
     // For now: if a caller-supplied id points to a redirect row, follow the
     // single hop. Cycles error out (no infinite loop).
     let resolved_id = match caller_entity_id {
-        Some(id) => match single_hop_redirect(conn, id) {
+        Some(id) => match single_hop_redirect(conn, id)? {
             RedirectOutcome::Survivor(s) => s,
             RedirectOutcome::Cycle => {
                 bail!("entity {id} is part of a redirect cycle")
@@ -493,16 +493,22 @@ pub enum RedirectOutcome {
     Cycle,
 }
 
-pub fn single_hop_redirect(conn: &Connection, entity_id: &str) -> RedirectOutcome {
+pub fn single_hop_redirect(
+    conn: &Connection,
+    entity_id: &str,
+) -> rusqlite::Result<RedirectOutcome> {
+    // D8: a read FAULT propagates — `.unwrap_or(None)` here would let a
+    // locked/faulting lookup silently insert against a loser id and split
+    // the cluster. A missing ROW is `Ok(None)` (the normal case); only an
+    // error is an error.
     let merged: Option<String> = conn
         .query_row(
             "SELECT merged_into FROM entity_redirects WHERE entity_id = ?1",
             [entity_id],
             |r| r.get(0),
         )
-        .optional()
-        .unwrap_or(None);
-    match merged {
+        .optional()?;
+    Ok(match merged {
         None => RedirectOutcome::None,
         Some(s) if s == entity_id => RedirectOutcome::Cycle,
         Some(s) => {
@@ -513,7 +519,7 @@ pub fn single_hop_redirect(conn: &Connection, entity_id: &str) -> RedirectOutcom
             // a healthy brain. Treat it as the one-hop survivor.
             RedirectOutcome::Survivor(s)
         }
-    }
+    })
 }
 
 /// Idempotent ensure step (spec §2.4.4, plan-p10-m4).
@@ -664,10 +670,21 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
         let new_json = serde_json::to_string(&root)?;
         let new_hash = hash_bytes(new_json.as_bytes());
         let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1 WHERE entity_id = ?2",
-            params![new_json, entity_id],
+        // Compare-and-swap on the bytes we READ (review finding): the read
+        // above is outside the transaction, so a concurrent engine/desktop
+        // rewrite between read and UPDATE must not be overwritten with an
+        // edited copy of the OLDER manifest. Zero rows changed = the row
+        // moved under us — leave it alone; the next ensure pass re-reads
+        // the newer bytes and re-decides. No memo is recorded in that case
+        // (r11-m4: memo only after the write commits).
+        let changed = tx.execute(
+            "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1
+              WHERE entity_id = ?2 AND manifest_json = ?3",
+            params![new_json, entity_id, manifest_json],
         )?;
+        if changed == 0 {
+            return Ok(EnsureOutcome::AlreadyEnsured);
+        }
         tx.execute(
             "INSERT OR REPLACE INTO manifest_ensure_memo (entity_id, manifest_hash, recorded_at)
              VALUES (?1, ?2, ?3)",
@@ -936,18 +953,36 @@ pub fn resolve_node_gate_decision(
     let schema_unparseable = ctx.schema_unparseable;
     let vault_root = ctx.vault_root;
     // Rung 1a — ct_entity_optouts row → opt-out, skip edge gating too (§2.1).
-    if entity_has_optout(conn, entity_id).unwrap_or(false) {
-        return NodeGateDecision {
-            verdict: ModeVerdict::OptOut,
-            vocabulary: None,
-            source_directory: None,
-        };
+    // D8: a read FAULT is never "no row" — it maps to Held (loud), so a
+    // locked/faulting lookup cannot silently push an opted-out entity back
+    // under the strict ladder's vocabulary assumptions.
+    match entity_has_optout(conn, entity_id) {
+        Ok(true) => {
+            return NodeGateDecision {
+                verdict: ModeVerdict::OptOut,
+                vocabulary: None,
+                source_directory: None,
+            };
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!(
+                "[entity-gate] opt-out lookup failed for {entity_id}: {e}; \
+                 holding the mint (rung 1a fail-closed)"
+            );
+            return NodeGateDecision {
+                verdict: ModeVerdict::StrictNoVocab,
+                vocabulary: None,
+                source_directory: None,
+            };
+        }
     }
 
     // Rung 1b/c/d — the entity's own manifest row. An unreadable row is
     // REPORT-OR-HOLD for nodes per r4-m4; an unmarked row climbs. A STRICT
     // row GATEs — the vocabulary comes from THIS manifest (its fallback_node_type
     // drives the degrade rung).
+    let mut entity_row_unreadable = false;
     match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
         Ok(o) if o.mode == "strict" => {
             // Ensure runs before the gate resolves (the gate's resolution path),
@@ -981,7 +1016,9 @@ pub fn resolve_node_gate_decision(
             // Unreadable row — REPORT-OR-HOLD for nodes per r4-m4. Match
             // the edge cascade's silent fall-through with one extra step:
             // strict-wins via rungs 2-3 below. If the climb ALSO produces
-            // no strict verdict, return Held (loud, not silent).
+            // no strict verdict, the rung-4 `Ok(_)` arm below returns Held
+            // (loud, not silent) via `entity_row_unreadable`.
+            entity_row_unreadable = true;
         }
     }
 
@@ -1059,9 +1096,20 @@ pub fn resolve_node_gate_decision(
             }
         }
         Ok(_) => {
-            // Unmarked/off tier_fact row: §2.3.1 SKIP. If a rung 2/3 lookup
-            // resolved off, record that folder — the r21 `gate_skipped` row
-            // carries it as `source_directory`.
+            // Unmarked/off tier_fact row: §2.3.1 SKIP — UNLESS the entity's
+            // own manifest row was unreadable: r4-m4's Held promise (no
+            // silent admission when the entity said strict but could not be
+            // read). If the climb produced a strict verdict we never reach
+            // here (rungs 2-3 returned above).
+            if entity_row_unreadable {
+                return NodeGateDecision {
+                    verdict: ModeVerdict::StrictNoVocab,
+                    vocabulary: None,
+                    source_directory: None,
+                };
+            }
+            // If a rung 2/3 lookup resolved off, record that folder — the
+            // r21 `gate_skipped` row carries it as `source_directory`.
             NodeGateDecision {
                 verdict: ModeVerdict::Off,
                 vocabulary: None,
@@ -1201,15 +1249,15 @@ fn tier_fact_vocabulary(conn: &Connection) -> Option<NodeVocabulary> {
     }
 }
 
-/// Rung 1a — does this entity have a deliberate opt-out row?
+/// Rung 1a — does this entity have a deliberate opt-out row? DB faults
+/// PROPAGATE (D8): a failed lookup is never interpreted as "no row" — the
+/// caller maps an error to Held/continued-gating, never to an opt-out skip.
 pub(crate) fn entity_has_optout(conn: &Connection, entity_id: &str) -> rusqlite::Result<bool> {
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM ct_entity_optouts WHERE entity_id = ?1",
-            [entity_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ct_entity_optouts WHERE entity_id = ?1",
+        [entity_id],
+        |r| r.get(0),
+    )?;
     Ok(count > 0)
 }
 
@@ -1738,7 +1786,7 @@ mod tests {
             params!["ent_a", "B"],
         )
         .unwrap();
-        let outcome = single_hop_redirect(&conn, "ent_a");
+        let outcome = single_hop_redirect(&conn, "ent_a").unwrap();
         assert_eq!(outcome, RedirectOutcome::Survivor("B".into()));
     }
 
@@ -1751,7 +1799,7 @@ mod tests {
             params!["ent_a", "ent_a"],
         )
         .unwrap();
-        let outcome = single_hop_redirect(&conn, "ent_a");
+        let outcome = single_hop_redirect(&conn, "ent_a").unwrap();
         assert_eq!(outcome, RedirectOutcome::Cycle);
     }
 
@@ -1759,7 +1807,7 @@ mod tests {
     #[test]
     fn single_hop_redirect_returns_none_when_absent() {
         let conn = open_in_memory().unwrap();
-        let outcome = single_hop_redirect(&conn, "ent_a");
+        let outcome = single_hop_redirect(&conn, "ent_a").unwrap();
         assert_eq!(outcome, RedirectOutcome::None);
     }
 

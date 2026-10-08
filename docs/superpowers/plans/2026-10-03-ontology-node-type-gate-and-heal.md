@@ -1,6 +1,6 @@
 # Ontology Node-Type Gate + Heal + Duplicate Merge (wave 1) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Implement wave 1 of the ontology node-type gate spec — a write-time
 node-type gate, an ontology-aware heal with signed-alias remap, a one-time
@@ -29,8 +29,12 @@ landed Task 0/1 code — this plan was revised the same day to match r21).
 | 10 Docs + tracking issue #273 | DONE | `5a4a443..219002d` |
 | Final whole-branch review + fix wave | DONE | `219002d..8402d50` |
 
-ALL TASKS COMPLETE. CI green on tip `8402d50` (8/8, mergeStateStatus CLEAN).
-Wave-1 deferred minors ride tracking issue #273. The implementation handoff
+ALL TASKS COMPLETE (per-task checklists below are ticked to match). CI was
+green on `8402d50` (8/8) at final-review time; branch-tip CI re-runs on every
+push — trust the PR checks, not this line. The LIVE CENSUS (R2.9.3) is still
+outstanding: do NOT merge without it (the PR body's test plan is the
+authoritative pre-merge gate). Wave-1 deferred minors ride tracking issue
+#273. The implementation handoff
 (`2026-10-07-ontology-gate-implementation-handoff.md`) is obsolete and
 deleted. Merge decision belongs to the user.
 
@@ -147,7 +151,7 @@ IMMEDIATE-behavior) to the `ImmediateTx` newtype so the helper's
 | `src-tauri/src/db/heal_ontology.rs` | New | Also owns `OntologyHealReport` (the CLI `CtHealOutput` payload, plan-p8-MAJOR-1). R2.6.1–R2.6.4: census (R2.9.3 rules), signed-alias table (DATA, target-declaredness check, `concept` disposition), retype mechanics (per-row IMMEDIATE, logged), queue routing; remap BEFORE merge is an ordering rule ENFORCED BY the
 merge command's precondition (r12-M3: heal itself never merges);
 `alias_remap_completed` marker (deleted by `clear_vault_tables`, r19-m2) |
-| `src-tauri/src/db/merge_dedup.rs` | New | R2.7.1–R2.7.6: normalized-name grouping, deterministic BINARY survivor, re-entrancy, type-conflict queueing, empty-summary rule (r8-M3), redirects + path compression (2-hop/cycle tests), auto-merge gate, remap-precondition predicate (`llm_wiki_meta` marker, r17-m3) |
+| `src-tauri/src/db/merge_duplicates.rs` | New | R2.7.1–R2.7.6: normalized-name grouping, deterministic BINARY survivor, re-entrancy, type-conflict queueing, empty-summary rule (r8-M3), redirects + path compression (2-hop/cycle tests), auto-merge gate, remap-precondition predicate (`llm_wiki_meta` marker, r17-m3) |
 | `src-tauri/src/db/okf_migration.rs` | Modify | §2.5: abort semantics (GATE-without-fallback → abort without `okf_migrated_at`, r6-M2 observability at the `let _ = run_okf_migration(...)` in `AppDb::open_with_config`), upsert via shared helper, `&mut Connection` |
 | `src-tauri/src/db/connection.rs` | Modify | Caller fix for okf_migration signature in `AppDb::open_with_config` (`let mut conn` binding + `&mut conn` at the `run_okf_migration` call) (Task 2 per plan-p10-m1 — plan-p14-m1 corrects the stale "Task 3"); best-effort ensure at DB open (r8-m6/r19-m5: name `AppDb` path — Task 2) |
 | `src-tauri/src/db/bundle_apply.rs` | Modify | §2.5: `ensure_entity` through helper (SKIP-path `'concept'`+ledger) — its signature changes from `&Connection` to `&ImmediateTx` (`:712` today); swap the `:320` transaction (already IMMEDIATE-behavior) to `ImmediateTx` (plan-p7-m4); error propagation (no `.ok()` swallow, `:723-729`) |
@@ -499,12 +503,12 @@ seed-set subset guard, object-shaped added entries, declare-or-report),
 R2.3.0/R2.3.1/R2.3.0-skip wiring for `NodeVocabulary::from_manifest`,
 R2.3.2/R2.3.2a (the SHARED source-resolution core — plan-p11-MAJOR-1).
 
-- [ ] FIX the 8 `run_okf_migration` TEST call sites in this task
+- [x] FIX the 8 `run_okf_migration` TEST call sites in this task
       (plan-p13-m2: `cargo test` compiles every target, so Task 2's
       check gate needs them): `src/db/okf_migration.rs:240/:245` +
       `tests/okf_migration.rs:58/:90/:122/:152/:182/:183` — `let mut
       conn` / `&mut conn` (`:183` uses `&conn` inline).
-- [ ] `ImmediateTx<'c>` newtype + `ImmediateTx::begin(&mut Connection)`;
+- [x] `ImmediateTx<'c>` newtype + `ImmediateTx::begin(&mut Connection)`;
       no behavior-getter reliance (r3-m7); `Deref<Target =
       rusqlite::Transaction<'c>>` (plan-p12-MAJOR-1 — NOT Connection:
       `commit.rs:2434/:2504` call `tx.rollback()` and `:2539` passes
@@ -525,10 +529,10 @@ R2.3.2/R2.3.2a (the SHARED source-resolution core — plan-p11-MAJOR-1).
       `AppDb::open_with_config` (`connection.rs`)
       (plan-p10-m1: Task 2 must compile, so it owns BOTH; no other
       task re-owns them). Test: existing callers pass unchanged.
-- [ ] Single-hop redirect resolver WITH cycle guard (plan-p2-M1: the
+- [x] Single-hop redirect resolver WITH cycle guard (plan-p2-M1: the
       helper's redirect check needs it now; Task 7 only APPLIES it at
       reader/writer sites).
-- [ ] Shared insert helper: gate check + redirect check + existence check
+- [x] Shared insert helper: gate check + redirect check + existence check
       + insert, atomic; error PROPAGATION (no `.ok()`); explicit upsert
       mode (name/summary/updated_at only — r6-M3); caller-supplied-id
       support (r9-m1). The helper does DB work only — no I/O inside the
@@ -536,7 +540,7 @@ R2.3.2/R2.3.2a (the SHARED source-resolution core — plan-p11-MAJOR-1).
       Task 3 to write the ledger row in the SAME transaction (the
       admit outcome: admitted-as-declared / aliased / degraded-to-fallback
       / skipped, plus the original label).
-- [ ] `ensure_manifest_vocabulary`: idempotent; full vocabulary work
+- [x] `ensure_manifest_vocabulary`: idempotent; full vocabulary work
       (add `document`+`process` as OBJECT entries + write
       `fallback_node_type`) under the seed-set SUBSET guard; foreign
       manifests → fallback-only declare-or-report; memoized per
@@ -546,7 +550,7 @@ R2.3.2/R2.3.2a (the SHARED source-resolution core — plan-p11-MAJOR-1).
       would let an upgraded brain with a pending conversion +
       pre-wave-1 manifest hit Task 3's gate-without-fallback abort at
       open). Test pins the order.
-- [ ] SHARED SOURCE-RESOLUTION CORE (plan-p11-MAJOR-1; spec L756-764,
+- [x] SHARED SOURCE-RESOLUTION CORE (plan-p11-MAJOR-1; spec L756-764,
       L795-815 — "SAME resolver core … no second implementation"):
       `Result<SourceResolution>` in `entities.rs` with THREE outcomes
       (`Resolved` / `HadEvidenceUnresolved` / `NoEvidence`, R2.3.2a
@@ -556,7 +560,7 @@ R2.3.2/R2.3.2a (the SHARED source-resolution core — plan-p11-MAJOR-1).
       librarian-token shape checked FIRST; `wiki_context` remains a
       second DISPLAY wrapper that degrades on error. Task 3's hold
       decision and Task 5's heal census both consume THIS core.
-- [ ] `wiki_graph.rs`: extend `WikiManifest` + `parse_manifest` for
+- [x] `wiki_graph.rs`: extend `WikiManifest` + `parse_manifest` for
       `fallback_node_type` (r14-MAJOR-1 — without this every strict brain
       reads as no-fallback and every mint is held); field is
       `#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -564,11 +568,11 @@ R2.3.2/R2.3.2a (the SHARED source-resolution core — plan-p11-MAJOR-1).
       `WikiOntologyResult` → frontend/MCP — additive-only output keeps
       the NO-frontend-changes constraint; `tests/wiki_graph.rs:84`
       struct literal is touched — listed in File Structure).
-- [ ] `NodeVocabulary::from_manifest` (parses `fallback_node_type`;
+- [x] `NodeVocabulary::from_manifest` (parses `fallback_node_type`;
       empty-declared-set rule; ensure → `wiki_get_ontology` →
       `NodeVocabulary` end-to-end test) + `canonicalize` + `admit` (alias-target
       declaredness → queue, r2-M1).
-- [ ] Tests: §6 items 1a, 2 and the R2.4.4 matrix cases (pre-wave-1
+- [x] Tests: §6 items 1a, 2 and the R2.4.4 matrix cases (pre-wave-1
       manifest, fresh-install-after-migration, no-preferred-fallback loud
       error, hand-stripped key re-ensured, foreign manifest untouched,
       engine-rewrite survival of the CT table).
@@ -581,12 +585,12 @@ side of R2.3.2/R2.3.2a (hold classification), R2.3.0 edge-endpoint
 strict-wins + the §2.1 entity-level opt-out cascade short-circuit for
 EDGES (commit.rs:364-369), §6 item 1b's per-direction matrix rows.
 
-- [ ] Prompt closed-set clause appended in `librarian/synthesis.rs`
+- [x] Prompt closed-set clause appended in `librarian/synthesis.rs`
       (`build_system_prompt`, `:625` — synthesis pattern per edge clause;
       NOT commit.rs); resolved from `tier_fact` for new entities;
       `format_candidates_section` (`synthesis.rs:541`) joins the Task 7
       redirect read list.
-- [ ] Gate at the four sites through the helper: LLM synthesis
+- [x] Gate at the four sites through the helper: LLM synthesis
       (`create_entity_if_needed`), GUI (`entities_api` opens IMMEDIATE),
       bundle (`ensure_entity`: SKIP-path `'concept'`+ledger UNTYPED row,
       abort-on-config-fail, fallback landing + queue), okf_migration
@@ -603,7 +607,7 @@ EDGES (commit.rs:364-369), §6 item 1b's per-direction matrix rows.
       §2.5 SKIP path `'concept'`+ledger row) is THIS task's — plan-p3-m4:
       between Tasks 3 and 9 the aborts would otherwise disappear behind
       the `let _ = run_okf_migration(...)` in `AppDb::open_with_config`.
-- [ ] Degrade ladder implementation + origin-ledger UNTYPED records;
+- [x] Degrade ladder implementation + origin-ledger UNTYPED records;
       off-sourced mints write the R2.3.5 directory row (source
       directory path + original label — plan-p11-MAJOR-2 write side); every
       write is `INSERT OR IGNORE` with its `OriginReason` per the
@@ -616,28 +620,28 @@ EDGES (commit.rs:364-369), §6 item 1b's per-direction matrix rows.
       | SKIP on bundle import (no label) | `gate_skipped` | NULL | as above |
       | any mint whose mode came from an `off` `folder_ontology` entry | `gate_skipped` | the label written | the `off` directory path |
       Admitted-as-declared and alias-admitted mints write NO row.
-- [ ] Edge gating (R2.3.0): gate an edge when EITHER endpoint resolves
+- [x] Edge gating (R2.3.0): gate an edge when EITHER endpoint resolves
       strict; entity-level opt-out on an endpoint short-circuits the edge
       cascade (§2.1, commit.rs:364-369); per-direction matrix tests
       (§6 item 1b).
-- [ ] Initial watermark stamp at first gate/heal resolution (r13-MAJOR-3:
+- [x] Initial watermark stamp at first gate/heal resolution (r13-MAJOR-3:
       `INSERT OR IGNORE`, skipped on read-only connections — refines
       Task 1's heal-is-sole-writer rule).
-- [ ] Tests: §6 items 1b (edge per-direction rows — the bullet above),
+- [x] Tests: §6 items 1b (edge per-direction rows — the bullet above),
       2 (all four paths; plain `&Connection` does
       not compile; upsert preserves `entity_type`; SG6 held proposals
       keep facts; degrade ladder; no invented label).
 
 ### Task 4: OKF rename (§2.8)
 
-- [ ] Field/enum → `doc_kind`/`DocKind` + `#[serde(rename = "entity_type")]`
+- [x] Field/enum → `doc_kind`/`DocKind` + `#[serde(rename = "entity_type")]`
       + doc comments; fix ALL compile sites incl.
       `tests/mcp_write_integration.rs` (r18-m3) and `write.rs:1351`.
-- [ ] `doc_kind:` key FAILS to parse (no alias, r11-m3); `$defs` DocKind
+- [x] `doc_kind:` key FAILS to parse (no alias, r11-m3); `$defs` DocKind
       test under `--features mcp-server`; description assertions.
-- [ ] §6 item 5 rows: serialize round-trip (`entity_type` key survives
+- [x] §6 item 5 rows: serialize round-trip (`entity_type` key survives
       `serde_json::to_value`) and `KNOWN_KEYS`-unchanged pin (r14-m3).
-- [ ] Check command: `cargo test --manifest-path src-tauri/Cargo.toml --all-targets --features test-utils,mcp-server -- --test-threads=1` (r-p1-m2: integration tests import test-utils-gated items; r-p2-m3: full path since commands run from repo root; `--test-threads=1` matches CI — plan-p9-m6: the per-config-path cache at `config/mod.rs:182` makes parallel runs flaky).
+- [x] Check command: `cargo test --manifest-path src-tauri/Cargo.toml --all-targets --features test-utils,mcp-server -- --test-threads=1` (r-p1-m2: integration tests import test-utils-gated items; r-p2-m3: full path since commands run from repo root; `--test-threads=1` matches CI — plan-p9-m6: the per-config-path cache at `config/mod.rs:182` makes parallel runs flaky).
 
 ### Task 5: Ontology heal
 
@@ -650,7 +654,7 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
 `ct`-facing REPORT display, Task 9 nothing), drift report + FINAL RULE
 (R2.2.8), `alias_remap_completed` marker.
 
-- [ ] STDOUT CONTRACT (plan-p7-MAJOR-1: `heal_run`'s doc comment
+- [x] STDOUT CONTRACT (plan-p7-MAJOR-1: `heal_run`'s doc comment
       `cmds.rs:244-246` + the two `ct_heal.rs` assertions at `:148-150`
       and `:221-223` pin stdout to EXACTLY ONE JSON object — a stray
       `println!` for the drift report or retype log breaks them and any
@@ -687,7 +691,7 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
       and `heal_with_yes_on_clean_brain_exits_zero_with_zero_summary`
       stay UNMODIFIED as the exit-0 regression pins (a "no preferred
       fallback" loud error must not fire on a fresh fixture).
-- [ ] ENSURE BEFORE CENSUS (plan-p7-m2: `heal_run` opens via
+- [x] ENSURE BEFORE CENSUS (plan-p7-m2: `heal_run` opens via
       `open_rw` + `migrate_open_db` (`cmds.rs:252-264`), NOT
       `AppDb::open_with_config`, so the open-time ensure never fires
       for `ct heal` — a pre-wave-1 manifest would misclassify every
@@ -708,7 +712,7 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
       fallback pattern, `ct.rs:584-599`) — `ct heal` without `--yes`
       included (its read-only census cannot migrate). Test per entry
       point against an old-schema database.
-- [ ] Retype provenance (spec R2.4.6/R2.3.6, r21): every heal retype
+- [x] Retype provenance (spec R2.4.6/R2.3.6, r21): every heal retype
       writes its origin row in the SAME per-row IMMEDIATE transaction —
       `alias_retype` for signed-alias remaps, `queue_retype` for approved
       queue items — `INSERT OR IGNORE` with the pre-retype label (first
@@ -716,7 +720,7 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
       table (`alias_retype`/`queue_retype` never surface as drift). Test:
       `heal --yes` remap of a ledger-less `agent` row → `alias_retype`
       row with `original_type = 'agent'`; re-run → no new surfacing.
-- [ ] R2.3.5 heal side (spec r21 scope): an unresolved source is
+- [x] R2.3.5 heal side (spec r21 scope): an unresolved source is
       REPORT-ONLY when the resolved `folder_ontology` map has an `off`
       (or degraded/dropped) entry OR the entity has a ledger row with a
       non-NULL `source_directory`; otherwise (empty map, no such row) the
@@ -728,11 +732,11 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
       `queue_retype` → never surfaced. Tests: empty map + stale hash +
       `--yes` → remaps; off entry + stale hash → zero retypes; ledger
       `source_directory` row + off entry later removed → still zero.
-- [ ] Census → drift report (echo old+new hash → STDERR per the stdout
+- [x] Census → drift report (echo old+new hash → STDERR per the stdout
       contract above) → remap (signed table,
       target-declaredness → queue; `concept` disposition per r8-M2 +
       r16-m1 gate/heal parity) → migrate → queue remainder.
-- [ ] WAIVE SEMANTICS (plan-p9-M2, spec L654-658): `--waive-drift`
+- [x] WAIVE SEMANTICS (plan-p9-M2, spec L654-658): `--waive-drift`
       acknowledges the mismatch and PROCEEDS WITHOUT retypes, remaps,
       OR watermark storage — the waive event is recorded in the heal
       summary OUTPUT only (add `waived: bool` + `old_stamped_at` to
@@ -761,7 +765,7 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
       fresh-drift waived merge would be blocked by the merge
       precondition): the waived-merge test SEEDS the marker; plus a
       row pinning "waive with no marker → precondition refusal".
-- [ ] `--yes` gating: drift report + confirm/waive hash (CLI form per
+- [x] `--yes` gating: drift report + confirm/waive hash (CLI form per
       r6-m5/r4-m1); remap per-row IMMEDIATE; report-only rules (unresolved
       sources, off-sourced, stale-hash + empty-map scope r18-m2).
       OWNS the clap flags (plan-p5-MAJOR-2: Task 5's tools tests cannot
@@ -785,7 +789,7 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
       `requires` vs default-false behaviour is version-dependent.
       Task 8's heal slice is report DISPLAY
       only.
-- [ ] NON-`--yes` arm contract (plan-p3-M1: today `Cmd::Heal{yes:false}`
+- [x] NON-`--yes` arm contract (plan-p3-M1: today `Cmd::Heal{yes:false}`
       is a hard refusal — `ct.rs:570-605` read-only open, print count,
       exit 1; `tools/tests/ct_heal.rs:81-133` pins no-mutation and
       no-fresh-DB-creation): the arm KEEPS the read-only open; it ADDS a
@@ -801,7 +805,7 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
       that reading gates all of `heal_run` and contradicts the
       composition row below). EXTEND `tools/tests/ct_heal.rs` — do NOT
       add a separate `ct_heal_drift.rs`.
-- [ ] Composition with the EXISTING `ct heal` (r14-M3/plan-p1-M3): the
+- [x] Composition with the EXISTING `ct heal` (r14-M3/plan-p1-M3): the
       ontology pass COMPOSES with `db::heal::heal_invalid_sources_conn`
       (source-heal runs first, then the ontology census/remap). FINAL
       RULE scoping (plan-p4-MAJOR-1: the spec's FINAL RULE lists only
@@ -817,7 +821,7 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
       refused): source-heal still runs; the ontology section is refused
       with a loud error. Test: degraded config + `ct heal --yes` →
       source-heal mutated + ontology section refused.
-- [ ] Heal-path inventory (plan-p4-MAJOR-3): the ontology pass runs ONLY
+- [x] Heal-path inventory (plan-p4-MAJOR-3): the ontology pass runs ONLY
       from `ct heal` (`cmds.rs:251` `heal_run`). The GUI path
       (`run_wiki_heal` → `heal_lost_librarian_inferred` + embedding
       sweep — it does NOT call `heal_invalid_sources_conn`, comment at
@@ -825,7 +829,7 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
       at `lib.rs:709`) are both UNTOUCHED (GUI stays non-destructive;
       scheduler gains no ontology pass). Test: the ontology pass runs
       from `ct heal` only.
-- [ ] Tests: §6 items 1 (heal half), 2a (degraded-load + unreadable/
+- [x] Tests: §6 items 1 (heal half), 2a (degraded-load + unreadable/
       unmarked rung-1 rows), 3, 6 (watermark), 8, 9 (stale-inline-
       evidence, vault-moved, SKIP+warning, same-bytes invalidation),
       10 (empty-map-stale-hash vs off-entry scope, engine-rewrite optout
@@ -837,14 +841,14 @@ full (census QUERY lives here per plan-p3-M2 — Task 8 owns only the
 r9-m1 re-run/Clone-demote test, r17-m3 precondition predicate, redirect
 chains + cycle guard r2-m6).
 
-- [ ] Precondition: consult the drift watermark — an unconfirmed drift
+- [x] Precondition: consult the drift watermark — an unconfirmed drift
       report blocks `merge --yes` too (R2.2.8 FINAL RULE: EVERY destructive
       `--yes` action); `--confirm-drift`/`--waive-drift` accepted.
       TESTED AS `tauri_app_lib` FUNCTIONS (plan-p6-m3, per the DECISION
       RULE: the precondition predicate + drift gating are library code
       in this task; the `WikiCmd::MergeDuplicates` clap subcommand and
       its CLI rows arrive in Task 8 — Task 6 must not touch `ct.rs`).
-- [ ] Report + `--yes` (never auto); BINARY survivor; grouping with
+- [x] Report + `--yes` (never auto); BINARY survivor; grouping with
       punctuation normalization; redirect table + path compression +
       single-hop resolution with cycle guard; ONE IMMEDIATE transaction
       per merge group (Global Constraints; not one per the whole sweep);
@@ -854,7 +858,7 @@ chains + cycle guard r2-m6).
       grouping candidates, so an archived cluster is never re-merged
       (spec R2.7.5 r21). The merge report lists every redirect row
       written (the hand-reversal handle, spec R2.7.5 r21).
-- [ ] Tests: the MERGE-SIDE rows of §6 item 4 only (read resolution,
+- [x] Tests: the MERGE-SIDE rows of §6 item 4 only (read resolution,
       write resolution, transitive closure and export-as-one rows are
       Task 7).
 
@@ -864,23 +868,23 @@ chains + cycle guard r2-m6).
 r13-m3 survivor-id rule, transitive fact closure, r15-m3 reject-vs-follow
 decision (follow + pin), r20-m6 `rg` audit covering all 15 files.
 
-- [ ] `live_entities` VIEW (spec r21 — no per-reader `NOT EXISTS`);
+- [x] `live_entities` VIEW (spec r21 — no per-reader `NOT EXISTS`);
       move every reader hit (the audit list) onto it; writers and the
       redirect/merge/clear readers stay on the base table.
-- [ ] Source-scan test: fail on any `FROM`/`JOIN curated_entities`
+- [x] Source-scan test: fail on any `FROM`/`JOIN curated_entities`
       read in `src-tauri/src` + `tools/src` not on the allowlist
       (file + one-line reason per entry). The allowlist starts with:
       the redirect resolver (Task 2, `entity_gate.rs`), `merge_dedup.rs`
       (Task 6 groups over the base table), `clear_vault_tables`
       (`queries.rs`), and pure writers (`INSERT`/`UPDATE`/`DELETE`
       statements are not reads and need no entry).
-- [ ] Shared redirect-resolution helper; `EntityDetail.id` = survivor;
+- [x] Shared redirect-resolution helper; `EntityDetail.id` = survivor;
       `get_entity(loser)` follows the redirect REGARDLESS of the
       survivor's `deleted_at` and returns archived detail as-is, never
       `None` (spec R2.7.5 r21); archive-the-cluster (redirect rows KEPT —
       archive touches only `deleted_at`); export maps facts through
       redirects (r2-M8) + exclusion test.
-- [ ] Tests: §6 item 4 read/write rows + export/re-import; merge
+- [x] Tests: §6 item 4 read/write rows + export/re-import; merge
       reversal (delete redirect row → loser restored, spec r21).
 
 ### Task 8: CLI (`ct ontology`/`ct heal`/`ct wiki merge-duplicates`) + MCP
@@ -893,13 +897,13 @@ the census REPORT display (query is Task 5, R2.9.3 — plan-p3-M2),
 §2.10 sweep extension, §2.8 MCP catalog absence (test = §6 item 7, NOT
 R2.9.2 — R2.9.2 is entirely Task 0's split-clear).
 
-- [ ] `ct ontology set` full grammar + warnings + refusals;
+- [x] `ct ontology set` full grammar + warnings + refusals;
       `ct heal` report DISPLAY only (flags/exit code are Task 5's —
       plan-p9-m2); one-time `ct wiki merge-duplicates`;
       `ct wiki sweep` node-type extension (census-driven).
-- [ ] MCP: ontology writer NOT registered + catalog test (§2.5 MCP
+- [x] MCP: ontology writer NOT registered + catalog test (§2.5 MCP
       surface / §6 item 7 — NOT R2.9.2; R2.9.2's split-clear fix is Task 0).
-- [ ] CI (plan-p3-M3): add the `cargo test --manifest-path
+- [x] CI (plan-p3-M3): add the `cargo test --manifest-path
       tools/Cargo.toml -- --test-threads=1` step to `.github/workflows/ci.yml`
       (owner: this task; target job by ID, not line numbers —
       plan-p4-m7/p5-m6: add the step to job `rust-ubuntu` next to its
@@ -909,7 +913,7 @@ R2.9.2 — R2.9.2 is entirely Task 0's split-clear).
       suite locally (`ct_watch_e2e`, `ct_watch_exit_codes`, watcher/
       env-dependent tests have never run in CI) — quarantine or
       `#[ignore]` environment-dependent tests with an issue link.
-- [ ] Tests: §6 items 7 + §2.11 matrix cases.
+- [x] Tests: §6 items 7 + §2.11 matrix cases.
 
 ### Task 9: Migration + okf_migration alignment
 

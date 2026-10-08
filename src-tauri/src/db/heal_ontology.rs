@@ -346,15 +346,21 @@ fn run_inner(
         return Ok(());
     }
     let (_, now_ms) = crate::db::commit::now_timestamps();
-    conn.execute(
+    // One transaction for BOTH bookkeeping rows (review finding): as two
+    // autocommit executes, a crash between them could persist the remap
+    // marker without the watermark it vouches for — unlocking
+    // merge-duplicates on top of a stale drift baseline.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT OR REPLACE INTO llm_wiki_meta (key, value) VALUES (?1, ?2)",
         params![ALIAS_REMAP_MARKER_KEY, now_ms.to_string()],
     )?;
     let watermark = serde_json::json!({"hash": live_hash, "stamped_at": now_ms}).to_string();
-    conn.execute(
+    tx.execute(
         "INSERT OR REPLACE INTO llm_wiki_meta (key, value) VALUES (?1, ?2)",
         params![WATERMARK_KEY, watermark],
     )?;
+    tx.commit()?;
     Ok(())
 }
 

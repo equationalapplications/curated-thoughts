@@ -770,7 +770,6 @@ fn ensure_entity(
     //   bundle import (no label)"): the gate returns Skipped with
     //   `original_label: None`; we land `'concept'` and write a
     //   `gate_skipped` row with original_type = NULL.
-    let conn: &Connection = tx;
     if existing.is_none() {
         let (decision, _gate) =
             crate::db::entity_gate::resolve_production_gate(tx, policy, target_entity_id, &[]);
@@ -841,7 +840,6 @@ fn ensure_entity(
                 // inserted anyway. We don't write a ledger row.
             }
         }
-        let _ = conn;
         return Ok(());
     }
 

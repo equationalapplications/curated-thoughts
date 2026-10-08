@@ -636,7 +636,9 @@ fn fetch_entity_neighbors(
            ON t.id = COALESCE((SELECT merged_into FROM entity_redirects r
                                WHERE r.entity_id = e.target_id), e.target_id)
           AND t.deleted_at IS NULL
-         WHERE e.entity_id = ?1 AND {anchor_col} = ?2{edge_filter}"
+         WHERE e.entity_id = ?1
+           AND COALESCE((SELECT merged_into FROM entity_redirects r
+                         WHERE r.entity_id = {anchor_col}), {anchor_col}) = ?2{edge_filter}"
     );
     // Cached, not re-compiled: cross-partition mode calls this up to
     // MAX_CROSS_PARTITION_PARTITIONS x 2 directions per traversal with only
@@ -715,8 +717,14 @@ fn scoped_traverse(
     let mut queue: VecDeque<(String, usize)> = VecDeque::new();
 
     nodes.insert(seed.id.clone(), seed.clone());
-    visited.insert(source_id.to_string());
-    queue.push_back((source_id.to_string(), 0));
+    // Seed the walk under the RESOLVED id (review finding): in entity space
+    // `load_live_node` resolves a loser seed to its survivor, and the
+    // queue/anchor comparisons below must use that resolved id or edges
+    // anchored on the pre-merge keys are omitted. In entry space the
+    // resolved id IS `source_id` (no redirect rows name entry ids), so the
+    // scoped-mode characterization contract is unaffected.
+    visited.insert(seed.id.clone());
+    queue.push_back((seed.id.clone(), 0));
 
     let mut truncated = false;
 
@@ -823,13 +831,22 @@ fn cross_partition_traverse(
     // the visible reason. `ORDER BY` states the ordering Step 3's
     // VACUUM-stability note relies on instead of inheriting it from UNION's
     // incidental sort.
+    // Cross-partition anchors resolve through redirects too (review
+    // finding): `seed.id` is the RESOLVED survivor, so both the discovery
+    // scan and the per-partition fetches below must compare resolved
+    // endpoints — an edge stored under a pre-merge loser anchor otherwise
+    // hides the partition that owns it.
+    let resolved_seed_id = seed.id.clone();
     let mut stmt = conn.prepare(
         "SELECT DISTINCT entity_id FROM llm_wiki_edges
-         WHERE source_id = ?1 OR target_id = ?1
+         WHERE COALESCE((SELECT merged_into FROM entity_redirects r
+                         WHERE r.entity_id = source_id), source_id) = ?1
+            OR COALESCE((SELECT merged_into FROM entity_redirects r
+                         WHERE r.entity_id = target_id), target_id) = ?1
          ORDER BY entity_id",
     )?;
     let partition_ids: Vec<String> = stmt
-        .query_map(rusqlite::params![source_id], |row| row.get(0))?
+        .query_map(rusqlite::params![resolved_seed_id], |row| row.get(0))?
         .collect::<std::result::Result<_, _>>()?;
 
     // Step 2 — per-partition edge load, gated by that partition's own
@@ -884,7 +901,7 @@ fn cross_partition_traverse(
             fetch_entity_neighbors(
                 conn,
                 pid,
-                source_id,
+                &resolved_seed_id,
                 &edge_filter,
                 edge_types,
                 false,
@@ -895,7 +912,7 @@ fn cross_partition_traverse(
             fetch_entity_neighbors(
                 conn,
                 pid,
-                source_id,
+                &resolved_seed_id,
                 &edge_filter,
                 edge_types,
                 true,

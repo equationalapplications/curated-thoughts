@@ -1757,19 +1757,33 @@ fn commit_fact_update(
         Option<String>,
     )>;
 
+    // Transitive fact closure (r13-m3, review finding): the target row may
+    // still be keyed to a redirected loser from before a merge — candidate
+    // facts include loser-keyed ids, so match the CLUSTER (same rule as
+    // `update_wisdom_in_tx`) and rekey the row to the survivor in the same
+    // UPDATE. A bare `entity_id = ?` bail here would roll back the whole
+    // resolution and wedge the auto-approve retry loop on every later run.
+    let cluster = crate::db::entities::cluster_ids(conn, &ctx.entity_id)?;
+    let cluster_placeholders = vec!["?"; cluster.len()].join(",");
+    let survivor = ctx.entity_id.clone();
+
     let existing: WikiFactRow = conn
         .query_row(
-            // COALESCE handles imported facts with a NULL source_ref so
-            // the r.get::<_, String>(0) deserializer doesn't bail before
-            // the update and outbox write can proceed.
-            "SELECT COALESCE(source_ref, ''), created_at,
-                    body,
-                    source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
-                    lifecycle_status, stale_after, generated_by,
-                    last_verified_at, last_verified_by
-             FROM llm_wiki_entries
-             WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
-            params![fact_id, ctx.entity_id],
+            &format!(
+                // COALESCE handles imported facts with a NULL source_ref so
+                // the r.get::<_, String>(0) deserializer doesn't bail before
+                // the update and outbox write can proceed.
+                "SELECT COALESCE(source_ref, ''), created_at,
+                        body,
+                        source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
+                        lifecycle_status, stale_after, generated_by,
+                        last_verified_at, last_verified_by
+                 FROM llm_wiki_entries
+                 WHERE id = ? AND entity_id IN ({cluster_placeholders}) AND deleted_at IS NULL"
+            ),
+            rusqlite::params_from_iter(
+                std::iter::once(fact_id.to_string()).chain(cluster.iter().cloned()),
+            ),
             |r| {
                 Ok((
                     r.get(0)?,
@@ -1823,22 +1837,36 @@ fn commit_fact_update(
         .filter(|e| e.embed_text == crate::embed_sweep::embed_text_for_entry(&title, &body))
         .map(|e| crate::wiki_graph::f32_vec_to_blob(&e.vector));
 
+    // Shared shape for both UPDATE arms below: ?1..?5 common SET columns,
+    // ?6 the (possibly COALESCEd) embedding, ?7 the fact id, ?8 the
+    // survivor rekey, ?9.. the cluster `IN` list. Positional binding keeps
+    // the numbered and anonymous placeholders aligned (the anonymous tail
+    // starts past the highest explicit number).
+    let mut update_params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+        Box::new(title.clone()),
+        Box::new(body.clone()),
+        Box::new(serde_json::to_string(&tags)?),
+        Box::new(confidence.to_string()),
+        Box::new(ctx.now_ms),
+        Box::new(embedding_blob),
+        Box::new(fact_id.to_string()),
+        Box::new(survivor.clone()),
+    ];
+    for id in &cluster {
+        update_params.push(Box::new(id.clone()));
+    }
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        update_params.iter().map(|p| p.as_ref()).collect();
+
     if body_changed {
         conn.execute(
-            "UPDATE llm_wiki_entries
-             SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5,
-                 embedding_blob = ?6
-             WHERE id = ?7 AND entity_id = ?8",
-            params![
-                title,
-                body,
-                serde_json::to_string(&tags)?,
-                confidence,
-                ctx.now_ms,
-                embedding_blob,
-                fact_id,
-                ctx.entity_id,
-            ],
+            &format!(
+                "UPDATE llm_wiki_entries
+                 SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5,
+                     embedding_blob = ?6, entity_id = ?8
+                 WHERE id = ?7 AND entity_id IN ({cluster_placeholders})"
+            ),
+            param_refs.as_slice(),
         )?;
     } else {
         // Body unchanged, so any stored vector still describes this text and
@@ -1847,20 +1875,13 @@ fn commit_fact_update(
         // fill it: we already paid for the vector and it matches the body.
         // COALESCE does both: overwrite when we have one, keep otherwise.
         conn.execute(
-            "UPDATE llm_wiki_entries
-             SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5,
-                 embedding_blob = COALESCE(?6, embedding_blob)
-             WHERE id = ?7 AND entity_id = ?8",
-            params![
-                title,
-                body,
-                serde_json::to_string(&tags)?,
-                confidence,
-                ctx.now_ms,
-                embedding_blob,
-                fact_id,
-                ctx.entity_id,
-            ],
+            &format!(
+                "UPDATE llm_wiki_entries
+                 SET title = ?1, body = ?2, tags = ?3, confidence = ?4, updated_at = ?5,
+                     embedding_blob = COALESCE(?6, embedding_blob), entity_id = ?8
+                 WHERE id = ?7 AND entity_id IN ({cluster_placeholders})"
+            ),
+            param_refs.as_slice(),
         )?;
     }
 
@@ -1914,11 +1935,26 @@ fn commit_fact_archive(
         .as_deref()
         .context("fact_archive requires target_id")?;
 
+    // Transitive fact closure (r13-m3, review finding): the target row may
+    // still be keyed to a redirected loser from before a merge — match the
+    // cluster (same rule as `archive_wisdom_in_tx`) instead of bailing,
+    // which would roll back the whole resolution.
+    let cluster = crate::db::entities::cluster_ids(conn, &ctx.entity_id)?;
+    let cluster_placeholders = vec!["?"; cluster.len()].join(",");
+    let mut archive_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(ctx.now_ms), Box::new(fact_id.to_string())];
+    for id in &cluster {
+        archive_params.push(Box::new(id.clone()));
+    }
+    let archive_param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        archive_params.iter().map(|p| p.as_ref()).collect();
     let changes = conn.execute(
-        "UPDATE llm_wiki_entries
-         SET deleted_at = ?1, updated_at = ?1
-         WHERE id = ?2 AND entity_id = ?3 AND deleted_at IS NULL",
-        params![ctx.now_ms, fact_id, ctx.entity_id],
+        &format!(
+            "UPDATE llm_wiki_entries
+             SET deleted_at = ?1, updated_at = ?1
+             WHERE id = ?2 AND entity_id IN ({cluster_placeholders}) AND deleted_at IS NULL"
+        ),
+        archive_param_refs.as_slice(),
     )?;
     if changes == 0 {
         bail!("fact_archive target not found: {fact_id}");
@@ -2129,7 +2165,7 @@ fn commit_edge_add(
         &target_id,
         ctx,
         gate,
-    );
+    )?;
     let edge_type = match resolved_vocabulary {
         Some(vocabulary) => match vocabulary.canonicalize(&edge_type) {
             // Issue #189: write the manifest's spelling, not the candidate's.
@@ -2229,18 +2265,28 @@ fn resolve_edge_endpoint_vocabulary(
     target_id: &str,
     ctx: &mut CommitContext,
     gate: &crate::db::entity_gate::GateResolutionContext<'_>,
-) -> Option<EdgeVocabulary> {
-    // Rung 1a — explicit opt-out on either endpoint → skip the gate.
-    if endpoint_has_optout(conn, source_id).unwrap_or(false)
-        || endpoint_has_optout(conn, target_id).unwrap_or(false)
-    {
-        return None;
+) -> Result<Option<EdgeVocabulary>> {
+    // Rung 1a — explicit opt-out on either endpoint → skip the gate. A read
+    // FAULT never reads as "no row" in the disarming direction (D8): it
+    // warns and falls through to the ladder — the fail-safe direction, more
+    // gating, never less.
+    for eid in [source_id, target_id] {
+        match crate::db::entity_gate::entity_has_optout(conn, eid) {
+            Ok(true) => return Ok(None),
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!(
+                    "[commit] opt-out lookup failed for endpoint {eid}: {e}; \
+                     continuing with the edge ladder (fail-safe)"
+                );
+            }
+        }
     }
-    let source = endpoint_edge_vocabulary(conn, source_id, entity_id, gate, ctx);
+    let source = endpoint_edge_vocabulary(conn, source_id, entity_id, gate, ctx)?;
     if source.is_some() {
         // Strict-wins across endpoints: the strict source side gates, under
         // its own vocabulary.
-        return source;
+        return Ok(source);
     }
     // The source endpoint resolves not-strict; a STRICT target still gates
     // (an off directory shields its own entities from CONTRIBUTING
@@ -2258,9 +2304,9 @@ fn endpoint_edge_vocabulary(
     proposal_entity_id: &str,
     gate: &crate::db::entity_gate::GateResolutionContext<'_>,
     ctx: &mut CommitContext,
-) -> Option<EdgeVocabulary> {
+) -> Result<Option<EdgeVocabulary>> {
     if let Some(cached) = ctx.edge_endpoint_strict.get(endpoint_id) {
-        return cached.clone();
+        return Ok(cached.clone());
     }
     let resolved = resolve_endpoint_ladder(
         conn,
@@ -2268,10 +2314,10 @@ fn endpoint_edge_vocabulary(
         proposal_entity_id,
         gate,
         &ctx.proposal_id,
-    );
+    )?;
     ctx.edge_endpoint_strict
         .insert(endpoint_id.to_string(), resolved.clone());
-    resolved
+    Ok(resolved)
 }
 
 /// The per-endpoint §2.3 ladder, edge flavor:
@@ -2294,10 +2340,22 @@ fn resolve_endpoint_ladder(
     proposal_entity_id: &str,
     gate: &crate::db::entity_gate::GateResolutionContext<'_>,
     proposal_id: &str,
-) -> Option<EdgeVocabulary> {
+) -> Result<Option<EdgeVocabulary>> {
+    // Review finding (fact/task endpoints): edge endpoints are frequently
+    // `llm_wiki_entries`/`llm_wiki_tasks` ids, not entity ids — the ladder's
+    // rungs are ENTITY-keyed, so running them against a fact id finds no
+    // manifest row and no source paths and falls to rung 4, ungating edges
+    // the old proposal-entity gate refused. Map a fact/task endpoint to its
+    // OWNING entity (resolved to the merge survivor) and walk that entity's
+    // ladder; the owner's fact source paths subsume the endpoint fact's.
+    let ladder_id: String = match endpoint_owner_entity(conn, endpoint_id)? {
+        Some(owner) => crate::db::entities::resolve_entity_id(conn, &owner)?,
+        None => endpoint_id.to_string(),
+    };
+
     // Rung 1b — the endpoint's own manifest row.
-    match ontology_leg(conn, endpoint_id, endpoint_id) {
-        OntologyLeg::Strict(v) => return v,
+    match ontology_leg(conn, &ladder_id, &ladder_id) {
+        OntologyLeg::Strict(v) => return Ok(v),
         // Unmarked (rung 1d) climbs; Err keeps today's edge fall-through.
         OntologyLeg::NotStrict | OntologyLeg::Err(_) => {}
     }
@@ -2309,8 +2367,8 @@ fn resolve_endpoint_ladder(
     // yet — so when it has no resolvable fact sources its rung-2 inputs
     // are the proposal's TRIGGER document paths, the same paths the mint
     // gate walked for it (R2.3.4).
-    let mut paths = endpoint_fact_source_paths(conn, endpoint_id);
-    if paths.is_empty() && endpoint_id == proposal_entity_id {
+    let mut paths = endpoint_fact_source_paths(conn, &ladder_id)?;
+    if paths.is_empty() && ladder_id == proposal_entity_id {
         if let Ok(trigger) = load_proposal_source_paths(conn, proposal_id) {
             paths = trigger;
         }
@@ -2325,14 +2383,14 @@ fn resolve_endpoint_ladder(
         ) {
             crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Strict) => {
                 // Vocabulary from `tier_fact` (mode-vs-vocabulary rule).
-                return match ontology_leg(conn, endpoint_id, "tier_fact") {
+                return Ok(match ontology_leg(conn, &ladder_id, "tier_fact") {
                     OntologyLeg::Strict(v) => v,
                     OntologyLeg::NotStrict => None,
                     OntologyLeg::Err(e) => {
-                        warn_ontology_unreadable(endpoint_id, &[endpoint_id, "tier_fact"], &e);
+                        warn_ontology_unreadable(&ladder_id, &[&ladder_id, "tier_fact"], &e);
                         None
                     }
-                };
+                });
             }
             crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Off) => {
                 // Off loses to a strict rung (R2.3.3) — keep climbing.
@@ -2349,34 +2407,52 @@ fn resolve_endpoint_ladder(
     }
 
     // Rung 4 — tier_fact itself.
-    match ontology_leg(conn, endpoint_id, "tier_fact") {
+    Ok(match ontology_leg(conn, &ladder_id, "tier_fact") {
         OntologyLeg::Strict(v) => v,
         OntologyLeg::NotStrict => None,
         OntologyLeg::Err(e) => {
-            warn_ontology_unreadable(endpoint_id, &[endpoint_id, "tier_fact"], &e);
+            warn_ontology_unreadable(&ladder_id, &[&ladder_id, "tier_fact"], &e);
             None
         }
-    }
+    })
+}
+
+/// A fact/task endpoint id → its owning entity id, or `Ok(None)` when the id
+/// is not a fact/task row (an entity id — the normal case). DB faults
+/// PROPAGATE (R2.3.2a): swallowing one here would silently disarm the strict
+/// edge gate, the exact silent-mutation direction the spec forbids.
+fn endpoint_owner_entity(conn: &Connection, endpoint_id: &str) -> Result<Option<String>> {
+    let owner: Option<String> = conn
+        .query_row(
+            "SELECT entity_id FROM llm_wiki_entries WHERE id = ?1
+             UNION ALL
+             SELECT entity_id FROM llm_wiki_tasks WHERE id = ?1
+             LIMIT 1",
+            [endpoint_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(owner)
 }
 
 /// An EXISTING endpoint entity's rung-2 source paths: every live fact's
 /// `source_ref` resolved through the shared core, deduplicated by path.
-/// Unresolved sources contribute no path (they cannot flip a mode HERE:
-/// the R2.3.2 report-only rule scopes to heal, and for a write-time edge
-/// gate an unresolvable source can only ever REMOVE a checkable strict
-/// folder — the direction that drops a visible `dropped_edges` item, never
-/// a silent mutation).
-fn endpoint_fact_source_paths(conn: &Connection, endpoint_id: &str) -> Vec<String> {
-    let facts: Vec<(String, Option<String>)> = conn
-        .prepare(
-            "SELECT id, source_ref FROM llm_wiki_entries
-             WHERE entity_id = ?1 AND deleted_at IS NULL",
-        )
-        .and_then(|mut stmt| {
-            stmt.query_map([endpoint_id], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect()
-        })
-        .unwrap_or_default();
+/// DB faults PROPAGATE (review finding / R2.3.2a): `.unwrap_or_default()`
+/// here turned a transient fault (e.g. SQLITE_BUSY) into empty rung-2
+/// source paths and silently disarmed the strict edge gate. An unresolvable
+/// SOURCE still contributes no path — that is a data state, not a fault (the
+/// R2.3.2 report-only rule scopes to heal; for a write-time edge gate an
+/// unresolvable source can only ever REMOVE a checkable strict folder — the
+/// direction that drops a visible `dropped_edges` item, never a silent
+/// mutation).
+fn endpoint_fact_source_paths(conn: &Connection, endpoint_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, source_ref FROM llm_wiki_entries
+         WHERE entity_id = ?1 AND deleted_at IS NULL",
+    )?;
+    let facts: Vec<(String, Option<String>)> = stmt
+        .query_map([endpoint_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
     let mut paths: Vec<String> = Vec::new();
     for (entry_id, source_ref) in &facts {
         if let Ok(crate::db::entities::SourceResolution::Resolved(resolved)) =
@@ -2389,19 +2465,7 @@ fn endpoint_fact_source_paths(conn: &Connection, endpoint_id: &str) -> Vec<Strin
             }
         }
     }
-    paths
-}
-
-/// Rung 1a — does this endpoint have a deliberate opt-out row?
-fn endpoint_has_optout(conn: &Connection, entity_id: &str) -> rusqlite::Result<bool> {
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM ct_entity_optouts WHERE entity_id = ?1",
-            [entity_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    Ok(count > 0)
+    Ok(paths)
 }
 
 /// The single place the final proposal status write lives (hvg Task 2).
@@ -2856,6 +2920,12 @@ pub fn resolve_proposal(
     if entity_was_created_here && ctx.accepted_count == 0 {
         if let Some(eid) = entity_id.as_deref() {
             tx.execute("DELETE FROM curated_entities WHERE id = ?1", [eid])?;
+            // Review finding: the gate ledger row written inside this
+            // resolution (`gate_skipped` / `degraded` / `unlabeled_landing`)
+            // must die with the entity — otherwise `entity_type_origin`
+            // keeps a row for an entity that no longer exists and heal /
+            // census count ghosts.
+            tx.execute("DELETE FROM entity_type_origin WHERE entity_id = ?1", [eid])?;
             tx.execute(
                 "UPDATE curated_proposals SET entity_id = NULL WHERE id = ?1",
                 [proposal_id],
@@ -3583,6 +3653,71 @@ mod tests {
             blob, None,
             "a changed body must never keep the vector of the old text"
         );
+    }
+
+    /// Review finding (r13-m3 transitive closure): the target fact may still
+    /// be keyed to a redirected loser from before a merge. The update must
+    /// match the CLUSTER and rekey the row to the survivor — a bare
+    /// `entity_id = ?` bail rolls back the whole resolution and wedges the
+    /// auto-approve retry loop on every later run.
+    #[test]
+    fn fact_update_targets_loser_keyed_row_and_rekeys_to_survivor() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Survivor", "Summary", 100);
+        // fact_a is still keyed to the merged-away loser.
+        seed_fact_row(&conn, "fact_a", "ent-loser", "The original body.");
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('ent-loser', 'ent-1', 1)",
+            [],
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx("ent-1");
+        let item = test_item("item-1", "fact_update", Some("fact_a"));
+        let payload = serde_json::json!({ "body": "The rekeyed body." });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let (entity_id, body): (String, String) = conn
+            .query_row(
+                "SELECT entity_id, body FROM llm_wiki_entries WHERE id = 'fact_a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            entity_id, "ent-1",
+            "a loser-keyed target is matched across the cluster and rekeyed"
+        );
+        assert_eq!(body, "The rekeyed body.");
+    }
+
+    /// Same rule for archive (review finding): a loser-keyed fact_archive
+    /// target must archive instead of bailing the resolution.
+    #[test]
+    fn fact_archive_targets_loser_keyed_row() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-1", "Survivor", "Summary", 100);
+        seed_fact_row(&conn, "fact_b", "ent-loser", "The original body.");
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('ent-loser', 'ent-1', 1)",
+            [],
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx("ent-1");
+        let item = test_item("item-2", "fact_archive", Some("fact_b"));
+        commit_fact_archive(&conn, &mut ctx, &item).unwrap();
+
+        let deleted_at: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'fact_b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(deleted_at.is_some(), "the loser-keyed row is archived");
     }
 
     #[test]
@@ -6498,6 +6633,48 @@ mod tests {
         ctx
     }
 
+    /// Review finding (fact/task endpoints): edge endpoints are frequently
+    /// `llm_wiki_entries` ids, not entity ids — the endpoint ladder must
+    /// resolve them to their OWNING entity before rung 1b / rungs 2-3.
+    /// Pre-fix, both rungs saw the raw fact id (no manifest row, no source
+    /// paths), fell to rung 4, and an off-manifest edge was written
+    /// verbatim even though the owning entity was strict.
+    #[test]
+    fn edge_fact_endpoints_inherit_owning_entitys_strict_gate() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent_a", "A", "summary", 100);
+        // The OWNER carries the strict manifest; `tier_fact` stays unmarked
+        // so rung 4 alone would NOT gate — exactly the pre-fix hole.
+        seed_manifest(
+            &conn,
+            "ent_a",
+            "strict",
+            &["thing"],
+            &[("depends_on", "thing", "thing")],
+        );
+        seed_fact_row(&conn, "fact-src", "ent_a", "source fact");
+        seed_fact_row(&conn, "fact-dst", "ent_a", "target fact");
+
+        let ingest = crate::config::IngestConfig::default();
+        let degraded = crate::config::OntologyDegradedState::default();
+        let gate = edge_gate_ctx(&ingest, &degraded);
+        let mut ctx = edge_test_ctx("ent_a");
+
+        let outcome = resolve_edge_endpoint_vocabulary(
+            &conn, "ent_a", "fact-src", "fact-dst", &mut ctx, &gate,
+        )
+        .unwrap();
+        let vocab = outcome.expect("fact endpoints inherit the owner's strict ladder");
+        assert!(
+            vocab.canonicalize("depends_on").is_some(),
+            "the gate runs under the owner entity's own manifest vocabulary"
+        );
+        assert!(
+            vocab.canonicalize("invented_type").is_none(),
+            "an off-manifest type must fail the owner's gate"
+        );
+    }
+
     /// §6 item 1b: R2.3.0 strict-wins — edge endpoint opt-out cascade
     /// short-circuits the edge gate. A `ct_entity_optouts` row on
     /// EITHER endpoint disarms the gate, so a strict manifest row on the
@@ -6531,7 +6708,8 @@ mod tests {
         // Case 1: no opt-out on either endpoint → the target's strict
         // manifest vocabulary fires.
         let outcome =
-            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate);
+            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate)
+                .unwrap();
         assert!(
             outcome.is_some(),
             "no opt-out + strict target endpoint → vocabulary fires"
@@ -6544,7 +6722,8 @@ mod tests {
         )
         .unwrap();
         let outcome =
-            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate);
+            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate)
+                .unwrap();
         assert!(
             outcome.is_none(),
             "opt-out on source endpoint must disarm the edge gate"
@@ -6563,11 +6742,12 @@ mod tests {
         )
         .unwrap();
         let outcome =
-            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate);
+            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate)
+                .unwrap();
         assert!(
             outcome.is_none(),
             "opt-out on target endpoint must disarm the edge gate"
-        );
+        )
     }
 
     /// §6 item 1b (R2.3.0, final wave): endpoints resolving to DIFFERENT
@@ -6606,7 +6786,8 @@ mod tests {
                 "ent_off",
                 &mut ctx,
                 &gate,
-            );
+            )
+            .unwrap();
             assert!(
                 outcome.is_some(),
                 "strict source + off target must gate (strict-wins across endpoints)"
@@ -6621,7 +6802,8 @@ mod tests {
                 "ent_strict",
                 &mut ctx,
                 &gate,
-            );
+            )
+            .unwrap();
             assert!(
                 outcome.is_some(),
                 "off source + strict target must gate per direction (strict-wins)"
@@ -6661,7 +6843,8 @@ mod tests {
             let mut ctx = edge_test_ctx("ent_s1");
             let outcome = resolve_edge_endpoint_vocabulary(
                 &conn, "ent_s1", "ent_s1", "ent_s2", &mut ctx, &gate,
-            );
+            )
+            .unwrap();
             let vocab = outcome.expect("both-strict must gate");
             assert_eq!(
                 vocab.canonicalize("from_source"),
@@ -6681,7 +6864,8 @@ mod tests {
             let mut ctx = edge_test_ctx("ent_o1");
             let outcome = resolve_edge_endpoint_vocabulary(
                 &conn, "ent_o1", "ent_o1", "ent_o2", &mut ctx, &gate,
-            );
+            )
+            .unwrap();
             assert!(
                 outcome.is_none(),
                 "neither endpoint strict → the edge gate must disarm"
@@ -6750,7 +6934,8 @@ mod tests {
             "ent_scoped",
             &mut ctx,
             &gate,
-        );
+        )
+        .unwrap();
         let vocab = outcome.expect("a strict source folder on either endpoint must gate");
         assert_eq!(
             vocab.canonicalize("depends_on"),
@@ -6775,7 +6960,8 @@ mod tests {
             "ent_scoped",
             &mut ctx,
             &gate,
-        );
+        )
+        .unwrap();
         assert!(again.is_some(), "memoized resolution must stay strict");
         assert_eq!(
             ctx.edge_endpoint_strict.len(),

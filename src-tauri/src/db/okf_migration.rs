@@ -192,7 +192,13 @@ fn migrate_approved_wiki_pages(
                 crate::db::entity_gate::write_origin_ledger_row(
                     tx,
                     &entity_id,
-                    Some("concept"),
+                    // r21 contract: NULL for "no label supplied" — the
+                    // migration passes `None` to `shared_insert_entity`, so
+                    // the ledger must not record the landed `'concept'`
+                    // literal as if it were a proposed label (review
+                    // finding; bundle import's Skip arm already writes
+                    // NULL).
+                    None,
                     OriginReason::GateSkipped,
                     gate.source_directory.as_deref(),
                 )?;

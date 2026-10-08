@@ -253,6 +253,7 @@ pub fn clear_vault_tables(conn: &mut Connection, now_ms: i64) -> anyhow::Result<
          DELETE FROM entity_type_origin;
          DELETE FROM entity_redirects;
          DELETE FROM ct_entity_optouts;
+         DELETE FROM manifest_ensure_memo;
          DELETE FROM curated_entities;
          DELETE FROM curated_proposal_items;
          DELETE FROM curated_proposal_sources;

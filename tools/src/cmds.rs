@@ -387,12 +387,28 @@ pub fn ontology_set_run(
         );
     }
     // Degraded-config refusal (r3-M3), detected exactly as the heal pass
-    // detects it (same policy loader, same degraded-state predicate).
+    // detects it (same policy loader, same degraded-state predicate) — PLUS
+    // the tie half of the documented refuse predicate
+    // (`ontology_degraded_or_tied`): a `folder_ontology` map with two keys
+    // normalizing to the same prefix is ambiguous, and writing a THIRD key
+    // through it would persist a config the heal pass refuses to interpret.
     let policy = tauri_app_lib::config::ingest_policy_for_db(paths.db_path.to_str());
-    if policy.ontology_degraded_state().is_degraded() {
+    let ties = tauri_app_lib::config::ontology_ties(&policy.tiers);
+    if policy.ontology_degraded_state().is_degraded() || !ties.is_empty() {
+        let detail = if policy.ontology_degraded_state().is_degraded() {
+            "the brain config loaded DEGRADED (dropped ontology keys)".to_string()
+        } else {
+            format!(
+                "folder_ontology has ambiguous (same-normalized-key) entries: {}",
+                ties.iter()
+                    .map(|(k, _)| k.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         eprintln!(
-            "refusing: the brain config loaded DEGRADED (dropped ontology keys) — \
-             fix the config before running `ct ontology set` (r3-M3)"
+            "refusing: {detail} — fix the config before running \
+             `ct ontology set` (r3-M3 / ontology_degraded_or_tied)"
         );
         return Ok(1);
     }

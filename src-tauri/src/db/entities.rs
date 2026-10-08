@@ -375,26 +375,6 @@ fn in_placeholders(ids: &[String]) -> String {
     vec!["?"; ids.len()].join(",")
 }
 
-fn fact_count(conn: &Connection, ids: &[String]) -> Result<i64> {
-    let sql = format!(
-        "SELECT COUNT(*) FROM llm_wiki_entries
-         WHERE entity_id IN ({}) AND deleted_at IS NULL",
-        in_placeholders(ids)
-    );
-    let n = conn.query_row(&sql, rusqlite::params_from_iter(ids.iter()), |r| r.get(0))?;
-    Ok(n)
-}
-
-fn open_task_count(conn: &Connection, ids: &[String]) -> Result<i64> {
-    let sql = format!(
-        "SELECT COUNT(*) FROM llm_wiki_tasks
-         WHERE entity_id IN ({}) AND status = 'pending' AND deleted_at IS NULL",
-        in_placeholders(ids)
-    );
-    let n = conn.query_row(&sql, rusqlite::params_from_iter(ids.iter()), |r| r.get(0))?;
-    Ok(n)
-}
-
 /// List non-archived entities (unless `filter.include_archived`).
 pub fn list_entities(
     conn: &Connection,
@@ -448,21 +428,90 @@ pub fn list_entities(
     };
 
     let mut out = Vec::with_capacity(rows.len());
+    // Batched cluster aggregates (review finding): the per-entity
+    // `cluster_ids` + `fact_count` + `open_task_count` loop prepared 3
+    // statements per row (~6k statements at 2k entities, each with rebuilt
+    // `IN`-placeholder SQL). Same closure, three queries total: load the
+    // (small) redirects table once, resolve every counted row's terminal
+    // survivor in Rust, and bucket two grouped COUNTs.
+    let counts = batched_cluster_counts(conn)?;
     for (id, name, entity_type, summary, created_at, updated_at) in rows {
-        // Transitive fact closure (r13-m3): counts cover the survivor ∪ its
-        // redirected losers. `id` comes from live_entities, so it is always
-        // a terminal survivor.
-        let cluster = cluster_ids(conn, &id)?;
+        let (facts, tasks) = counts.get(&id).copied().unwrap_or((0, 0));
         out.push(EntitySummary {
-            id: id.clone(),
+            id,
             name,
             entity_type,
             summary_snippet: summary_snippet(&summary),
-            fact_count: fact_count(conn, &cluster)?,
-            open_task_count: open_task_count(conn, &cluster)?,
+            fact_count: facts,
+            open_task_count: tasks,
             created_at,
             updated_at,
         });
+    }
+    Ok(out)
+}
+
+/// Terminal survivor of a redirect chain walked through `map`, with a
+/// visited-set cycle guard: a hand-crafted loop stops at the id it closed
+/// on (counts are attributed, never dropped — repairing the loop is the
+/// operator's job, same rule as `resolve_entity_id`).
+fn terminal_survivor<'a>(
+    map: &'a std::collections::HashMap<String, String>,
+    mut id: &'a str,
+) -> &'a str {
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(id.to_string()) {
+        match map.get(id) {
+            Some(next) if next != id => id = next,
+            _ => break,
+        }
+    }
+    id
+}
+
+/// `(fact_count, open_task_count)` per terminal survivor over the whole
+/// brain: one full scan of `entity_redirects` plus one grouped COUNT per
+/// content table. Rows keyed to redirected losers land in their survivor's
+/// bucket — the same transitive closure [`cluster_ids`] computes per
+/// entity, batched.
+fn batched_cluster_counts(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, (i64, i64)>> {
+    let mut redirects: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT entity_id, merged_into FROM entity_redirects")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (loser, survivor) = row?;
+            redirects.insert(loser, survivor);
+        }
+    }
+    let mut out: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, COUNT(*) FROM llm_wiki_entries
+             WHERE deleted_at IS NULL GROUP BY entity_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (id, n) = row?;
+            out.entry(terminal_survivor(&redirects, &id).to_string())
+                .or_insert((0, 0))
+                .0 += n;
+        }
+    }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, COUNT(*) FROM llm_wiki_tasks
+             WHERE status = 'pending' AND deleted_at IS NULL GROUP BY entity_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (id, n) = row?;
+            out.entry(terminal_survivor(&redirects, &id).to_string())
+                .or_insert((0, 0))
+                .1 += n;
+        }
     }
     Ok(out)
 }

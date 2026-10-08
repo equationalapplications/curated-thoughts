@@ -775,6 +775,7 @@ mod tests {
     /// handler still succeeds; the pre-chosen privacy block keeps
     /// resolve_privacy_state from writing.
     #[test]
+    #[cfg(unix)] // PermissionsExt — the read-only-dir trick has no Windows twin
     fn update_provider_write_failure_leaves_disk_untouched() {
         use std::os::unix::fs::PermissionsExt;
 

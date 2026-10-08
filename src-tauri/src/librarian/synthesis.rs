@@ -775,12 +775,15 @@ fn resolve_entity_node_vocabulary(conn: &Connection, entity_id: &str) -> Vec<Str
                         // — the same rule the gate uses via
                         // `NodeVocabulary::canonicalize` / `from_manifest`. A
                         // casing mismatch between prompt and gate would
-                        // mismatch on the very first hint.
+                        // mismatch on the very first hint. `NodeVocabulary`
+                        // owns the normalization rule for NODE types (using
+                        // `EdgeVocabulary::key` here made a second owner that
+                        // could silently diverge).
                         let mut seen: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
                         let mut out = Vec::new();
                         for node in &m.node_types {
-                            let k = crate::db::commit::EdgeVocabulary::key(&node.type_name);
+                            let k = crate::db::entity_gate::NodeVocabulary::key(&node.type_name);
                             if seen.insert(k) {
                                 out.push(node.type_name.trim().to_string());
                             }

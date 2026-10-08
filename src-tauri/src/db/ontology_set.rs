@@ -146,7 +146,22 @@ pub fn write_fallback(conn: &Connection, target: &str, fallback: &str) -> Result
     };
     let mut manifest: serde_json::Value = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("manifest_json for `{target}` is not valid JSON: {e}"))?;
-    manifest["fallback_node_type"] = serde_json::json!(fallback);
+    // R2.4.4 ("no invented label ever enters curated_entities.entity_type"):
+    // the fallback is the degrade target for EVERY unlabeled/undeclared
+    // mint, so a typo here (`--fallback projct`) would silently become the
+    // landed type of every future mint. Validate it against the manifest's
+    // DECLARED node types through the single normalization owner
+    // (`NodeVocabulary`) and store the manifest's canonical spelling.
+    let parsed: crate::wiki_graph::WikiManifest = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("manifest_json for `{target}` is not valid JSON: {e}"))?;
+    let vocab = crate::db::entity_gate::NodeVocabulary::from_manifest(&parsed);
+    let Some(canonical) = vocab.canonicalize(fallback).map(str::to_string) else {
+        bail!(
+            "`{fallback}` is not a node type declared by `{target}`'s manifest — \
+             declare it in the manifest first, then set it as the fallback"
+        );
+    };
+    manifest["fallback_node_type"] = serde_json::json!(canonical);
     conn.execute(
         "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1, updated_at = strftime('%s','now')
          WHERE entity_id = ?2",
@@ -267,7 +282,7 @@ mod tests {
         let conn = memory_conn();
         conn.execute(
             "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
-             VALUES ('tier_fact', 'strict', '{\"node_types\":[{\"type\":\"document\"}]}', 1)",
+             VALUES ('tier_fact', 'strict', '{\"node_types\":[{\"type\":\"document\"}],\"edge_types\":[]}', 1)",
             [],
         )
         .unwrap();
@@ -280,6 +295,20 @@ mod tests {
             )
             .unwrap();
         assert!(row.contains("fallback_node_type"));
+
+        // R2.4.4: an undeclared fallback (the typo case) is refused and
+        // leaves the manifest untouched.
+        let before = row.clone();
+        let err = write_fallback(&conn, TIER_FACT, "projct").unwrap_err();
+        assert!(err.to_string().contains("not a node type declared"));
+        let after: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, after, "a refused fallback writes nothing");
 
         let err = write_fallback(&conn, "entity::absent", "document").unwrap_err();
         assert!(err.to_string().contains("no manifest row"));
