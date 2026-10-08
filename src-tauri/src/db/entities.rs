@@ -786,12 +786,9 @@ pub fn create_entity(conn: &mut Connection, input: &CreateEntityInput) -> Result
     // exists → refusal error shown; otherwise normal ladder" / §2.5 GUI
     // bullet). The transaction rolls back when this function returns Err.
     match &outcome {
-        crate::db::entity_gate::AdmitOutcome::Held { .. } => {
+        crate::db::entity_gate::AdmitOutcome::Held { reason, .. } => {
             let _ = tx.rollback();
-            bail!(
-                "ontology gate held the entity mint: manifest is strict with no declared \
-                 fallback_node_type (spec §2.4.5); facts survive, retry after naming a fallback"
-            );
+            bail!("ontology gate held (§2.4.5) the entity mint: {reason}; nothing was written");
         }
         crate::db::entity_gate::AdmitOutcome::Skipped { .. } => {
             // SKIP path: helper did NOT insert (off folder / off host /

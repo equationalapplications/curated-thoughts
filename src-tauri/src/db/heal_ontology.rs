@@ -952,6 +952,14 @@ mod tests {
         for e in extra {
             types.push(json!({"type": e}));
         }
+        // R2.4.4: the fallback must itself be declared, else the vocabulary
+        // cannot gate (`HoldReason::FallbackNotDeclared`). Declare it the way
+        // the live row does (EA seed + `concept`).
+        if let Some(f) = fallback {
+            if !types.iter().any(|t| t["type"] == f) {
+                types.push(json!({"type": f}));
+            }
+        }
         let mut m = json!({"node_types": types, "edge_types": []});
         if let Some(f) = fallback {
             m["fallback_node_type"] = json!(f);

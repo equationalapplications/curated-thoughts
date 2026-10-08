@@ -1450,7 +1450,7 @@ fn create_entity_if_needed(
                 now_secs,
             )?;
         }
-        crate::db::entity_gate::AdmitOutcome::Held { .. } => {
+        crate::db::entity_gate::AdmitOutcome::Held { reason, .. } => {
             // SG6 (spec §2.4.5): a Held mint FAILS the resolution with a
             // Held-specific error naming the ontology-gate cause. The
             // erroring `?`/return drops the `ImmediateTx`, whose rollback
@@ -1462,12 +1462,9 @@ fn create_entity_if_needed(
             // "proposal has no entity_id" bail further down — safety by
             // accident, with no §2.4.5 diagnostic.
             bail!(
-                "ontology gate held the new-entity mint for proposal {} ({}): the \
-                 strict manifest has no usable vocabulary — no declared \
-                 `fallback_node_type`, or a declared fallback over an EMPTY \
-                 `node_types` set (spec §2.4.5). The proposal stays pending and \
-                 its facts are kept; retry after naming a fallback or adding \
-                 node types to the manifest",
+                "ontology gate held (§2.4.5) the new-entity mint for proposal {} ({}): {reason}. \
+                 The proposal stays pending and its facts are kept; retry once the \
+                 cause is fixed",
                 proposal.id,
                 proposal.proposed_name.as_deref().unwrap_or("unnamed")
             );
@@ -7577,6 +7574,18 @@ mod tests {
         assert!(
             message.contains("prop-held"),
             "the diagnostic must name the held proposal, got: {message}"
+        );
+        // The diagnostic names the ACTUAL cause: a corrupt row, not a
+        // missing fallback (the pre-`HoldReason` text blamed a missing
+        // `fallback_node_type` for every hold, sending the operator to a
+        // fix that changes nothing).
+        assert!(
+            message.contains("`tier_fact` manifest row could not be read"),
+            "the diagnostic must name the unreadable row, got: {message}"
+        );
+        assert!(
+            !message.contains("fallback"),
+            "an unreadable row must not be diagnosed as a missing fallback, got: {message}"
         );
 
         // Facts kept + proposal held: still pending, item untouched, and

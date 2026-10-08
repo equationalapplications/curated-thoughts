@@ -259,15 +259,15 @@ pub fn preview_import(
             let decision =
                 crate::db::entity_gate::preview_production_gate(conn, &policy, &probe_id, &[]);
             // The apply's Held set, not just `GateDecision::Held`: the
-            // shared insert helper ALSO holds a `Gate` decision whose
-            // vocabulary is empty (§2.4.5's second trigger — a declared
-            // `fallback_node_type` over ZERO `node_types`). Preview must
-            // refuse exactly what the apply would abort on, else it reports
-            // an import the apply refuses (bundle mints are unlabeled, so
-            // no other ladder arm can turn Held inside a `Gate` decision).
+            // shared insert helper ALSO holds a `Gate` decision over an
+            // unusable vocabulary (`NodeVocabulary::hold_reason`). Preview
+            // must refuse exactly what the apply would abort on, else it
+            // reports an import the apply refuses (bundle mints are
+            // unlabeled, so no other ladder arm can turn Held inside a
+            // usable `Gate` decision).
             let would_hold = match &decision {
-                crate::db::entity_gate::GateDecision::Held => true,
-                crate::db::entity_gate::GateDecision::Gate(v) => v.is_empty(),
+                crate::db::entity_gate::GateDecision::Held(_) => true,
+                crate::db::entity_gate::GateDecision::Gate(v) => v.hold_reason(None).is_some(),
                 crate::db::entity_gate::GateDecision::Skip => false,
             };
             if would_hold {
@@ -867,7 +867,7 @@ fn ensure_entity(
                     None,
                 )?;
             }
-            (AdmitOutcome::Held { .. }, _) => {
+            (AdmitOutcome::Held { reason, .. }, _) => {
                 // §2.5 bullet: "If no fallback is declared, the import
                 // ABORTS ATOMICALLY with a report, facts intact." The
                 // outer IMMEDIATE transaction rolls back via bail!
@@ -875,9 +875,9 @@ fn ensure_entity(
                 // tx.rollback()). Facts intact because the LLM-mint
                 // path is in the same batch.
                 bail!(
-                    "bundle import aborted: strict ontology gate held an unlabeled entity mint \
-                     (spec §2.4.5: no fallback_node_type declared); facts are intact and will \
-                     re-enter when the manifest names a fallback"
+                    "bundle import aborted: strict ontology gate held (§2.4.5) an unlabeled \
+                     entity mint: {reason}. Nothing was imported; re-run the import once the \
+                     cause is fixed"
                 );
             }
             _ => {

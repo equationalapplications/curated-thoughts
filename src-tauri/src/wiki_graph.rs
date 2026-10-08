@@ -116,7 +116,10 @@ impl WikiManifest {
 /// degrades to a name-only entry rather than failing the whole read: a
 /// `wiki_get_ontology` that errors is indistinguishable to a caller from a
 /// brain with no ontology, which is exactly the confusion §2.1 exists to end.
-fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
+///
+/// Crate-visible so a manifest WRITER can check its row exactly as the gate
+/// will read it (`ct ontology set`'s R2.4.5 write-time refusal).
+pub(crate) fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
     fn entries(value: Option<&serde_json::Value>) -> Vec<&serde_json::Value> {
         value
             .and_then(|v| v.as_array())

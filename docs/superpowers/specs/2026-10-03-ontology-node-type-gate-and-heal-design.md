@@ -41,6 +41,19 @@ anchor-vocabulary read filter but are recoverable, which deletion is
 not. The read filter itself is unchanged (r4-m5 pin). Census deferral:
 the operator WAIVED the live-census attach as a merge gate (2026-10-08);
 run it post-merge as a verification, not a blocker.
+r25 (2026-10-08, controller ruling, post-merge): the no-usable-fallback
+hold is FAIL-CLOSED and covers DECLARED labels — a strict vocabulary
+with node types but no usable `fallback_node_type` holds EVERY
+new-entity mint, a mint proposing a declared type included (R2.4.5).
+This resolves a spec inconsistency: R2.4.4/R2.4.5 said "refuses
+new-entity mints" while three passages (R2.4.4 manifest-key bullet,
+fallback VALUE rule, ensure matrix) read "declared set only" / "error
+on the first novel-label mint". Those passages are corrected. R2.4.4's
+"fallback not itself declared → same configuration error" is now
+enforced at resolution (it previously gated and landed the undeclared
+type). Every hold names its cause (R2.4.5 diagnostics), and
+`ct ontology set --entity <id> --mode strict` refuses to write an
+unusable strict row (§2.11).
 **Date:** 2026-10-03 (written 2026-10-04; r21 2026-10-07)
 **Baseline:** `main` @ `9c2281b` (v3.2.0) for the design; line citations
 re-anchored (r21) to branch tip after merging `main` @ `0f7ea9f` (v3.3.0).
@@ -1023,7 +1036,10 @@ hard-coded literal). Single consolidated rule:
 
 - Every strict manifest MUST declare its own fallback type; absence is a
   configuration error (§2.4.5).
-- If the fallback type is not itself declared → same configuration error.
+- If the fallback type is not itself declared → same configuration error
+  (r25: enforced at resolution — the gate holds instead of landing the
+  undeclared fallback, which would put an invented type in
+  `entity_type`).
 - **Manifest vocabulary extension (the r2-B1 gap, resolved here).** The
   current manifest JSON carries only `{"node_types": [...],
   "edge_types": [...]}` (`commit.rs:4186`) — no fallback key exists, and
@@ -1032,8 +1048,10 @@ hard-coded literal). Single consolidated rule:
   - Key: `"fallback_node_type": "<type>"`, an OPTIONAL top-level sibling
     of `node_types`/`edge_types` inside `manifest_json`. Absence is a
     defined TRANSITION state, not a stall: the gate treats a strict
-    manifest without the key as "declared set only, no fallback" and
-    classifies it per §2.4.5 — BUT wave 1 closes the gap with an
+    manifest without the key as UNUSABLE and holds every new-entity mint
+    per §2.4.5, declared labels included (r25 — never "declared set
+    only": the gate runs a full vocabulary or none) — BUT wave 1 closes
+    the gap with an
     IDEMPOTENT ENSURE step (r6-B1, superseding the earlier
     one-shot-migration design): `ensure_manifest_vocabulary(conn, entity_id)` runs
     whenever the gate or heal RESOLVES a manifest (memoized per
@@ -1089,7 +1107,7 @@ hard-coded literal). Single consolidated rule:
     writes it as `fallback_node_type`; if NEITHER is declared it
     writes NOTHING and reports loudly (heal report + warn) — never a
     type the manifest doesn't declare (that would be a fabricated
-    §2.4.5 error on every novel-label mint). EA/`SchemaSoftwareOrg`
+    §2.4.5 error on every new-entity mint — r25). EA/`SchemaSoftwareOrg`
     17-type set → `project`; the live ThinkPad row (18 types incl.
     `concept`) → `concept`; SchemaOrg (9 types, declares `project`,
     not `concept`) → `project` — no first-party brain stalls. NOTE — this CORRECTS the frozen investigation
@@ -1143,8 +1161,8 @@ hard-coded literal). Single consolidated rule:
     the per-manifest fallback, gate functional; manifest seeded AFTER
     the wave-1 migration (fresh install) → ensure covers it on first
     resolution; manifest whose node_types do not include the preferred
-    fallback → ensure writes nothing, §2.4.5 loud error on first
-    novel-label mint; manifest hand-stripped of the key post-ensure →
+    fallback → ensure writes nothing, §2.4.5 loud error on the first
+    new-entity mint, declared labels included (r25); manifest hand-stripped of the key post-ensure →
     re-ensured on next resolution (idempotent); 18-type row including
     `concept` → ensure writes `concept` as the fallback (r10-M1);
     SchemaOrg 9-type row → `project` (r11-M3).
@@ -1163,7 +1181,28 @@ hard-coded literal). Single consolidated rule:
 zero usable types or no declared fallback is a configuration ERROR:
 the gate refuses new-entity mints; the refused proposal is HELD as
 pending (its facts are NOT dropped — they re-enter when the manifest
-names a fallback); heal reports loudly. No disarm variant exists. Note:
+names a fallback); heal reports loudly. No disarm variant exists.
+
+- **Fail-closed, declared labels included (r25 controller ruling).** The
+  refusal covers EVERY new-entity mint against that vocabulary — a mint
+  proposing a DECLARED type is held too. The gate never runs a partial
+  vocabulary: "usable" means node types declared AND a
+  `fallback_node_type` that is itself one of them (R2.4.4), and an
+  unusable vocabulary never reaches the admit ladder. Rationale: the
+  label-less paths (bundle import, `okf_migration`, a blank-type GUI
+  mint) need the fallback regardless, so a declared-only relaxation
+  would leave a brain that half-works; one early, loud refusal with a
+  one-command fix is easier to diagnose.
+- **Diagnostics name the cause (r25).** Several distinct causes share
+  the Held verdict: no fallback, an undeclared fallback, zero node
+  types, an unreadable entity or `tier_fact` manifest row, a faulted
+  opt-out lookup (D8), and a degraded/conflicting folder or host config
+  (R2.3.3 Hold). Every refusal (GUI error, proposal error, bundle
+  abort, `okf_migration` abort) names its actual cause and recovery;
+  only the vocabulary causes prescribe `ct ontology set … --fallback
+  <type>`, listing the declared types and targeting the row that held
+  the mint (`tier_fact` by default, `--entity <id>` for an entity row).
+  An unreadable row is never diagnosed as a missing fallback. Note:
 held proposals live in `curated_proposals`, which clear_vault wipes —
 they survive until a vault switch on the clear path (per-vault by
 design).
@@ -1664,6 +1703,17 @@ vocabulary check exists; report-only like its edge half unless `--yes`.
   invocation). `edge_types` rides along verbatim on `--entity strict`
   (a synthesized empty edge list on a strict entity row would hand the
   edge gate a vocabulary that purges every declared edge).
+  **Write-time refusal (r25):** `--entity <id> --mode strict` REFUSES
+  (nothing written, opt-out kept) when the row it would write is
+  unusable per R2.4.5 — e.g. the copied `tier_fact` declares no
+  `fallback_node_type` — since that row would hold every mint for the
+  entity. The refusal lists the declared types and both fixes: name a
+  fallback on `tier_fact` (`--fallback <type>`, fixing every mint
+  resolving through it) or on this entity only (`--entity <id> --mode
+  strict --fallback <type>`). CT cannot prevent the engine seeding an
+  unusable `tier_fact`; `ct heal --yes` reports that case (the ensure
+  pass's `foreign_no_preferred_fallback` count) and every held mint
+  names it.
 - `--fallback <type>` writes `fallback_node_type` into the target
   manifest's `manifest_json` (tier/manifest-level, unlike the
   entity-scoped `--entity`); target defaults to `tier_fact`. Declares

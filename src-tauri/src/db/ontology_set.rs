@@ -140,6 +140,7 @@ pub fn set_entity_strict(
         entity_manifest["fallback_node_type"] =
             serde_json::json!(canonical_fallback(&entity_manifest, &entity_id, fallback)?);
     }
+    refuse_unusable_strict_row(&entity_manifest, &entity_id)?;
 
     // The opt-out lookup is cluster-closed (a merged-in member's opt-out
     // keeps applying to the survivor), so the reversal must clear it
@@ -164,6 +165,33 @@ pub fn set_entity_strict(
         optout_deleted: optouts_deleted > 0,
         manifest_row_written: true,
     })
+}
+
+/// R2.4.5 write-time refusal: a strict entity row whose vocabulary cannot
+/// gate (no node types, no `fallback_node_type`, or an undeclared one) would
+/// HOLD every mint for that entity — declared types included — and the
+/// operator would only find out at the first refused mint. Refuse it here,
+/// where `--fallback` can still fix it. Parsed exactly as the gate reads it.
+fn refuse_unusable_strict_row(manifest: &serde_json::Value, entity_id: &str) -> Result<()> {
+    use crate::db::entity_gate::{HoldReason, NodeVocabulary};
+    let parsed = crate::wiki_graph::parse_manifest(&manifest.to_string())?;
+    // The vocabulary is copied from `tier_fact`, so the reason names that
+    // row: fixing `tier_fact` fixes every mint resolving through it.
+    let Some(reason) = NodeVocabulary::from_manifest(&parsed).hold_reason(Some(TIER_FACT)) else {
+        return Ok(());
+    };
+    let alternative = match reason {
+        HoldReason::NoFallback { .. } | HoldReason::FallbackNotDeclared { .. } => format!(
+            "; or set this entity's fallback only: `ct ontology set --entity {entity_id} \
+             --mode strict --fallback <type>`"
+        ),
+        _ => String::new(),
+    };
+    bail!(
+        "refusing `--mode strict` for `{entity_id}`: the vocabulary it would copy cannot gate, \
+         so every new-entity mint for it would be held — {reason}{alternative}. Nothing was \
+         written"
+    )
 }
 
 /// `--entity <id> --mode <mode> [--fallback <type>]` dispatcher. A
@@ -466,6 +494,49 @@ mod tests {
             .unwrap();
         let row: serde_json::Value = serde_json::from_str(&row).unwrap();
         assert_eq!(row["fallback_node_type"], "process", "canonical spelling");
+    }
+
+    /// R2.4.5 write-time refusal: `--entity X --mode strict` copying a
+    /// fallback-less `tier_fact` would hold every mint for X (declared types
+    /// included), so it is refused with the legal `--fallback` values and
+    /// writes NOTHING (opt-out kept). Passing `--fallback` makes it legal.
+    #[test]
+    fn strict_copy_of_fallbackless_tier_fact_is_refused() {
+        let mut conn = memory_conn();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', ?1, 1)",
+            params![json!({
+                "node_types": [{"type": "person"}, {"type": "place"}],
+                "edge_types": []
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at) VALUES ('ent_x', 'user', 1)",
+            [],
+        )
+        .unwrap();
+
+        let err = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict, None).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("refusing `--mode strict` for `ent_x`"),
+            "{message}"
+        );
+        assert!(message.contains("one of: person, place"), "{message}");
+        assert!(
+            message.contains("`ct ontology set --entity ent_x --mode strict --fallback <type>`"),
+            "{message}"
+        );
+        assert!(message.contains("Nothing was written"), "{message}");
+        assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::OptOut, "opt-out kept");
+        assert_eq!(manifest_row_count(&conn).unwrap(), 1, "only tier_fact");
+
+        let out = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict, Some("place")).unwrap();
+        assert!(out.optout_deleted && out.manifest_row_written);
+        assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::Gate);
     }
 
     #[test]

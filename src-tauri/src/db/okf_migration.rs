@@ -211,34 +211,24 @@ fn migrate_approved_wiki_pages(
                     gate.source_directory.as_deref(),
                 )?;
             }
-            (AdmitOutcome::Held { .. }, _) => {
+            (AdmitOutcome::Held { reason, .. }, _) => {
                 // §2.5 abort trigger (r12-M2/r3-M1): abort WITHOUT
                 // setting `okf_migrated_at`. The dominant trigger is the
                 // rung-4 strict vocabulary LACKING a declared
-                // `fallback_node_type` (`ModeVerdict::StrictNoVocab` →
-                // `GateDecision::Held` in
-                // `NodeGateDecision::into_gate_decision`). The outer
-                // `ImmediateTx::rollback` rolls back the entire
+                // `fallback_node_type` (`HoldReason::NoFallback`). The
+                // outer `ImmediateTx::rollback` rolls back the entire
                 // migration, so the retry safety holds.
                 //
                 // The match stays WIDE (Task 3's shipped semantics — Task
                 // 9 owns observability, not the abort-vs-skip decision):
-                // the only other route to Held here is
-                // `GateDecision::Gate` over an EMPTY declared set (strict
-                // + `fallback_node_type` + zero `node_types`), which is
-                // the §2.4.5 configuration error — aborting is correct
-                // there too, and the diagnostic below names the recovery
-                // for EACH trigger (fix-before-merge: the old phrase said
-                // "gains a fallback" for both, but adding a fallback to a
-                // manifest that already declares one is a NO-OP — that
-                // corner's recovery is adding node types).
+                // every Held cause aborts, and the diagnostic names the
+                // recovery for the ACTUAL cause via `HoldReason`'s Display
+                // (adding a fallback is a no-op for an empty `node_types`
+                // set or an unreadable row).
                 bail!(
                     "okf_migration aborted: strict ontology gate held a wiki-page mint \
-                     (entity {entity_id}, path {path:?}): the strict manifest has no \
-                     usable vocabulary — no declared `fallback_node_type`, or a declared \
-                     fallback over an EMPTY `node_types` set. Retry after naming a \
-                     `fallback_node_type` (first case) or adding node types to the \
-                     manifest (second case) (spec §2.4.5 / §2.5 r12-M2)"
+                     (entity {entity_id}, path {path:?}): {reason}. Retry once the cause \
+                     is fixed (spec §2.4.5 / §2.5 r12-M2)"
                 );
             }
             (AdmitOutcome::DegradedToFallback { .. }, _) => {
