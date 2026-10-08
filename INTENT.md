@@ -1,117 +1,275 @@
-# INTENT — Curated Thoughts (The Brain, The Vault, and Trust Boundaries)
+# INTENT — Curated Thoughts
 
-**Read this file first.** It explains why CT exists, the business rules its
-components must enforce, what is explicitly out of scope, and how changes are
-made. When this file and any other document disagree, this file wins on
-*intent*; specs win on *detail*.
+**Read this file first.** It explains why Curated Thoughts (CT) exists, the
+rules it must follow, what it deliberately does not do, and how changes are
+made. If this file and another document disagree, this file wins on
+*intent* (what we are trying to do) and the specs win on *detail* (exactly
+how).
+
+Each rule has a **Status** line saying how much of it the code does today:
+
+- **Built** — the code does this.
+- **Partly built** — some of it exists; the line says what is missing.
+- **Planned** — decided, but not in the code yet.
+- **Open decision** — not decided yet.
+
+Statuses were checked against the code on 2026-10-08. Update a status line
+in the same pull request that changes the behavior.
 
 ## Why CT exists
 
-Curated Thoughts is a privacy-first, local-first second brain for humans of
-authority (engineers, product managers, authors — anyone whose words are canon)
-and for the agents that serve them. Raw material is deposited as real files;
-the **Active Librarian** distills it into a curated wisdom layer that any agent
-— including a weak one — can recall intuitively. Structure does the work, not
-model cleverness. Two surfaces over one pipeline: the **app** (user-friendly,
-any human author, any genre) and the **sidecar/MCP/CLI** (opinionated for
-software development and agents). "Agent-facing" in this file means BOTH the
-MCP sidecar AND the `ct` CLI.
+CT is a private, local-first "second brain." It is built for people whose
+words are the final say on their work (engineers, product managers,
+authors) and for the AI agents that work for them.
 
-## Business rules (non-negotiable)
+You put raw material in as ordinary files. A component called the **Active
+Librarian** reads those files and turns them into short, trustworthy facts
+(the "wisdom layer"). Any agent, even a weak one, can then recall those
+facts. The goal is that good structure does the work, so agents don't need
+to be clever.
 
-1. **The Trust Boundary (file-first deposit).** Agents must NEVER write
-   directly to the curated wisdom layer (the database). All agentic knowledge
-   is written to the vault as files via `wisdom_deposit`; the Active Librarian
-   is the sole authority that reads those files, understands them, and stamps
-   them into the brain as facts. Removed from the agent surface (MCP and CLI
-   alike): `curated_add_wisdom`, `curated_update_wisdom`,
-   `curated_proposal_decide`, `curated_archive_wisdom` — no agent-reachable
-   path may insert, update, approve, or archive wisdom rows.
-2. **Attestation over location (tier = f(provenance class)).** Human tier
-   requires a `human_attestations` record (written only by app UI flows, keyed
-   by content_hash). Every unattested file ingests at agent tier, wherever it
-   sits. No mechanism detects "an agent wrote this"; the guarantee is honest:
-   impossible through sanctioned surfaces, detectable through unsanctioned
-   ones (provenance mismatch). Migration: existing human ISF is bulk-attested
-   once; laundered `user_stated` rows are identified, re-ingested as agent
-   files, and superseded.
-3. **The visibility race.** Every deposit reports `pending` (queryable via
-   `wisdom_deposit_status`) until ingest completes; a host with no ingest
-   capability reports `pending: no ingest host`. Deposit kicks ingest — the
-   deposit path requests immediate ingestion of the file it just landed (the
-   ingest channel itself is new work). We do NOT scan uningested files in
-   injection or ranked recall; the only exception is the on-demand, read-only
-   `wisdom_pending` listing, which is never merged into recall results or the
-   injection block.
-4. **Retirement is supersession, not deletion; authority follows provenance.**
-   Agents retire wisdom ONLY by depositing a supersession file
-   (`wisdom_propose_supersession`). The Active Librarian applies it
-   automatically when both facts are agent tier; when the target is human
-   tier, it becomes a proposal that only a human resolves in the app.
-5. **The fleet shares one wisdom layer via the outbox.** Reconcile is
-   origin-scoped (rows carry `origin_host`): only the host that ingested a
-   fact may judge its source gone. Fact ids are deterministic, hashed from the
-   vault-relative, normalized doc path + content hash + extraction index, so
-   duplicate ingest across hosts converges. Peers never upgrade a provenance
-   stamp; how peers trust incoming stamps is an open decision (RR-2) — until
-   then, attestation records sync alongside the facts they cover.
-6. **System One judges; it never authors.** Fast, cheap, typed judgment
-   (Jev/Laya) is used for ingest triage and recall relevance, audit-logged for
-   evals. It never writes facts, approves anything, rewrites queries, or
-   decides trust. It is optional; recall works without it.
-7. **Recall abstains; it does not bluff.** A weak top hit is treated as "no
-   answer," never confidently injected. Question embeddings are generated at
-   ingest; the abstention floor is a fixed, benchmark-calibrated threshold.
-8. **Scope follows the work.** Facts ingested under `works/<project>/` stay
-   scoped to that work and never surface in other scopes' recall. Human-stated
-   captures live under `stated/<author>/YYYY/`, are app-authored (never
-   agent-authored), carry `stated_by`/`captured_via`/`attestation_id`
-   frontmatter, and stay below wisdom tier until attested.
-9. **Vault semantics by area.** `agents/` is append-only for agents: deposits
-   are never edited or deleted; corrections are new supersession deposits.
-   Human areas are edited freely by humans, with git as the lineage. Reconcile
-   retires facts whose source is gone — and only on the ingesting host.
+There are two ways in, both over the same pipeline:
 
-## Active Librarian functions (decided, not yet built)
+- **The app** — friendly, for any author writing anything.
+- **The agent tools** — the MCP sidecar and the `ct` command line, tuned
+  for software development. In this file, "agent tools" always means both.
 
-The component is the **Active Librarian** with two functions: **ingest**
-(understand and stamp) and **reconcile** (repair, consistency flagging,
-supersession upkeep). "Heal" is retired as a term. Committed enhancements:
-deterministic fact ids (guarantee dedup at retrieval time); ingest-time
-"questions this fact answers" embeddings, recall taking the max over a fact's
-vectors; supersession/current-only filtering in Rust recall (migration-13
-columns; Rust readability is RR-4, open). Corpus design target: ~10⁴ live
-facts per brain; ANN deferred to 10⁵.
+## Glossary
 
-## Non-goals (do not build here)
+- **Vault** — the folder of real files that CT reads.
+- **Brain** — CT's database of facts built from the vault.
+- **Wisdom layer** — the curated facts agents recall.
+- **Deposit** — an agent saving knowledge as a new file in the vault.
+- **Ingest** — the Librarian reading a file and turning it into facts.
+- **Reconcile** — the Librarian's upkeep: removing facts whose source file
+  is gone, flagging inconsistencies, applying supersessions. (The code
+  still calls part of this "heal"; see below.)
+- **Tier** — how much a fact is trusted: *human* (a person stands behind
+  it) or *agent*.
+- **Attestation** — a record that a person confirmed a file's exact
+  content.
+- **Supersession** — marking an old fact as replaced by a newer one,
+  instead of deleting it.
+- **Recall** — looking up facts relevant to a question.
+- **Injection** — facts automatically added to an agent's context at the
+  start of a session (done by CTI, below).
+- **ISF** — `immutable-source-files/`, the vault folder for source files.
+  Agent deposits go in `immutable-source-files/agents/`.
+- **CTI** — curated-thoughts-integrations, a separate repo that delivers
+  wisdom into agent sessions using `ct wisdom match`.
+- **System One** — small, fast, cheap models that make typed yes/no or
+  category judgments (classification). CT is building them into its
+  architecture. Two are named:
+  - **Jev** — the one CT uses today.
+  - **Laya** — an open-weight System One model for fast, cheap
+    classification. Not in the code yet.
+- **Migration 13** — the wiki-engine database change that added fact
+  history columns (`valid_from`, `valid_to`, `superseded_by`); CT's copy is
+  schema version V24.
 
-- No generalizing the MCP/CLI surface for non-developer genres — the app owns
-  that experience.
-- No routing recall through the TypeScript engine; port engine capabilities
-  into Rust recall instead.
-- No graph-traversal expansion inside session-start injection (v1); traversal
-  stays in on-demand tools (`wiki_context`).
-- No reading of uningested files in injection or ranked recall (see rule 3 for
-  the `wisdom_pending` exception).
-- No provenance used as a hidden ranking penalty; provenance is stamped and
-  surfaced (CTI labels it), and any ranking change must be decided by a spec
-  against the benchmarks.
-- No deletion of source files as part of fact retirement.
+## The rules
 
-## Workflow (how changes are made here)
+### 1. Agents never write facts directly
 
-1. Spec first under `docs/superpowers/specs/`, from a `[V]`-evidenced
-   investigation (claims read from real source, not memory).
-2. Canonical decision context lives in the equational-wiki vault
-   (`wisdom-deposit-file-first-intent-2026-10-01.md`, the Opus decision brief
-   and cycle-2 review, 2026-10-01).
-3. Dual review (GLM + Opus) → CI green → merge; open questions park the PR.
-4. Recall/injection changes gate on the engine benchmarks: supersession
-   scenarios (no superseded fact is ever injected), LongMemEval hit@k +
-   abstention precision, cross-model paraphrase probes (n ≥ 200),
-   exactly-once property tests, cache-safety byte-stability tests.
-   Reconcile/ingest changes gate on the two-host fleet test (origin-scoped
-   reconcile; duplicate ingest produces no duplicate rows). Benchmarks run on
-   scratch brains with real embeddings; embedding stubs are for unit tests
-   only.
-5. Never touch the live brain out-of-band; tests use scratch profiles.
+Agents add knowledge only by depositing a file (`wisdom_deposit`). Only the
+Librarian reads those files and turns them into facts. No agent tool may
+add, change, approve, or archive facts in the database. The old tools that
+did this (`curated_add_wisdom`, `curated_update_wisdom`,
+`curated_proposal_decide`, `curated_archive_wisdom`) are removed.
+
+*Why:* everything in the brain should trace back to a file, and the
+Librarian should be the single gatekeeper.
+
+**Status: Partly built.** `wisdom_deposit` writes a new file and never the
+facts table, and the four old tools are gone from both the MCP sidecar and
+`ct`. Known gaps: `vault_write_note` can still create and edit files in the
+agents deposit folder, and `ct proposals review` can approve proposals. It
+refuses piped input, but an agent that opens a pseudo-terminal can get
+past that check.
+
+### 2. A fact is human-trusted only if a person vouched for it
+
+A file earns the human tier only when the app has recorded an attestation
+for its exact content. Attestations are written only by the app, never by
+agent tools. Every file without one is treated as agent-written, no matter
+which folder it sits in.
+
+*Why:* CT can't tell who wrote a file by looking at it, so it requires
+proof instead of guessing. Through the normal tools an agent cannot create
+that proof. If one goes around them, the mismatch between the file and its
+recorded origin can be detected.
+
+When this ships, existing human files will be attested once in bulk, and
+facts that were wrongly stamped as human-stated (`user_stated`) will be
+re-ingested as agent facts and superseded.
+
+**Status: Planned.** There is no attestation record in the code yet. Today
+trust follows *location*: facts from the agent deposit folder get the
+configured `deposit_default_tier`, and the app still writes `user_stated`
+facts directly.
+
+### 3. A deposit shows as "pending" until it has been processed
+
+Depositing a file immediately asks for that file to be ingested. Until
+ingest finishes, `wisdom_deposit_status` reports it as pending, or says
+there is no ingest host if this machine can't process files. Recall and
+injection never read files that haven't been ingested. The one exception
+is `wisdom_pending`, a separate read-only list of unprocessed deposits,
+which is never mixed into recall results.
+
+*Why:* agents should get an honest answer ("not ready yet") rather than
+half-processed knowledge.
+
+**Status: Partly built.** The deposit kick, the status states, and
+`wisdom_pending` all exist. Gap: a deposit stuck after its text is split
+into chunks (but before facts are made) can still be returned by
+`vault_semantic_search`.
+
+### 4. Old facts are superseded, not deleted, and only humans overrule humans
+
+An agent retires a fact only by depositing a supersession file
+(`wisdom_propose_supersession`). If the old and new facts are both agent
+tier, the Librarian applies it automatically. If the old fact is human
+tier, it becomes a proposal that only a person can accept, in the app.
+
+*Why:* history is kept, and an agent can never overwrite something a
+person stands behind.
+
+**Status: Partly built.** The tool writes the supersession file. The
+Librarian does not apply supersessions yet, so they stay pending.
+
+### 5. All of a person's machines share one set of facts
+
+Facts sync between machines through the outbox. Each fact records which
+machine ingested it, and only that machine may decide its source file is
+gone. Fact IDs are computed from the file's path, its content, and the
+fact's position in it, so two machines ingesting the same file produce the
+same facts instead of duplicates. A machine never raises the trust tier of
+a fact it received from another. Attestations sync along with the facts
+they cover.
+
+*Why:* several machines should agree on one brain without fighting over
+it.
+
+**Status: Mostly planned.** The outbox exists but only pushes one way, to
+a Postgres replica; machines don't pull from each other. There is no
+"ingested on" machine field, and fact IDs are random. How a machine
+should trust tiers it receives from another is an **open decision**.
+
+### 6. The fast model judges; it never writes
+
+System One models (Jev, Laya) give quick, cheap judgments: should this file be
+ingested, is this fact relevant to this question. Every judgment is logged
+so it can be evaluated. It never writes facts, approves anything, rewrites
+questions, or decides trust. It is optional: recall works without it.
+
+*Why:* a small model is useful for sorting, not for deciding what is true.
+
+**Status: Partly built, used differently.** Jev exists only as an optional
+classifier that assigns types to untyped facts. It is not used for ingest
+triage or recall relevance, and its judgments are not logged for
+evaluation. Laya is not integrated yet.
+
+### 7. Recall says "I don't know" rather than guess
+
+If the best match is weak, recall returns nothing rather than presenting a
+poor answer with confidence. The cutoff is a fixed threshold set from
+benchmarks. At ingest, each fact also gets embeddings for the questions it
+answers, and recall uses whichever of a fact's embeddings matches best.
+
+*Why:* a confident wrong answer is worse than no answer.
+
+**Status: Partly built.** `ct wisdom match` has a benchmark-set cutoff
+(0.70 for qwen3-embedding-4b) and refuses to answer with a model that has
+no calibrated cutoff. The other recall tools (`curated_recall_context`,
+wiki search) have no cutoff. Question embeddings are not built.
+
+### 8. Facts stay inside the project they came from
+
+Facts ingested from `works/<project>/` are only recalled within that
+project. Things a person says directly are captured by the app (never by
+an agent) under `stated/<author>/<year>/`, with frontmatter recording who
+said it, how it was captured, and its attestation. They stay below wisdom
+tier until attested.
+
+*Why:* one project's knowledge shouldn't leak into another's answers.
+
+**Status: Planned.** None of this is in the code yet.
+
+### 9. Each area of the vault has its own editing rules
+
+Agents may only add files to their deposit folder, never edit or delete
+them. Corrections are new supersession deposits. People edit their own
+areas freely, with git as the history. When a source file is gone, its
+facts are retired, but only by the machine that ingested them.
+
+*Why:* agent deposits become an append-only record you can audit.
+
+**Status: Partly built.** `wisdom_deposit` only ever creates new files,
+but `vault_write_note` can edit existing ones in the deposit folder (see
+rule 1). Facts whose source is gone are retired by the database "heal"
+pass, which is not limited to the ingesting machine.
+
+## The Active Librarian
+
+The Librarian has two jobs:
+
+- **Ingest** — read files and turn them into facts.
+- **Reconcile** — keep the brain healthy: retire facts whose source is
+  gone, flag inconsistencies, apply supersessions.
+
+The Librarian's repair job is called "reconcile" from now on. The code
+still uses "heal" for part of it (the database heal pass and the app's
+"Heal Database" button) and should be renamed over time. Separately,
+`ct heal` is also the name of the *ontology* repair command (fixing entity
+and edge types). That command is not part of the Librarian, and this
+rename does not apply to it.
+
+Planned Librarian improvements:
+
+- Fact IDs computed from content, so duplicates can't appear. **Planned.**
+- Question embeddings at ingest, with recall using a fact's best-matching
+  embedding. **Planned.**
+- Recall that skips superseded and expired facts. **Partly built:** only
+  `ct wisdom match` does this today.
+
+Design target: about 10,000 live facts per brain. Approximate
+nearest-neighbor search (ANN) can wait until about 100,000.
+
+## Out of scope (don't build these here)
+
+- Making the agent tools general-purpose for non-software work. The app
+  covers that.
+- Running agent recall through the TypeScript wiki engine. Port what's
+  needed into the Rust recall instead. (Today agent recall is Rust.)
+- Following graph links during session-start injection (v1). Graph
+  traversal stays in on-demand tools like `wiki_context`.
+- Reading un-ingested files in injection or recall (see rule 3 for the
+  one exception).
+- Quietly ranking facts lower because of where they came from. Origin is
+  recorded and shown (CTI labels it); any ranking change needs a spec and
+  benchmark results.
+- Deleting source files when a fact is retired.
+
+## How changes are made
+
+1. **Spec first.** Write a spec under `docs/superpowers/specs/`, based on
+   an investigation that reads the real code (not memory). Spec, plan and
+   implementation go in one pull request.
+2. **Decision history** for the wisdom-deposit design lives in the
+   equational-wiki vault (`wisdom-deposit-file-first-intent-2026-10-01.md`
+   and its review, 2026-10-01). That vault is separate from this repo.
+3. **Review, then merge.** Two independent AI reviews (GLM and Opus), CI
+   green, then merge. Unresolved questions hold the pull request.
+4. **Benchmarks gate behavior changes.**
+   - Recall and injection changes must pass: no superseded fact is ever
+     injected; LongMemEval hit rate and abstention precision; paraphrase
+     tests across models (at least 200); exactly-once tests; and tests
+     that cached output stays byte-identical.
+   - Ingest and reconcile changes must pass the two-machine test: only
+     the ingesting machine retires a fact, and ingesting the same file
+     twice creates no duplicates.
+   - Benchmarks run on scratch brains with real embeddings. Fake
+     embeddings are only for unit tests.
+5. **Never touch the live brain** outside the app. Tests use scratch
+   profiles.
