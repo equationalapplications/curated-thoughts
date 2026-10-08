@@ -25,7 +25,6 @@ use crate::wiki_graph::WikiManifest;
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::json;
-use std::collections::HashSet;
 use std::path::Path;
 
 /// A transaction that is guaranteed to have been opened with
@@ -133,11 +132,17 @@ impl NodeVocabulary {
 
     /// Build the vocabulary from a manifest.
     ///
-    /// Empty-declared-set rule (spec §2.4.5): if a strict manifest declares
-    /// zero node types, every write is held — there is nothing to admit, and
-    /// `is_empty()` exposes that fact. The fallback is parsed even on an
-    /// empty manifest so a manifest that names a fallback but no declared
-    /// set can still degrade via §2.4.5.
+    /// Empty-declared-set rule (spec §2.4.5, r25): if a strict manifest
+    /// declares zero node types, every write is held — there is nothing to
+    /// admit, and `is_empty()` exposes that fact. A fallback named over an
+    /// empty declared set does NOT soften this: `hold_reason` checks
+    /// `is_empty()` first, so the mints hold rather than degrade onto it.
+    ///
+    /// A fallback that names a DECLARED type is stored in that entry's
+    /// canonical spelling — the spelling the degrade ladder lands (R2.4.4:
+    /// one spelling per type, same rule as the declared and alias arms). An
+    /// UNDECLARED fallback keeps its raw spelling: it can never land, and
+    /// `FallbackNotDeclared`'s message names exactly what the row says.
     pub fn from_manifest(manifest: &WikiManifest) -> Self {
         let mut by_key: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
@@ -150,14 +155,13 @@ impl NodeVocabulary {
                 .entry(k)
                 .or_insert_with(|| node.type_name.trim().to_string());
         }
-        Self {
-            by_key,
-            fallback: manifest
-                .fallback_node_type
-                .as_ref()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-        }
+        let fallback = manifest
+            .fallback_node_type
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(|f| by_key.get(&Self::key(&f)).cloned().unwrap_or(f));
+        Self { by_key, fallback }
     }
 
     /// The manifest's declared fallback, if any.
@@ -174,6 +178,53 @@ impl NodeVocabulary {
     /// insensitive).
     pub fn contains(&self, candidate: &str) -> bool {
         self.by_key.contains_key(&Self::key(candidate))
+    }
+
+    /// The declared node types in the manifest's spelling, sorted — for
+    /// refusal messages that must list the legal `--fallback` values.
+    pub fn declared(&self) -> Vec<String> {
+        let mut declared: Vec<String> = self.by_key.values().cloned().collect();
+        declared.sort();
+        declared
+    }
+
+    /// Why this STRICT vocabulary cannot gate, or `None` when it can.
+    /// R2.4.4/R2.4.5: it gates only when it declares node types AND a
+    /// `fallback_node_type` that is itself one of them. Anything less holds
+    /// EVERY new-entity mint — a mint proposing a declared type included;
+    /// the gate never runs a partial vocabulary. `manifest` names the row
+    /// the vocabulary came from (`None` when the caller does not know).
+    pub fn hold_reason(&self, manifest: Option<&str>) -> Option<HoldReason> {
+        // The usable path — every gated mint — allocates nothing; the
+        // payloads below are built only for an actual hold.
+        if self.is_usable() {
+            return None;
+        }
+        let manifest = manifest.map(str::to_string);
+        if self.is_empty() {
+            return Some(HoldReason::EmptyNodeTypes {
+                manifest,
+                fallback: self.fallback().map(str::to_string),
+            });
+        }
+        match self.fallback() {
+            None => Some(HoldReason::NoFallback {
+                manifest,
+                declared: self.declared(),
+            }),
+            Some(fallback) if !self.contains(fallback) => Some(HoldReason::FallbackNotDeclared {
+                manifest,
+                fallback: fallback.to_string(),
+                declared: self.declared(),
+            }),
+            Some(_) => None,
+        }
+    }
+
+    /// True when this vocabulary can gate (R2.4.4/R2.4.5): it declares node
+    /// types AND a `fallback_node_type` that is one of them.
+    pub fn is_usable(&self) -> bool {
+        !self.is_empty() && self.fallback().is_some_and(|f| self.contains(f))
     }
 
     /// True when the vocabulary admits no names. A strict manifest with an
@@ -210,10 +261,13 @@ pub enum AdmitOutcome {
         landed_as: String,
         entity_id: String,
     },
-    /// The gate held the proposal — strict + empty vocabulary / no fallback
-    /// declared. The helper did NOT insert. Caller decides what to do
-    /// (refuse error vs. fall back to a literal, which is bundle-import's job).
-    Held { original_label: Option<String> },
+    /// The gate held the proposal (§2.4.5); `reason` names the cause. The
+    /// helper did NOT insert. Caller decides what to do (refusal error, or
+    /// an atomic abort for bundle import / okf_migration).
+    Held {
+        original_label: Option<String>,
+        reason: HoldReason,
+    },
     /// Gate SKIPPED (off / no manifest). The helper did NOT insert; the caller
     /// is responsible for landing the literal `'concept'` (bundle / GUI / OKF
     /// skip path) and writing a `gate_skipped` ledger row.
@@ -232,9 +286,209 @@ pub enum GateDecision {
     /// The caller lands the literal `'concept'` and writes a `gate_skipped`
     /// ledger row.
     Skip,
-    /// Held: strict + empty vocabulary or no fallback declared — helper does
-    /// NOT insert. Caller writes a refusal.
-    Held,
+    /// Held (§2.4.5) — helper does NOT insert. Caller writes a refusal that
+    /// names the `HoldReason`.
+    Held(HoldReason),
+}
+
+/// Why the gate HELD a mint (§2.4.5). Several distinct causes share the one
+/// Held verdict; each refusal message names its own, so the operator is not
+/// sent to add a fallback when the real fault is an unreadable row or a
+/// degraded config. Only the vocabulary causes are fixed with
+/// `ct ontology set --fallback`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoldReason {
+    /// The strict manifest declares zero node types — nothing to admit.
+    /// `fallback` is the `fallback_node_type` the row already names over
+    /// the empty set, if any — the fix differs (declare it vs. also name
+    /// one).
+    EmptyNodeTypes {
+        manifest: Option<String>,
+        fallback: Option<String>,
+    },
+    /// The strict manifest declares node types but no `fallback_node_type`.
+    /// Every new-entity mint holds, a DECLARED-type mint included (R2.4.5).
+    NoFallback {
+        manifest: Option<String>,
+        declared: Vec<String>,
+    },
+    /// The declared `fallback_node_type` is not one of the manifest's node
+    /// types (R2.4.4) — landing it would write an undeclared type.
+    FallbackNotDeclared {
+        manifest: Option<String>,
+        fallback: String,
+        declared: Vec<String>,
+    },
+    /// The rung 1(a) opt-out lookup faulted (D8 fail-closed).
+    OptOutLookupFailed { entity_id: String },
+    /// The mint's merge-redirect chain could not be resolved (a cycle or a
+    /// database fault), so the survivor whose manifest row governs the
+    /// mint is unknown (R2.7.5, D8 fail-closed).
+    RedirectUnresolved { entity_id: String },
+    /// A defensive backstop fired: a code path the resolver is built never
+    /// to reach. Named as what it is — a bug — rather than guessing a
+    /// configuration cause the operator would then chase.
+    Internal { detail: &'static str },
+    /// The entity's own manifest row could not be read (r4-m4).
+    EntityManifestUnreadable { entity_id: String },
+    /// The `tier_fact` manifest row could not be read (§2.3 rung 4).
+    TierFactUnreadable,
+    /// The folder/host ontology config is degraded or conflicting for this
+    /// mint's source while a strict vocabulary exists (`OntologyLookup::Hold`,
+    /// r10-MINOR-2). `source` is `None` for a pathless mint.
+    ConfigHold { source: Option<String> },
+}
+
+impl HoldReason {
+    /// The `ct ontology set` target flag for a manifest row: `tier_fact` is
+    /// the default target; an entity row needs `--entity`.
+    fn fallback_command(manifest: &Option<String>, declared: &[String]) -> String {
+        // The command must stay pasteable shell — no `[--entity <id>]`
+        // bracket placeholders (glob characters in zsh/bash). When the
+        // caller cannot name the row, print the default (`tier_fact`)
+        // command and name the entity-row variant in prose.
+        use crate::db::ontology_set::{set_command, SetCommand, TIER_FACT};
+        let (entity, note) = match manifest.as_deref() {
+            Some(TIER_FACT) => (None, ""),
+            Some(id) => (Some(id), ""),
+            None => (
+                None,
+                " (add `--entity <id>` before `--fallback` when an entity row holds \
+                 the mint)",
+            ),
+        };
+        format!(
+            "fix: `{}` with one of: {}{note}",
+            set_command(SetCommand {
+                entity,
+                strict: false,
+                fallback: true,
+            }),
+            declared.join(", ")
+        )
+    }
+}
+
+impl std::fmt::Display for HoldReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let named = |m: &Option<String>| match m {
+            Some(m) => format!("the strict manifest `{m}`"),
+            None => "the strict manifest".to_string(),
+        };
+        match self {
+            Self::EmptyNodeTypes { manifest, fallback } => {
+                // The fix-line must name a writer that can actually repair
+                // the row: `tier_fact` (and unnamed rows) belong to the
+                // wiki engine, but an entity strict row is CT-owned and
+                // the engine will never rewrite it. `--mode strict`
+                // OVERWRITES it with `tier_fact`'s vocabulary — whatever
+                // the row held before — and refuses unless that
+                // vocabulary can gate, so one command repairs it fully.
+                // Node types alone do not: a strict row also needs a
+                // declared fallback (R2.4.5), so the tier arm names the
+                // whole repair rather than leave a second hold to
+                // discover — declaring the fallback it already names, or
+                // naming one when it has none.
+                use crate::db::ontology_set::{set_command, SetCommand, TIER_FACT};
+                let fix = match manifest.as_deref() {
+                    Some(id) if id != TIER_FACT => format!(
+                        "fix: `{}` overwrites this row with the `tier_fact` vocabulary \
+                         (refused until `tier_fact` itself declares node types and a \
+                         fallback — the wiki engine owns that row)",
+                        set_command(SetCommand {
+                            entity: Some(id),
+                            strict: true,
+                            fallback: false,
+                        })
+                    ),
+                    _ => match fallback {
+                        Some(fallback) => format!(
+                            "fix: add node types to that manifest — `{fallback}`, the \
+                             fallback it already names, among them (the wiki engine owns \
+                             manifest rows)"
+                        ),
+                        None => format!(
+                            "fix: add node types to that manifest (the wiki engine owns \
+                             manifest rows), then name one as its fallback with `{}` — a \
+                             strict row needs both",
+                            set_command(SetCommand {
+                                entity: None,
+                                strict: false,
+                                fallback: true,
+                            })
+                        ),
+                    },
+                };
+                write!(
+                    f,
+                    "{} declares no node types, so there is nothing to admit (§2.4.5); \
+                     {fix}",
+                    named(manifest)
+                )
+            }
+            Self::NoFallback { manifest, declared } => write!(
+                f,
+                "{} declares no `fallback_node_type`, so every new-entity mint is held — \
+                 including mints that propose a declared type (§2.4.5); {}",
+                named(manifest),
+                Self::fallback_command(manifest, declared)
+            ),
+            Self::FallbackNotDeclared {
+                manifest,
+                fallback,
+                declared,
+            } => write!(
+                f,
+                "{} names `{fallback}` as its `fallback_node_type`, but `{fallback}` is not \
+                 one of its node types, so landing it would write an undeclared type \
+                 (R2.4.4); {}",
+                named(manifest),
+                Self::fallback_command(manifest, declared)
+            ),
+            Self::OptOutLookupFailed { entity_id } => write!(
+                f,
+                "the opt-out lookup for entity `{entity_id}` failed (a database fault), so \
+                 the mint is held rather than risk gating an opted-out entity (D8); retry, \
+                 and check the brain database if it persists"
+            ),
+            Self::RedirectUnresolved { entity_id } => write!(
+                f,
+                "the merge redirect chain for entity `{entity_id}` could not be resolved \
+                 (a cycle or a database fault), so the mint is held rather than read a \
+                 merged-away entity's manifest (R2.7.5); retry, and check the brain \
+                 database if it persists"
+            ),
+            Self::Internal { detail } => write!(
+                f,
+                "internal gate inconsistency ({detail}) — the mint is held rather than \
+                 guessing a cause; this is a bug, please report it"
+            ),
+            Self::EntityManifestUnreadable { entity_id } => write!(
+                f,
+                "entity `{entity_id}`'s own manifest row could not be read (corrupt \
+                 `manifest_json` or a database fault), so the mint is held rather than \
+                 skipping a possibly-strict entity (r4-m4); repair or remove that row"
+            ),
+            Self::TierFactUnreadable => write!(
+                f,
+                "the `tier_fact` manifest row could not be read (corrupt `manifest_json` \
+                 or a database fault) (§2.3 rung 4); repair that row"
+            ),
+            Self::ConfigHold { source } => {
+                let what = match source {
+                    Some(dir) => format!("source `{dir}`"),
+                    None => "this mint (no source path)".to_string(),
+                };
+                write!(
+                    f,
+                    "the folder/host ontology config is degraded or conflicting for {what}, \
+                     so the mint is held rather than guessing a mode; fix the \
+                     `ingest.folder_ontology` / `ingest.ontology_default` entries in the \
+                     brain config"
+                )
+            }
+        }
+    }
 }
 
 /// The single insert helper. Builds a connection from the `ImmediateTx`, runs
@@ -281,14 +535,18 @@ pub fn shared_insert_entity(
         GateDecision::Skip => Ok(AdmitOutcome::Skipped {
             original_label: caller_entity_type.map(str::to_string),
         }),
-        GateDecision::Held => Ok(AdmitOutcome::Held {
+        GateDecision::Held(reason) => Ok(AdmitOutcome::Held {
             original_label: caller_entity_type.map(str::to_string),
+            reason,
         }),
         GateDecision::Gate(vocab) => {
-            // Empty-vocab rule (§2.4.5): strict + empty vocabulary — held.
-            if vocab.is_empty() {
+            // R2.4.4/R2.4.5 usability: the production resolver only builds
+            // `Gate` over a usable vocabulary; this re-check holds a caller
+            // that hands in an unusable one directly.
+            if let Some(reason) = vocab.hold_reason(None) {
                 return Ok(AdmitOutcome::Held {
                     original_label: caller_entity_type.map(str::to_string),
+                    reason,
                 });
             }
             let proposed = caller_entity_type.map(str::trim).filter(|s| !s.is_empty());
@@ -339,8 +597,15 @@ pub fn shared_insert_entity(
                         entity_id: resolved_id,
                     })
                 }
+                // Unreachable after the usability check above (the ladder
+                // holds only on an empty or fallback-less vocabulary); kept
+                // total rather than panicking, and named as the bug it
+                // would be — never a fabricated configuration cause.
                 AdmitInternal::Held => Ok(AdmitOutcome::Held {
                     original_label: caller_entity_type.map(str::to_string),
+                    reason: HoldReason::Internal {
+                        detail: "admit ladder held a usable vocabulary",
+                    },
                 }),
             }
         }
@@ -417,10 +682,11 @@ impl std::fmt::Debug for AdmitInternal {
 /// The degrade ladder (spec §2.4.4):
 ///   declared → alias (target declared) → fallback → held
 ///
-/// Empty-declared-set rule (§2.4.5): a strict manifest with ZERO usable types
-/// is a configuration error even when it has a fallback — there is nothing
-/// to admit. Held (first arm below). A strict vocabulary that HAS types but
-/// NO fallback holds too (final arm): there is nothing to degrade onto and
+/// Production callers only reach this ladder over a USABLE vocabulary
+/// ([`NodeVocabulary::hold_reason`] is `None`): an empty or fallback-less
+/// strict vocabulary holds EVERY mint before the ladder runs (R2.4.5),
+/// declared labels included. The Held arms below are a defensive backstop
+/// that keeps the function total — there is nothing to degrade onto and
 /// inventing a label is forbidden (R2.4.4).
 fn run_admit_ladder(vocab: &NodeVocabulary, proposed: Option<&str>) -> AdmitInternal {
     if vocab.is_empty() {
@@ -532,6 +798,13 @@ pub(crate) enum EnsurePlan {
     Complete,
     /// Foreign manifest with no declared fallback and no preferred choice.
     ForeignNoPreferredFallback,
+    /// The PLANNED row still carries a vocabulary the gate cannot run
+    /// (R2.4.5: an existing fallback naming no declared type, or an empty
+    /// declared set) — every mint on it holds. Foreign-row shapes the
+    /// ensure must not rewrite (§2.4.4 declare-or-report); reported loudly
+    /// via heal instead, never memoized, so the pass re-reports until the
+    /// operator fixes it with `ct ontology set --fallback`.
+    UnusableVocabulary { reason: HoldReason },
     /// The edited manifest to write back.
     Edit {
         new_json: String,
@@ -540,7 +813,15 @@ pub(crate) enum EnsurePlan {
     },
 }
 
-pub(crate) fn plan_manifest_ensure(manifest_json: &str) -> Result<EnsurePlan> {
+/// `owner` names the row (`tier_fact` or an entity id) so an unusable
+/// verdict's fix-line targets the row that actually holds; `strict` is the
+/// row's mode — the gate reads only strict rows, so only a strict row's
+/// vocabulary can hold a mint and be reported unusable.
+pub(crate) fn plan_manifest_ensure(
+    manifest_json: &str,
+    owner: &str,
+    strict: bool,
+) -> Result<EnsurePlan> {
     let mut root: serde_json::Value = match serde_json::from_str(manifest_json) {
         Ok(v) => v,
         Err(e) => {
@@ -549,35 +830,26 @@ pub(crate) fn plan_manifest_ensure(manifest_json: &str) -> Result<EnsurePlan> {
         }
     };
 
-    let declared: Vec<String> = root
-        .get("node_types")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let declared_lower: HashSet<String> = declared.iter().map(|s| NodeVocabulary::key(s)).collect();
+    // "Declared" is read through the gate's own lenient reader (review
+    // finding: a hand-rolled `{type: …}`-only extraction saw ZERO types in
+    // a bare-string manifest the gate reads as declaring them, so the
+    // planner and the gate classified the same row differently).
+    let vocab = NodeVocabulary::from_manifest(&crate::wiki_graph::parse_manifest_value(&root));
 
     // Subset guard: every EA slug ⊆ declared? If yes, do the full work;
     // otherwise do only the fallback declare-or-report.
-    let is_ea_subset = EA_SEED_TYPES
-        .iter()
-        .all(|seed| declared_lower.contains(&NodeVocabulary::key(seed)));
+    let is_ea_subset = EA_SEED_TYPES.iter().all(|seed| vocab.contains(seed));
 
     // Pick the fallback value (prefer `concept` if declared; else `project`),
     // written in the MANIFEST's own spelling so the fallback names exactly
     // the declared entry (`Concept` stays `Concept`).
-    let declared_spelling = |slug: &str| -> Option<String> {
-        declared
-            .iter()
-            .find(|d| NodeVocabulary::key(d) == slug)
-            .map(|d| d.trim().to_string())
-    };
-    let fallback_choice: Option<String> =
-        declared_spelling("concept").or_else(|| declared_spelling("project"));
+    let fallback_choice: Option<String> = vocab
+        .canonicalize("concept")
+        .or_else(|| vocab.canonicalize("project"))
+        .map(str::to_string);
+    // The row's EXISTING fallback as written — `None` when the key is
+    // absent, not a string, or blank (the reader treats all three alike).
+    let existing_fallback = vocab.fallback().map(str::to_string);
 
     let mut did_set_fallback = false;
     let mut did_extend = false;
@@ -601,20 +873,20 @@ pub(crate) fn plan_manifest_ensure(manifest_json: &str) -> Result<EnsurePlan> {
             // Membership-key comparison (review finding): an exact-string
             // check appended `document` beside an existing `Document`,
             // polluting the manifest with case-variant duplicates.
-            let already = declared_lower.contains(slug);
-            if !already {
+            if !vocab.contains(slug) {
                 node_types.push(json!({"type": slug, "description": desc}));
                 did_extend = true;
             }
         }
-        // Set fallback_node_type if not already present AND we have a choice.
-        let existing_fallback = root
-            .get("fallback_node_type")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        if existing_fallback.is_none() {
+        // Set `fallback_node_type` when the key is absent OR names no
+        // declared type (r25: both leave every mint held). Replacing an
+        // undeclared fallback with the preferred DECLARED choice keeps the
+        // row usable; the EA family always has one (`project` is a seed
+        // type), so this arm cannot fall through to the unusable report.
+        let fallback_usable = existing_fallback
+            .as_ref()
+            .is_some_and(|f| vocab.contains(f));
+        if !fallback_usable {
             if let Some(choice) = fallback_choice {
                 root["fallback_node_type"] = json!(choice);
                 did_set_fallback = true;
@@ -622,23 +894,37 @@ pub(crate) fn plan_manifest_ensure(manifest_json: &str) -> Result<EnsurePlan> {
         }
     } else {
         // Foreign manifest: declare-or-report only.
-        let existing_fallback = root
-            .get("fallback_node_type")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
         if existing_fallback.is_none() && fallback_choice.is_none() {
             return Ok(EnsurePlan::ForeignNoPreferredFallback);
         }
         // Foreign manifest with a declared fallback — fine. With no declared
         // fallback but `project` declared — declare it. With nothing
-        // declared — the loud signal above.
+        // declared — the loud signal above. An EXISTING fallback naming no
+        // declared type is left untouched here (declare-or-report) and
+        // caught by the post-edit usability check below.
         if existing_fallback.is_none() {
             if let Some(choice) = fallback_choice {
                 root["fallback_node_type"] = json!(choice);
                 did_set_fallback = true;
             }
+        }
+    }
+
+    // R2.4.5 post-edit usability check: the PLANNED row must leave a
+    // vocabulary the gate can run — the ensure must not stamp healthy
+    // (`Complete`) a row that holds every mint. Evaluated through the
+    // gate's own reader on the post-edit state, so the planner and the
+    // gate can never disagree about usability. EA-family rows were
+    // repaired above; this fires for foreign rows the ensure must not
+    // rewrite: an existing fallback naming no declared type, or an empty
+    // declared set. Strict rows only: the gate never reads a non-strict
+    // row's vocabulary, so nothing is held on one and reporting it would
+    // be a permanent false alarm (review finding).
+    if strict {
+        let planned_vocab =
+            NodeVocabulary::from_manifest(&crate::wiki_graph::parse_manifest_value(&root));
+        if let Some(reason) = planned_vocab.hold_reason(Some(owner)) {
+            return Ok(EnsurePlan::UnusableVocabulary { reason });
         }
     }
 
@@ -678,40 +964,50 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some((_mode, manifest_json)) = row else {
+    let Some((mode, manifest_json)) = row else {
         // No row to ensure — the spec's "missing row" case is a normal
         // SKIP per §2.1.
         return Ok(EnsureOutcome::NoRow);
     };
 
-    // 2. Memoization: skip if (entity_id, sha256(manifest_json)) is recorded.
-    let manifest_hash = hash_bytes(manifest_json.as_bytes());
+    // 2. Memoization: skip if this (entity, planner epoch, gated mode,
+    //    bytes) was already planned healthy.
+    let gated_mode = gated_row_mode(conn, entity_id, &mode)?;
+    let manifest_hash = ensure_memo_key(gated_mode, &manifest_json);
     if manifest_ensure_already_done(conn, entity_id, &manifest_hash)? {
         return Ok(EnsureOutcome::AlreadyEnsured);
     }
 
     // 3. Parse, classify, edit (the pure planner).
-    let (new_json, did_extend, did_set_fallback) = match plan_manifest_ensure(&manifest_json)? {
-        EnsurePlan::Malformed(e) => return Ok(EnsureOutcome::Malformed(e)),
-        EnsurePlan::ForeignNoPreferredFallback => {
-            return Ok(EnsureOutcome::ForeignNoPreferredFallback {
-                entity_id: entity_id.to_string(),
-            });
-        }
-        EnsurePlan::Complete => (None, false, false),
-        EnsurePlan::Edit {
-            new_json,
-            extended,
-            fallback_set,
-        } => (Some(new_json), extended, fallback_set),
-    };
+    let strict = gated_mode == "strict";
+    let (new_json, did_extend, did_set_fallback) =
+        match plan_manifest_ensure(&manifest_json, entity_id, strict)? {
+            EnsurePlan::Malformed(e) => return Ok(EnsureOutcome::Malformed(e)),
+            EnsurePlan::ForeignNoPreferredFallback => {
+                return Ok(EnsureOutcome::ForeignNoPreferredFallback {
+                    entity_id: entity_id.to_string(),
+                });
+            }
+            EnsurePlan::UnusableVocabulary { reason } => {
+                return Ok(EnsureOutcome::UnusableVocabulary {
+                    entity_id: entity_id.to_string(),
+                    reason,
+                });
+            }
+            EnsurePlan::Complete => (None, false, false),
+            EnsurePlan::Edit {
+                new_json,
+                extended,
+                fallback_set,
+            } => (Some(new_json), extended, fallback_set),
+        };
 
     // 4. Write the edited manifest_json back + record the memo ONLY if the
     //    write commits (r11-m4). The memo key is the POST-WRITE hash so the
     //    next call reads the new manifest_json, computes its hash, and finds
     //    the memo — short-circuiting to AlreadyEnsured.
     if let Some(new_json) = new_json {
-        let new_hash = hash_bytes(new_json.as_bytes());
+        let new_hash = ensure_memo_key(gated_mode, &new_json);
         let tx = conn.unchecked_transaction()?;
         // Compare-and-swap on the bytes we READ (review finding): the read
         // above is outside the transaction, so a concurrent engine/desktop
@@ -730,11 +1026,7 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
             // may still be missing — report the race distinctly.
             return Ok(EnsureOutcome::RacedConcurrentWrite);
         }
-        tx.execute(
-            "INSERT OR REPLACE INTO manifest_ensure_memo (entity_id, manifest_hash, recorded_at)
-             VALUES (?1, ?2, ?3)",
-            params![entity_id, new_hash, crate::db::commit::now_timestamps().0],
-        )?;
+        record_ensure_memo(&tx, entity_id, &new_hash)?;
         tx.commit()?;
         Ok(EnsureOutcome::Ensured {
             extended: did_extend,
@@ -744,15 +1036,7 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
         // Nothing to change — still record it so we don't reparse on every
         // resolution (r11-m4).
         let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT OR IGNORE INTO manifest_ensure_memo (entity_id, manifest_hash, recorded_at)
-             VALUES (?1, ?2, ?3)",
-            params![
-                entity_id,
-                manifest_hash,
-                crate::db::commit::now_timestamps().0
-            ],
-        )?;
+        record_ensure_memo(&tx, entity_id, &manifest_hash)?;
         tx.commit()?;
         Ok(EnsureOutcome::AlreadyComplete)
     }
@@ -777,10 +1061,71 @@ pub enum EnsureOutcome {
     /// Foreign manifest without a preferred-fallback option declared; the
     /// ensure refused to inject and surfaced a §2.4.5 loud diagnostic.
     ForeignNoPreferredFallback { entity_id: String },
+    /// The row (post any ensure edits) still carries a vocabulary the gate
+    /// cannot run — R2.4.5 holds every mint on it. The ensure writes
+    /// nothing and records no memo; heal reports the row until the
+    /// operator fixes it (`ct ontology set --fallback`).
+    UnusableVocabulary {
+        entity_id: String,
+        reason: HoldReason,
+    },
     /// The compare-and-swap write changed zero rows — the manifest was
     /// rewritten concurrently between read and UPDATE. Nothing was written
     /// and no memo recorded; the next pass re-reads the newer bytes.
     RacedConcurrentWrite,
+}
+
+/// The planner's verdict epoch. Bump it whenever
+/// [`plan_manifest_ensure`] can return a different verdict for the same
+/// bytes: a memo is a cached "planned healthy", and one recorded by an
+/// older planner must never short-circuit a newer one (review finding: a
+/// pre-r26 memo kept `Complete` on rows r26 repairs or reports, so the
+/// ensure answered `AlreadyEnsured` forever while read-only `ct heal`
+/// reported the row unusable).
+const ENSURE_PLANNER_EPOCH: &str = "r26";
+
+/// The mode the GATE sees for `entity_id`'s row: its stored `mode`, except
+/// that a merged-away (or cycle-locked) id's row is never read — rung 1b
+/// reads the terminal survivor's row (R2.7.5) — so it gates nothing and is
+/// reported as `"redirected"` (review finding: judging it by raw id
+/// re-reported a loser's leftover row forever, with a fix that writes the
+/// survivor's row instead). D8: a faulting redirect read propagates.
+pub(crate) fn gated_row_mode<'m>(
+    conn: &Connection,
+    entity_id: &str,
+    mode: &'m str,
+) -> Result<&'m str> {
+    Ok(match redirect_survivor(conn, entity_id)? {
+        RedirectOutcome::None => mode,
+        RedirectOutcome::Survivor(_) | RedirectOutcome::Cycle => "redirected",
+    })
+}
+
+/// The memo key: the planner's verdict depends on the epoch, the row's
+/// mode (only strict rows can be unusable) and its bytes — all three key
+/// it, so a mode flip or a planner change re-plans.
+fn ensure_memo_key(mode: &str, manifest_json: &str) -> String {
+    hash_bytes(format!("{ENSURE_PLANNER_EPOCH}\0{mode}\0{manifest_json}").as_bytes())
+}
+
+/// Record `manifest_hash` as this entity's ONE memo, dropping any earlier
+/// key — older bytes or an older epoch can never match again, so keeping
+/// them only grows the table.
+fn record_ensure_memo(conn: &Connection, entity_id: &str, manifest_hash: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM manifest_ensure_memo WHERE entity_id = ?1 AND manifest_hash <> ?2",
+        params![entity_id, manifest_hash],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO manifest_ensure_memo (entity_id, manifest_hash, recorded_at)
+         VALUES (?1, ?2, ?3)",
+        params![
+            entity_id,
+            manifest_hash,
+            crate::db::commit::now_timestamps().0
+        ],
+    )?;
+    Ok(())
 }
 
 fn manifest_ensure_already_done(
@@ -829,6 +1174,12 @@ pub fn ensure_all_manifest_vocabularies(conn: &Connection) -> Result<EnsureSumma
                     EnsureOutcome::ForeignNoPreferredFallback { .. } => {
                         summary.foreign_no_preferred_fallback += 1;
                     }
+                    EnsureOutcome::UnusableVocabulary { entity_id, reason } => {
+                        // Named per row with its own cause and fix — a bare
+                        // count cannot say which row holds or why.
+                        eprintln!("[entity-gate] manifest `{entity_id}` cannot gate: {reason}");
+                        summary.unusable_vocabulary.push(entity_id);
+                    }
                     EnsureOutcome::Malformed(_) => summary.malformed += 1,
                     EnsureOutcome::RacedConcurrentWrite => {
                         summary.raced += 1;
@@ -865,6 +1216,9 @@ pub struct EnsureSummary {
     pub extended: usize,
     pub fallbacks_set: usize,
     pub foreign_no_preferred_fallback: usize,
+    /// Strict rows (entity ids) whose post-ensure vocabulary still cannot
+    /// gate (R2.4.5) — reported by name, not repaired.
+    pub unusable_vocabulary: Vec<String>,
     pub malformed: usize,
     /// Rows whose CAS write lost a concurrent rewrite (nothing written).
     pub raced: usize,
@@ -887,15 +1241,17 @@ pub struct EnsureSummary {
 ///   * `Off` — rungs 2/3/4 explicitly resolve to off (an `off`
 ///     `folder_ontology` entry, an off ontology_default, or an
 ///     unmarked-off tier_fact row). SKIP.
-///   * `StrictNoVocab` — rung 4: tier_fact is strict with no usable
-///     vocabulary (no `node_types` OR no fallback_node_type).
-///     HELD per §2.4.5 — config error.
+///   * `StrictNoVocab` — the mint must be gated but cannot be: a strict
+///     row with no usable vocabulary (no `node_types`, no
+///     `fallback_node_type`, or an undeclared one), an unreadable row, a
+///     faulted opt-out lookup, or a degraded config. HELD per §2.4.5; the
+///     [`HoldReason`] names which.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModeVerdict {
     OptOut,
     Gate,
     Off,
-    StrictNoVocab,
+    StrictNoVocab(HoldReason),
 }
 
 /// What `resolve_node_gate_decision` did — Task 3 wires this at the four
@@ -913,15 +1269,19 @@ pub struct NodeGateDecision {
 
 impl NodeGateDecision {
     /// Convert to a [`GateDecision`] for the shared insert helper. An
-    /// off/opt-out verdict becomes `Skip`; an empty vocabulary
-    /// becomes `Held`; a populated vocabulary becomes `Gate(vocab)`.
+    /// off/opt-out verdict becomes `Skip`; a held verdict becomes
+    /// `Held(reason)`; a gated vocabulary becomes `Gate(vocab)`.
     pub fn into_gate_decision(self) -> GateDecision {
         match self.verdict {
             ModeVerdict::OptOut | ModeVerdict::Off => GateDecision::Skip,
-            ModeVerdict::StrictNoVocab => GateDecision::Held,
+            ModeVerdict::StrictNoVocab(reason) => GateDecision::Held(reason),
             ModeVerdict::Gate => match self.vocabulary {
                 Some(v) => GateDecision::Gate(v),
-                None => GateDecision::Held,
+                // The resolver never builds `Gate` without a vocabulary;
+                // name the bug rather than invent an empty-manifest cause.
+                None => GateDecision::Held(HoldReason::Internal {
+                    detail: "gate verdict without a vocabulary",
+                }),
             },
         }
     }
@@ -992,18 +1352,33 @@ impl GateResolutionContext<'_> {
     }
 }
 
+/// The mode verdict for a STRICT vocabulary read from manifest row `owner`:
+/// GATE when usable, else HELD (§2.4.5) naming why — no parseable manifest,
+/// no node types, or no declared `fallback_node_type` (R2.4.4/R2.4.5).
+fn strict_vocabulary_verdict(vocabulary: Option<&NodeVocabulary>, owner: &str) -> ModeVerdict {
+    let reason = match vocabulary {
+        Some(v) => v.hold_reason(Some(owner)),
+        None => Some(HoldReason::EmptyNodeTypes {
+            manifest: Some(owner.to_string()),
+            fallback: None,
+        }),
+    };
+    match reason {
+        Some(reason) => ModeVerdict::StrictNoVocab(reason),
+        None => ModeVerdict::Gate,
+    }
+}
+
 /// The verdict of a STRICT manifest row (rung 1b's own row, or rung 4's
-/// `tier_fact`): GATE under its vocabulary, or HELD (§2.4.5) when the row
-/// declares no usable `fallback_node_type` / no parseable manifest.
-fn strict_row_decision(manifest: Option<&crate::wiki_graph::WikiManifest>) -> NodeGateDecision {
+/// `tier_fact`), named `owner`: GATE under its vocabulary, or HELD (§2.4.5)
+/// when that vocabulary is unusable.
+fn strict_row_decision(
+    manifest: Option<&crate::wiki_graph::WikiManifest>,
+    owner: &str,
+) -> NodeGateDecision {
     let vocabulary = manifest.map(NodeVocabulary::from_manifest);
-    let usable = vocabulary.as_ref().is_some_and(|v| v.fallback().is_some());
     NodeGateDecision {
-        verdict: if usable {
-            ModeVerdict::Gate
-        } else {
-            ModeVerdict::StrictNoVocab
-        },
+        verdict: strict_vocabulary_verdict(vocabulary.as_ref(), owner),
         vocabulary,
         source_directory: None,
     }
@@ -1046,7 +1421,9 @@ pub fn resolve_node_gate_decision(
                  holding the mint (rung 1a fail-closed)"
             );
             return NodeGateDecision {
-                verdict: ModeVerdict::StrictNoVocab,
+                verdict: ModeVerdict::StrictNoVocab(HoldReason::OptOutLookupFailed {
+                    entity_id: entity_id.to_string(),
+                }),
                 vocabulary: None,
                 source_directory: None,
             };
@@ -1057,15 +1434,36 @@ pub fn resolve_node_gate_decision(
     // REPORT-OR-HOLD for nodes per r4-m4; an unmarked row climbs. A STRICT
     // row GATEs — the vocabulary comes from THIS manifest (its fallback_node_type
     // drives the degrade rung).
+    //
+    // The row read is the TERMINAL SURVIVOR's (R2.7.5): a mint under a
+    // merged-away id lands on the survivor (`shared_insert_entity`
+    // resolves the same chain), so the survivor's row governs it — and
+    // it is the row `ct ontology set --entity` writes, so a held mint's
+    // fix-line names a row that command can actually repair (review
+    // finding: reading the loser's row by raw id held mints on a row no
+    // CT command can reach). D8: an unresolvable chain holds.
+    let manifest_owner = match redirect_survivor(conn, entity_id) {
+        Ok(RedirectOutcome::Survivor(survivor)) => survivor,
+        Ok(RedirectOutcome::None) => entity_id.to_string(),
+        Ok(RedirectOutcome::Cycle) | Err(_) => {
+            return NodeGateDecision {
+                verdict: ModeVerdict::StrictNoVocab(HoldReason::RedirectUnresolved {
+                    entity_id: entity_id.to_string(),
+                }),
+                vocabulary: None,
+                source_directory: None,
+            };
+        }
+    };
     let mut entity_row_unreadable = false;
-    match crate::wiki_graph::wiki_get_ontology(conn, entity_id) {
+    match crate::wiki_graph::wiki_get_ontology(conn, &manifest_owner) {
         Ok(o) if o.mode == "strict" => {
             // Ensure runs before the gate resolves (the gate's resolution path),
             // so a fresh install already has the `document`/`process` extensions
             // + `fallback_node_type` written. A pre-wave-1 manifest was caught
             // at the gate-resolve call below; if the strict row STILL lacks a
             // fallback the helper holds per §2.4.5.
-            return strict_row_decision(o.manifest.as_ref());
+            return strict_row_decision(o.manifest.as_ref(), &manifest_owner);
         }
         Ok(_) => {
             // Not strict (mark explicit OFF/emergent): rung 1d, climb.
@@ -1166,18 +1564,13 @@ pub fn resolve_node_gate_decision(
                     source_directory: None,
                 }
             }
-            TierFactRow::Strict(Some(v)) if v.fallback().is_some() => NodeGateDecision {
-                verdict: ModeVerdict::Gate,
-                vocabulary: Some(v),
-                source_directory: strict_source_dir,
-            },
             TierFactRow::Strict(vocab) => NodeGateDecision {
-                verdict: ModeVerdict::StrictNoVocab,
+                verdict: strict_vocabulary_verdict(vocab.as_ref(), "tier_fact"),
                 vocabulary: vocab,
                 source_directory: strict_source_dir,
             },
             TierFactRow::Unreadable => NodeGateDecision {
-                verdict: ModeVerdict::StrictNoVocab,
+                verdict: ModeVerdict::StrictNoVocab(HoldReason::TierFactUnreadable),
                 vocabulary: None,
                 source_directory: strict_source_dir,
             },
@@ -1193,7 +1586,9 @@ pub fn resolve_node_gate_decision(
         // exists to prevent.
         if entity_row_unreadable {
             return NodeGateDecision {
-                verdict: ModeVerdict::StrictNoVocab,
+                verdict: ModeVerdict::StrictNoVocab(HoldReason::EntityManifestUnreadable {
+                    entity_id: manifest_owner.clone(),
+                }),
                 vocabulary: None,
                 source_directory: None,
             };
@@ -1215,7 +1610,9 @@ pub fn resolve_node_gate_decision(
             };
         }
         return NodeGateDecision {
-            verdict: ModeVerdict::StrictNoVocab,
+            verdict: ModeVerdict::StrictNoVocab(HoldReason::ConfigHold {
+                source: hold_source_dir.clone(),
+            }),
             vocabulary: None,
             source_directory: hold_source_dir.clone(),
         };
@@ -1227,7 +1624,9 @@ pub fn resolve_node_gate_decision(
         // ungated"). r4-m4 still applies: an unreadable entity row holds.
         if entity_row_unreadable {
             return NodeGateDecision {
-                verdict: ModeVerdict::StrictNoVocab,
+                verdict: ModeVerdict::StrictNoVocab(HoldReason::EntityManifestUnreadable {
+                    entity_id: manifest_owner.clone(),
+                }),
                 vocabulary: None,
                 source_directory: None,
             };
@@ -1241,7 +1640,7 @@ pub fn resolve_node_gate_decision(
 
     // Rung 4 — tier_fact itself.
     match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
-        Ok(o) if o.mode == "strict" => strict_row_decision(o.manifest.as_ref()),
+        Ok(o) if o.mode == "strict" => strict_row_decision(o.manifest.as_ref(), "tier_fact"),
         Ok(_) => {
             // Unmarked/off tier_fact row: §2.3.1 SKIP — UNLESS the entity's
             // own manifest row was unreadable: r4-m4's Held promise (no
@@ -1250,7 +1649,9 @@ pub fn resolve_node_gate_decision(
             // here (rungs 2-3 returned above).
             if entity_row_unreadable {
                 return NodeGateDecision {
-                    verdict: ModeVerdict::StrictNoVocab,
+                    verdict: ModeVerdict::StrictNoVocab(HoldReason::EntityManifestUnreadable {
+                        entity_id: manifest_owner.clone(),
+                    }),
                     vocabulary: None,
                     source_directory: None,
                 };
@@ -1266,7 +1667,7 @@ pub fn resolve_node_gate_decision(
         Err(_) => {
             // Corrupt tier_fact manifest: REPORT-OR-HOLD per §2.3 rung 4.
             NodeGateDecision {
-                verdict: ModeVerdict::StrictNoVocab,
+                verdict: ModeVerdict::StrictNoVocab(HoldReason::TierFactUnreadable),
                 vocabulary: None,
                 source_directory: None,
             }
@@ -1937,6 +2338,318 @@ mod tests {
         );
     }
 
+    /// r25/r26: an EA-family row whose `fallback_node_type` names no
+    /// declared type would hold every mint — the ensure REPLACES it with
+    /// the preferred declared choice (here `concept`, declared beside the
+    /// seeds) instead of stamping the row healthy.
+    #[test]
+    fn ensure_replaces_undeclared_ea_fallback() {
+        let conn = open_in_memory().unwrap();
+        let mut types: Vec<serde_json::Value> =
+            EA_SEED_TYPES.iter().map(|s| json!({"type": s})).collect();
+        types.push(json!({"type": "concept"}));
+        let manifest = serde_json::json!({
+            "node_types": types,
+            "edge_types": [],
+            "fallback_node_type": "ghost",
+        });
+        insert_manifest(&conn, "tier_fact", "strict", &manifest.to_string());
+
+        let outcome = ensure_manifest_vocabulary(&conn, "tier_fact").unwrap();
+        match outcome {
+            EnsureOutcome::Ensured { fallback_set, .. } => assert!(fallback_set),
+            other => panic!("expected Ensured, got {other:?}"),
+        }
+        let stored: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed["fallback_node_type"].as_str(), Some("concept"));
+
+        // The replacement left a usable vocabulary: a memo-cleared re-run
+        // is AlreadyComplete, not another repair or report.
+        conn.execute("DELETE FROM manifest_ensure_memo", [])
+            .unwrap();
+        let outcome = ensure_manifest_vocabulary(&conn, "tier_fact").unwrap();
+        assert_eq!(outcome, EnsureOutcome::AlreadyComplete);
+    }
+
+    /// r25/r26: a FOREIGN row whose fallback names no declared type is
+    /// beyond the ensure's declare-or-report charter — nothing is written
+    /// and the row is REPORTED (heal's `unusable_vocabulary` count),
+    /// never stamped healthy. No memo: every pass reports it again until
+    /// the operator fixes it.
+    #[test]
+    fn ensure_reports_foreign_undeclared_fallback() {
+        let conn = open_in_memory().unwrap();
+        let manifest = serde_json::json!({
+            "node_types": [{"type": "person"}, {"type": "place"}],
+            "edge_types": [],
+            "fallback_node_type": "ghost",
+        });
+        let manifest_json = manifest.to_string();
+        insert_manifest(&conn, "foreign_vault", "strict", &manifest_json);
+
+        let expected = EnsureOutcome::UnusableVocabulary {
+            entity_id: "foreign_vault".to_string(),
+            reason: HoldReason::FallbackNotDeclared {
+                manifest: Some("foreign_vault".to_string()),
+                fallback: "ghost".to_string(),
+                declared: vec!["person".to_string(), "place".to_string()],
+            },
+        };
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "foreign_vault").unwrap(),
+            expected
+        );
+        let stored: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'foreign_vault'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, manifest_json, "nothing was written");
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "foreign_vault").unwrap(),
+            expected,
+            "unusable rows are re-reported every pass (no memo)"
+        );
+    }
+
+    /// r25/r26: an empty declared set holds every mint even WITH a
+    /// fallback named over it — reported, never degraded onto.
+    #[test]
+    fn ensure_reports_empty_node_types_with_fallback() {
+        let conn = open_in_memory().unwrap();
+        let manifest = serde_json::json!({
+            "node_types": [],
+            "edge_types": [],
+            "fallback_node_type": "person",
+        });
+        insert_manifest(&conn, "foreign_vault", "strict", &manifest.to_string());
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "foreign_vault").unwrap(),
+            EnsureOutcome::UnusableVocabulary {
+                entity_id: "foreign_vault".to_string(),
+                reason: HoldReason::EmptyNodeTypes {
+                    manifest: Some("foreign_vault".to_string()),
+                    fallback: Some("person".to_string()),
+                },
+            }
+        );
+    }
+
+    /// Review finding (memo epoch): a memo recorded by the PRE-r26 planner
+    /// (key = sha256 of the bytes alone) marked rows `Complete` that r26
+    /// reports or repairs. It must not short-circuit the new planner, or
+    /// `ct heal --yes` answers `AlreadyEnsured` forever while read-only
+    /// `ct heal` reports the row unusable.
+    #[test]
+    fn legacy_memo_does_not_suppress_the_r26_planner() {
+        let conn = open_in_memory().unwrap();
+        // Foreign strict row: reported.
+        let foreign = serde_json::json!({
+            "node_types": [{"type": "person"}],
+            "fallback_node_type": "ghost",
+        })
+        .to_string();
+        insert_manifest(&conn, "foreign_vault", "strict", &foreign);
+        // EA-family row with an undeclared fallback: repaired.
+        let mut types: Vec<serde_json::Value> =
+            EA_SEED_TYPES.iter().map(|s| json!({"type": s})).collect();
+        types.push(json!({"type": "document"}));
+        types.push(json!({"type": "process"}));
+        let ea = json!({"node_types": types, "fallback_node_type": "ghost"}).to_string();
+        insert_manifest(&conn, "ea_vault", "strict", &ea);
+        for (id, bytes) in [("foreign_vault", &foreign), ("ea_vault", &ea)] {
+            conn.execute(
+                "INSERT INTO manifest_ensure_memo (entity_id, manifest_hash, recorded_at)
+                 VALUES (?1, ?2, 1)",
+                params![id, hash_bytes(bytes.as_bytes())],
+            )
+            .unwrap();
+        }
+
+        assert!(matches!(
+            ensure_manifest_vocabulary(&conn, "foreign_vault").unwrap(),
+            EnsureOutcome::UnusableVocabulary { .. }
+        ));
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "ea_vault").unwrap(),
+            EnsureOutcome::Ensured {
+                extended: false,
+                fallback_set: true,
+            }
+        );
+        // The repair re-memoized under the new key and dropped the legacy
+        // one: one memo row per entity, and the next pass short-circuits.
+        let memos: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM manifest_ensure_memo WHERE entity_id = 'ea_vault'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(memos, 1);
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "ea_vault").unwrap(),
+            EnsureOutcome::AlreadyEnsured
+        );
+    }
+
+    /// Review finding (mode): the gate reads only STRICT rows, so a
+    /// non-strict row's unusable vocabulary holds nothing and is not
+    /// reported — but flipping the row to strict (same bytes) re-plans
+    /// and reports it: the memo is keyed by mode too.
+    #[test]
+    fn unusable_vocabulary_is_reported_for_strict_rows_only() {
+        let conn = open_in_memory().unwrap();
+        let manifest = serde_json::json!({
+            "node_types": [{"type": "person"}],
+            "fallback_node_type": "ghost",
+        })
+        .to_string();
+        insert_manifest(&conn, "foreign_vault", "off", &manifest);
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "foreign_vault").unwrap(),
+            EnsureOutcome::AlreadyComplete
+        );
+        conn.execute(
+            "UPDATE llm_wiki_entity_manifests SET mode = 'strict' WHERE entity_id = 'foreign_vault'",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            ensure_manifest_vocabulary(&conn, "foreign_vault").unwrap(),
+            EnsureOutcome::UnusableVocabulary { .. }
+        ));
+    }
+
+    /// Review finding (planner reader): "declared" is read through the
+    /// gate's lenient reader, so a bare-string `node_types` row is not
+    /// misread as declaring nothing — `project` is found and declared as
+    /// the fallback, exactly as for the object form.
+    #[test]
+    fn planner_reads_bare_string_node_types_like_the_gate() {
+        let manifest = json!({"node_types": ["person", "project"]}).to_string();
+        let EnsurePlan::Edit {
+            new_json,
+            fallback_set,
+            ..
+        } = plan_manifest_ensure(&manifest, "foreign_vault", true).unwrap()
+        else {
+            panic!("expected the fallback to be declared");
+        };
+        assert!(fallback_set);
+        let parsed: serde_json::Value = serde_json::from_str(&new_json).unwrap();
+        assert_eq!(parsed["fallback_node_type"], "project");
+    }
+
+    /// Review finding (merged-away id): rung 1b reads the TERMINAL
+    /// SURVIVOR's manifest row — where the mint lands and the row
+    /// `ct ontology set --entity` writes — never a stale loser's row.
+    #[test]
+    fn rung_1b_reads_the_survivor_row_not_the_losers() {
+        let conn = open_in_memory().unwrap();
+        // The loser's leftover row is unusable; the survivor has none.
+        insert_manifest(
+            &conn,
+            "e_lose",
+            "strict",
+            &json!({"node_types": [{"type": "person"}]}).to_string(),
+        );
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('e_lose', 'e_surv', 1)",
+            [],
+        )
+        .unwrap();
+        let ingest = crate::config::IngestConfig::default();
+        let degraded = crate::config::OntologyDegradedState::default();
+        let ctx = || GateResolutionContext {
+            ingest: &ingest,
+            degraded: &degraded,
+            schema: None,
+            schema_unparseable: false,
+            vault_root: None,
+        };
+        let node = resolve_node_gate_decision(&conn, "e_lose", &[], ctx());
+        assert!(
+            !matches!(
+                &node.verdict,
+                ModeVerdict::StrictNoVocab(HoldReason::NoFallback { manifest: Some(m), .. })
+                    if m == "e_lose"
+            ),
+            "the loser's row must not govern the mint: {:?}",
+            node.verdict
+        );
+
+        // A survivor strict row DOES govern, and its hold names the
+        // survivor — the row the printed fix can actually repair.
+        insert_manifest(
+            &conn,
+            "e_surv",
+            "strict",
+            &json!({"node_types": [{"type": "person"}]}).to_string(),
+        );
+        let node = resolve_node_gate_decision(&conn, "e_lose", &[], ctx());
+        assert_eq!(
+            node.verdict,
+            ModeVerdict::StrictNoVocab(HoldReason::NoFallback {
+                manifest: Some("e_surv".to_string()),
+                declared: vec!["person".to_string()],
+            })
+        );
+
+        // An unresolvable chain holds (D8), naming the cause.
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('e_surv', 'e_lose', 1)",
+            [],
+        )
+        .unwrap();
+        let node = resolve_node_gate_decision(&conn, "e_lose", &[], ctx());
+        assert!(
+            matches!(
+                node.verdict,
+                ModeVerdict::StrictNoVocab(HoldReason::OptOutLookupFailed { .. })
+                    | ModeVerdict::StrictNoVocab(HoldReason::RedirectUnresolved { .. })
+            ),
+            "{:?}",
+            node.verdict
+        );
+    }
+
+    /// Review finding: a merged-away id's leftover strict row is never read
+    /// by the gate (rung 1b reads the survivor's), so the ensure must not
+    /// report it unusable — its printed fix would write the survivor's row
+    /// and never clear the report.
+    #[test]
+    fn ensure_does_not_report_a_merged_losers_row() {
+        let conn = open_in_memory().unwrap();
+        insert_manifest(
+            &conn,
+            "e_lose",
+            "strict",
+            &json!({"node_types": [{"type": "person"}], "fallback_node_type": "ghost"}).to_string(),
+        );
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('e_lose', 'e_surv', 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "e_lose").unwrap(),
+            EnsureOutcome::AlreadyComplete
+        );
+    }
+
     /// Hand-stripped `fallback_node_type` → ensure re-runs and writes it.
     #[test]
     fn ensure_hand_stripped_key_re_runs() {
@@ -2321,7 +3034,7 @@ mod tests {
             Some("character"),
             "summary",
             100,
-            GateDecision::Held,
+            GateDecision::Held(HoldReason::TierFactUnreadable),
             false,
         )
         .unwrap();
@@ -2364,7 +3077,7 @@ mod tests {
             Some("character"),
             "summary",
             200,
-            GateDecision::Held,
+            GateDecision::Held(HoldReason::TierFactUnreadable),
             false,
         )
         .unwrap();
@@ -2396,6 +3109,8 @@ mod tests {
             let mut by_key = std::collections::HashMap::new();
             by_key.insert("person".to_string(), "person".to_string());
             by_key.insert("role".to_string(), "role".to_string());
+            // R2.4.4: the fallback is itself declared.
+            by_key.insert("project".to_string(), "project".to_string());
             NodeVocabulary {
                 by_key,
                 fallback: Some("project".to_string()),
@@ -2492,6 +3207,45 @@ mod tests {
         tx.commit().unwrap();
     }
 
+    /// R2.4.4 (r26): a case-variant fallback (`Person` beside the declared
+    /// `person`) is USABLE — membership is key-based — but must LAND in
+    /// the declared entry's spelling, the same rule the declared and
+    /// alias arms follow, so one type never splits into two exact-match
+    /// buckets in `entity_type`.
+    #[test]
+    fn case_variant_fallback_lands_the_declared_spelling() {
+        let manifest = crate::wiki_graph::parse_manifest_value(&serde_json::json!({
+            "node_types": [{"type": "person"}, {"type": "place"}],
+            "edge_types": [],
+            "fallback_node_type": "Person",
+        }));
+        let vocab = NodeVocabulary::from_manifest(&manifest);
+        assert_eq!(vocab.hold_reason(None), None, "case variant is usable");
+        assert_eq!(vocab.fallback(), Some("person"), "stored canonically");
+
+        let conn = open_in_memory().unwrap();
+        let mut conn = conn;
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            None,
+            "Unlabeled-mint",
+            None,
+            "",
+            100,
+            GateDecision::Gate(vocab),
+            false,
+        )
+        .unwrap();
+        match outcome {
+            AdmitOutcome::DegradedToFallback { landed_as, .. } => {
+                assert_eq!(landed_as, "person");
+            }
+            other => panic!("expected DegradedToFallback, got {other:?}"),
+        }
+        tx.commit().unwrap();
+    }
+
     /// Task 9 fix round 1, Finding 2 pin: the UNLABELED ladder arm (Task 9)
     /// reaches BOTH the GUI mint (entities::create_entity, blank type) and
     /// LLM synthesis (commit.rs, no proposed type). Both sites route through
@@ -2513,6 +3267,8 @@ mod tests {
         let vocab_with_fallback = {
             let mut by_key = std::collections::HashMap::new();
             by_key.insert("person".to_string(), "person".to_string());
+            // R2.4.4: the fallback is itself declared.
+            by_key.insert("project".to_string(), "project".to_string());
             NodeVocabulary {
                 by_key,
                 fallback: Some("project".to_string()),
@@ -2570,7 +3326,13 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(outcome, AdmitOutcome::Held { .. }),
+            matches!(
+                outcome,
+                AdmitOutcome::Held {
+                    reason: HoldReason::NoFallback { .. },
+                    ..
+                }
+            ),
             "unlabeled without a declared fallback must still refuse, got {outcome:?}"
         );
         let count: i64 = tx
@@ -2768,7 +3530,10 @@ mod tests {
         };
         let node =
             ladder_with_strict_tier_fact(&crate::config::IngestConfig::default(), &degraded, &[]);
-        assert_eq!(node.verdict, ModeVerdict::StrictNoVocab);
+        assert_eq!(
+            node.verdict,
+            ModeVerdict::StrictNoVocab(HoldReason::ConfigHold { source: None })
+        );
     }
 
     /// No default + no schema → rung 3 climbs; rung 4 strict tier_fact
@@ -2858,7 +3623,12 @@ mod tests {
             &degraded,
             &["held/a.md".to_string(), "ops/b.md".to_string()],
         );
-        assert_eq!(node.verdict, ModeVerdict::StrictNoVocab);
+        assert_eq!(
+            node.verdict,
+            ModeVerdict::StrictNoVocab(HoldReason::ConfigHold {
+                source: Some("held/a.md".to_string())
+            })
+        );
         assert_eq!(node.source_directory.as_deref(), Some("held/a.md"));
     }
 
@@ -2891,8 +3661,11 @@ mod tests {
             vault_root: None,
         };
         let node = resolve_node_gate_decision(&conn, "ent_new", &["held/a.md".to_string()], ctx);
-        assert_eq!(node.verdict, ModeVerdict::StrictNoVocab);
-        assert_eq!(node.into_gate_decision(), GateDecision::Held);
+        let reason = HoldReason::EntityManifestUnreadable {
+            entity_id: "ent_new".to_string(),
+        };
+        assert_eq!(node.verdict, ModeVerdict::StrictNoVocab(reason.clone()));
+        assert_eq!(node.into_gate_decision(), GateDecision::Held(reason));
     }
 
     /// Ensure dedupe is case-insensitive (review finding): a manifest that
@@ -2905,7 +3678,9 @@ mod tests {
         types.push(json!({"type": "Document"}));
         types.push(json!({"type": "Concept"}));
         let manifest = json!({"node_types": types, "edge_types": []}).to_string();
-        let EnsurePlan::Edit { new_json, .. } = plan_manifest_ensure(&manifest).unwrap() else {
+        let EnsurePlan::Edit { new_json, .. } =
+            plan_manifest_ensure(&manifest, "tier_fact", true).unwrap()
+        else {
             panic!("expected an edit (process + fallback missing)");
         };
         let parsed: serde_json::Value = serde_json::from_str(&new_json).unwrap();
@@ -2978,7 +3753,10 @@ mod tests {
         assert_eq!(node.verdict, ModeVerdict::Off);
         let node =
             ladder_with_strict_tier_fact(&crate::config::IngestConfig::default(), &degraded, &[]);
-        assert_eq!(node.verdict, ModeVerdict::StrictNoVocab);
+        assert_eq!(
+            node.verdict,
+            ModeVerdict::StrictNoVocab(HoldReason::ConfigHold { source: None })
+        );
     }
 
     /// R2.3.3 strict-wins: an off source never downgrades an entity whose
@@ -2995,5 +3773,228 @@ mod tests {
             &["ops/a.md".to_string(), "notes/b.md".to_string()],
         );
         assert_eq!(node.verdict, ModeVerdict::Gate);
+    }
+
+    /// Resolve a fresh mint against a strict `tier_fact` row carrying
+    /// `manifest`, pathless (GUI/bundle shape), no folder config.
+    fn ladder_over_tier_fact(manifest: serde_json::Value) -> (Connection, NodeGateDecision) {
+        let conn = open_in_memory().unwrap();
+        conn.execute("DELETE FROM llm_wiki_entity_manifests", [])
+            .unwrap();
+        insert_manifest(&conn, "tier_fact", "strict", &manifest.to_string());
+        let ingest = crate::config::IngestConfig::default();
+        let degraded = crate::config::OntologyDegradedState::default();
+        let ctx = GateResolutionContext {
+            ingest: &ingest,
+            degraded: &degraded,
+            schema: None,
+            schema_unparseable: false,
+            vault_root: None,
+        };
+        let node = resolve_node_gate_decision(&conn, "ent_new", &[], ctx);
+        (conn, node)
+    }
+
+    /// R2.4.5 (explicit): a strict `tier_fact` that declares node types but
+    /// NO `fallback_node_type` holds EVERY new-entity mint — a mint
+    /// proposing a DECLARED type included. The gate never runs a partial
+    /// vocabulary. The fixture declares neither `concept` nor `project`, the
+    /// foreign-manifest shape the ensure leaves fallback-less.
+    #[test]
+    fn strict_no_fallback_holds_a_declared_label_mint() {
+        let (mut conn, node) = ladder_over_tier_fact(serde_json::json!({
+            "node_types": [{"type": "person"}, {"type": "place"}],
+            "edge_types": [],
+        }));
+        let expected = HoldReason::NoFallback {
+            manifest: Some("tier_fact".to_string()),
+            declared: vec!["person".to_string(), "place".to_string()],
+        };
+        assert_eq!(node.verdict, ModeVerdict::StrictNoVocab(expected.clone()));
+
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_new"),
+            "Ada",
+            Some("person"),
+            "",
+            1,
+            node.into_gate_decision(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            AdmitOutcome::Held {
+                original_label: Some("person".to_string()),
+                reason: expected,
+            },
+            "a declared label is held too"
+        );
+        let count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM curated_entities WHERE id = 'ent_new'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "held: nothing inserted");
+    }
+
+    /// R2.4.4: a `fallback_node_type` that is not one of the manifest's
+    /// node types is the same configuration error — it holds rather than
+    /// landing an undeclared type.
+    #[test]
+    fn undeclared_fallback_holds_instead_of_landing_it() {
+        let (_conn, node) = ladder_over_tier_fact(serde_json::json!({
+            "node_types": [{"type": "person"}],
+            "edge_types": [],
+            "fallback_node_type": "thing",
+        }));
+        assert_eq!(
+            node.verdict,
+            ModeVerdict::StrictNoVocab(HoldReason::FallbackNotDeclared {
+                manifest: Some("tier_fact".to_string()),
+                fallback: "thing".to_string(),
+                declared: vec!["person".to_string()],
+            })
+        );
+    }
+
+    /// A fallback over ZERO node types holds at the resolver (it used to
+    /// reach `Gate` and hold only inside the insert helper), naming the
+    /// empty set rather than a fallback the manifest already has.
+    #[test]
+    fn fallback_over_empty_node_types_holds_naming_the_empty_set() {
+        let (_conn, node) = ladder_over_tier_fact(serde_json::json!({
+            "node_types": [],
+            "edge_types": [],
+            "fallback_node_type": "person",
+        }));
+        assert_eq!(
+            node.verdict,
+            ModeVerdict::StrictNoVocab(HoldReason::EmptyNodeTypes {
+                manifest: Some("tier_fact".to_string()),
+                fallback: Some("person".to_string()),
+            })
+        );
+    }
+
+    /// Only the vocabulary causes print a `--fallback` fix, and the command
+    /// targets the row that held the mint: `tier_fact` is the default
+    /// target, an entity row needs `--entity`.
+    #[test]
+    fn hold_reason_messages_name_the_cause_and_the_right_fix() {
+        let declared = vec!["person".to_string(), "place".to_string()];
+        let tier = HoldReason::NoFallback {
+            manifest: Some("tier_fact".to_string()),
+            declared: declared.clone(),
+        }
+        .to_string();
+        assert!(tier.contains("declared type"), "{tier}");
+        assert!(
+            tier.contains("`ct ontology set --fallback <type>` with one of: person, place"),
+            "{tier}"
+        );
+
+        let entity = HoldReason::NoFallback {
+            manifest: Some("ent_x".to_string()),
+            declared,
+        }
+        .to_string();
+        assert!(
+            entity.contains("`ct ontology set --entity=ent_x --fallback <type>`"),
+            "{entity}"
+        );
+
+        // r26: the unnamed-row arm still prints a PASTEABLE command — no
+        // bracket placeholders (glob characters in zsh/bash) — with the
+        // entity-row variant named in prose.
+        let unnamed = HoldReason::NoFallback {
+            manifest: None,
+            declared: vec!["person".to_string()],
+        }
+        .to_string();
+        assert!(!unnamed.contains('['), "{unnamed}");
+        assert!(
+            unnamed.contains("`ct ontology set --fallback <type>`"),
+            "{unnamed}"
+        );
+        assert!(unnamed.contains("--entity <id>"), "{unnamed}");
+
+        // r26: an entity strict row is CT-written (a `tier_fact` copy) —
+        // its EmptyNodeTypes fix names the re-copy, not the wiki engine
+        // (which never rewrites an entity-scoped row).
+        let entity_empty = HoldReason::EmptyNodeTypes {
+            manifest: Some("ent_x".to_string()),
+            fallback: None,
+        }
+        .to_string();
+        assert!(
+            entity_empty.contains("`ct ontology set --entity=ent_x --mode strict`"),
+            "{entity_empty}"
+        );
+
+        let tier_empty = HoldReason::EmptyNodeTypes {
+            manifest: Some("tier_fact".to_string()),
+            fallback: Some("person".to_string()),
+        }
+        .to_string();
+        assert!(tier_empty.contains("wiki engine"), "{tier_empty}");
+        assert!(tier_empty.contains("`person`"), "{tier_empty}");
+
+        // With NO fallback named, adding node types alone would only trade
+        // this hold for NoFallback: the fix names both steps.
+        let tier_bare = HoldReason::EmptyNodeTypes {
+            manifest: Some("tier_fact".to_string()),
+            fallback: None,
+        }
+        .to_string();
+        assert!(
+            tier_bare.contains("`ct ontology set --fallback <type>`"),
+            "{tier_bare}"
+        );
+
+        // Entity ids are shell-quoted in every printed command: a bundle
+        // id with shell metacharacters must not inject into a paste.
+        let hostile = HoldReason::NoFallback {
+            manifest: Some("ent_a; rm -rf ~".to_string()),
+            declared: vec!["person".to_string()],
+        }
+        .to_string();
+        assert!(
+            hostile.contains("`ct ontology set --entity='ent_a; rm -rf ~' --fallback <type>`"),
+            "{hostile}"
+        );
+
+        // Backstops name a bug, never a configuration cause.
+        let internal = HoldReason::Internal { detail: "x" }.to_string();
+        assert!(internal.contains("bug"), "{internal}");
+
+        for reason in [
+            HoldReason::TierFactUnreadable,
+            HoldReason::EntityManifestUnreadable {
+                entity_id: "ent_x".to_string(),
+            },
+            HoldReason::OptOutLookupFailed {
+                entity_id: "ent_x".to_string(),
+            },
+            HoldReason::ConfigHold { source: None },
+            HoldReason::EmptyNodeTypes {
+                manifest: Some("tier_fact".to_string()),
+                fallback: Some("person".to_string()),
+            },
+            HoldReason::RedirectUnresolved {
+                entity_id: "ent_x".to_string(),
+            },
+            HoldReason::Internal { detail: "x" },
+        ] {
+            let message = reason.to_string();
+            assert!(
+                !message.contains("--fallback"),
+                "{reason:?} must not prescribe a fallback fix: {message}"
+            );
+        }
     }
 }

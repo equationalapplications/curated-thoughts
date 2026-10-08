@@ -1095,3 +1095,94 @@ fn trust_cmd(link: Option<String>, list: bool, revoke: Option<String>) -> Result
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri_app_lib::db::ontology_set::{set_command, SetCommand};
+
+    /// Split a printed command the way a POSIX shell would for the subset
+    /// `set_command` emits: whitespace-separated words, single quotes
+    /// literal, an unquoted `\` escapes the next character.
+    fn shell_words(cmd: &str) -> Vec<String> {
+        let (mut words, mut cur, mut quoted, mut in_word) =
+            (Vec::new(), String::new(), false, false);
+        let mut chars = cmd.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' if !quoted => {
+                    cur.extend(chars.next());
+                    in_word = true;
+                }
+                '\'' => {
+                    quoted = !quoted;
+                    in_word = true;
+                }
+                c if c.is_whitespace() && !quoted => {
+                    if in_word {
+                        words.push(std::mem::take(&mut cur));
+                        in_word = false;
+                    }
+                }
+                c => {
+                    cur.push(c);
+                    in_word = true;
+                }
+            }
+        }
+        if in_word {
+            words.push(cur);
+        }
+        words
+    }
+
+    /// Every `ct ontology set` fix command the gate, okf/bundle aborts and
+    /// heal print comes from `set_command`; it must parse against THIS
+    /// clap definition (review finding: freehand templates could drift
+    /// from the flags and print commands that fail at the parser).
+    #[test]
+    fn printed_ontology_set_commands_parse() {
+        for entity in [
+            None,
+            Some("ent_0a1b"),
+            Some("ent_a; echo pwned"),
+            Some("it's"),
+            // A leading hyphen must stay attached (`--entity=`), else clap
+            // reads the id as an option.
+            Some("-ent_lead"),
+        ] {
+            for strict in [false, true] {
+                for fallback in [false, true] {
+                    if !strict && !fallback {
+                        continue; // never printed: sets nothing
+                    }
+                    let printed = set_command(SetCommand {
+                        entity,
+                        strict,
+                        fallback,
+                    })
+                    .replace("<type>", "person");
+                    let words = shell_words(&printed);
+                    let parsed = Ct::try_parse_from(&words)
+                        .unwrap_or_else(|e| panic!("`{printed}` does not parse: {e}"));
+                    let Cmd::Ontology {
+                        cmd:
+                            OntologyCmd::Set {
+                                mode,
+                                entity: e,
+                                dir,
+                                fallback: f,
+                            },
+                    } = parsed.cmd
+                    else {
+                        panic!("`{printed}` parsed as another command");
+                    };
+                    assert_eq!(e.as_deref(), entity, "{printed}");
+                    assert_eq!(mode.as_deref(), strict.then_some("strict"), "{printed}");
+                    assert_eq!(f.as_deref(), fallback.then_some("person"), "{printed}");
+                    assert_eq!(dir, None);
+                }
+            }
+        }
+    }
+}

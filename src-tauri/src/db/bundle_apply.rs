@@ -234,7 +234,9 @@ pub fn preview_import(
     // aborts atomically on a Held mint; preview resolves the same ladder
     // (read-only) so it never reports an import the apply will refuse.
     let policy = crate::config::ingest_policy_for_db(conn.path());
-    let mut held: Vec<String> = Vec::new();
+    // Held new entities grouped by cause, in first-seen order, so the
+    // warning names each cause once (a whole bundle usually shares one).
+    let mut held: Vec<(crate::db::entity_gate::HoldReason, Vec<String>)> = Vec::new();
     for entity in &bundle.entities {
         // Task 7: preview resolves bundle source ids through redirects the
         // same way apply does, so a merged-away id previews as its survivor.
@@ -259,19 +261,22 @@ pub fn preview_import(
             let decision =
                 crate::db::entity_gate::preview_production_gate(conn, &policy, &probe_id, &[]);
             // The apply's Held set, not just `GateDecision::Held`: the
-            // shared insert helper ALSO holds a `Gate` decision whose
-            // vocabulary is empty (§2.4.5's second trigger — a declared
-            // `fallback_node_type` over ZERO `node_types`). Preview must
-            // refuse exactly what the apply would abort on, else it reports
-            // an import the apply refuses (bundle mints are unlabeled, so
-            // no other ladder arm can turn Held inside a `Gate` decision).
-            let would_hold = match &decision {
-                crate::db::entity_gate::GateDecision::Held => true,
-                crate::db::entity_gate::GateDecision::Gate(v) => v.is_empty(),
-                crate::db::entity_gate::GateDecision::Skip => false,
+            // shared insert helper ALSO holds a `Gate` decision over an
+            // unusable vocabulary (`NodeVocabulary::hold_reason`). Preview
+            // must refuse exactly what the apply would abort on, else it
+            // reports an import the apply refuses (bundle mints are
+            // unlabeled, so no other ladder arm can turn Held inside a
+            // usable `Gate` decision).
+            let hold_reason = match decision {
+                crate::db::entity_gate::GateDecision::Held(reason) => Some(reason),
+                crate::db::entity_gate::GateDecision::Gate(v) => v.hold_reason(None),
+                crate::db::entity_gate::GateDecision::Skip => None,
             };
-            if would_hold {
-                held.push(entity.entity_id.clone());
+            if let Some(reason) = hold_reason {
+                match held.iter_mut().find(|(r, _)| *r == reason) {
+                    Some((_, ids)) => ids.push(entity.entity_id.clone()),
+                    None => held.push((reason, vec![entity.entity_id.clone()])),
+                }
             }
         }
         let local_summary: Option<String> = conn
@@ -345,14 +350,15 @@ pub fn preview_import(
             summary_action,
         });
     }
-    if !held.is_empty() {
+    // One warning per cause, naming THAT cause and its fix (`HoldReason`'s
+    // Display) — only vocabulary causes prescribe `--fallback`.
+    for (reason, ids) in &held {
         warnings.push(format!(
-            "import will abort: the strict ontology gate would hold {} new entit{} ({}) — \
-             the manifest declares no usable fallback_node_type (§2.4.5); declare one \
-             (`ct ontology set --fallback <type>`) before applying",
-            held.len(),
-            if held.len() == 1 { "y" } else { "ies" },
-            held.join(", ")
+            "import will abort: the strict ontology gate would hold (§2.4.5) {} new entit{} \
+             ({}): {reason}",
+            ids.len(),
+            if ids.len() == 1 { "y" } else { "ies" },
+            ids.join(", ")
         ));
     }
     Ok(ImportPreview {
@@ -867,7 +873,7 @@ fn ensure_entity(
                     None,
                 )?;
             }
-            (AdmitOutcome::Held { .. }, _) => {
+            (AdmitOutcome::Held { reason, .. }, _) => {
                 // §2.5 bullet: "If no fallback is declared, the import
                 // ABORTS ATOMICALLY with a report, facts intact." The
                 // outer IMMEDIATE transaction rolls back via bail!
@@ -875,9 +881,9 @@ fn ensure_entity(
                 // tx.rollback()). Facts intact because the LLM-mint
                 // path is in the same batch.
                 bail!(
-                    "bundle import aborted: strict ontology gate held an unlabeled entity mint \
-                     (spec §2.4.5: no fallback_node_type declared); facts are intact and will \
-                     re-enter when the manifest names a fallback"
+                    "bundle import aborted: strict ontology gate held (§2.4.5) an unlabeled \
+                     entity mint: {reason}. Nothing was imported; re-run the import once the \
+                     cause is fixed"
                 );
             }
             _ => {
@@ -1454,23 +1460,29 @@ mod tests {
         )
         .unwrap();
         let preview = preview_import(&conn, &sample_bundle(), ImportMode::Merge).unwrap();
+        let warning = preview
+            .warnings
+            .iter()
+            .find(|w| w.contains("import will abort"))
+            .unwrap_or_else(|| panic!("{:?}", preview.warnings));
+        // Names the actual cause and its fix (review finding: the warning
+        // used to blame a missing fallback for every hold cause).
         assert!(
-            preview
-                .warnings
-                .iter()
-                .any(|w| w.contains("import will abort")),
-            "{:?}",
-            preview.warnings
+            warning.contains("declares no `fallback_node_type`"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("`ct ontology set --fallback <type>` with one of: person"),
+            "{warning}"
         );
         assert!(apply_import(&mut conn, &sample_bundle(), ImportMode::Merge).is_err());
     }
 
     /// Preview/apply parity for §2.4.5's SECOND Held trigger: a strict
-    /// tier_fact that DECLARES a fallback over ZERO node_types. The gate
-    /// decision is `Gate` (not `Held`), but the shared insert helper holds
-    /// an empty vocabulary — the preview must warn exactly as the apply
-    /// aborts (review finding: the `== GateDecision::Held` probe reported
-    /// this brain importable).
+    /// tier_fact that DECLARES a fallback over ZERO node_types. The resolver
+    /// now holds it (`HoldReason::EmptyNodeTypes`) — the preview must warn
+    /// exactly as the apply aborts (review finding: the
+    /// `== GateDecision::Held` probe once reported this brain importable).
     #[test]
     fn preview_warns_on_declared_fallback_over_empty_node_types() {
         let mut conn = open_in_memory().unwrap();
@@ -1481,14 +1493,15 @@ mod tests {
         )
         .unwrap();
         let preview = preview_import(&conn, &sample_bundle(), ImportMode::Merge).unwrap();
-        assert!(
-            preview
-                .warnings
-                .iter()
-                .any(|w| w.contains("import will abort")),
-            "{:?}",
-            preview.warnings
-        );
+        let warning = preview
+            .warnings
+            .iter()
+            .find(|w| w.contains("import will abort"))
+            .unwrap_or_else(|| panic!("{:?}", preview.warnings));
+        // The manifest already HAS a fallback: the warning must name the
+        // empty node-type set and must not prescribe `--fallback`.
+        assert!(warning.contains("declares no node types"), "{warning}");
+        assert!(!warning.contains("--fallback"), "{warning}");
         assert!(apply_import(&mut conn, &sample_bundle(), ImportMode::Merge).is_err());
     }
 

@@ -32,6 +32,55 @@ use crate::db::entity_gate::ImmediateTx;
 /// The manifest row every entity-scoped strict write resolves from.
 pub const TIER_FACT: &str = "tier_fact";
 
+/// One `ct ontology set` fix command, as a refusal prints it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SetCommand<'a> {
+    /// `--entity <id>`; `None` targets `tier_fact` (the default target).
+    pub entity: Option<&'a str>,
+    /// `--mode strict`.
+    pub strict: bool,
+    /// `--fallback <type>` — always the `<type>` placeholder; the refusal
+    /// lists the legal values beside it.
+    pub fallback: bool,
+}
+
+/// The ONE shaper of every `ct ontology set` command a gate refusal, an
+/// okf/bundle abort or a heal report prints (review finding: four
+/// hand-rolled templates could drift from the clap flags in `ct.rs`,
+/// whose tests parse this output). The entity id is shell-quoted: ids
+/// arrive from bundles unvalidated, and the command is meant to be pasted.
+/// It is attached with `=`: a separate word starting with `-` would be
+/// rejected by clap as an option rather than taken as the value.
+pub fn set_command(cmd: SetCommand<'_>) -> String {
+    let mut out = String::from("ct ontology set");
+    if let Some(id) = cmd.entity {
+        out.push_str(" --entity=");
+        out.push_str(&shell_quote(id));
+    }
+    if cmd.strict {
+        out.push_str(" --mode strict");
+    }
+    if cmd.fallback {
+        out.push_str(" --fallback <type>");
+    }
+    out
+}
+
+/// POSIX-shell-quote one argument: printed bare when it is plainly safe,
+/// else single-quoted (an embedded `'` becomes `'\''`), so no id can
+/// inject or split a pasted command.
+pub fn shell_quote(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/' | '@' | '+')
+        });
+    if safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 /// Outcome of `--entity <id> --mode <mode>` (spec §2.11 reversal rule).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EntityModeOutcome {
@@ -136,10 +185,27 @@ pub fn set_entity_strict(
     if let Some(fallback) = tier.get("fallback_node_type") {
         entity_manifest["fallback_node_type"] = fallback.clone();
     }
-    if let Some(fallback) = fallback {
-        entity_manifest["fallback_node_type"] =
-            serde_json::json!(canonical_fallback(&entity_manifest, &entity_id, fallback)?);
+    // Both paths store the fallback in its DECLARED spelling — the one
+    // every degraded mint lands (review finding: the plain copy kept a
+    // case-variant `Person` beside declared `person`, a spelling no mint
+    // ever lands, while `--fallback` canonicalized). An undeclared copied
+    // value is left as is for the refusal below to name.
+    let canonical = match fallback {
+        Some(fallback) => Some(canonical_fallback(&entity_manifest, &entity_id, fallback)?),
+        None => {
+            let vocab = crate::db::entity_gate::NodeVocabulary::from_manifest(
+                &crate::wiki_graph::parse_manifest_value(&entity_manifest),
+            );
+            vocab
+                .fallback()
+                .and_then(|f| vocab.canonicalize(f))
+                .map(str::to_string)
+        }
+    };
+    if let Some(canonical) = canonical {
+        entity_manifest["fallback_node_type"] = serde_json::json!(canonical);
     }
+    refuse_unusable_strict_row(&entity_manifest, &entity_id)?;
 
     // The opt-out lookup is cluster-closed (a merged-in member's opt-out
     // keeps applying to the survivor), so the reversal must clear it
@@ -164,6 +230,42 @@ pub fn set_entity_strict(
         optout_deleted: optouts_deleted > 0,
         manifest_row_written: true,
     })
+}
+
+/// R2.4.5 write-time refusal: a strict entity row whose vocabulary cannot
+/// gate (no node types, no `fallback_node_type`, or an undeclared one) would
+/// HOLD every mint for that entity — declared types included — and the
+/// operator would only find out at the first refused mint. Refuse it here,
+/// where `--fallback` can still fix it. Parsed exactly as the gate reads it.
+fn refuse_unusable_strict_row(manifest: &serde_json::Value, entity_id: &str) -> Result<()> {
+    use crate::db::entity_gate::{HoldReason, NodeVocabulary};
+    // The Value-form reader — no serialize→reparse round-trip (the &str
+    // form's only fallible step is the JSON parse we already did).
+    let parsed = crate::wiki_graph::parse_manifest_value(manifest);
+    // The vocabulary is copied from `tier_fact`, so the reason names that
+    // row: fixing `tier_fact` fixes every mint resolving through it.
+    let Some(reason) = NodeVocabulary::from_manifest(&parsed).hold_reason(Some(TIER_FACT)) else {
+        return Ok(());
+    };
+    // Only a fallback-shaped hold has an entity-scoped fix: over an empty
+    // declared set `--fallback` names nothing, so the second command would
+    // be refused again (the reason's own fix-line covers that shape).
+    let alternative = match reason {
+        HoldReason::NoFallback { .. } | HoldReason::FallbackNotDeclared { .. } => format!(
+            "; or set this entity's fallback only: `{}`",
+            set_command(SetCommand {
+                entity: Some(entity_id),
+                strict: true,
+                fallback: true,
+            })
+        ),
+        _ => String::new(),
+    };
+    bail!(
+        "refusing `--mode strict` for `{entity_id}`: the vocabulary it would copy cannot gate, \
+         so every new-entity mint for it would be held — {reason}{alternative}. Nothing was \
+         written"
+    )
 }
 
 /// `--entity <id> --mode <mode> [--fallback <type>]` dispatcher. A
@@ -193,11 +295,16 @@ fn canonical_fallback(
     target: &str,
     fallback: &str,
 ) -> Result<String> {
-    let parsed: crate::wiki_graph::WikiManifest = serde_json::from_value(manifest.clone())
-        .map_err(|e| {
-            anyhow::anyhow!("manifest_json for `{target}` is not a valid manifest: {e}")
-        })?;
-    let vocab = crate::db::entity_gate::NodeVocabulary::from_manifest(&parsed);
+    // The gate's own lenient reader (review finding): the write-time
+    // refusal lists types it accepts — bare-string `node_types` included —
+    // so the fix it prints must accept the same row. Only a non-object
+    // root is refused: the caller writes a key into it.
+    if !manifest.is_object() {
+        bail!("manifest_json for `{target}` is not a JSON object");
+    }
+    let vocab = crate::db::entity_gate::NodeVocabulary::from_manifest(
+        &crate::wiki_graph::parse_manifest_value(manifest),
+    );
     match vocab.canonicalize(fallback) {
         Some(canonical) => Ok(canonical.to_string()),
         None => bail!(
@@ -468,6 +575,49 @@ mod tests {
         assert_eq!(row["fallback_node_type"], "process", "canonical spelling");
     }
 
+    /// R2.4.5 write-time refusal: `--entity X --mode strict` copying a
+    /// fallback-less `tier_fact` would hold every mint for X (declared types
+    /// included), so it is refused with the legal `--fallback` values and
+    /// writes NOTHING (opt-out kept). Passing `--fallback` makes it legal.
+    #[test]
+    fn strict_copy_of_fallbackless_tier_fact_is_refused() {
+        let mut conn = memory_conn();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', ?1, 1)",
+            params![json!({
+                "node_types": [{"type": "person"}, {"type": "place"}],
+                "edge_types": []
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at) VALUES ('ent_x', 'user', 1)",
+            [],
+        )
+        .unwrap();
+
+        let err = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict, None).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("refusing `--mode strict` for `ent_x`"),
+            "{message}"
+        );
+        assert!(message.contains("one of: person, place"), "{message}");
+        assert!(
+            message.contains("`ct ontology set --entity=ent_x --mode strict --fallback <type>`"),
+            "{message}"
+        );
+        assert!(message.contains("Nothing was written"), "{message}");
+        assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::OptOut, "opt-out kept");
+        assert_eq!(manifest_row_count(&conn).unwrap(), 1, "only tier_fact");
+
+        let out = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict, Some("place")).unwrap();
+        assert!(out.optout_deleted && out.manifest_row_written);
+        assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::Gate);
+    }
+
     #[test]
     fn fallback_writes_into_existing_target_manifest_only() {
         let conn = memory_conn();
@@ -503,5 +653,97 @@ mod tests {
 
         let err = write_fallback(&conn, "entity::absent", "document").unwrap_err();
         assert!(err.to_string().contains("no manifest row"));
+    }
+
+    /// Review finding: the refusal reads `tier_fact` leniently and lists
+    /// bare-string types as legal `--fallback` values, so the fix it
+    /// prints must accept that row too — not fail it as "not a valid
+    /// manifest".
+    #[test]
+    fn fallback_fix_accepts_bare_string_node_types() {
+        let conn = memory_conn();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', '{\"node_types\":[\"person\",\"place\"]}', 1)",
+            [],
+        )
+        .unwrap();
+        write_fallback(&conn, TIER_FACT, "Person").unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed["fallback_node_type"], "person", "declared spelling");
+    }
+
+    /// Review finding: the plain strict copy stores the fallback in its
+    /// DECLARED spelling — the one every degraded mint lands — exactly as
+    /// the explicit `--fallback` path does.
+    #[test]
+    fn strict_copy_canonicalizes_a_case_variant_fallback() {
+        let mut conn = memory_conn();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', ?1, 1)",
+            params![json!({
+                "node_types": [{"type": "person"}],
+                "fallback_node_type": "Person"
+            })
+            .to_string()],
+        )
+        .unwrap();
+        set_entity_strict(&mut conn, "ent_x", None).unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'ent_x'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed["fallback_node_type"], "person");
+    }
+
+    /// Review finding: an entity id with shell metacharacters is quoted in
+    /// the refusal's pasteable command, never interpolated raw.
+    #[test]
+    fn refusal_shell_quotes_the_entity_id() {
+        let mut conn = memory_conn();
+        let id = "ent_a; echo pwned";
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1, ?1, 'concept', '', 1, 1)",
+            params![id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', '{\"node_types\":[{\"type\":\"person\"}]}', 1)",
+            [],
+        )
+        .unwrap();
+        let err = set_entity_strict(&mut conn, id, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                "`ct ontology set --entity='ent_a; echo pwned' --mode strict --fallback <type>`"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("--entity=ent_a;"), "{err}");
+    }
+
+    #[test]
+    fn shell_quote_leaves_plain_ids_bare_and_quotes_the_rest() {
+        assert_eq!(shell_quote("ent_0a1b"), "ent_0a1b");
+        assert_eq!(shell_quote("entity::abc"), "entity::abc");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote(""), "''");
     }
 }
