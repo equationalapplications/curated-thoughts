@@ -679,17 +679,13 @@ pub fn wiki_sweep_cmd(yes: bool) -> Result<i32> {
              (a write). Pass --yes to proceed.",
             brain.paths.db_path.display()
         );
-        // §2.10 node-type extension, report-only arm: the SAME resolved
-        // vocabulary + alias table the heal pass uses, strictly read-only
-        // (`apply == false` — nothing retyped, no watermark). Human-readable
-        // census/drift text comes from inside the pass on STDERR; the
-        // summary line below is the sweep's own display of it.
+        // §2.10 node-type extension, report-only arm: the read-only preview
+        // of the SAME retype-only pass `--yes` runs (no ensure promise,
+        // nothing retyped, no watermark). Human-readable census/drift text
+        // comes from inside the pass on STDERR; the summary line below is
+        // the sweep's own display of it.
         if let Ok(mut ro) = tauri_app_lib::retrieval::open_brain_readonly(&brain.paths.db_path) {
-            let report = tauri_app_lib::db::heal_ontology::ontology_heal_pass(
-                &mut ro,
-                tauri_app_lib::db::heal_ontology::DriftFlag::None,
-                false,
-            );
+            let report = tauri_app_lib::db::heal_ontology::ontology_retype_pass_preview(&mut ro);
             print_ontology_pass_summary(&report, true);
         }
         return Ok(1);

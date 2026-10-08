@@ -167,7 +167,16 @@ mod tests {
                     prev_cfg_test_attr = false;
                     continue;
                 }
-                prev_cfg_test_attr = line.trim() == "#[cfg(test)]";
+                // A `#[cfg(test)]` attribute stays pending across further
+                // attributes, doc/line comments and blank lines (review
+                // finding: `#[cfg(test)]` + `#[allow(..)]` + `mod tests`
+                // reset the flag on the intervening line, so the whole test
+                // module was scanned as production code). Any other line
+                // consumes it.
+                let t = line.trim();
+                prev_cfg_test_attr = t == "#[cfg(test)]"
+                    || (prev_cfg_test_attr
+                        && (t.is_empty() || t.starts_with("#[") || t.starts_with("//")));
                 // Skip comments (module docs document the scan itself).
                 if line.trim_start().starts_with("//") {
                     continue;

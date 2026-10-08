@@ -625,8 +625,14 @@ fn fetch_entity_neighbors(
     // attributes (real pre-merge provenance; the merge report lists
     // self-loops for pruning). Merge-time path compression keeps healthy
     // redirects one hop deep, so one hop is the complete resolution.
+    //
+    // The ENDPOINTS returned are the RESOLVED ids (`s.id`, `t.id`), not the
+    // raw `e.source_id`/`e.target_id` (review finding): nodes are keyed by
+    // survivor ids, so a raw loser endpoint dangled against the node list
+    // every graph consumer builds — contradicting the self-loop rendering
+    // described above.
     let sql = format!(
-        "SELECT e.source_id, e.target_id, e.edge_type, {neighbor_alias}.id
+        "SELECT s.id, t.id, e.edge_type, {neighbor_alias}.id
          FROM llm_wiki_edges e
          JOIN live_entities s
            ON s.id = COALESCE((SELECT merged_into FROM entity_redirects r
@@ -1712,8 +1718,10 @@ mod unit_tests {
             result
                 .edges
                 .iter()
-                .any(|e| e.source_id == "e_surv" && e.target_id == "e_lose"),
-            "the resolved self-loop is SHOWN with its original edge row"
+                .any(|e| e.source_id == "e_surv" && e.target_id == "e_surv"),
+            "the survivor→loser edge is SHOWN as the survivor→survivor self-loop it \
+             resolves to (R2.7.5 r3-m8) — endpoints resolved, so the edge never \
+             dangles against the survivor-keyed node list"
         );
         assert!(
             result.nodes.iter().all(|n| n.id != "e_lose"),

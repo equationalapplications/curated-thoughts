@@ -461,8 +461,8 @@ pub fn ontology_set_run(
     // not run yet).
     if ontology_set::manifest_row_count(&conn)? == 0 {
         let warning = "this brain has NO manifest rows — the gate SKIPs until \
-             `ct heal --yes` runs the ensure; the write below is recorded but \
-             gates nothing yet"
+             the wiki engine seeds `tier_fact` (open the app once; CT cannot \
+             create it, §1.6); the write below is recorded but gates nothing yet"
             .to_string();
         eprintln!("warning: {warning}");
         out.warning = Some(warning);

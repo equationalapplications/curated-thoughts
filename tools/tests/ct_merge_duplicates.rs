@@ -128,6 +128,48 @@ fn yes_without_remap_marker_refuses() {
     });
 }
 
+/// Review finding: merge-duplicates refuses its destructive pass under a
+/// degraded/tied config, the same posture as heal and `ct ontology set`
+/// (plan-p7-m3) — not every degraded state moves the drift hash.
+#[test]
+fn yes_with_degraded_config_refuses() {
+    with_brain(|dir| {
+        seed_duplicate_pair(dir);
+        seed_marker(dir);
+        std::fs::write(dir.join("config.json"), b"{not json").unwrap();
+        let out = run_ct(dir, &["wiki", "merge-duplicates", "--yes"]);
+        assert_eq!(out.status.code(), Some(1));
+        let report = parse_stdout_object(&out);
+        assert_eq!(report["skipped_reason"], "degraded_config", "{report}");
+        assert_eq!(redirect_count(dir), 0);
+    });
+}
+
+/// Review finding: the redirect-cycle census runs on the REPORT-ONLY arm
+/// too (it used to run only after a successful apply).
+#[test]
+fn report_only_run_surfaces_redirect_cycles() {
+    with_brain(|dir| {
+        let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
+        for (a, b) in [("ent_c1", "ent_c2"), ("ent_c2", "ent_c1")] {
+            conn.execute(
+                "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+                 VALUES (?1, ?2, 1)",
+                rusqlite::params![a, b],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let out = run_ct(dir, &["wiki", "merge-duplicates"]);
+        let report = parse_stdout_object(&out);
+        let cycles = report["cycles"].as_array().expect("cycles array");
+        assert!(
+            !cycles.is_empty(),
+            "report-only run must list cycles: {report}"
+        );
+    });
+}
+
 #[test]
 fn yes_unconfirmed_drift_blocks_the_merge() {
     with_brain(|dir| {

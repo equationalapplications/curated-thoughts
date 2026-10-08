@@ -131,7 +131,15 @@ fn migrate_approved_wiki_pages(
     let mut count = 0usize;
     for page in pages {
         let path = &page.path;
-        let entity_id = entity_id_from_wiki_path(path);
+        // The path-derived id resolves to its TERMINAL survivor up front
+        // (review finding): the admit arms already insert under the
+        // survivor (`shared_insert_entity` resolves), but the SKIP arm's
+        // literal upsert, the ledger rows and the event below keyed on the
+        // RAW id — refreshing a merged-away loser row no survivor-resolving
+        // reader sees. A cycle errors, aborting the migration loudly
+        // (mutate path — never guess a survivor).
+        let raw_entity_id = entity_id_from_wiki_path(path);
+        let entity_id = crate::db::entities::resolve_entity_id(tx, &raw_entity_id)?;
         let name = wiki_page_entity_name(path, &page.body);
         let summary = page.body.clone();
 
@@ -256,7 +264,12 @@ fn migrate_approved_wiki_pages(
             }
         }
 
-        let event_id = format!("evt-migrate-{}", &hash_bytes(entity_id.as_bytes())[..12]);
+        // Keyed on the RAW path id so the event id stays stable however the
+        // entity has since been merged (the INSERT OR IGNORE idempotency key).
+        let event_id = format!(
+            "evt-migrate-{}",
+            &hash_bytes(raw_entity_id.as_bytes())[..12]
+        );
         let summary_text = if page.file_found {
             format!("Migrated from wiki page *{path}*")
         } else {
@@ -470,5 +483,70 @@ mod tests {
 
         assert_eq!(count1, 1);
         assert_eq!(count2, 1);
+    }
+
+    /// Review finding: the SKIP arm (no `tier_fact` row) lands on the
+    /// path-derived id's TERMINAL survivor, like the admit arms — never on
+    /// the merged-away loser row no survivor-resolving reader sees.
+    #[test]
+    fn skip_arm_lands_on_the_redirect_survivor() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path();
+        std::fs::create_dir_all(vault.join("wiki")).unwrap();
+        std::fs::write(vault.join("wiki/page.md"), "# Page\n\nBody.").unwrap();
+
+        let mut conn = open_v7_db();
+        conn.execute(
+            "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
+             VALUES ('page.md', '[]', 'test', 'approved')",
+            [],
+        )
+        .unwrap();
+        let raw = entity_id_from_wiki_path("page.md");
+        for (id, summary) in [(raw.as_str(), "loser"), ("ent_surv", "survivor")] {
+            conn.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES (?1, 'Page', 'concept', ?2, 1, 1)",
+                params![id, summary],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at) VALUES (?1, 'ent_surv', 1)",
+            params![raw],
+        )
+        .unwrap();
+
+        run_okf_migration(&mut conn, vault).unwrap();
+
+        let summary_of = |id: &str| -> String {
+            conn.query_row(
+                "SELECT summary FROM curated_entities WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(summary_of(&raw), "loser", "the loser row is left untouched");
+        assert!(
+            summary_of("ent_surv").contains("Body."),
+            "survivor refreshed"
+        );
+        let ledger: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity_type_origin WHERE entity_id = 'ent_surv'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ledger, 1, "gate_skipped row keyed on the survivor");
+        let event_owner: String = conn
+            .query_row(
+                "SELECT entity_id FROM llm_wiki_events WHERE event_type = 'imported'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_owner, "ent_surv");
     }
 }

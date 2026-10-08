@@ -101,8 +101,8 @@ pub struct MergeDuplicatesReport {
     pub cycles: Vec<String>,
     /// A fault caught here so the caller still gets one report object.
     pub error: Option<String>,
-    /// `"alias_remap_not_run"` | `"unconfirmed_drift"` — set when the
-    /// destructive pass was refused.
+    /// `"alias_remap_not_run"` | `"degraded_config"` | `"unconfirmed_drift"`
+    /// — set when the destructive pass was refused.
     pub skipped_reason: Option<String>,
 }
 
@@ -120,20 +120,23 @@ pub enum MergePrecondition {
 /// Consult the `alias_remap_completed` MARKER (r17-m3: marker presence
 /// only — never a live-row predicate, so report-only heal rows cannot
 /// block merging forever). The marker is deleted by `clear_vault_tables`.
-pub fn merge_precondition(conn: &Connection) -> MergePrecondition {
+///
+/// A read FAULT propagates (R2.3.2a) instead of reading as "no marker":
+/// mapping it to `RemapNotRun` refused the pass under the wrong reason
+/// and pointed the operator at a heal that had already run.
+pub fn merge_precondition(conn: &Connection) -> Result<MergePrecondition> {
     let present: Option<String> = conn
         .query_row(
             "SELECT value FROM llm_wiki_meta WHERE key = ?1",
             [ALIAS_REMAP_MARKER_KEY],
             |r| r.get(0),
         )
-        .optional()
-        .unwrap_or(None);
-    if present.is_some() {
+        .optional()?;
+    Ok(if present.is_some() {
         MergePrecondition::RemapDone
     } else {
         MergePrecondition::RemapNotRun
-    }
+    })
 }
 
 /// Run the duplicate merge sweep. `apply == false` is the read-only report:
@@ -194,6 +197,15 @@ fn run(
         }
     }
 
+    // Cycle census, ONCE per sweep (r2-m6): a hand-crafted redirect loop
+    // anywhere in the table is reported, never looped. Runs BEFORE the
+    // report-only return and the refusals below so every arm surfaces it
+    // (review finding: report-only runs and refused applies printed no
+    // cycles). A merge never creates or rewrites a cycle (apply_group
+    // refuses cycle-touching chains), so the pre-apply census holds after
+    // apply too.
+    cycle_census(conn, report)?;
+
     // 3. Precondition + FINAL RULE drift gate — both block ONLY the
     //    destructive pass (the report above still prints).
     if !apply {
@@ -202,12 +214,28 @@ fn run(
     // From here `merged_groups` means APPLIED: a refusal below must not
     // report the planned merges as done (the groups list still shows them).
     report.merged_groups = 0;
-    if matches!(merge_precondition(conn), MergePrecondition::RemapNotRun) {
+    if matches!(merge_precondition(conn)?, MergePrecondition::RemapNotRun) {
         report.skipped_reason = Some("alias_remap_not_run".into());
         eprintln!(
             "merge-duplicates: the signed-alias remap has not run for this vault — \
              run `ct heal --yes` once first (R2.7.1), else pre-remap groups queue as \
              false type conflicts"
+        );
+        return Ok(());
+    }
+    // Degraded/tied ontology config: refuse the destructive pass, the same
+    // posture heal and `ct ontology set` take (plan-p7-m3) — a merge picks
+    // surviving entity types and archives losers, and must not do so under
+    // a config the rest of the system refuses to interpret. Not every
+    // degraded state moves the drift hash, so the drift gate alone does
+    // not cover this.
+    if policy.ontology_degraded_state().is_degraded()
+        || !crate::config::ontology_ties(&policy.tiers).is_empty()
+    {
+        report.skipped_reason = Some("degraded_config".into());
+        eprintln!(
+            "merge-duplicates: ingest config is degraded or tied — destructive pass \
+             refused; fix config.json and re-run"
         );
         return Ok(());
     }
@@ -226,20 +254,26 @@ fn run(
     }
 
     // 4. Apply: ONE ImmediateTx per merge GROUP (never one per sweep).
-    //    `merged_groups` counts only groups that COMMITTED.
-    for group in report.groups.clone() {
+    //    `merged_groups` counts only groups that COMMITTED. The groups are
+    //    moved out for the loop (apply_group borrows the report mutably)
+    //    rather than deep-cloned.
+    let groups = std::mem::take(&mut report.groups);
+    for group in &groups {
         if group.queued.is_some() {
             continue;
         }
-        if apply_group(conn, &group, report) {
+        if apply_group(conn, group, report) {
             report.merged_groups += 1;
         }
     }
+    report.groups = groups;
+    Ok(())
+}
 
-    // 5. Cycle census, ONCE per sweep (r2-m6): a hand-crafted redirect
-    //    loop anywhere in the table is reported, never looped. Per-group
-    //    compression only re-walks rows pointing at that group's losers,
-    //    so the whole-table walk lives here rather than in every group.
+/// Whole-table redirect cycle census (r2-m6). Per-group compression only
+/// re-walks rows pointing at that group's losers, so the whole-table walk
+/// lives here rather than in every group.
+fn cycle_census(conn: &Connection, report: &mut MergeDuplicatesReport) -> Result<()> {
     let ids: Vec<String> = {
         let mut stmt = conn.prepare("SELECT entity_id FROM entity_redirects")?;
         let rows = stmt
@@ -372,7 +406,13 @@ fn find_duplicate_groups(conn: &Connection) -> Result<Vec<MergeGroup>> {
 /// normalized-equal (same normalization as the name key). Anything else
 /// queues — both-empty and empty-vs-nonempty are NOT agreement (r8-M3).
 fn disposition(members: &[Candidate]) -> Option<QueueReason> {
-    let types: HashSet<&str> = members.iter().map(|m| m.entity_type.as_str()).collect();
+    // Type agreement uses the vocabulary membership key (trim + lowercase,
+    // the gate's own rule): `Person` and `person` are the same declared
+    // type, not a conflict that needs a ruling.
+    let types: HashSet<String> = members
+        .iter()
+        .map(|m| crate::db::entity_gate::NodeVocabulary::key(&m.entity_type))
+        .collect();
     if types.len() > 1 {
         return Some(QueueReason::TypeConflict);
     }
@@ -457,13 +497,30 @@ fn apply_group(
         false
     };
 
-    // Defensive cycle guard: the grouping scan excludes redirected rows,
-    // so the survivor cannot carry a redirect row — if hand-edited data
-    // made it one, refuse this group loudly rather than write a loop.
-    match resolve_redirect_chain(conn, &group.survivor) {
+    let tx = match ImmediateTx::begin(conn) {
+        Ok(tx) => tx,
+        Err(e) => {
+            return fail(
+                report,
+                format!("group {} failed to begin: {e:#}", group.survivor),
+            )
+        }
+    };
+
+    // Defensive guards, INSIDE the write lock (review finding: checked
+    // before BEGIN IMMEDIATE, a concurrent sweep could redirect the
+    // survivor or a loser between the check and the writes, and the
+    // INSERT OR REPLACE below would silently overwrite its redirect). The
+    // grouping scan excludes redirected rows, so the survivor cannot
+    // carry a redirect row — if hand-edited data or a concurrent merge
+    // made it one, refuse this group loudly rather than write a loop. An
+    // early return drops `tx`, which rolls back.
+    match resolve_redirect_chain(&tx, &group.survivor) {
         Err(e) => return fail(report, format!("group {} failed: {e:#}", group.survivor)),
         Ok(ChainResolution::Cycle(id)) => {
-            report.cycles.push(id.clone());
+            if !report.cycles.contains(&id) {
+                report.cycles.push(id.clone());
+            }
             eprintln!(
                 "merge-duplicates: survivor {} sits on a redirect cycle ({id}) — \
                  group refused",
@@ -481,16 +538,21 @@ fn apply_group(
             return false;
         }
     }
-
-    let tx = match ImmediateTx::begin(conn) {
-        Ok(tx) => tx,
-        Err(e) => {
-            return fail(
-                report,
-                format!("group {} failed to begin: {e:#}", group.survivor),
-            )
+    for loser in &group.losers {
+        match resolve_redirect_chain(&tx, loser) {
+            Err(e) => return fail(report, format!("group {} failed: {e:#}", group.survivor)),
+            Ok(ChainResolution::None) => {}
+            Ok(_) => {
+                eprintln!(
+                    "merge-duplicates: loser {loser} of group {} was redirected since \
+                     the scan — group refused (re-run the sweep)",
+                    group.survivor
+                );
+                return false;
+            }
         }
-    };
+    }
+
     let now = crate::db::commit::now_timestamps().0;
     let mut wrote: Vec<(String, String)> = Vec::new();
     let mut rewritten: Vec<(String, String, String)> = Vec::new();
@@ -512,6 +574,8 @@ fn apply_group(
         }
         return fail(report, msg);
     }
+    // A failed COMMIT leaves the transaction open; dropping it (rusqlite's
+    // default DropBehavior::Rollback) rolls it back.
     if let Err(e) = tx.commit() {
         return fail(
             report,
@@ -520,7 +584,12 @@ fn apply_group(
     }
     report.redirects_written.extend(wrote);
     report.redirects_rewritten.extend(rewritten);
-    report.cycles.extend(cycles);
+    // The pre-apply whole-table census may already list these.
+    for c in cycles {
+        if !report.cycles.contains(&c) {
+            report.cycles.push(c);
+        }
+    }
     report.self_loops.extend(self_loops);
     true
 }
@@ -770,6 +839,44 @@ mod tests {
         assert_eq!(normalize_merge_key("Zoë"), "zoë");
     }
 
+    /// Type agreement uses the vocabulary membership key (review finding):
+    /// `Person` vs `person` is the SAME declared type, so the group merges
+    /// instead of queueing as a false type conflict.
+    #[test]
+    fn case_variant_types_agree() {
+        let mut conn = open_in_memory().unwrap();
+        armed(&conn);
+        seed(&conn, "e1", "Adrian", "Person", "same summary");
+        seed(&conn, "e2", "Adrian", "person", "same summary");
+        let r = merge_duplicates_pass(&mut conn, DriftFlag::None, true);
+        assert_eq!(r.error, None, "{r:?}");
+        assert_eq!(r.queued_groups, 0, "{r:?}");
+        assert_eq!(r.merged_groups, 1, "{r:?}");
+    }
+
+    /// The survivor/loser guards run INSIDE the group's write lock (review
+    /// finding): a loser redirected after the scan (a concurrent sweep) is
+    /// refused, never overwritten by INSERT OR REPLACE.
+    #[test]
+    fn loser_redirected_after_scan_refuses_the_group() {
+        let mut conn = open_in_memory().unwrap();
+        seed(&conn, "e1", "Adrian", "concept", "same");
+        seed(&conn, "e2", "Adrian", "concept", "same");
+        seed(&conn, "e9", "Other", "concept", "x");
+        let groups = find_duplicate_groups(&conn).unwrap();
+        assert_eq!(groups.len(), 1);
+        // A concurrent merge lands between the scan and the apply.
+        redirect(&conn, "e2", "e9");
+        let mut report = MergeDuplicatesReport::default();
+        assert!(!apply_group(&mut conn, &groups[0], &mut report));
+        assert_eq!(
+            merged_into(&conn, "e2").as_deref(),
+            Some("e9"),
+            "not overwritten"
+        );
+        assert_eq!(report.error, None, "a refusal, not a fault: {report:?}");
+    }
+
     /// Punctuation-only names normalize to "" — the empty-key guard keeps
     /// two such entities from auto-merging on a shared summary (review
     /// finding: the summary gate rejects empty, the name key had no
@@ -1015,7 +1122,10 @@ mod tests {
     #[test]
     fn missing_alias_remap_marker_refuses_apply() {
         let mut conn = open_in_memory().unwrap();
-        assert_eq!(merge_precondition(&conn), MergePrecondition::RemapNotRun);
+        assert_eq!(
+            merge_precondition(&conn).unwrap(),
+            MergePrecondition::RemapNotRun
+        );
         seed(&conn, "e1", "Adrian", "concept", "s");
         seed(&conn, "e2", "Adrian", "concept", "s");
         // Report arm: groups computed, nothing written, not blocked.
@@ -1026,7 +1136,10 @@ mod tests {
         let r = merge_duplicates_pass(&mut conn, DriftFlag::None, true);
         assert_eq!(r.skipped_reason.as_deref(), Some("alias_remap_not_run"));
         assert_eq!(redirect_count(&conn), 0);
-        assert_eq!(merge_precondition(&conn), MergePrecondition::RemapNotRun);
+        assert_eq!(
+            merge_precondition(&conn).unwrap(),
+            MergePrecondition::RemapNotRun
+        );
     }
 
     /// Unconfirmed drift blocks the destructive pass (FINAL RULE: merges

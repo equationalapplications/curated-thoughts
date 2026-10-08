@@ -62,6 +62,23 @@ pub fn load_export_entities(
             entity_id: id,
         });
     }
+    // An explicitly requested id that exported NOTHING (unknown, archived,
+    // or merged into an archived survivor) is reported, not silently
+    // dropped (review finding: the caller otherwise ships a valid-looking
+    // empty bundle). Still `Ok` — the pinned unknown-id contract.
+    if let Some(requested) = entity_ids {
+        let exported: std::collections::HashSet<&str> =
+            entities.iter().map(|e| e.entity_id.as_str()).collect();
+        for raw in requested {
+            let resolved = crate::db::entities::resolve_entity_id(conn, raw)?;
+            if !exported.contains(resolved.as_str()) {
+                eprintln!(
+                    "[bundle export] requested entity {raw} (resolves to {resolved}) has no \
+                     live, non-archived row — nothing exported for it"
+                );
+            }
+        }
+    }
     Ok(entities)
 }
 

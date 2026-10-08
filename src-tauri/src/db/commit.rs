@@ -184,6 +184,11 @@ struct CommitContext {
     /// item that names the endpoint and reused by every later edge in the
     /// SAME proposal.
     edge_endpoint_strict: std::collections::HashMap<String, Option<EdgeVocabulary>>,
+    /// Per-proposal memo of rung-1a opt-out lookups for edge endpoints
+    /// (review finding: each edge re-ran the cluster-closed recursive CTE
+    /// for both endpoints and their owners inside the write lock). Only
+    /// SUCCESSFUL lookups are memoized — a fault is re-tried, never cached.
+    edge_endpoint_optout: std::collections::HashMap<String, bool>,
     /// The proposal entity's OWN strict edge vocabulary — the one the read
     /// filter and the off-manifest purge judge an edge row by, since the
     /// row is anchored to the proposal entity. Memoized once per proposal
@@ -1566,10 +1571,17 @@ fn resolve_edge_ref(
         return Ok(Some(resolved_id));
     }
     if let Some(name) = value.get("new_name").and_then(|v| v.as_str()) {
+        // Deterministic (review finding: a bare `LIMIT 1` let SQLite pick
+        // any of several same-name duplicates). An exact-case match wins;
+        // otherwise a case-insensitive one (the merge scan case-folds names,
+        // so "Adrian"/"adrian" are the same duplicate group). Ties break on
+        // the byte-wise lowest id — the survivor the merge pass itself
+        // would pick (R2.7.3), so the edge anchors where the merge lands.
         let resolved: Option<String> = conn
             .query_row(
                 "SELECT id FROM live_entities
-                 WHERE name = ?1 AND deleted_at IS NULL
+                 WHERE name = ?1 COLLATE NOCASE AND deleted_at IS NULL
+                 ORDER BY (name = ?1) DESC, id
                  LIMIT 1",
                 [name],
                 |r| r.get(0),
@@ -2231,34 +2243,15 @@ fn commit_edge_add(
                 return Ok(());
             }
         },
-        // No strict vocabulary on either endpoint: nothing to canonicalize
-        // against, write verbatim — BUT the anchor-owner check below still
-        // applies. The row is anchored to the proposal entity and the read
-        // filter / off-manifest purge judge it by THAT entity's vocabulary
-        // even when no endpoint gate fired; skipping the check here would
-        // admit an edge that is hidden on read and destroyed by the next
-        // sweep — exactly what the Some-arm check prevents. Conjunctive:
-        // never loosens the gate.
-        None => {
-            let owner = ctx
-                .owner_edge_vocabulary
-                .get_or_insert_with(|| resolve_strict_edge_vocabulary(conn, &proposal_entity_id));
-            if let Some(owner) = owner {
-                if owner.canonicalize(&edge_type).is_none() {
-                    eprintln!(
-                        "[commit] edge_type {edge_type:?} is not declared by the anchoring \
-                         entity {entity}'s strict vocabulary (declared: {declared:?}); \
-                         dropping edge item {item}",
-                        entity = ctx.entity_id,
-                        declared = owner.declared_sorted(),
-                        item = item.id,
-                    );
-                    ctx.dropped_edges.push(item.id.clone());
-                    return Ok(());
-                }
-            }
-            edge_type
-        }
+        // No strict vocabulary: nothing to canonicalize against, write
+        // verbatim. R2.3.0: both endpoints off / no-manifest (or a rung-1a
+        // opt-out) → SKIP. The r22 anchor-vocabulary conjunction applies
+        // only when the endpoint gate FIRES (the Some arm above); applying
+        // it here would re-gate opted-out and all-off edges under
+        // `tier_fact`, undoing D8. That such SKIP rows are still judged by
+        // the anchor's vocabulary on read and purge is the open E2 design
+        // call, not a write-gate bug.
+        None => edge_type,
     };
 
     // Issue #189: the librarian's dedupe artifacts arrive as edges between
@@ -2356,7 +2349,13 @@ fn resolve_edge_endpoint_vocabulary(
             ids.push(&ladder_id);
         }
         for id in ids {
-            match crate::db::entity_gate::entity_has_optout(conn, id) {
+            let lookup = match ctx.edge_endpoint_optout.get(id) {
+                Some(&cached) => Ok(cached),
+                None => crate::db::entity_gate::entity_has_optout(conn, id).inspect(|&v| {
+                    ctx.edge_endpoint_optout.insert(id.to_string(), v);
+                }),
+            };
+            match lookup {
                 Ok(true) => return Ok(None),
                 Ok(false) => {}
                 Err(e) => {
@@ -2911,6 +2910,7 @@ pub fn resolve_proposal(
             .clone()
             .unwrap_or_else(|| crate::config::DEFAULT_DEPOSIT_TIER.to_string()),
         edge_endpoint_strict: std::collections::HashMap::new(),
+        edge_endpoint_optout: std::collections::HashMap::new(),
         owner_edge_vocabulary: None,
         reviewed_by: options.reviewed_by.clone(),
     };
@@ -3340,6 +3340,7 @@ mod tests {
         CommitContext {
             deposit_default_tier: crate::config::DEFAULT_DEPOSIT_TIER.to_string(),
             edge_endpoint_strict: std::collections::HashMap::new(),
+            edge_endpoint_optout: std::collections::HashMap::new(),
             owner_edge_vocabulary: None,
             proposal_id: "prop-test".into(),
             proposal_created_at: 100,
@@ -6960,6 +6961,32 @@ mod tests {
         );
     }
 
+    /// Review finding: a `new_name` endpoint resolves deterministically —
+    /// exact case first, then case-insensitive, ties on the byte-wise lowest
+    /// id (the survivor the merge pass would pick, R2.7.3).
+    #[test]
+    fn new_name_edge_ref_is_deterministic_and_case_insensitive() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent_b", "Adrian", "s", 100);
+        seed_entity(&conn, "ent_a", "Adrian", "s", 100);
+        seed_entity(&conn, "ent_0", "ADRIAN", "s", 100);
+        let by = |name: &str| {
+            resolve_edge_ref(&conn, &serde_json::json!({ "new_name": name }), "ent_x").unwrap()
+        };
+        assert_eq!(
+            by("Adrian").as_deref(),
+            Some("ent_a"),
+            "exact case wins, lowest id"
+        );
+        assert_eq!(by("ADRIAN").as_deref(), Some("ent_0"), "exact case wins");
+        assert_eq!(
+            by("adrian").as_deref(),
+            Some("ent_0"),
+            "no exact match → case-insensitive, lowest id"
+        );
+        assert_eq!(by("Nobody"), None);
+    }
+
     /// §6 item 1b: R2.3.0 strict-wins — edge endpoint opt-out cascade
     /// short-circuits the edge gate. A `ct_entity_optouts` row on
     /// EITHER endpoint disarms the gate, so a strict manifest row on the
@@ -7001,11 +7028,15 @@ mod tests {
         );
 
         // Case 2: opt-out on source endpoint → no vocabulary, write verbatim.
+        // Each case is a NEW proposal (fresh context): the opt-out memo is
+        // per-proposal, and opt-outs cannot change inside one proposal's
+        // IMMEDIATE commit transaction.
         conn.execute(
             "INSERT INTO ct_entity_optouts (entity_id, reason, created_at) VALUES ('ent_a', 'user', 1)",
             [],
         )
         .unwrap();
+        let mut ctx = edge_test_ctx("ent_a");
         let outcome =
             resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate)
                 .unwrap();
@@ -7026,6 +7057,7 @@ mod tests {
             [],
         )
         .unwrap();
+        let mut ctx = edge_test_ctx("ent_a");
         let outcome =
             resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate)
                 .unwrap();

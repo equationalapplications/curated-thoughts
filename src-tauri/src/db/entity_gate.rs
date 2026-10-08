@@ -122,9 +122,13 @@ pub struct NodeVocabulary {
 }
 
 impl NodeVocabulary {
-    /// Membership-rule key — one place, just like `EdgeVocabulary::key`.
+    /// Membership-rule key. Delegates to [`EdgeVocabulary::key`] so node
+    /// and edge membership share ONE rule (review finding: two copies of
+    /// the same `trim().to_lowercase()` could drift apart).
+    ///
+    /// [`EdgeVocabulary::key`]: crate::db::commit::EdgeVocabulary::key
     pub fn key(candidate: &str) -> String {
-        candidate.trim().to_lowercase()
+        crate::db::commit::EdgeVocabulary::key(candidate)
     }
 
     /// Build the vocabulary from a manifest.
@@ -258,11 +262,12 @@ pub fn shared_insert_entity(
 ) -> Result<AdmitOutcome> {
     let conn: &Connection = tx; // deref ImmediateTx → &Transaction → &Connection
 
-    // Redirect check first (Task 7 APPLIES this at sites; Task 2 BUILDS it).
-    // For now: if a caller-supplied id points to a redirect row, follow the
-    // single hop. Cycles error out (no infinite loop).
+    // Redirect check first (Task 7 APPLIES this at sites; Task 2 BUILDS it):
+    // a caller-supplied id that points at a redirect row resolves to its
+    // TERMINAL survivor (the whole chain, not one hop). Cycles error out
+    // (no infinite loop).
     let resolved_id = match caller_entity_id {
-        Some(id) => match single_hop_redirect(conn, id)? {
+        Some(id) => match redirect_survivor(conn, id)? {
             RedirectOutcome::Survivor(s) => s,
             RedirectOutcome::Cycle => {
                 bail!("entity {id} is part of a redirect cycle")
@@ -480,11 +485,14 @@ pub fn generate_mint_entity_id() -> String {
     format!("ent_{}", hex::encode(bytes))
 }
 
-/// Single-hop redirect resolver with cycle guard (spec R2.7.3 / plan-p2-M1).
+/// Redirect resolver with cycle guard (spec R2.7.3 / plan-p2-M1).
 ///
-/// Resolves one hop. A hand-crafted cycle (A→B, B→A) returns `Cycle` rather
-/// than looping forever — the caller surfaces it to the user, never to
-/// silent recursion.
+/// Walks the WHOLE chain to its terminal survivor through the shared
+/// cycle-guarded walk ([`resolve_redirect_chain`]). A hand-crafted cycle
+/// (A→B, B→A) returns `Cycle` rather than looping forever — the caller
+/// surfaces it to the user, never to silent recursion.
+///
+/// [`resolve_redirect_chain`]: crate::db::merge_duplicates::resolve_redirect_chain
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedirectOutcome {
     /// No redirect row exists for the input id; use it.
@@ -496,32 +504,18 @@ pub enum RedirectOutcome {
     Cycle,
 }
 
-pub fn single_hop_redirect(
-    conn: &Connection,
-    entity_id: &str,
-) -> rusqlite::Result<RedirectOutcome> {
-    // D8: a read FAULT propagates — `.unwrap_or(None)` here would let a
-    // locked/faulting lookup silently insert against a loser id and split
-    // the cluster. A missing ROW is `Ok(None)` (the normal case); only an
-    // error is an error.
-    let merged: Option<String> = conn
-        .query_row(
-            "SELECT merged_into FROM entity_redirects WHERE entity_id = ?1",
-            [entity_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(match merged {
-        None => RedirectOutcome::None,
-        Some(s) if s == entity_id => RedirectOutcome::Cycle,
-        Some(s) => {
-            // Verify we did not just hit a 2-hop after a forged single hop:
-            // if the survivor itself is a redirect's loser (i.e. a chain),
-            // we still return that survivor — Task 7's readers do path-
-            // compression at merge time, so a 2-hop row would not exist on
-            // a healthy brain. Treat it as the one-hop survivor.
-            RedirectOutcome::Survivor(s)
-        }
+/// Resolve `entity_id` to its terminal survivor. Review finding: the
+/// previous resolver followed ONE hop, so a legacy multi-hop chain
+/// (a→b→c, written before merge-time path compression) handed a mint the
+/// intermediate loser `b` — splitting the cluster. D8: a read FAULT
+/// propagates — a locked/faulting lookup must never silently insert
+/// against a loser id. A missing ROW is the normal `None` case.
+pub fn redirect_survivor(conn: &Connection, entity_id: &str) -> Result<RedirectOutcome> {
+    use crate::db::merge_duplicates::{resolve_redirect_chain, ChainResolution};
+    Ok(match resolve_redirect_chain(conn, entity_id)? {
+        ChainResolution::None => RedirectOutcome::None,
+        ChainResolution::Survivor(s) => RedirectOutcome::Survivor(s),
+        ChainResolution::Cycle(_) => RedirectOutcome::Cycle,
     })
 }
 
@@ -573,14 +567,17 @@ pub(crate) fn plan_manifest_ensure(manifest_json: &str) -> Result<EnsurePlan> {
         .iter()
         .all(|seed| declared_lower.contains(&NodeVocabulary::key(seed)));
 
-    // Pick the fallback value (prefer `concept` if declared; else `project`).
-    let fallback_choice: Option<&'static str> = if declared_lower.contains("concept") {
-        Some("concept")
-    } else if declared_lower.contains("project") {
-        Some("project")
-    } else {
-        None
+    // Pick the fallback value (prefer `concept` if declared; else `project`),
+    // written in the MANIFEST's own spelling so the fallback names exactly
+    // the declared entry (`Concept` stays `Concept`).
+    let declared_spelling = |slug: &str| -> Option<String> {
+        declared
+            .iter()
+            .find(|d| NodeVocabulary::key(d) == slug)
+            .map(|d| d.trim().to_string())
     };
+    let fallback_choice: Option<String> =
+        declared_spelling("concept").or_else(|| declared_spelling("project"));
 
     let mut did_set_fallback = false;
     let mut did_extend = false;
@@ -601,9 +598,10 @@ pub(crate) fn plan_manifest_ensure(manifest_json: &str) -> Result<EnsurePlan> {
                 "Repeatable procedures, protocols, recipes, skills, runbooks.",
             ),
         ] {
-            let already = node_types
-                .iter()
-                .any(|v| v.get("type").and_then(|t| t.as_str()) == Some(slug));
+            // Membership-key comparison (review finding): an exact-string
+            // check appended `document` beside an existing `Document`,
+            // polluting the manifest with case-variant duplicates.
+            let already = declared_lower.contains(slug);
             if !already {
                 node_types.push(json!({"type": slug, "description": desc}));
                 did_extend = true;
@@ -1159,7 +1157,8 @@ pub fn resolve_node_gate_decision(
                 eprintln!(
                     "[entity-gate] {entity_id}: strict mode resolved from folder/host \
                      config but no strict `tier_fact` vocabulary row exists — SKIP \
-                     (run `ct heal --yes` so the ensure creates it)"
+                     (the row is seeded by the wiki engine when the app opens this \
+                     brain; CT cannot create it, §1.6)"
                 );
                 NodeGateDecision {
                     verdict: ModeVerdict::Off,
@@ -1184,11 +1183,16 @@ pub fn resolve_node_gate_decision(
             },
         };
     }
-    if hold_seen {
-        // No later source resolved strict, so the deferred Hold verdict
-        // from r10-MINOR-2 applies (same arms as the original in-loop
-        // return): with no strict `tier_fact` row there is nothing the
-        // hold protects — SKIP; with one, the hold protects it.
+    if hold_seen && !any_climb {
+        // No source resolved strict and none climbs, so the deferred Hold
+        // verdict from r10-MINOR-2 applies (same arms as the original
+        // in-loop return): with no strict `tier_fact` row there is nothing
+        // the hold protects — SKIP; with one, the hold protects it. A
+        // CLIMBING sibling instead reaches rung 4 below: strict-wins means
+        // the held source (strict or off, unknown) cannot change a strict
+        // rung-4 verdict, and its vocabulary would come from `tier_fact`
+        // either way (r9-M1) — the same "held source reaches rung 4" rule
+        // the edge endpoint ladder applies.
         if tier_fact_row_state(conn) == TierFactRow::NotStrict {
             return NodeGateDecision {
                 verdict: ModeVerdict::Off,
@@ -2029,35 +2033,53 @@ mod tests {
 
     /// Single-hop redirect: A → B returns Survivor(B).
     #[test]
-    fn single_hop_redirect_returns_survivor() {
+    fn redirect_survivor_returns_survivor() {
         let conn = open_in_memory().unwrap();
         conn.execute(
             "INSERT INTO entity_redirects (entity_id, merged_into, created_at) VALUES (?1, ?2, 1)",
             params!["ent_a", "B"],
         )
         .unwrap();
-        let outcome = single_hop_redirect(&conn, "ent_a").unwrap();
+        let outcome = redirect_survivor(&conn, "ent_a").unwrap();
         assert_eq!(outcome, RedirectOutcome::Survivor("B".into()));
     }
 
     /// Cycle (A → A) reports Cycle, never loops.
     #[test]
-    fn single_hop_redirect_detects_self_cycle() {
+    fn redirect_survivor_detects_self_cycle() {
         let conn = open_in_memory().unwrap();
         conn.execute(
             "INSERT INTO entity_redirects (entity_id, merged_into, created_at) VALUES (?1, ?2, 1)",
             params!["ent_a", "ent_a"],
         )
         .unwrap();
-        let outcome = single_hop_redirect(&conn, "ent_a").unwrap();
+        let outcome = redirect_survivor(&conn, "ent_a").unwrap();
         assert_eq!(outcome, RedirectOutcome::Cycle);
+    }
+
+    /// Multi-hop chain (a → b → c) resolves to the terminal survivor.
+    #[test]
+    fn redirect_survivor_walks_the_whole_chain() {
+        // Review finding: a legacy 2-hop chain must resolve to the TERMINAL
+        // survivor, never the intermediate loser.
+        let conn = open_in_memory().unwrap();
+        for (loser, survivor) in [("ent_a", "ent_b"), ("ent_b", "ent_c")] {
+            conn.execute(
+                "INSERT INTO entity_redirects (entity_id, merged_into, created_at) \
+                 VALUES (?1, ?2, 1)",
+                params![loser, survivor],
+            )
+            .unwrap();
+        }
+        let outcome = redirect_survivor(&conn, "ent_a").unwrap();
+        assert_eq!(outcome, RedirectOutcome::Survivor("ent_c".into()));
     }
 
     /// No redirect → `None`.
     #[test]
-    fn single_hop_redirect_returns_none_when_absent() {
+    fn redirect_survivor_returns_none_when_absent() {
         let conn = open_in_memory().unwrap();
-        let outcome = single_hop_redirect(&conn, "ent_a").unwrap();
+        let outcome = redirect_survivor(&conn, "ent_a").unwrap();
         assert_eq!(outcome, RedirectOutcome::None);
     }
 
@@ -2763,6 +2785,99 @@ mod tests {
         );
         assert_eq!(node.verdict, ModeVerdict::Off);
         assert_eq!(node.source_directory.as_deref(), Some("ops/a.md"));
+    }
+
+    /// Review finding (R2.3.3 strict-wins across source paths): a HELD
+    /// source (dropped `folder_ontology` prefix) must not short-circuit the
+    /// walk — a later strict source still wins and gates.
+    #[test]
+    fn held_source_does_not_mask_a_later_strict_source() {
+        let mut ingest = crate::config::IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("work".to_string(), crate::config::OntologyMode::Strict);
+        let degraded = crate::config::OntologyDegradedState {
+            dropped_prefixes: vec!["held".to_string()],
+            ..Default::default()
+        };
+        let node = ladder_with_strict_tier_fact(
+            &ingest,
+            &degraded,
+            &["held/a.md".to_string(), "work/b.md".to_string()],
+        );
+        assert_eq!(node.verdict, ModeVerdict::Gate);
+        assert_eq!(node.source_directory.as_deref(), Some("work/b.md"));
+    }
+
+    /// A held source beside a CLIMBING sibling reaches rung 4: strict-wins
+    /// means the held source (strict or off, unknown) cannot change a
+    /// strict rung-4 verdict, and the vocabulary is `tier_fact`'s either way.
+    #[test]
+    fn held_source_with_climbing_sibling_gates_via_tier_fact() {
+        let degraded = crate::config::OntologyDegradedState {
+            dropped_prefixes: vec!["held".to_string()],
+            ..Default::default()
+        };
+        let node = ladder_with_strict_tier_fact(
+            &crate::config::IngestConfig::default(),
+            &degraded,
+            &["held/a.md".to_string(), "notes/b.md".to_string()],
+        );
+        assert_eq!(node.verdict, ModeVerdict::Gate);
+    }
+
+    /// A held source beside an `off` sibling (no climb, no strict) still
+    /// HOLDS on a strict `tier_fact`: the held source might be strict, and
+    /// without it every source would be off — undeterminable, so hold.
+    #[test]
+    fn held_source_with_off_sibling_holds() {
+        let mut ingest = crate::config::IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".to_string(), crate::config::OntologyMode::Off);
+        let degraded = crate::config::OntologyDegradedState {
+            dropped_prefixes: vec!["held".to_string()],
+            ..Default::default()
+        };
+        let node = ladder_with_strict_tier_fact(
+            &ingest,
+            &degraded,
+            &["held/a.md".to_string(), "ops/b.md".to_string()],
+        );
+        assert_eq!(node.verdict, ModeVerdict::StrictNoVocab);
+        assert_eq!(node.source_directory.as_deref(), Some("held/a.md"));
+    }
+
+    /// Ensure dedupe is case-insensitive (review finding): a manifest that
+    /// already declares `Document` must not gain a duplicate `document`,
+    /// and the fallback is written in the manifest's own spelling.
+    #[test]
+    fn ensure_dedupe_is_case_insensitive_and_keeps_manifest_spelling() {
+        let mut types: Vec<serde_json::Value> =
+            EA_SEED_TYPES.iter().map(|s| json!({"type": s})).collect();
+        types.push(json!({"type": "Document"}));
+        types.push(json!({"type": "Concept"}));
+        let manifest = json!({"node_types": types, "edge_types": []}).to_string();
+        let EnsurePlan::Edit { new_json, .. } = plan_manifest_ensure(&manifest).unwrap() else {
+            panic!("expected an edit (process + fallback missing)");
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&new_json).unwrap();
+        let declared: Vec<&str> = parsed["node_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect();
+        assert_eq!(
+            declared
+                .iter()
+                .filter(|t| t.eq_ignore_ascii_case("document"))
+                .count(),
+            1,
+            "no case-variant duplicate: {declared:?}"
+        );
+        assert!(declared.contains(&"process"), "{declared:?}");
+        assert_eq!(parsed["fallback_node_type"].as_str(), Some("Concept"));
     }
 
     /// The same ladder on a brain with NO `tier_fact` row at all.

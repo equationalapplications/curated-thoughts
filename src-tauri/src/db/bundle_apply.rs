@@ -244,8 +244,19 @@ pub fn preview_import(
             "SELECT 1 FROM curated_entities WHERE id=?1",
             &[&resolved],
         )?;
-        if !entity_exists
-            && crate::db::entity_gate::preview_production_gate(conn, &policy, &resolved, &[])
+        // Probe the gate exactly as apply will mint (review finding): Clone
+        // mode ALWAYS mints a fresh `ent_` id and gates THAT id — whether
+        // or not the bundle id exists locally — so the probe uses a fresh
+        // id too (the gate consults per-id state: rung 1a opt-outs,
+        // entity-scoped manifests). Merge/Replace mint under the resolved
+        // bundle id, only when it does not exist yet.
+        let (probe_id, mints_new) = if mode == ImportMode::Clone {
+            (generate_id("ent_"), true)
+        } else {
+            (resolved.clone(), !entity_exists)
+        };
+        if mints_new
+            && crate::db::entity_gate::preview_production_gate(conn, &policy, &probe_id, &[])
                 == crate::db::entity_gate::GateDecision::Held
         {
             held.push(entity.entity_id.clone());

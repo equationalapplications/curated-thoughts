@@ -16,6 +16,21 @@ r22 (2026-10-08, `/code-review max` wave): R2.3.0 anchor-vocabulary rule
 + fact/task-endpoint opt-out added; R2.7.5 cluster-closed opt-out /
 origin ledger / fact dedupe pinned; §2.5 SKIP landing for labeled GUI/LLM
 mints clarified (label verbatim, `concept` only when blank).
+r23 (2026-10-08, `/code-review ultra` waves 3–4): R2.3.3 a rung-2/3 HOLD
+no longer short-circuits the source walk — a later strict source wins,
+a climbing sibling reaches rung 4, and only hold + off/no-climb holds;
+§2.4.4 `heal --yes` runs the ensure even under unconfirmed drift (drift
+blocks retypes/remaps only — the ensure is the recovery the §2.4.5
+messages name); the ensure never CREATES a missing `tier_fact` row (the
+engine seeds it, §1.6 — recovery messages corrected); R2.7.1
+`merge-duplicates --yes` also refuses on degraded/tied config
+(`degraded_config`), type agreement uses the vocabulary key, the cycle
+census runs on every arm; R2.7.5 resolved survivor→survivor self-loops
+are returned with RESOLVED endpoint ids (attributes original); write-time
+mint resolution (okf/bundle/helper) walks the whole redirect chain —
+read-time stays single-hop error-on-cycle (r2-m6). R2.3.0's
+both-endpoints-off SKIP is unchanged: such rows are still judged by the
+anchor's vocabulary on read/purge — the E2 design call stays OPEN.
 **Date:** 2026-10-03 (written 2026-10-04; r21 2026-10-07)
 **Baseline:** `main` @ `9c2281b` (v3.2.0) for the design; line citations
 re-anchored (r21) to branch tip after merging `main` @ `0f7ea9f` (v3.3.0).

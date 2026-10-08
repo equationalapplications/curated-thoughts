@@ -154,6 +154,26 @@ pub fn ontology_retype_pass(conn: &mut Connection) -> OntologyHealReport {
     report
 }
 
+/// Read-only preview of [`ontology_retype_pass`] — `ct wiki sweep`'s
+/// refusal arm. Same `PassScope::RetypeOnly` as the apply (review
+/// finding: the preview used to run the HEAL scope and promise "N
+/// manifest(s) would be extended/ensured" — an ensure the sweep's `--yes`
+/// deliberately never performs), so the counts it prints are the counts
+/// the apply would produce. Nothing is written.
+pub fn ontology_retype_pass_preview(conn: &mut Connection) -> OntologyHealReport {
+    let mut report = OntologyHealReport::default();
+    if let Err(e) = run_inner(
+        conn,
+        DriftFlag::None,
+        false,
+        PassScope::RetypeOnly,
+        &mut report,
+    ) {
+        report.error = Some(format!("{e:#}"));
+    }
+    report
+}
+
 fn run(
     conn: &mut Connection,
     flag: DriftFlag,
@@ -316,8 +336,14 @@ fn run_inner(
 
     if !apply {
         // Read-only census: ensure computed IN MEMORY (R2.4.4 r12-m4), no
-        // watermark stamp, no writes; counts are "would" counts.
-        let (pending, foreign) = ensure_pending_readonly(conn)?;
+        // watermark stamp, no writes; counts are "would" counts. The
+        // ensure report is HEAL-scope only — the retype-only apply never
+        // performs it, so its preview must not promise it.
+        let (pending, foreign) = if scope == PassScope::Heal {
+            ensure_pending_readonly(conn)?
+        } else {
+            (0, 0)
+        };
         if pending > 0 || foreign > 0 {
             eprintln!(
                 "ontology heal: ensure pending (read-only): {pending} manifest(s) would \
@@ -341,6 +367,15 @@ fn run_inner(
     //    already performed the ensure (step 3) and reports the census; it
     //    must not retype under an unconfirmed baseline.
     if drift_unconfirmed_apply {
+        // Show what confirming would do (review finding: the refused apply
+        // otherwise showed LESS than the read-only run). Stderr only — the
+        // report's counts stay zero because nothing was retyped.
+        let would = remap_pass(conn, &ctx, true)?;
+        eprintln!(
+            "ontology heal: confirming drift would retype {} entit(ies), queue {}, \
+             report-only {}",
+            would.retyped, would.queued, would.report_only
+        );
         return Ok(());
     }
     let counts = remap_pass(conn, &ctx, false)?;

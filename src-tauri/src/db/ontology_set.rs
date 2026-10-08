@@ -119,7 +119,8 @@ pub fn set_entity_strict(
     let Some(tier_json) = tier_json else {
         bail!(
             "no `{TIER_FACT}` manifest row to resolve the entity vocabulary from — \
-             run `ct heal --yes` once so the ensure creates it (§2.4.4), then retry"
+             the row is seeded by the wiki engine when the app opens this brain \
+             (CT cannot create it, §1.6); open the app once, then retry"
         );
     };
     let tier: serde_json::Value = serde_json::from_str(&tier_json)
@@ -220,8 +221,9 @@ fn fallback_rewrite(conn: &Connection, target: &str, fallback: &str) -> Result<(
     let Some(json) = json else {
         bail!(
             "no manifest row for `{target}` — `--fallback` writes into an EXISTING \
-             manifest's manifest_json; run `ct heal --yes` once so the ensure \
-             creates the row, then retry"
+             manifest's manifest_json, and CT cannot create manifest rows \
+             (§1.6) — the wiki engine seeds them when the app opens this \
+             brain; open the app once, then retry"
         );
     };
     let mut manifest: serde_json::Value = serde_json::from_str(&json)
