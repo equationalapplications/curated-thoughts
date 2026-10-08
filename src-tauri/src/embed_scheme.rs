@@ -5,9 +5,9 @@
 //! Two schemes exist:
 //!
 //! - `raw`   — entries and queries embedded verbatim (all pre-#265 rows).
-//! - `instr1`— the E5/MTEB query instruction is prepended to **queries only**
-//!   (document passages stay raw), the scheme Qwen3 embedding models are
-//!   documented for.
+//! - `instr1`— the E5/MTEB instruction is prepended to **BOTH sides**:
+//!   queries (read path) and document passages (write path, via
+//!   `doc_text_for_entry`) — the both-sides "cell E" the spec adopts.
 //!
 //! Scheme is stamped per row (`llm_wiki_entries.embed_scheme`, V26) and the
 //! active read scheme in `llm_wiki_meta.wisdom_active_scheme`. Reads are
@@ -56,7 +56,9 @@ pub const ACTIVE_SCHEME_META_KEY: &str = "wisdom_active_scheme";
 pub enum Scheme {
     /// Verbatim (no instruction) — the pre-#265 scheme.
     Raw,
-    /// E5/MTEB query instruction on the query side; passages stay raw.
+    /// E5/MTEB instruction on BOTH sides: queries (read path, via
+    /// `query_text_for_scheme`) and document passages (write path, via
+    /// `doc_text_for_entry`).
     Instr1,
 }
 
