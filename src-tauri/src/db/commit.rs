@@ -2326,6 +2326,54 @@ fn commit_edge_add(
 /// once per proposal, not per edge"): each endpoint's ladder — including
 /// the source-document resolution rung 2 walks — runs at most once per
 /// proposal, memoized in [`CommitContext::edge_endpoint_strict`].
+/// E2 resolution (controller ruling 2026-10-08, spec r24): would the
+/// WRITE gate write an edge between these endpoints verbatim today — i.e.
+/// does [`resolve_edge_endpoint_vocabulary`] resolve NO strict vocabulary
+/// (both endpoints off / no-manifest, a rung-1a opt-out, or a strict
+/// manifest that declares no edge types)? The retroactive off-manifest
+/// purge must not destroy rows that are the write gate's deliberate
+/// output ("off means off", D8): such rows stay hidden by the
+/// anchor-vocabulary read filter but are RECOVERABLE (declare the type /
+/// change the mode), which deletion is not.
+///
+/// Purely a read probe: the memo maps are fresh per call, `entity_id` is
+/// `""` (never a real ladder id, so the mid-commit proposal-source
+/// fallback cannot fire) and `proposal_id` matches no proposal row.
+pub(crate) fn edge_write_gate_would_skip(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+    gate: &crate::db::entity_gate::GateResolutionContext<'_>,
+) -> Result<bool> {
+    let mut ctx = CommitContext {
+        proposal_id: String::new(),
+        proposal_created_at: 0,
+        entity_id: String::new(),
+        entity_name: String::new(),
+        source_type: "purge_probe",
+        now_secs: 0,
+        now_ms: 0,
+        committed: Vec::new(),
+        conflicts: Vec::new(),
+        dropped_edges: Vec::new(),
+        accepted_count: 0,
+        rejected_count: 0,
+        facts_added: 0,
+        facts_updated: 0,
+        facts_archived: 0,
+        tasks_added: 0,
+        facts_duplicated: 0,
+        skipped_unanchored: 0,
+        entry_embeddings: std::collections::HashMap::new(),
+        deposit_default_tier: crate::config::DEFAULT_DEPOSIT_TIER.to_string(),
+        edge_endpoint_strict: std::collections::HashMap::new(),
+        edge_endpoint_optout: std::collections::HashMap::new(),
+        owner_edge_vocabulary: None,
+        reviewed_by: None,
+    };
+    Ok(resolve_edge_endpoint_vocabulary(conn, "", source_id, target_id, &mut ctx, gate)?.is_none())
+}
+
 fn resolve_edge_endpoint_vocabulary(
     conn: &Connection,
     entity_id: &str,

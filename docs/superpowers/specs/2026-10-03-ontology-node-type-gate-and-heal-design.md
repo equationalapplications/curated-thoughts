@@ -31,6 +31,16 @@ mint resolution (okf/bundle/helper) walks the whole redirect chain —
 read-time stays single-hop error-on-cycle (r2-m6). R2.3.0's
 both-endpoints-off SKIP is unchanged: such rows are still judged by the
 anchor's vocabulary on read/purge — the E2 design call stays OPEN.
+r24 (2026-10-08, controller ruling): E2 RESOLVED as purge-side sparing —
+the retroactive off-manifest purge (`edge_purge`) SPARES a row whose
+endpoints the write gate would leave ungated today (both off /
+no-manifest, a rung-1a opt-out, a strict manifest declaring no edge
+types; mirror of `resolve_edge_endpoint_vocabulary` == no vocabulary).
+"Off means off" (D8) outranks cleanup: spared rows stay hidden by the
+anchor-vocabulary read filter but are recoverable, which deletion is
+not. The read filter itself is unchanged (r4-m5 pin). Census deferral:
+the operator WAIVED the live-census attach as a merge gate (2026-10-08);
+run it post-merge as a verification, not a blocker.
 **Date:** 2026-10-03 (written 2026-10-04; r21 2026-10-07)
 **Baseline:** `main` @ `9c2281b` (v3.2.0) for the design; line citations
 re-anchored (r21) to branch tip after merging `main` @ `0f7ea9f` (v3.3.0).
@@ -779,6 +789,14 @@ Applies to edges AND nodes AND heal. Resolve in order; first hit decides:
    on read and destroyed by the next sweep. **Fact/task endpoints (r22):**
    rung 1a's opt-out is checked on the endpoint's OWNING entity (the same
    mapping the ladder walks), not only on the raw fact/task id.
+   **E2 resolution (r24, controller ruling 2026-10-08):** a SKIP-written
+   row (both endpoints off / no-manifest, or an opt-out) is NOT destroyed
+   by the retroactive off-manifest purge — the sweep spares exactly the
+   rows the write gate would produce verbatim today, so "off means off"
+   holds retroactively too. Spared rows remain subject to the
+   anchor-vocabulary read filter (hidden until the anchor's manifest
+   declares the type or the mode changes — recoverable, r4-m5 pin
+   unchanged).
 
 Additional rules:
 
