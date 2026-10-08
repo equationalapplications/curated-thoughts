@@ -854,6 +854,18 @@ Additional rules:
   directory is strict, the entity is gated (an off directory shields its
   own documents from CONTRIBUTING gating obligations; it never downgrades
   an entity another directory made strict).
+  **Per-source resolution (2026-10-08 clarification):** each source
+  walks rungs 2–3 on its own. A source NO `folder_ontology` entry or
+  `ontology_default` decides (rung 3 climbs) resolves at the residual
+  rung 4 — so under a strict `tier_fact` it counts as a STRICT source
+  for strict-wins, not as a neutral one. Only when EVERY source decides
+  `off` at rungs 2–3 does the entity SKIP; rung 4 never overrides an
+  all-`off` resolution (§2.3 "first hit decides"). The same rule
+  applies per endpoint for edges (R2.3.0) and to heal (an all-`off`
+  entity is ungated: neither retyped nor queued). Matrix cases:
+  every source under an `off` folder + strict `tier_fact` → SKIP;
+  one `off` source + one unmatched source + strict `tier_fact` →
+  GATE (the unmatched source is strict via rung 4).
 - **R2.3.4 No-source entities.** Entities with NO resolvable sources
   resolve via rung 3 (host default), then rung 4 (tier_fact) — i.e.
   climb the ladder from the host default. The gate feeds the resolver
