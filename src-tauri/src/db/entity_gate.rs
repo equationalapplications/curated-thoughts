@@ -970,15 +970,16 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
         return Ok(EnsureOutcome::NoRow);
     };
 
-    // 2. Memoization: skip if this (entity, planner epoch, mode, bytes) was
-    //    already planned healthy.
-    let manifest_hash = ensure_memo_key(&mode, &manifest_json);
+    // 2. Memoization: skip if this (entity, planner epoch, gated mode,
+    //    bytes) was already planned healthy.
+    let gated_mode = gated_row_mode(conn, entity_id, &mode)?;
+    let manifest_hash = ensure_memo_key(gated_mode, &manifest_json);
     if manifest_ensure_already_done(conn, entity_id, &manifest_hash)? {
         return Ok(EnsureOutcome::AlreadyEnsured);
     }
 
     // 3. Parse, classify, edit (the pure planner).
-    let strict = mode == "strict";
+    let strict = gated_mode == "strict";
     let (new_json, did_extend, did_set_fallback) =
         match plan_manifest_ensure(&manifest_json, entity_id, strict)? {
             EnsurePlan::Malformed(e) => return Ok(EnsureOutcome::Malformed(e)),
@@ -1006,7 +1007,7 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
     //    next call reads the new manifest_json, computes its hash, and finds
     //    the memo — short-circuiting to AlreadyEnsured.
     if let Some(new_json) = new_json {
-        let new_hash = ensure_memo_key(&mode, &new_json);
+        let new_hash = ensure_memo_key(gated_mode, &new_json);
         let tx = conn.unchecked_transaction()?;
         // Compare-and-swap on the bytes we READ (review finding): the read
         // above is outside the transaction, so a concurrent engine/desktop
@@ -1082,6 +1083,23 @@ pub enum EnsureOutcome {
 /// ensure answered `AlreadyEnsured` forever while read-only `ct heal`
 /// reported the row unusable).
 const ENSURE_PLANNER_EPOCH: &str = "r26";
+
+/// The mode the GATE sees for `entity_id`'s row: its stored `mode`, except
+/// that a merged-away (or cycle-locked) id's row is never read — rung 1b
+/// reads the terminal survivor's row (R2.7.5) — so it gates nothing and is
+/// reported as `"redirected"` (review finding: judging it by raw id
+/// re-reported a loser's leftover row forever, with a fix that writes the
+/// survivor's row instead). D8: a faulting redirect read propagates.
+pub(crate) fn gated_row_mode<'m>(
+    conn: &Connection,
+    entity_id: &str,
+    mode: &'m str,
+) -> Result<&'m str> {
+    Ok(match redirect_survivor(conn, entity_id)? {
+        RedirectOutcome::None => mode,
+        RedirectOutcome::Survivor(_) | RedirectOutcome::Cycle => "redirected",
+    })
+}
 
 /// The memo key: the planner's verdict depends on the epoch, the row's
 /// mode (only strict rows can be unusable) and its bytes — all three key
@@ -2607,6 +2625,31 @@ mod tests {
         );
     }
 
+    /// Review finding: a merged-away id's leftover strict row is never read
+    /// by the gate (rung 1b reads the survivor's), so the ensure must not
+    /// report it unusable — its printed fix would write the survivor's row
+    /// and never clear the report.
+    #[test]
+    fn ensure_does_not_report_a_merged_losers_row() {
+        let conn = open_in_memory().unwrap();
+        insert_manifest(
+            &conn,
+            "e_lose",
+            "strict",
+            &json!({"node_types": [{"type": "person"}], "fallback_node_type": "ghost"}).to_string(),
+        );
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('e_lose', 'e_surv', 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            ensure_manifest_vocabulary(&conn, "e_lose").unwrap(),
+            EnsureOutcome::AlreadyComplete
+        );
+    }
+
     /// Hand-stripped `fallback_node_type` → ensure re-runs and writes it.
     #[test]
     fn ensure_hand_stripped_key_re_runs() {
@@ -3861,7 +3904,7 @@ mod tests {
         }
         .to_string();
         assert!(
-            entity.contains("`ct ontology set --entity ent_x --fallback <type>`"),
+            entity.contains("`ct ontology set --entity=ent_x --fallback <type>`"),
             "{entity}"
         );
 
@@ -3889,7 +3932,7 @@ mod tests {
         }
         .to_string();
         assert!(
-            entity_empty.contains("`ct ontology set --entity ent_x --mode strict`"),
+            entity_empty.contains("`ct ontology set --entity=ent_x --mode strict`"),
             "{entity_empty}"
         );
 
@@ -3921,7 +3964,7 @@ mod tests {
         }
         .to_string();
         assert!(
-            hostile.contains("`ct ontology set --entity 'ent_a; rm -rf ~' --fallback <type>`"),
+            hostile.contains("`ct ontology set --entity='ent_a; rm -rf ~' --fallback <type>`"),
             "{hostile}"
         );
 

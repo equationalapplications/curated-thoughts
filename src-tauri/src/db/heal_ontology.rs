@@ -757,7 +757,7 @@ fn ensure_pending_readonly(conn: &Connection) -> Result<(usize, usize, UnusableR
     for (entity_id, mode, manifest_json) in rows {
         // The SAME pure planner the real ensure runs — the read-only report
         // cannot drift from what `--yes` writes.
-        let strict = mode == "strict";
+        let strict = crate::db::entity_gate::gated_row_mode(conn, &entity_id, &mode)? == "strict";
         match crate::db::entity_gate::plan_manifest_ensure(&manifest_json, &entity_id, strict)? {
             crate::db::entity_gate::EnsurePlan::Edit { .. } => would_write += 1,
             crate::db::entity_gate::EnsurePlan::ForeignNoPreferredFallback => {

@@ -1147,6 +1147,9 @@ mod tests {
             Some("ent_0a1b"),
             Some("ent_a; echo pwned"),
             Some("it's"),
+            // A leading hyphen must stay attached (`--entity=`), else clap
+            // reads the id as an option.
+            Some("-ent_lead"),
         ] {
             for strict in [false, true] {
                 for fallback in [false, true] {

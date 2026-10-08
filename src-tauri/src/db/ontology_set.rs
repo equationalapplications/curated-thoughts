@@ -49,10 +49,12 @@ pub struct SetCommand<'a> {
 /// hand-rolled templates could drift from the clap flags in `ct.rs`,
 /// whose tests parse this output). The entity id is shell-quoted: ids
 /// arrive from bundles unvalidated, and the command is meant to be pasted.
+/// It is attached with `=`: a separate word starting with `-` would be
+/// rejected by clap as an option rather than taken as the value.
 pub fn set_command(cmd: SetCommand<'_>) -> String {
     let mut out = String::from("ct ontology set");
     if let Some(id) = cmd.entity {
-        out.push_str(" --entity ");
+        out.push_str(" --entity=");
         out.push_str(&shell_quote(id));
     }
     if cmd.strict {
@@ -604,7 +606,7 @@ mod tests {
         );
         assert!(message.contains("one of: person, place"), "{message}");
         assert!(
-            message.contains("`ct ontology set --entity ent_x --mode strict --fallback <type>`"),
+            message.contains("`ct ontology set --entity=ent_x --mode strict --fallback <type>`"),
             "{message}"
         );
         assert!(message.contains("Nothing was written"), "{message}");
@@ -729,11 +731,11 @@ mod tests {
             .to_string();
         assert!(
             err.contains(
-                "`ct ontology set --entity 'ent_a; echo pwned' --mode strict --fallback <type>`"
+                "`ct ontology set --entity='ent_a; echo pwned' --mode strict --fallback <type>`"
             ),
             "{err}"
         );
-        assert!(!err.contains("--entity ent_a;"), "{err}");
+        assert!(!err.contains("--entity=ent_a;"), "{err}");
     }
 
     #[test]
