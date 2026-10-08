@@ -2446,12 +2446,19 @@ fn endpoint_owner_entity(conn: &Connection, endpoint_id: &str) -> Result<Option<
 /// direction that drops a visible `dropped_edges` item, never a silent
 /// mutation).
 fn endpoint_fact_source_paths(conn: &Connection, endpoint_id: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
+    // After a merge, facts can stay keyed to the LOSER id (the survivor's
+    // ladder must see them) — expand to the whole redirect cluster, the same
+    // coverage `commit_fact_update`/`commit_fact_archive`/`get_entity` use.
+    let cluster = crate::db::entities::cluster_ids(conn, endpoint_id)?;
+    let cluster_placeholders = vec!["?"; cluster.len()].join(",");
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, source_ref FROM llm_wiki_entries
-         WHERE entity_id = ?1 AND deleted_at IS NULL",
-    )?;
+         WHERE entity_id IN ({cluster_placeholders}) AND deleted_at IS NULL"
+    ))?;
     let facts: Vec<(String, Option<String>)> = stmt
-        .query_map([endpoint_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     let mut paths: Vec<String> = Vec::new();
     for (entry_id, source_ref) in &facts {
@@ -6968,6 +6975,57 @@ mod tests {
             1,
             "the source endpoint memoized exactly once; the strict-wins early \
              return skips the target resolution entirely"
+        );
+    }
+
+    /// Review finding (rung-2 coverage): after a merge, facts can stay
+    /// keyed to the LOSER id — the survivor's rung-2 source paths must
+    /// still see them. `endpoint_fact_source_paths` expands the endpoint
+    /// id to its redirect cluster, the same coverage `commit_fact_update`,
+    /// `commit_fact_archive`, `get_entity` and `batched_cluster_counts`
+    /// use. Pre-fix the query matched the survivor id only and a
+    /// loser-keyed strict-folder fact was invisible to rungs 2–3.
+    #[test]
+    fn endpoint_fact_source_paths_cover_loser_keyed_facts() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-surv", "Survivor", "Summary", 100);
+        seed_entity(&conn, "ent-loser", "Loser", "Summary", 100);
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('ent-loser', 'ent-surv', 1)",
+            [],
+        )
+        .unwrap();
+
+        // The loser's one fact, grounded in a resolvable document. The
+        // shared resolver core matches evidence by `chunks.content_hash`,
+        // so the chunk carries a real (non-empty) hash.
+        let doc_id = seed_document(&conn, "/vault/ops/runbook.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        let content_hash = "a".repeat(64);
+        conn.execute(
+            "UPDATE chunks SET content_hash = ?1 WHERE id = ?2",
+            params![content_hash, chunk_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_ref, created_at, updated_at
+             ) VALUES ('fact-loser', 'ent-loser', 'Loser fact', 'body', '[]',
+                       'inferred', 'librarian_inferred', ?1, 100, 100)",
+            [serde_json::json!({
+                "evidence": [{ "content_hash": content_hash }]
+            })
+            .to_string()],
+        )
+        .unwrap();
+
+        let paths = endpoint_fact_source_paths(&conn, "ent-surv").unwrap();
+        assert!(
+            paths.iter().any(|p| p.contains("runbook")),
+            "the loser-keyed fact's source path must surface in the \
+             survivor's rung-2 inputs; got {paths:?}"
         );
     }
 
