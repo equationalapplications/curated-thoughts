@@ -284,12 +284,19 @@ pub fn normalize_merge_key(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut pending_space = false;
     for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() {
+        if ch.is_alphanumeric() {
             if pending_space && !out.is_empty() {
                 out.push(' ');
             }
             pending_space = false;
-            out.push(ch.to_ascii_lowercase());
+            // Full Unicode lowercase (`char::to_lowercase`), not
+            // `to_ascii_lowercase`: the key's own doc example is
+            // " Café—Olga! ", and ASCII-only filtering made "Zoë" and "Zo"
+            // collide into ONE duplicate group — a deterministic WRONG
+            // auto-merge with agreeing summaries (final-review
+            // fix-before-merge). Multi-char lowercases (İ → i̇) are
+            // handled by `extend`.
+            out.extend(ch.to_lowercase());
         } else if ch.is_whitespace() {
             pending_space = true;
         } else {
@@ -715,7 +722,39 @@ mod tests {
         // equals "Intent x".
         assert_eq!(normalize_merge_key("Intent (x)"), "intent x");
         assert_ne!(normalize_merge_key("Intent (x)"), "intentx");
-        assert_eq!(normalize_merge_key(" Café—Olga! "), "caf olga");
+        // The doc example, now with non-ASCII letters KEPT (the key's own
+        // documented behavior — final-review fix-before-merge: ASCII-only
+        // filtering made "Zoë" collide with "Zo").
+        assert_eq!(normalize_merge_key(" Café—Olga! "), "café olga");
+        // "Zoë" and "Zo" are DIFFERENT names and must NOT share a key…
+        assert_ne!(normalize_merge_key("Zoë"), normalize_merge_key("Zo"));
+        // …while "Zoë" and "Zoë" (any casing/spacing variation) must.
+        assert_eq!(normalize_merge_key("Zoë"), normalize_merge_key(" zoë "));
+        assert_eq!(normalize_merge_key("Zoë"), "zoë");
+    }
+
+    /// Final-review fix-before-merge: NON-ASCII names must not collapse a
+    /// duplicate group. Pre-fix, "Café" and "Cafe" hashed to the same
+    /// merge key ("cafe") and the pass auto-merged them with agreeing
+    /// summaries — a deterministic WRONG merge.
+    #[test]
+    fn non_ascii_names_do_not_merge() {
+        let mut conn = open_in_memory().unwrap();
+        armed(&conn);
+        seed(&conn, "e1", "Café", "concept", "corner café");
+        seed(&conn, "e2", "Cafe", "concept", "corner café");
+        let r = merge_duplicates_pass(&mut conn, DriftFlag::None, true);
+        assert_eq!(r.merged_groups, 0, "Café ≠ Cafe; {r:?}");
+        assert_eq!(redirect_count(&conn), 0);
+
+        // …while the SAME non-ASCII name still merges (the fix must not
+        // over-correct into never-merge).
+        let mut conn = open_in_memory().unwrap();
+        armed(&conn);
+        seed(&conn, "e3", "Café", "concept", "corner café");
+        seed(&conn, "e4", "Café", "concept", "corner café");
+        let r = merge_duplicates_pass(&mut conn, DriftFlag::None, true);
+        assert_eq!(r.merged_groups, 1, "Café = Café must still merge; {r:?}");
     }
 
     /// Type conflict → queue, survivor must not silently win (R2.7.4).

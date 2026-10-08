@@ -1080,13 +1080,14 @@ pub fn resolve_node_gate_decision(
 }
 
 /// The SINGLE production entry point for the four insert sites (LLM
-/// synthesis / GUI / bundle / okf_migration). Loads the ingest policy for
-/// the connection's brain dir ([`crate::config::ingest_policy_for_db`] —
-/// cached per config-file bytes), stamps the initial drift watermark at
-/// the first gate resolution (r13-MAJOR-3), and walks the FULL §2.3
-/// ladder — rungs 1a/1b/1c/1d, the rung 2/3 `folder_ontology` /
-/// `ontology_default` climb via [`resolve_node_gate_decision`], and the
-/// rung 4 `tier_fact` fallback.
+/// synthesis / GUI / bundle / okf_migration). The caller loads the ingest
+/// policy for the connection's brain dir ([`crate::config::ingest_policy_for_db`]
+/// — cached per config-file bytes) BEFORE opening the IMMEDIATE transaction
+/// (r21 hold-time rule: no filesystem I/O inside it) and passes it in here;
+/// this function stamps the initial drift watermark at the first gate
+/// resolution (r13-MAJOR-3) and walks the FULL §2.3 ladder — rungs
+/// 1a/1b/1c/1d, the rung 2/3 `folder_ontology` / `ontology_default` climb
+/// via [`resolve_node_gate_decision`], and the rung 4 `tier_fact` fallback.
 ///
 /// `source_paths` per site (spec R2.3.4): LLM synthesis passes the
 /// proposal's trigger document paths; okf_migration passes the wiki-page
@@ -1105,11 +1106,11 @@ pub fn resolve_node_gate_decision(
 /// swallows read-only/contended failures.
 pub fn resolve_production_gate(
     tx: &ImmediateTx<'_>,
+    policy: &crate::config::IngestPolicy,
     entity_id: &str,
     source_paths: &[String],
 ) -> (GateDecision, NodeGateDecision) {
     let conn: &Connection = tx;
-    let policy = crate::config::ingest_policy_for_db(conn.path());
     let degraded = policy.ontology_degraded_state();
 
     // C1 (r13-MAJOR-3): the INITIAL watermark is stamped at the first gate
@@ -1141,10 +1142,14 @@ pub fn resolve_production_gate(
 ///     outcome carried (the proposed label, or `None` when the caller
 ///     supplied none — never `''`); `source_directory` = the `off` folder
 ///     when rung 2 caused the SKIP, else NULL.
-///   * `DegradedToFallback` → `degraded` row with the original label,
-///     trimmed, pre-canonicalization; `source_directory` NULL (degrade
-///     rows only carry a directory when off-sourced, which cannot happen
-///     on a Gate verdict).
+///   * `DegradedToFallback` with a LABEL → `degraded` row with the original
+///     label, trimmed, pre-canonicalization; `DegradedToFallback` with NO
+///     label (the unlabeled-mint landing, `original_label: ""`) →
+///     `unlabeled_landing` row with `original_type` NULL (r21 normative
+///     table — a label-less landing is an unlabeled landing, not a
+///     degrade); `source_directory` NULL either way (degrade rows only
+///     carry a directory when off-sourced, which cannot happen on a Gate
+///     verdict).
 ///   * Admitted-as-declared / alias-admitted / held → NO row.
 ///
 /// Bundle import's `unlabeled_landing` row and okf_migration's
@@ -1168,12 +1173,16 @@ pub fn write_gate_origin_ledger(
             )?;
         }
         (_, AdmitOutcome::DegradedToFallback { original_label, .. }) => {
-            let label: Option<&str> = if !original_label.is_empty() {
-                Some(original_label.as_str())
+            // Minor-4 (r21 normative table): a label-less landing is an
+            // UNLABELED landing (`unlabeled_landing`, `original_type`
+            // NULL), not a degrade — only a landing that degraded an
+            // actual supplied label is a `degraded` row.
+            let (label, reason) = if !original_label.is_empty() {
+                (Some(original_label.as_str()), OriginReason::Degraded)
             } else {
-                None
+                (None, OriginReason::UnlabeledLanding)
             };
-            write_origin_ledger_row(tx, entity_id, label, OriginReason::Degraded, None)?;
+            write_origin_ledger_row(tx, entity_id, label, reason, None)?;
         }
         _ => {
             // Admitted-as-declared, alias-admitted, held: NO ledger row.
@@ -2248,9 +2257,12 @@ mod tests {
     #[test]
     fn production_gate_stamps_initial_watermark() {
         let mut conn = open_in_memory().unwrap();
+        // r21 hold-time rule: the policy load happens BEFORE the tx opens
+        // (in-memory conn → the default policy, no filesystem read).
+        let policy = crate::config::ingest_policy_for_db(conn.path());
         // Fresh brain: no manifest rows → ladder falls to rung 4 → Off/SKIP.
         let tx = ImmediateTx::begin(&mut conn).unwrap();
-        let (decision, _node) = resolve_production_gate(&tx, "ent_new", &[]);
+        let (decision, _node) = resolve_production_gate(&tx, &policy, "ent_new", &[]);
         assert!(matches!(decision, GateDecision::Skip));
         tx.commit().unwrap();
 
@@ -2268,7 +2280,7 @@ mod tests {
 
         // Re-resolution does not duplicate or overwrite the row.
         let tx = ImmediateTx::begin(&mut conn).unwrap();
-        let _ = resolve_production_gate(&tx, "ent_other", &[]);
+        let _ = resolve_production_gate(&tx, &policy, "ent_other", &[]);
         tx.commit().unwrap();
         let count: i64 = conn
             .query_row(
@@ -2317,9 +2329,12 @@ mod tests {
                         &serde_json::to_string(&manifest).unwrap(),
                     );
 
+                    // r21 hold-time rule: config (filesystem) loads BEFORE
+                    // the IMMEDIATE transaction opens.
+                    let policy = crate::config::ingest_policy_for_db(conn.path());
                     let tx = ImmediateTx::begin(&mut conn).unwrap();
                     let (decision, node) =
-                        resolve_production_gate(&tx, "ent_new", &["ops/a.md".to_string()]);
+                        resolve_production_gate(&tx, &policy, "ent_new", &["ops/a.md".to_string()]);
                     tx.commit().unwrap();
                     assert!(
                         matches!(decision, GateDecision::Gate(_)),
@@ -2342,9 +2357,10 @@ mod tests {
                         crate::db::connection::open_app_db(&brain.path().join("brain.db"), None)
                             .unwrap();
 
+                    let policy = crate::config::ingest_policy_for_db(conn.path());
                     let tx = ImmediateTx::begin(&mut conn).unwrap();
                     let (decision, node) =
-                        resolve_production_gate(&tx, "ent_new", &["ops/a.md".to_string()]);
+                        resolve_production_gate(&tx, &policy, "ent_new", &["ops/a.md".to_string()]);
                     tx.commit().unwrap();
                     assert!(matches!(decision, GateDecision::Skip));
                     assert_eq!(node.verdict, ModeVerdict::Off);

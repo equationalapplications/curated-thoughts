@@ -176,11 +176,14 @@ struct CommitContext {
     /// The tier a deposit-origin entry is stamped with in this commit. Already
     /// resolved against the shipped default, so it is never empty.
     deposit_default_tier: String,
-    /// Manifest edge-type vocabulary to gate edge writes against (spec §2.3),
-    /// or `None` when this entity's ontology does not gate.
-    /// Resolved once per commit: the entity is fixed for the whole proposal, so
-    /// re-reading and re-parsing the manifest per edge item would be pure waste.
-    strict_edge_types: Option<EdgeVocabulary>,
+    /// R2.3.0 per-proposal memo (spec: edge gating "resolves the endpoints'
+    /// sources once per proposal, not per edge"): endpoint entity id → the
+    /// strict edge vocabulary that endpoint's §2.3 ladder resolved to
+    /// (`None` = the endpoint resolves not-strict / strict-with-no-vocabulary
+    /// and contributes no gate). Populated lazily by the first `edge_add`
+    /// item that names the endpoint and reused by every later edge in the
+    /// SAME proposal.
+    edge_endpoint_strict: std::collections::HashMap<String, Option<EdgeVocabulary>>,
     /// Human Verification Gate (hvg): reviewer identity to stamp on the
     /// proposal's final guarded UPDATE. Mirrored from `ResolveOptions` so
     /// `finalize_proposal_status_guarded` reads it from the ctx it already
@@ -1368,6 +1371,7 @@ fn parse_tags(payload: &serde_json::Value) -> Vec<String> {
 
 fn create_entity_if_needed(
     tx: &crate::db::entity_gate::ImmediateTx<'_>,
+    policy: &crate::config::IngestPolicy,
     proposal: &LoadedProposal,
     accepted_any: bool,
     now_secs: i64,
@@ -1392,7 +1396,7 @@ fn create_entity_if_needed(
     let conn: &Connection = tx;
     let source_paths = load_proposal_source_paths(conn, &proposal.id)?;
     let (decision, gate) =
-        crate::db::entity_gate::resolve_production_gate(tx, &entity_id, &source_paths);
+        crate::db::entity_gate::resolve_production_gate(tx, policy, &entity_id, &source_paths);
     let proposed_label = proposed_type
         .as_deref()
         .map(str::trim)
@@ -1429,12 +1433,26 @@ fn create_entity_if_needed(
             )?;
         }
         crate::db::entity_gate::AdmitOutcome::Held { .. } => {
-            // SG6 (spec §2.4.5): a Held proposal is held as pending. The
-            // proposal's facts are NOT dropped — they re-enter when the
-            // manifest names a fallback. We return `(None, false)` so
-            // the caller's existing flow marks the proposal as held
-            // without inserting a row.
-            return Ok((None, false));
+            // SG6 (spec §2.4.5): a Held mint FAILS the resolution with a
+            // Held-specific error naming the ontology-gate cause. The
+            // erroring `?`/return drops the `ImmediateTx`, whose rollback
+            // undoes anything this resolution wrote — so the proposal
+            // STAYS `pending` and its facts are NOT dropped (they re-enter
+            // when the manifest names a fallback / declares node types).
+            // Important-3 (final review): the pre-fix code returned
+            // `Ok((None, false))` and relied on the generic
+            // "proposal has no entity_id" bail further down — safety by
+            // accident, with no §2.4.5 diagnostic.
+            bail!(
+                "ontology gate held the new-entity mint for proposal {} ({}): the \
+                 strict manifest has no usable vocabulary — no declared \
+                 `fallback_node_type`, or a declared fallback over an EMPTY \
+                 `node_types` set (spec §2.4.5). The proposal stays pending and \
+                 its facts are kept; retry after naming a fallback or adding \
+                 node types to the manifest",
+                proposal.id,
+                proposal.proposed_name.as_deref().unwrap_or("unnamed")
+            );
         }
         _ => {
             // Helper inserted (AdmittedDeclared / Aliased / DegradedToFallback).
@@ -2056,6 +2074,7 @@ fn commit_task_add(
 
 fn commit_edge_add(
     conn: &Connection,
+    gate: &crate::db::entity_gate::GateResolutionContext<'_>,
     ctx: &mut CommitContext,
     item: &LoadedItem,
     payload: &serde_json::Value,
@@ -2096,16 +2115,21 @@ fn commit_edge_add(
     // Reads stay untyped-tolerant: this is a write-time gate only, and rows
     // written before the manifest existed remain readable and traversable.
     //
-    // R2.3.0 (Task 3): strict-wins across ENDPOINTS. If either endpoint
-    // resolves strict (its own strict manifest row, or its source path
-    // rung-2/3 strict verdict), the EDGE is gated under the strict
+    // R2.3.0 (Task 3, final wave): strict-wins across ENDPOINTS. If either
+    // endpoint resolves strict (its own strict manifest row, or its source
+    // path rung-2/3 strict verdict), the EDGE is gated under the strict
     // vocabulary that fires FIRST. The §2.3 rung-1a's entity-level opt-out
     // (a deliberate `ct_entity_optouts` row) short-circuits the edge gate
-    // on that endpoint (§2.1, r12-M1 restated) — the existing pre-wave-1
-    // `commit.rs:364-369` fall-through is the row-PRESENT-but-UNMARKED
-    // case; an explicit opt-out goes the OTHER way.
-    let resolved_vocabulary =
-        resolve_edge_endpoint_vocabulary(conn, &ctx.entity_id, &source_id, &target_id, ctx);
+    // on that endpoint (§2.1, r12-M1 restated).
+    let proposal_entity_id = ctx.entity_id.clone();
+    let resolved_vocabulary = resolve_edge_endpoint_vocabulary(
+        conn,
+        &proposal_entity_id,
+        &source_id,
+        &target_id,
+        ctx,
+        gate,
+    );
     let edge_type = match resolved_vocabulary {
         Some(vocabulary) => match vocabulary.canonicalize(&edge_type) {
             // Issue #189: write the manifest's spelling, not the candidate's.
@@ -2184,21 +2208,27 @@ fn commit_edge_add(
 /// R2.3.0 (Task 3): strict-wins across EDGE endpoints. If EITHER
 /// `source_id` or `target_id` has a deliberate `ct_entity_optouts` row,
 /// the edge cascade short-circuits (§2.1, r12-m1 restated) and the gate
-/// disarms (return `None` → no vocabulary → write verbatim). Otherwise the
-/// entity's own `strict_edge_types` (already resolved at `CommitContext`
-/// construction time) gates the edge.
+/// disarms (return `None` → no vocabulary → write verbatim). Otherwise
+/// EACH endpoint's §2.3 mode is resolved — rung 1b (its own manifest row),
+/// rungs 2–3 (its source directories via `folder_ontology` /
+/// `ontology_default`), rung 4 (`tier_fact`) — and the edge is GATED if
+/// EITHER endpoint resolves strict, under the strict side's vocabulary:
+/// the endpoint's own manifest row when that row is the strict rung, else
+/// the `tier_fact` vocabulary (the mode-vs-vocabulary rule, r9-M1 — rungs
+/// 2–3 supply a mode, never a vocabulary). The SOURCE endpoint's strict
+/// vocabulary fires first when both are strict.
 ///
-/// A future Task 5/Task 7 implementation can wire rung-2/3 source-path
-/// resolution per-endpoint; today's pass returns the entity's vocabulary
-/// when no opt-out fires, matching the pre-wave-1 strict-wins behavior at
-/// `commit.rs:364-369` (which is the row-PRESENT-but-UNMARKED case — an
-/// explicit opt-out is the row-PRESENT-and-OPTED-OUT case, here).
+/// Per-proposal memoization (spec R2.3.0: "resolves the endpoints' sources
+/// once per proposal, not per edge"): each endpoint's ladder — including
+/// the source-document resolution rung 2 walks — runs at most once per
+/// proposal, memoized in [`CommitContext::edge_endpoint_strict`].
 fn resolve_edge_endpoint_vocabulary(
     conn: &Connection,
     entity_id: &str,
     source_id: &str,
     target_id: &str,
-    ctx: &CommitContext,
+    ctx: &mut CommitContext,
+    gate: &crate::db::entity_gate::GateResolutionContext<'_>,
 ) -> Option<EdgeVocabulary> {
     // Rung 1a — explicit opt-out on either endpoint → skip the gate.
     if endpoint_has_optout(conn, source_id).unwrap_or(false)
@@ -2206,10 +2236,160 @@ fn resolve_edge_endpoint_vocabulary(
     {
         return None;
     }
-    // Rung 1b/c/d fall through to the entity's resolved vocabulary (the
-    // pre-wave-1 behavior; Task 5/7 will refine per-endpoint rung-2/3).
-    let _ = entity_id;
-    ctx.strict_edge_types.clone()
+    let source = endpoint_edge_vocabulary(conn, source_id, entity_id, gate, ctx);
+    if source.is_some() {
+        // Strict-wins across endpoints: the strict source side gates, under
+        // its own vocabulary.
+        return source;
+    }
+    // The source endpoint resolves not-strict; a STRICT target still gates
+    // (an off directory shields its own entities from CONTRIBUTING
+    // obligations but never downgrades an edge the strict side makes
+    // checkable — same asymmetry as §2.3.3).
+    endpoint_edge_vocabulary(conn, target_id, entity_id, gate, ctx)
+}
+
+/// Resolve ONE endpoint's §2.3 ladder to the edge vocabulary it contributes
+/// (`None` = not-strict / no usable vocabulary → contributes no gate), with
+/// the per-proposal memo.
+fn endpoint_edge_vocabulary(
+    conn: &Connection,
+    endpoint_id: &str,
+    proposal_entity_id: &str,
+    gate: &crate::db::entity_gate::GateResolutionContext<'_>,
+    ctx: &mut CommitContext,
+) -> Option<EdgeVocabulary> {
+    if let Some(cached) = ctx.edge_endpoint_strict.get(endpoint_id) {
+        return cached.clone();
+    }
+    let resolved = resolve_endpoint_ladder(
+        conn,
+        endpoint_id,
+        proposal_entity_id,
+        gate,
+        &ctx.proposal_id,
+    );
+    ctx.edge_endpoint_strict
+        .insert(endpoint_id.to_string(), resolved.clone());
+    resolved
+}
+
+/// The per-endpoint §2.3 ladder, edge flavor:
+///
+///   * rung 1b — the endpoint's own manifest row. A STRICT row gates under
+///     ITS edge vocabulary (a strict row declaring zero edge types disarms,
+///     per §2.1's warn-and-disarm; `ontology_leg` owns the warning). An
+///     unmarked row climbs; an UNREADABLE row falls through WITHOUT a
+///     warning — §2.3 rung 1(c) keeps today's edge behavior (only nodes
+///     and heal get report-or-hold).
+///   * rungs 2–3 — the endpoint's source directories. The vocabulary comes
+///     from `tier_fact` (the mode-vs-vocabulary rule). Strict-wins across
+///     paths; a mode that resolves off keeps climbing. A rung-2/3 strict
+///     verdict with no strict `tier_fact` vocabulary disarms (mode = GATE +
+///     no vocabulary row → SKIP + census warning, mirroring §2.1).
+///   * rung 4 — `tier_fact` itself (unmarked/off row → `None`, §2.3.1).
+fn resolve_endpoint_ladder(
+    conn: &Connection,
+    endpoint_id: &str,
+    proposal_entity_id: &str,
+    gate: &crate::db::entity_gate::GateResolutionContext<'_>,
+    proposal_id: &str,
+) -> Option<EdgeVocabulary> {
+    // Rung 1b — the endpoint's own manifest row.
+    match ontology_leg(conn, endpoint_id, endpoint_id) {
+        OntologyLeg::Strict(v) => return v,
+        // Unmarked (rung 1d) climbs; Err keeps today's edge fall-through.
+        OntologyLeg::NotStrict | OntologyLeg::Err(_) => {}
+    }
+
+    // Rungs 2–3 — the endpoint's source directories. For an EXISTING
+    // entity these are its live facts' resolved document paths (the same
+    // shared core, `resolve_source_core`, the heal pass walks). The
+    // proposal's OWN entity is mid-commit — its facts may not have landed
+    // yet — so when it has no resolvable fact sources its rung-2 inputs
+    // are the proposal's TRIGGER document paths, the same paths the mint
+    // gate walked for it (R2.3.4).
+    let mut paths = endpoint_fact_source_paths(conn, endpoint_id);
+    if paths.is_empty() && endpoint_id == proposal_entity_id {
+        if let Ok(trigger) = load_proposal_source_paths(conn, proposal_id) {
+            paths = trigger;
+        }
+    }
+    for path in &paths {
+        match gate.ingest.ontology_lookup(
+            path,
+            gate.vault_root,
+            gate.degraded,
+            gate.schema,
+            gate.schema_unparseable,
+        ) {
+            crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Strict) => {
+                // Vocabulary from `tier_fact` (mode-vs-vocabulary rule).
+                return match ontology_leg(conn, endpoint_id, "tier_fact") {
+                    OntologyLeg::Strict(v) => v,
+                    OntologyLeg::NotStrict => None,
+                    OntologyLeg::Err(e) => {
+                        warn_ontology_unreadable(endpoint_id, &[endpoint_id, "tier_fact"], &e);
+                        None
+                    }
+                };
+            }
+            crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Off) => {
+                // Off loses to a strict rung (R2.3.3) — keep climbing.
+                continue;
+            }
+            // Degraded-config Hold: the edge gate keeps today's posture
+            // (edges never consulted the degraded state pre-R2.3.0); the
+            // §2.2.4 scoped hold is the node gate's. Falls through to
+            // rung 4, which still gates under `tier_fact` when strict.
+            crate::config::OntologyLookup::Hold | crate::config::OntologyLookup::Climb => {
+                continue;
+            }
+        }
+    }
+
+    // Rung 4 — tier_fact itself.
+    match ontology_leg(conn, endpoint_id, "tier_fact") {
+        OntologyLeg::Strict(v) => v,
+        OntologyLeg::NotStrict => None,
+        OntologyLeg::Err(e) => {
+            warn_ontology_unreadable(endpoint_id, &[endpoint_id, "tier_fact"], &e);
+            None
+        }
+    }
+}
+
+/// An EXISTING endpoint entity's rung-2 source paths: every live fact's
+/// `source_ref` resolved through the shared core, deduplicated by path.
+/// Unresolved sources contribute no path (they cannot flip a mode HERE:
+/// the R2.3.2 report-only rule scopes to heal, and for a write-time edge
+/// gate an unresolvable source can only ever REMOVE a checkable strict
+/// folder — the direction that drops a visible `dropped_edges` item, never
+/// a silent mutation).
+fn endpoint_fact_source_paths(conn: &Connection, endpoint_id: &str) -> Vec<String> {
+    let facts: Vec<(String, Option<String>)> = conn
+        .prepare(
+            "SELECT id, source_ref FROM llm_wiki_entries
+             WHERE entity_id = ?1 AND deleted_at IS NULL",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([endpoint_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut paths: Vec<String> = Vec::new();
+    for (entry_id, source_ref) in &facts {
+        if let Ok(crate::db::entities::SourceResolution::Resolved(resolved)) =
+            crate::db::entities::resolve_source_core(conn, entry_id, source_ref.as_deref())
+        {
+            for (path, _) in resolved {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    paths
 }
 
 /// Rung 1a — does this endpoint have a deliberate opt-out row?
@@ -2494,10 +2674,24 @@ pub fn resolve_proposal(
         precompute_entry_embeddings(&items, decisions, options.embed_profile.as_ref())
     });
 
+    // r21 hold-time rule (R15/R14): the ingest policy is FILESYSTEM I/O —
+    // load it BEFORE the IMMEDIATE transaction opens. One load serves both
+    // the new-entity mint gate (`create_entity_if_needed`) and the R2.3.0
+    // per-endpoint edge gate (`commit_edge_add`).
+    let gate_policy = crate::config::ingest_policy_for_db(conn.path());
+    let gate_degraded = gate_policy.ontology_degraded_state();
+    let gate_ctx = crate::db::entity_gate::GateResolutionContext {
+        ingest: &gate_policy.tiers,
+        degraded: &gate_degraded,
+        schema: gate_policy.ontology_selection,
+        schema_unparseable: gate_policy.ontology_unparseable,
+        vault_root: gate_policy.vault_root.as_deref(),
+    };
+
     let tx = ImmediateTx::begin(conn)?;
 
     let (minted_entity, entity_was_created_here) =
-        create_entity_if_needed(&tx, &proposal, accepted_any, now_secs)?;
+        create_entity_if_needed(&tx, &gate_policy, &proposal, accepted_any, now_secs)?;
     // Task 7 (r13-MAJOR-1 / r15-m4): a proposal naming a merged-away loser
     // (or a model echoing back a stale candidate id) resolves to the
     // survivor BEFORE any item commits — every fact/task/edge/summary
@@ -2535,10 +2729,7 @@ pub fn resolve_proposal(
             .deposit_default_tier
             .clone()
             .unwrap_or_else(|| crate::config::DEFAULT_DEPOSIT_TIER.to_string()),
-        strict_edge_types: resolve_strict_edge_vocabulary(
-            &tx,
-            entity_id.as_deref().unwrap_or_default(),
-        ),
+        edge_endpoint_strict: std::collections::HashMap::new(),
         reviewed_by: options.reviewed_by.clone(),
     };
 
@@ -2611,7 +2802,7 @@ pub fn resolve_proposal(
                 }
                 "task_add" => commit_task_add(&tx, &mut ctx, item, &payload)
                     .map(|_| ItemCommitOutcome::Applied),
-                "edge_add" => commit_edge_add(&tx, &mut ctx, item, &payload).map(|_| {
+                "edge_add" => commit_edge_add(&tx, &gate_ctx, &mut ctx, item, &payload).map(|_| {
                     if ctx.dropped_edges.iter().any(|id| id == &item.id) {
                         ItemCommitOutcome::Rejected
                     } else {
@@ -2960,7 +3151,7 @@ mod tests {
     fn test_ctx(entity_id: &str) -> CommitContext {
         CommitContext {
             deposit_default_tier: crate::config::DEFAULT_DEPOSIT_TIER.to_string(),
-            strict_edge_types: None,
+            edge_endpoint_strict: std::collections::HashMap::new(),
             proposal_id: "prop-test".into(),
             proposal_created_at: 100,
             entity_id: entity_id.to_string(),
@@ -6284,14 +6475,37 @@ mod tests {
         assert_eq!(result.proposal_status, "rejected");
     }
 
+    /// A `GateResolutionContext` over a locally owned `IngestConfig` — the
+    /// same injection shape the heal-ontology tests use, so the per-endpoint
+    /// edge ladder can be exercised without touching the filesystem policy
+    /// cache.
+    fn edge_gate_ctx<'a>(
+        ingest: &'a crate::config::IngestConfig,
+        degraded: &'a crate::config::OntologyDegradedState,
+    ) -> crate::db::entity_gate::GateResolutionContext<'a> {
+        crate::db::entity_gate::GateResolutionContext {
+            ingest,
+            degraded,
+            schema: None,
+            schema_unparseable: false,
+            vault_root: None,
+        }
+    }
+
+    fn edge_test_ctx(entity_id: &str) -> CommitContext {
+        let mut ctx = test_ctx(entity_id);
+        ctx.proposal_id = "prop_edge".into();
+        ctx
+    }
+
     /// §6 item 1b: R2.3.0 strict-wins — edge endpoint opt-out cascade
     /// short-circuits the edge gate. A `ct_entity_optouts` row on
-    /// EITHER endpoint disarms the gate, so the entity's own
-    /// `strict_edge_types` (the only thing today's gate reads) is
-    /// bypassed and the edge is written verbatim.
+    /// EITHER endpoint disarms the gate, so a strict manifest row on the
+    /// OTHER endpoint (or the proposal entity) is bypassed and the edge is
+    /// written verbatim.
     ///
     /// Matrix cases (per endpoint pair):
-    ///   * no opt-out + strict vocabulary → vocabulary check fires
+    ///   * no opt-out + strict endpoint manifest → vocabulary check fires
     ///   * opt-out on either endpoint → write verbatim (cascade
     ///     short-circuit per §2.1, r12-m1)
     #[test]
@@ -6299,56 +6513,28 @@ mod tests {
         let conn = open_in_memory().unwrap();
         seed_entity(&conn, "ent_a", "A", "summary", 100);
         seed_entity(&conn, "ent_b", "B", "summary", 100);
+        // The TARGET endpoint carries its own strict manifest — under
+        // R2.3.0 that alone gates the edge (source not strict).
+        seed_manifest(
+            &conn,
+            "ent_b",
+            "strict",
+            &["thing"],
+            &[("depends_on", "thing", "thing")],
+        );
 
-        // Build a CommitContext with a strict vocabulary. The
-        // pre-existing `test_ctx` helper is private; build a minimal
-        // one inline so we exercise the helper directly.
-        let mut ctx = CommitContext {
-            deposit_default_tier: crate::config::DEFAULT_DEPOSIT_TIER.to_string(),
-            strict_edge_types: None,
-            proposal_id: "prop_edge".into(),
-            proposal_created_at: 100,
-            entity_id: "ent_a".into(),
-            entity_name: "A".into(),
-            source_type: "user_confirmed",
-            now_secs: 100,
-            now_ms: 100,
-            committed: vec![],
-            conflicts: vec![],
-            dropped_edges: vec![],
-            accepted_count: 0,
-            rejected_count: 0,
-            facts_added: 0,
-            facts_updated: 0,
-            facts_archived: 0,
-            tasks_added: 0,
-            facts_duplicated: 0,
-            skipped_unanchored: 0,
-            entry_embeddings: Default::default(),
-            reviewed_by: None,
-        };
-        let manifest = crate::wiki_graph::WikiManifest {
-            node_types: vec![],
-            edge_types: vec![
-                crate::wiki_graph::WikiEdgeType {
-                    type_name: "depends_on".into(),
-                    ..Default::default()
-                },
-                crate::wiki_graph::WikiEdgeType {
-                    type_name: "owned_by".into(),
-                    ..Default::default()
-                },
-            ],
-            fallback_node_type: None,
-        };
-        ctx.strict_edge_types = Some(EdgeVocabulary::from_manifest(&manifest));
+        let ingest = crate::config::IngestConfig::default();
+        let degraded = crate::config::OntologyDegradedState::default();
+        let gate = edge_gate_ctx(&ingest, &degraded);
+        let mut ctx = edge_test_ctx("ent_a");
 
-        // Case 1: no opt-out on either endpoint → strict vocabulary
-        // applies; the helper returns Some(vocab).
-        let outcome = resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &ctx);
+        // Case 1: no opt-out on either endpoint → the target's strict
+        // manifest vocabulary fires.
+        let outcome =
+            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate);
         assert!(
             outcome.is_some(),
-            "no opt-out + strict vocabulary → vocabulary fires"
+            "no opt-out + strict target endpoint → vocabulary fires"
         );
 
         // Case 2: opt-out on source endpoint → no vocabulary, write verbatim.
@@ -6357,13 +6543,15 @@ mod tests {
             [],
         )
         .unwrap();
-        let outcome = resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &ctx);
+        let outcome =
+            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate);
         assert!(
             outcome.is_none(),
             "opt-out on source endpoint must disarm the edge gate"
         );
 
-        // Case 3: opt-out on target endpoint → no vocabulary, write verbatim.
+        // Case 3: opt-out on target endpoint → no vocabulary, write verbatim,
+        // even though the target is the strict side.
         conn.execute(
             "DELETE FROM ct_entity_optouts WHERE entity_id = 'ent_a'",
             [],
@@ -6374,11 +6562,328 @@ mod tests {
             [],
         )
         .unwrap();
-        let outcome = resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &ctx);
+        let outcome =
+            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate);
         assert!(
             outcome.is_none(),
             "opt-out on target endpoint must disarm the edge gate"
         );
+    }
+
+    /// §6 item 1b (R2.3.0, final wave): endpoints resolving to DIFFERENT
+    /// modes gate PER DIRECTION — a strict endpoint gates the edge even
+    /// when the PROPOSING entity is not strict, in either direction. The
+    /// both-strict and neither-strict rows ride along.
+    #[test]
+    fn edge_endpoints_in_different_modes_gate_per_direction() {
+        let ingest = crate::config::IngestConfig::default();
+        let degraded = crate::config::OntologyDegradedState::default();
+        let gate = edge_gate_ctx(&ingest, &degraded);
+
+        // ── Row 1/2: different modes, both directions. `ent_strict`
+        // carries its own strict manifest row (rung 1b); `ent_off` is
+        // explicitly off; the PROPOSER `ent_plain` has no row at all.
+        {
+            let conn = open_in_memory().unwrap();
+            seed_entity(&conn, "ent_plain", "Plain", "summary", 100);
+            seed_entity(&conn, "ent_strict", "Strict", "summary", 100);
+            seed_entity(&conn, "ent_off", "Off", "summary", 100);
+            seed_manifest(
+                &conn,
+                "ent_strict",
+                "strict",
+                &["thing"],
+                &[("depends_on", "thing", "thing")],
+            );
+            seed_manifest(&conn, "ent_off", "off", &[], &[]);
+            let mut ctx = edge_test_ctx("ent_plain");
+
+            // strict → off: the strict SOURCE endpoint gates.
+            let outcome = resolve_edge_endpoint_vocabulary(
+                &conn,
+                "ent_plain",
+                "ent_strict",
+                "ent_off",
+                &mut ctx,
+                &gate,
+            );
+            assert!(
+                outcome.is_some(),
+                "strict source + off target must gate (strict-wins across endpoints)"
+            );
+            // off → strict: the strict TARGET endpoint still gates — an
+            // off directory never downgrades an edge the strict side makes
+            // checkable (R2.3.0, same asymmetry as §2.3.3).
+            let outcome = resolve_edge_endpoint_vocabulary(
+                &conn,
+                "ent_plain",
+                "ent_off",
+                "ent_strict",
+                &mut ctx,
+                &gate,
+            );
+            assert!(
+                outcome.is_some(),
+                "off source + strict target must gate per direction (strict-wins)"
+            );
+            // The gated vocabulary is the STRICT side's own manifest.
+            let vocab = outcome.expect("checked is_some above");
+            assert!(
+                vocab.canonicalize("depends_on").is_some(),
+                "the gate runs under the strict endpoint's own manifest vocabulary"
+            );
+            assert!(
+                vocab.canonicalize("not_in_manifest").is_none(),
+                "an off-manifest type must fail the strict endpoint's gate"
+            );
+        }
+
+        // ── Row 3: both endpoints strict → gated (source's vocabulary
+        // fires first).
+        {
+            let conn = open_in_memory().unwrap();
+            seed_entity(&conn, "ent_s1", "S1", "summary", 100);
+            seed_entity(&conn, "ent_s2", "S2", "summary", 100);
+            seed_manifest(
+                &conn,
+                "ent_s1",
+                "strict",
+                &["thing"],
+                &[("from_source", "thing", "thing")],
+            );
+            seed_manifest(
+                &conn,
+                "ent_s2",
+                "strict",
+                &["thing"],
+                &[("from_target", "thing", "thing")],
+            );
+            let mut ctx = edge_test_ctx("ent_s1");
+            let outcome = resolve_edge_endpoint_vocabulary(
+                &conn, "ent_s1", "ent_s1", "ent_s2", &mut ctx, &gate,
+            );
+            let vocab = outcome.expect("both-strict must gate");
+            assert_eq!(
+                vocab.canonicalize("from_source"),
+                Some("from_source"),
+                "both strict → the SOURCE side's vocabulary fires first"
+            );
+        }
+
+        // ── Row 4: neither endpoint strict (both off rows, no tier_fact
+        // row) → no gate, write verbatim.
+        {
+            let conn = open_in_memory().unwrap();
+            seed_entity(&conn, "ent_o1", "O1", "summary", 100);
+            seed_entity(&conn, "ent_o2", "O2", "summary", 100);
+            seed_manifest(&conn, "ent_o1", "off", &[], &[]);
+            seed_manifest(&conn, "ent_o2", "off", &[], &[]);
+            let mut ctx = edge_test_ctx("ent_o1");
+            let outcome = resolve_edge_endpoint_vocabulary(
+                &conn, "ent_o1", "ent_o1", "ent_o2", &mut ctx, &gate,
+            );
+            assert!(
+                outcome.is_none(),
+                "neither endpoint strict → the edge gate must disarm"
+            );
+        }
+    }
+
+    /// §6 item 1b (R2.3.0 rungs 2–3): an endpoint whose SOURCE DIRECTORY
+    /// resolves a strict `folder_ontology` prefix gates the edge under the
+    /// `tier_fact` vocabulary (mode-vs-vocabulary rule) — even when the
+    /// proposing entity and both endpoints carry no manifest row of their
+    /// own. This is the scoped-strict-brain leak the final review's
+    /// Critical 1 named: pre-fix, the gate read only the proposal entity's
+    /// vocabulary and such edges were written ungated.
+    #[test]
+    fn strict_source_folder_gates_edge_via_tier_fact_vocabulary() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent_plain", "Plain", "summary", 100);
+        seed_entity(&conn, "ent_scoped", "Scoped", "summary", 100);
+
+        // The scoped endpoint has ONE fact, grounded in a document under
+        // the strict `ops/` folder (the rung-2 walk resolves its source).
+        let doc_id = seed_document(&conn, "/vault/ops/runbook.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        let content_hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_ref, created_at, updated_at
+             ) VALUES ('fact_scoped', 'ent_scoped', 'Scoped', 'body', '[]',
+                       'inferred', 'librarian_inferred', ?1, 100, 100)",
+            [serde_json::json!({
+                "evidence": [{ "content_hash": content_hash }]
+            })
+            .to_string()],
+        )
+        .unwrap();
+
+        // tier_fact strict with a fallback supplies the rung-2/3 vocabulary.
+        seed_manifest(
+            &conn,
+            "tier_fact",
+            "strict",
+            &["thing"],
+            &[("depends_on", "thing", "thing")],
+        );
+
+        let mut ingest = crate::config::IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".to_string(), crate::config::OntologyMode::Strict);
+        let degraded = crate::config::OntologyDegradedState::default();
+        let gate = edge_gate_ctx(&ingest, &degraded);
+        let mut ctx = edge_test_ctx("ent_plain");
+
+        let outcome = resolve_edge_endpoint_vocabulary(
+            &conn,
+            "ent_plain",
+            "ent_plain",
+            "ent_scoped",
+            &mut ctx,
+            &gate,
+        );
+        let vocab = outcome.expect("a strict source folder on either endpoint must gate");
+        assert_eq!(
+            vocab.canonicalize("depends_on"),
+            Some("depends_on"),
+            "the gate runs under the tier_fact vocabulary (mode-vs-vocabulary rule)"
+        );
+        assert!(
+            vocab.canonicalize("made_up_type").is_none(),
+            "an off-manifest edge type must fail the rung-2 strict gate"
+        );
+
+        // Memoization pin (R2.3.0 "once per proposal"): the second lookup
+        // hits the per-proposal memo and returns the same verdict. Exactly
+        // ONE entry exists — the strict SOURCE resolved first and the
+        // strict-wins early return never needed the target's ladder (with
+        // `tier_fact` strict, the target would resolve strict too; the
+        // source's vocabulary is the one that gates).
+        let again = resolve_edge_endpoint_vocabulary(
+            &conn,
+            "ent_plain",
+            "ent_plain",
+            "ent_scoped",
+            &mut ctx,
+            &gate,
+        );
+        assert!(again.is_some(), "memoized resolution must stay strict");
+        assert_eq!(
+            ctx.edge_endpoint_strict.len(),
+            1,
+            "the source endpoint memoized exactly once; the strict-wins early \
+             return skips the target resolution entirely"
+        );
+    }
+
+    /// §6 items 1/8 + Important-3 (final review): a corrupt `tier_fact`
+    /// manifest (strict row, malformed `manifest_json`) + one LLM
+    /// new-entity mint → the resolution FAILS with a LOUD §2.4.5
+    /// diagnostic naming the ontology gate, the proposal STAYS pending,
+    /// and its facts are kept (the items survive untouched — they re-enter
+    /// when the manifest is repaired). Pre-fix, the Held arm returned
+    /// `Ok((None, false))` and the only guard was the generic
+    /// "proposal has no entity_id" bail — safety by accident.
+    #[test]
+    fn held_llm_mint_fails_loud_proposal_stays_pending_facts_kept() {
+        let mut conn = open_in_memory().unwrap();
+        seed_pending_proposal(&conn, "prop-held");
+        // The corrupt config: tier_fact is strict but its manifest_json is
+        // unparseable — rung 4 of the mint ladder reads it and Holds.
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', '{not json', 0)",
+            [],
+        )
+        .unwrap();
+
+        let decisions = all_accept_decisions(&conn, "prop-held");
+        let err = resolve_proposal(
+            &mut conn,
+            "prop-held",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("ontology gate held"),
+            "the diagnostic must name the ontology gate cause, got: {message}"
+        );
+        assert!(
+            message.contains("§2.4.5") || message.contains("2.4.5"),
+            "the diagnostic must name the spec cause, got: {message}"
+        );
+        assert!(
+            message.contains("prop-held"),
+            "the diagnostic must name the held proposal, got: {message}"
+        );
+
+        // Facts kept + proposal held: still pending, item untouched, and
+        // no entity was minted by the aborted resolution.
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM curated_proposals WHERE id = 'prop-held'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "a held proposal stays pending");
+        let item_status: String = conn
+            .query_row(
+                "SELECT status FROM curated_proposal_items WHERE id = 'item-prop-held'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            item_status, "pending",
+            "the held proposal's facts are kept, not dropped"
+        );
+        let entities: i64 = conn
+            .query_row("SELECT COUNT(*) FROM curated_entities", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(entities, 0, "the held mint must not insert an entity");
+
+        // Retry after the repair succeeds (§2.4.5: facts re-enter) — the
+        // diagnostic is actionable, not a dead end.
+        conn.execute(
+            "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1
+             WHERE entity_id = 'tier_fact'",
+            [serde_json::json!({
+                "node_types": [{"type": "project"}],
+                "edge_types": [],
+                "fallback_node_type": "project"
+            })
+            .to_string()],
+        )
+        .unwrap();
+        let decisions = all_accept_decisions(&conn, "prop-held");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-held",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.proposal_status, "approved");
     }
     // ── Task 7 (spec R2.7.5 / r13-MAJOR-1): commit-path redirect write
     // resolution — a fact naming a merged-away loser lands on the SURVIVOR.

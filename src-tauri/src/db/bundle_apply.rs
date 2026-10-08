@@ -326,7 +326,9 @@ pub fn apply_import(
     // so the shared insert helper's `&ImmediateTx` parameter type-checks once
     // Task 3 calls it from `ensure_entity`. Existing callers (`tx.commit()`,
     // `&tx` → &Connection helpers) work unchanged because Transaction derefs
-    // transitively to Connection.
+    // transitively to Connection. The policy load (filesystem) happens
+    // BEFORE the transaction opens — r21 hold-time rule (R15).
+    let policy = crate::config::ingest_policy_for_db(conn.path());
     let tx = ImmediateTx::begin(conn)?;
     let mut result = ImportResult::default();
 
@@ -363,7 +365,7 @@ pub fn apply_import(
             map.get(id).cloned().unwrap_or_else(|| id.to_string())
         };
 
-        ensure_entity(&tx, entity, &target_entity_id, mode, now_secs)?;
+        ensure_entity(&tx, &policy, entity, &target_entity_id, mode, now_secs)?;
 
         if mode == ImportMode::Replace {
             hard_deleted_ids.extend(clear_entity_content(&tx, &target_entity_id, now_ms)?);
@@ -726,6 +728,7 @@ pub fn apply_import(
 
 fn ensure_entity(
     tx: &ImmediateTx<'_>,
+    policy: &crate::config::IngestPolicy,
     entity: &ParsedEntity,
     target_entity_id: &str,
     mode: ImportMode,
@@ -770,7 +773,7 @@ fn ensure_entity(
     let conn: &Connection = tx;
     if existing.is_none() {
         let (decision, _gate) =
-            crate::db::entity_gate::resolve_production_gate(tx, target_entity_id, &[]);
+            crate::db::entity_gate::resolve_production_gate(tx, policy, target_entity_id, &[]);
         let outcome = crate::db::entity_gate::shared_insert_entity(
             tx,
             Some(target_entity_id),

@@ -695,9 +695,11 @@ pub fn create_entity(conn: &mut Connection, input: &CreateEntityInput) -> Result
     // Open IMMEDIATE so the shared insert helper's `&ImmediateTx` parameter
     // type-checks. Spec R2.4.2 (r1-MAJOR-3): GUI mints must go through the
     // gate; a plain `&Connection` is a compile-time impossibility now that
-    // the helper is the single insert point.
+    // the helper is the single insert point. The policy load (filesystem)
+    // happens BEFORE the transaction opens — r21 hold-time rule.
+    let policy = crate::config::ingest_policy_for_db(conn.path());
     let tx = crate::db::entity_gate::ImmediateTx::begin(conn)?;
-    let (decision, gate) = crate::db::entity_gate::resolve_production_gate(&tx, &id, &[]);
+    let (decision, gate) = crate::db::entity_gate::resolve_production_gate(&tx, &policy, &id, &[]);
     let outcome = crate::db::entity_gate::shared_insert_entity(
         &tx,
         Some(&id),

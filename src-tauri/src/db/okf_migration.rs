@@ -88,20 +88,52 @@ fn okf_migration_complete(conn: &Connection) -> Result<bool> {
     Ok(migrated.is_some())
 }
 
-fn migrate_approved_wiki_pages(tx: &ImmediateTx<'_>, vault_root: &Path, now: i64) -> Result<usize> {
-    let conn: &Connection = tx;
+/// One approved page with its body ALREADY READ (R15: the filesystem read
+/// happens before the migration transaction opens — the r21 hold-time rule
+/// forbids file I/O inside the IMMEDIATE transaction).
+struct PreloadedPage {
+    path: String,
+    body: String,
+    file_found: bool,
+}
+
+/// Read every approved page's body BEFORE the transaction opens (R15b).
+/// A read failure here is the same `(String::new(), false)` the in-tx read
+/// produced — the page migrates with an empty body and a
+/// "(file missing)" event, unchanged.
+fn preload_approved_pages(conn: &Connection, vault_root: &Path) -> Result<Vec<PreloadedPage>> {
     let mut stmt =
-        conn.prepare("SELECT id, path FROM wiki_pages WHERE status = 'approved' ORDER BY id")?;
-    let rows: Vec<(i64, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        conn.prepare("SELECT path FROM wiki_pages WHERE status = 'approved' ORDER BY id")?;
+    let paths: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(paths
+        .into_iter()
+        .map(|path| {
+            let (body, file_found) = read_wiki_page_body(vault_root, &path);
+            PreloadedPage {
+                path,
+                body,
+                file_found,
+            }
+        })
+        .collect())
+}
+
+fn migrate_approved_wiki_pages(
+    tx: &ImmediateTx<'_>,
+    policy: &crate::config::IngestPolicy,
+    pages: &[PreloadedPage],
+    now: i64,
+) -> Result<usize> {
+    let conn: &Connection = tx;
 
     let mut count = 0usize;
-    for (_page_id, path) in rows {
-        let entity_id = entity_id_from_wiki_path(&path);
-        let (body, file_found) = read_wiki_page_body(vault_root, &path);
-        let name = wiki_page_entity_name(&path, &body);
-        let summary = body;
+    for page in pages {
+        let path = &page.path;
+        let entity_id = entity_id_from_wiki_path(path);
+        let name = wiki_page_entity_name(path, &page.body);
+        let summary = page.body.clone();
 
         // §2.5 okf_migration bullet: ids are path-derived, so it
         // resolves `folder_ontology` mode from the note's path like
@@ -122,8 +154,9 @@ fn migrate_approved_wiki_pages(tx: &ImmediateTx<'_>, vault_root: &Path, now: i64
         // (Task 9 owns the loud logging there).
         let (decision, gate) = crate::db::entity_gate::resolve_production_gate(
             tx,
+            policy,
             &entity_id,
-            std::slice::from_ref(&path),
+            std::slice::from_ref(path),
         );
         let outcome = crate::db::entity_gate::shared_insert_entity(
             tx,
@@ -181,12 +214,17 @@ fn migrate_approved_wiki_pages(tx: &ImmediateTx<'_>, vault_root: &Path, now: i64
                 // + `fallback_node_type` + zero `node_types`), which is
                 // the §2.4.5 configuration error — aborting is correct
                 // there too, and the diagnostic below names the recovery
-                // for the dominant case.
+                // for EACH trigger (fix-before-merge: the old phrase said
+                // "gains a fallback" for both, but adding a fallback to a
+                // manifest that already declares one is a NO-OP — that
+                // corner's recovery is adding node types).
                 bail!(
                     "okf_migration aborted: strict ontology gate held a wiki-page mint \
-                     (entity {entity_id}, path {path:?}): manifest is strict with no \
-                     declared `fallback_node_type`; migration is retried after the manifest \
-                     gains a fallback (spec §2.4.5 / §2.5 r12-M2)"
+                     (entity {entity_id}, path {path:?}): the strict manifest has no \
+                     usable vocabulary — no declared `fallback_node_type`, or a declared \
+                     fallback over an EMPTY `node_types` set. Retry after naming a \
+                     `fallback_node_type` (first case) or adding node types to the \
+                     manifest (second case) (spec §2.4.5 / §2.5 r12-M2)"
                 );
             }
             (AdmitOutcome::DegradedToFallback { .. }, _) => {
@@ -213,7 +251,7 @@ fn migrate_approved_wiki_pages(tx: &ImmediateTx<'_>, vault_root: &Path, now: i64
         }
 
         let event_id = format!("evt-migrate-{}", &hash_bytes(entity_id.as_bytes())[..12]);
-        let summary_text = if file_found {
+        let summary_text = if page.file_found {
             format!("Migrated from wiki page *{path}*")
         } else {
             format!("Migrated from wiki page *{path}* (file missing)")
@@ -329,9 +367,17 @@ pub fn run_okf_migration(conn: &mut Connection, vault_root: &Path) -> Result<()>
         .context("system clock before unix epoch")?
         .as_secs() as i64;
 
+    // R15 (r21 hold-time rule): BOTH filesystem reads — the ingest policy
+    // config and the wiki-page bodies — happen BEFORE the IMMEDIATE
+    // transaction opens. The V7 migration is a one-shot open-time pass, so
+    // the (tiny) window between this read query and the transaction is the
+    // pre-existing V7 posture, not a new race.
+    let policy = crate::config::ingest_policy_for_db(conn.path());
+    let pages = preload_approved_pages(conn, vault_root)?;
+
     let tx = ImmediateTx::begin(conn)?;
     let commit_result = (|| -> Result<()> {
-        migrate_approved_wiki_pages(&tx, vault_root, now)?;
+        migrate_approved_wiki_pages(&tx, &policy, &pages, now)?;
         drop_pending_wiki_proposals(&tx, vault_root)?;
         purge_wiki_tier_documents(&tx)?;
         mark_okf_migrated(&tx, now)?;

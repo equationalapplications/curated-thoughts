@@ -696,6 +696,16 @@ pub fn wiki_sweep_cmd(yes: bool) -> Result<i32> {
     }
     let brain = resolve()?;
     let mut conn = open_rw(&brain)?;
+    // plan-p9-M3 symmetry (final-review Minor 5): `open_rw` is
+    // migration-free by design, but the `--yes` apply arm runs the retyping
+    // pass against tables the headless binary may be the FIRST thing to
+    // open after a schema bump — bring the DB up to the current schema on
+    // the same connection, exactly like `ct heal` / `ct wiki
+    // merge-duplicates` / `ct ontology set --yes` do. Ungated and
+    // idempotent (CREATE ... IF NOT EXISTS), so a no-op on a current brain.
+    // The refusal arm above stays read-only ("schema pending (read-only)"
+    // census behavior unchanged).
+    tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
     let removed = tauri_app_lib::db::edge_purge::purge_off_manifest_edges_all(&conn)?;
     println!("purged {removed} off-manifest edge(s)");
     // §2.10 node-type extension, apply arm: the RETYPING-ONLY pass

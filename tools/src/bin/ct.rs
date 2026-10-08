@@ -733,11 +733,17 @@ fn run(cmd: Cmd) -> Result<i32> {
                 // old-schema database the census reports "schema pending
                 // (read-only)" instead of failing (plan-p9-M3).
                 if let Ok(mut ro) = tauri_app_lib::retrieval::open_brain_readonly(&db_path) {
-                    let _ = tauri_app_lib::db::heal_ontology::ontology_heal_pass(
+                    let report = tauri_app_lib::db::heal_ontology::ontology_heal_pass(
                         &mut ro,
                         tauri_app_lib::db::heal_ontology::DriftFlag::None,
                         false,
                     );
+                    // Final-review folded minor: the refusal arm used to
+                    // discard the report (`let _ =`), swallowing a census
+                    // fault the operator needs to see before --yes.
+                    if let Some(err) = &report.error {
+                        eprintln!("ontology census: error: {err}");
+                    }
                 }
                 return Ok(1);
             }
