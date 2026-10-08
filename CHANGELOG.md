@@ -1,3 +1,13 @@
+## [3.4.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.4.0...v3.4.1) (2026-10-08)
+
+### Bug Fixes
+
+* **bundle:** preview warning names each hold's cause, not always a missing fallback ([ae07ae1](https://github.com/equationalapplications/curated-thoughts/commit/ae07ae151e0ef12d485db89d2b5faecbfd9b62ef))
+* **ontology:** /code-review max wave — memo epoch, named unusable rows, survivor rung 1b (r27) ([e477ae8](https://github.com/equationalapplications/curated-thoughts/commit/e477ae895ea40f7a0642b17b4b74afeca3400061))
+* **ontology:** ensure reports/repairs unusable vocabularies (r26) ([3fca831](https://github.com/equationalapplications/curated-thoughts/commit/3fca83103bdaa8aa386a5997929f950972c19689)), closes [#274](https://github.com/equationalapplications/curated-thoughts/issues/274)
+* **ontology:** make the no-usable-fallback hold explicit and name every hold's cause ([ad26a04](https://github.com/equationalapplications/curated-thoughts/commit/ad26a046782ecd97cdf80a8839ec67d07c12393e))
+* **ontology:** skip merged-away rows in the ensure; attach --entity with = ([63ef0e8](https://github.com/equationalapplications/curated-thoughts/commit/63ef0e8e6caf36462128ec75a1cdded5d9ee9e43))
+
 ## [3.4.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.3.0...v3.4.0) (2026-10-08)
 
 ### Features
