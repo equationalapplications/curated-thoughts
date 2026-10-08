@@ -41,6 +41,71 @@ fn json_of(out: &std::process::Output) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).expect("stdout is JSON")
 }
 
+/// The gate-decision log line lives on STDERR so stdout stays pure JSON; the
+/// tripwire cron greps the stable token and splits the tabs.
+fn gate_decision_lines(out: &std::process::Output) -> Vec<Vec<String>> {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("wisdom_gate_decision\t"))
+        .map(|l| l.split('\t').map(str::to_string).collect())
+        .collect()
+}
+
+/// Exactly one decision line per `ct wisdom match` call, tab-separated field
+/// order pinned by the spec's merge blocker 3 (F5):
+/// `wisdom_gate_decision<TAB>ts<TAB>scheme<TAB>open|closed<TAB>n_results`.
+/// The tripwire cron parses this — field order and tab count are contract.
+#[test]
+fn gate_decision_log_line_shape_on_a_hit() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let out = run_ct(&["wisdom", "match", "--json", "--", "how do I deploy"]);
+        let v = json_of(&out);
+        let lines = gate_decision_lines(&out);
+        assert_eq!(
+            lines.len(),
+            1,
+            "exactly one decision line per call; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let f = &lines[0];
+        assert_eq!(f.len(), 5, "token + 4 tab-separated fields: {f:?}");
+        assert_eq!(f[0], "wisdom_gate_decision");
+        // ts: ISO-8601 UTC, `Z` suffix.
+        let ts = &f[1];
+        assert!(ts.ends_with('Z'), "ts must be UTC (Z suffix): {ts}");
+        assert!(
+            ts.parse::<chrono::DateTime<chrono::Utc>>().is_ok(),
+            "ts must parse as ISO-8601 UTC: {ts}"
+        );
+        // scheme: the active read scheme string (seeded brain = `raw`).
+        assert_eq!(f[2], "raw");
+        // hit → open, n_results matches the JSON contract.
+        assert_eq!(f[3], "open");
+        assert_eq!(f[4], "1");
+        assert_eq!(v["entries"].as_array().unwrap().len(), 1);
+    });
+}
+
+/// Miss DB: no entries → the same line shape but `closed` with `n_results=0`.
+#[test]
+fn gate_decision_log_line_closed_on_a_miss() {
+    with_seeded_brain(|| {
+        let out = run_ct(&["wisdom", "match", "--json", "--", "anything"]);
+        let v = json_of(&out);
+        assert_eq!(v["entries"], serde_json::json!([]));
+        let lines = gate_decision_lines(&out);
+        assert_eq!(lines.len(), 1);
+        let f = &lines[0];
+        assert_eq!(f.len(), 5, "token + 4 tab-separated fields: {f:?}");
+        assert_eq!(f[0], "wisdom_gate_decision");
+        assert_eq!(f[2], "raw");
+        assert_eq!(f[3], "closed");
+        assert_eq!(f[4], "0");
+    });
+}
+
 #[test]
 fn match_returns_contract_shape() {
     with_seeded_brain(|| {

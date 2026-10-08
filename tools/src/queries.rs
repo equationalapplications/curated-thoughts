@@ -20,6 +20,7 @@
 //! `crate::cli_common::{...}` and the duplicates coexist.
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::json;
@@ -738,6 +739,27 @@ pub fn wisdom_match_cmd(
     // so caller and library can never disagree about the active scheme.
     let key = wm::gate_model_key(&profile, stub.as_deref());
     let result = wm::wisdom_match(&conn, &query_vec, &key, max, exclude, now_ms)?;
+    // Gate-decision log line (spec 2026-10-07 merge blocker 3, form pinned):
+    // exactly one line per `ct wisdom match` call, on STDERR so stdout stays
+    // pure JSON. Machine-parseable for the tripwire cron — stable grep token
+    // `wisdom_gate_decision` followed by tab-separated fields IN ORDER:
+    //   wisdom_gate_decision<TAB>ts<TAB>scheme<TAB>open|closed<TAB>n_results
+    // ts is ISO-8601 UTC of the call; scheme is the active read scheme string;
+    // open|closed is whether the gate returned any entries; n_results is the
+    // entry count. Never re-order or re-space these fields.
+    let ts = DateTime::<Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(SecondsFormat::Secs, true);
+    eprintln!(
+        "wisdom_gate_decision\t{}\t{}\t{}\t{}",
+        ts,
+        read_scheme.as_str(),
+        if result.entries.is_empty() {
+            "closed"
+        } else {
+            "open"
+        },
+        result.entries.len(),
+    );
     if json_mode {
         print_json(&result);
     } else {

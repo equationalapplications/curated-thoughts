@@ -336,6 +336,108 @@ mod tests {
     }
 
     #[test]
+    fn reader_inventory_every_gate_or_wiki_search_select_filters_embed_scheme() {
+        // Plan Task 6 test (e) — mirror of the writer inventory over the READ
+        // side: every production SQL SELECT that reads gate/wiki_search
+        // candidates out of `llm_wiki_entries` WITH `embedding_blob` must
+        // reference `embed_scheme` in the same statement — a vector may never
+        // surface through a reader that ignores its scheme stamp. Exemptions
+        // (statement-start line, `file: first SQL line`) are explicit and
+        // commented; adding one must be a conscious review decision.
+        //
+        // EXEMPT (scheme-sweep infrastructure — the sweep's whole job is to
+        // find rows whose state does NOT match the WRITE scheme, so pinning
+        // `embed_scheme = ?` there would make it a no-op):
+        //   embed_sweep.rs — count_unstamped_entries (`embed_scheme != ?1`).
+        //   embed_sweep.rs — pending_null_batch: rows with a NULL blob have
+        //     no stamp yet; the sweep finds and stamps them.
+        // Everything else selected is a fixture/test helper (id- or
+        // length-only lookup, no candidate set) filtered out structurally.
+        let exempt_first_lines = [
+            "embed_sweep.rs:         \"SELECT COUNT(*) FROM llm_wiki_entries",
+            "embed_sweep.rs:         \"SELECT id, title, body FROM llm_wiki_entries",
+        ];
+
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src, &mut files);
+        files.sort();
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut reader_windows = 0usize;
+        for file in &files {
+            let rel = file
+                .strip_prefix(&src)
+                .unwrap_or(file)
+                .to_string_lossy()
+                .to_string();
+            let content = match std::fs::read_to_string(file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let lines: Vec<&str> = content.lines().collect();
+            // First `#[cfg(test)]` in the file: anything at/after it is test
+            // code (fixtures with id-only lookups), not a production reader.
+            let test_start = lines
+                .iter()
+                .position(|l| l.contains("#[cfg(test)]"))
+                .unwrap_or(lines.len());
+            for (i, line) in lines.iter().enumerate() {
+                if i >= test_start {
+                    break;
+                }
+                let trimmed = line.trim_start();
+                if !(trimmed.starts_with('"') && trimmed.contains("SELECT")) {
+                    continue;
+                }
+                // Two windows: the STATEMENT (literal + 11 lines) decides
+                // candidacy — `embedding_blob` must appear inside the SQL
+                // itself, not in surrounding code (function signatures name
+                // parameters `embedding_blob` too). The CONTEXT (16 lines
+                // before through 11 after) decides the embed_scheme check —
+                // both real readers assemble the scheme filter in the lines
+                // around the SQL string (wiki_graph builds it above,
+                // wisdom_match appends below).
+                let hi = (i + 12).min(lines.len());
+                let statement = lines[i..hi].join("\n");
+                let lo = i.saturating_sub(16);
+                let context = lines[lo..hi].join("\n");
+                let reads_candidates = statement.contains("FROM llm_wiki_entries")
+                    && statement.contains("embedding_blob")
+                    && statement.contains("WHERE");
+                if !reads_candidates {
+                    continue;
+                }
+                reader_windows += 1;
+                if context.contains("embed_scheme") {
+                    continue;
+                }
+                let key = format!("{rel}: {}", lines[i].trim_end());
+                if exempt_first_lines.contains(&key.as_str()) {
+                    continue;
+                }
+                offenders.push(format!("{rel}:{}", i + 1));
+            }
+        }
+
+        assert!(
+            reader_windows >= 2,
+            "inventory ran cold — expected the wisdom_match gate SELECT and \
+             the wiki_graph::wiki_search SELECT, got {reader_windows}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "gate/wiki_search SELECT reads embedding_blob without an \
+             embed_scheme filter at:\n  {}\n\
+             Either add `AND embed_scheme = <read scheme>` (from \
+             crate::embed_scheme::read_scheme) to the WHERE clause or, for a \
+             statement that must not filter, add an explicit commented \
+             exemption in reader_inventory_…",
+            offenders.join("\n  ")
+        );
+    }
+
+    #[test]
     fn the_sql_blob_writers_reference_the_write_constant() {
         // The three files owning direct SQL blob writes must drive the stamp
         // from the WRITE_SCHEME constant (not a string literal), so a scheme
