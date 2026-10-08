@@ -371,7 +371,7 @@ pub(crate) fn cluster_ids(conn: &Connection, survivor: &str) -> Result<Vec<Strin
 
 /// Build an `IN (…)` placeholder list for `ids`. The caller binds the ids
 /// positionally in the same order.
-fn in_placeholders(ids: &[String]) -> String {
+pub(crate) fn in_placeholders(ids: &[String]) -> String {
     vec!["?"; ids.len()].join(",")
 }
 
@@ -773,13 +773,16 @@ pub fn create_entity(conn: &mut Connection, input: &CreateEntityInput) -> Result
         }
         crate::db::entity_gate::AdmitOutcome::Skipped { .. } => {
             // SKIP path: helper did NOT insert (off folder / off host /
-            // no manifest). Per §2.5 the literal `'concept'` stands and the
-            // origin ledger records a `gate_skipped` row.
+            // no manifest). No gate ran, so there is no vocabulary to
+            // violate — today's behavior stands: the caller's label lands
+            // verbatim, the `'concept'` literal only for a blank type
+            // (§2.5 / r2-M2a). The origin ledger records a `gate_skipped`
+            // row.
             tx.execute(
                 "INSERT INTO curated_entities (
                     id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at
-                 ) VALUES (?1, ?2, 'concept', ?3, NULL, ?4, ?4, NULL)",
-                params![id, name, summary, now],
+                 ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5, NULL)",
+                params![id, name, proposed_label.unwrap_or("concept"), summary, now],
             )?;
         }
         _ => {
@@ -1104,18 +1107,42 @@ mod tests {
         .unwrap();
         assert!(detail.id.starts_with("ent_"));
         assert_eq!(detail.name, "Project Alpha");
-        // Wave-1 (spec §2.5 GUI bullet, r2-M2a): on a SKIP (no manifest
-        // row → no vocabulary to violate) the literal `'concept'` stands
-        // regardless of the proposed entity_type. Pre-wave-1 stored the
-        // proposed label verbatim; the gate now keeps the LITERAL
-        // constant so a later strict flip surfaces the row to heal as
-        // ledger-tagged (not as an invented type).
-        assert_eq!(detail.entity_type, "concept");
+        // Spec §2.5 GUI bullet / r2-M2a: on a SKIP (no manifest row → no
+        // vocabulary to violate) today's behavior stands — the caller's
+        // label lands verbatim. The `gate_skipped` ledger row (below) is
+        // what surfaces the entity to heal if a later strict flip leaves
+        // the label undeclared.
+        assert_eq!(detail.entity_type, "project");
         assert_eq!(detail.summary, "Summary prose.");
+        let (reason, original): (String, Option<String>) = conn
+            .query_row(
+                "SELECT reason, original_type FROM entity_type_origin WHERE entity_id = ?1",
+                [&detail.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(reason, "gate_skipped");
+        assert_eq!(original.as_deref(), Some("project"));
 
         let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
         assert_eq!(loaded.name, "Project Alpha");
         assert!(loaded.facts.is_empty());
+    }
+
+    /// SKIP with a BLANK type lands the pre-existing `'concept'` literal.
+    #[test]
+    fn create_entity_skip_with_blank_type_lands_concept() {
+        let mut conn = open_in_memory().unwrap();
+        let detail = create_entity(
+            &mut conn,
+            &CreateEntityInput {
+                name: "Untyped".into(),
+                entity_type: Some("  ".into()),
+                summary: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(detail.entity_type, "concept");
     }
 
     #[test]

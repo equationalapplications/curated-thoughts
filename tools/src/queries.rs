@@ -718,10 +718,20 @@ pub fn wiki_sweep_cmd(yes: bool) -> Result<i32> {
     let report = tauri_app_lib::db::heal_ontology::ontology_retype_pass(&mut conn);
     print_ontology_pass_summary(&report, false);
     // Same exit contract as `ct heal`: a faulted pass (e.g. a census DB
-    // error) reports failure to the calling script instead of a silent 0.
-    // The edge-purge line above already printed; a non-zero exit does not
-    // mask it.
-    Ok(if report.error.is_some() { 1 } else { 0 })
+    // error) OR a refused one (unconfirmed drift / degraded config — the
+    // retypes never applied) reports failure to the calling script instead
+    // of a silent 0, so `ct wiki sweep --yes && …` chains stop. The
+    // edge-purge line above already printed; a non-zero exit does not mask
+    // it. Drift is cleared only by `ct heal --yes --confirm-drift` (§2.2.8).
+    let refused = matches!(
+        report.skipped_reason.as_deref(),
+        Some("unconfirmed_drift") | Some("degraded_config")
+    );
+    Ok(if report.error.is_some() || refused {
+        1
+    } else {
+        0
+    })
 }
 
 /// One-line human display of the ontology pass result for `ct wiki sweep`

@@ -148,3 +148,30 @@ fn sweep_yes_applies_retype_but_writes_no_heal_bookkeeping() {
         );
     });
 }
+
+/// Same exit contract as `ct heal`: a node-type pass REFUSED for an
+/// unconfirmed config drift exits 1 (the edge purge still ran and printed),
+/// so `ct wiki sweep --yes && …` chains stop instead of proceeding under a
+/// config the gate refused to interpret.
+#[test]
+fn sweep_yes_exits_1_when_the_node_type_pass_is_refused_for_drift() {
+    with_brain(|dir| {
+        let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_wiki_meta (key, value)
+             VALUES ('ontology_config_watermark', ?1)",
+            [r#"{"hash":"deadbeef","stamped_at":7}"#],
+        )
+        .unwrap();
+        drop(conn);
+
+        let out = run_ct(dir, &["wiki", "sweep", "--yes"]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{err}");
+        assert!(err.contains("unconfirmed_drift"), "{err}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("purged"),
+            "the edge purge still ran and reported"
+        );
+    });
+}

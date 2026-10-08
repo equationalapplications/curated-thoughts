@@ -1368,9 +1368,31 @@ fn tier_fact_vocabulary(conn: &Connection) -> Option<NodeVocabulary> {
 /// Rung 1a — does this entity have a deliberate opt-out row? DB faults
 /// PROPAGATE (D8): a failed lookup is never interpreted as "no row" — the
 /// caller maps an error to Held/continued-gating, never to an opt-out skip.
+///
+/// Cluster-closed (spec R2.7.5): a merge moves no rows, so an opt-out the
+/// user set on a member that later merged away still lives under the
+/// loser's id. The lookup resolves `entity_id` to its terminal survivor and
+/// checks every member of that redirect cluster, so a deliberate opt-out on
+/// ANY member keeps applying to the merged entity (D8: off means off).
+/// `UNION` (not `UNION ALL`) keeps a hand-edited redirect cycle finite.
 pub(crate) fn entity_has_optout(conn: &Connection, entity_id: &str) -> rusqlite::Result<bool> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM ct_entity_optouts WHERE entity_id = ?1",
+        "WITH RECURSIVE
+           up(id, depth) AS (
+             SELECT ?1, 0
+             UNION
+             SELECT r.merged_into, up.depth + 1
+               FROM entity_redirects r JOIN up ON r.entity_id = up.id
+              WHERE up.depth < 64
+           ),
+           survivor(id) AS (SELECT id FROM up ORDER BY depth DESC LIMIT 1),
+           cluster(id) AS (
+             SELECT id FROM survivor
+             UNION
+             SELECT r.entity_id FROM entity_redirects r JOIN cluster c ON r.merged_into = c.id
+           )
+         SELECT COUNT(*) FROM ct_entity_optouts
+          WHERE entity_id IN (SELECT id FROM cluster)",
         [entity_id],
         |r| r.get(0),
     )?;
@@ -1443,6 +1465,32 @@ mod tests {
             params![entity_id, mode, manifest_json],
         )
         .unwrap();
+    }
+
+    /// R2.7.5 / D8: a merge moves no rows, so an opt-out set on a member
+    /// that later merged away must keep applying to the merged entity —
+    /// looked up from the survivor, from the loser, and from a loser-of-a-
+    /// loser alike. An unrelated entity stays un-opted-out.
+    #[test]
+    fn optout_lookup_is_cluster_closed() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at) VALUES ('e_lose', 'user', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at) VALUES ('e_lose','e_surv',1);
+             INSERT INTO entity_redirects (entity_id, merged_into, created_at) VALUES ('e_other','e_surv',1);",
+        )
+        .unwrap();
+        for id in ["e_surv", "e_lose", "e_other"] {
+            assert!(
+                entity_has_optout(&conn, id).unwrap(),
+                "{id} must see the cluster opt-out"
+            );
+        }
+        assert!(!entity_has_optout(&conn, "e_unrelated").unwrap());
     }
 
     /// The 17 EA seed slugs (spec §1.1) — pinned here as a string so the

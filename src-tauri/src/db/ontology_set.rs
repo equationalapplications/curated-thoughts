@@ -35,6 +35,9 @@ pub const TIER_FACT: &str = "tier_fact";
 /// Outcome of `--entity <id> --mode <mode>` (spec §2.11 reversal rule).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EntityModeOutcome {
+    /// The entity the write landed on — the caller's id resolved through
+    /// any merge redirect to its survivor (R2.7.5 r13-MAJOR-1).
+    pub entity_id: String,
     /// An opt-out row was written (`--mode off`).
     pub optout_written: bool,
     /// An opt-out row was deleted (`--mode strict`, r13-MAJOR-2).
@@ -43,10 +46,31 @@ pub struct EntityModeOutcome {
     pub manifest_row_written: bool,
 }
 
+/// Resolve a caller-supplied entity id to the entity a write must land on:
+/// through any merge redirect to its survivor (R2.7.5 r13-MAJOR-1 — every
+/// id-keyed mutator resolves first, else a stale loser id writes a row no
+/// gate or heal scan ever reads), and refuse an id that names no entity
+/// (a typo would otherwise write an inert row and report success).
+pub fn resolve_target_entity(conn: &Connection, entity_id: &str) -> Result<String> {
+    let resolved = crate::db::entities::resolve_entity_id(conn, entity_id)?;
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_entities WHERE id = ?1)",
+        params![resolved],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        bail!("no entity `{entity_id}` in this brain — check the id; nothing was written");
+    }
+    Ok(resolved)
+}
+
 /// `--entity <id> --mode off`: write the deliberate `ct_entity_optouts` row
 /// (rung 1(a)). Idempotent (upsert); returns after the write commits.
 pub fn set_entity_optout(conn: &mut Connection, entity_id: &str) -> Result<EntityModeOutcome> {
     let tx = ImmediateTx::begin(conn)?;
+    // Resolved INSIDE the write transaction so a concurrent merge cannot
+    // redirect the id between the resolve and the write.
+    let entity_id = resolve_target_entity(&tx, entity_id)?;
     tx.execute(
         "INSERT OR REPLACE INTO ct_entity_optouts (entity_id, reason, created_at)
          VALUES (?1, 'ct ontology set --mode off', strftime('%s','now'))",
@@ -54,6 +78,7 @@ pub fn set_entity_optout(conn: &mut Connection, entity_id: &str) -> Result<Entit
     )?;
     tx.commit()?;
     Ok(EntityModeOutcome {
+        entity_id,
         optout_written: true,
         optout_deleted: false,
         manifest_row_written: false,
@@ -67,13 +92,23 @@ pub fn set_entity_optout(conn: &mut Connection, entity_id: &str) -> Result<Entit
 /// too when the tier row carries them — an entity-scoped strict row with a
 /// synthesized empty edge list would hand the edge gate a vocabulary that
 /// purges every edge the tier manifest declares.
-pub fn set_entity_strict(conn: &mut Connection, entity_id: &str) -> Result<EntityModeOutcome> {
+///
+/// `fallback` (`--entity <id> --mode strict --fallback <type>`) overrides
+/// the copied `fallback_node_type` on the row written here, validated
+/// against the copied node types — in the SAME transaction, so a bad
+/// fallback leaves nothing written.
+pub fn set_entity_strict(
+    conn: &mut Connection,
+    entity_id: &str,
+    fallback: Option<&str>,
+) -> Result<EntityModeOutcome> {
     // The tier_fact read happens INSIDE the IMMEDIATE transaction (review
     // finding): the write lock is held from the read through the
     // INSERT OR REPLACE, so a concurrent engine rewrite of the tier row can
     // neither land between them nor be overwritten by a copy of the older
     // vocabulary. An early `bail!` drops the tx, which rolls back.
     let tx = ImmediateTx::begin(conn)?;
+    let entity_id = resolve_target_entity(&tx, entity_id)?;
     let tier_json: Option<String> = tx
         .query_row(
             "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
@@ -100,10 +135,21 @@ pub fn set_entity_strict(conn: &mut Connection, entity_id: &str) -> Result<Entit
     if let Some(fallback) = tier.get("fallback_node_type") {
         entity_manifest["fallback_node_type"] = fallback.clone();
     }
+    if let Some(fallback) = fallback {
+        entity_manifest["fallback_node_type"] =
+            serde_json::json!(canonical_fallback(&entity_manifest, &entity_id, fallback)?);
+    }
 
+    // The opt-out lookup is cluster-closed (a merged-in member's opt-out
+    // keeps applying to the survivor), so the reversal must clear it
+    // across the whole redirect cluster or rung 1(a) keeps skipping.
+    let cluster = crate::db::entities::cluster_ids(&tx, &entity_id)?;
     let optouts_deleted = tx.execute(
-        "DELETE FROM ct_entity_optouts WHERE entity_id = ?1",
-        params![entity_id],
+        &format!(
+            "DELETE FROM ct_entity_optouts WHERE entity_id IN ({})",
+            crate::db::entities::in_placeholders(&cluster)
+        ),
+        rusqlite::params_from_iter(cluster.iter()),
     )?;
     tx.execute(
         "INSERT OR REPLACE INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
@@ -112,29 +158,58 @@ pub fn set_entity_strict(conn: &mut Connection, entity_id: &str) -> Result<Entit
     )?;
     tx.commit()?;
     Ok(EntityModeOutcome {
+        entity_id,
         optout_written: false,
         optout_deleted: optouts_deleted > 0,
         manifest_row_written: true,
     })
 }
 
-/// `--entity <id> --mode <mode>` dispatcher.
+/// `--entity <id> --mode <mode> [--fallback <type>]` dispatcher. A
+/// fallback on an opted-out entity is meaningless (the gate never runs for
+/// it) and is refused before anything is written.
 pub fn set_entity_mode(
     conn: &mut Connection,
     entity_id: &str,
     mode: OntologyMode,
+    fallback: Option<&str>,
 ) -> Result<EntityModeOutcome> {
-    match mode {
-        OntologyMode::Off => set_entity_optout(conn, entity_id),
-        OntologyMode::Strict => set_entity_strict(conn, entity_id),
+    match (mode, fallback) {
+        (OntologyMode::Off, Some(_)) => bail!(
+            "--fallback has no effect on an opted-out entity (`--mode off` skips the \
+             gate entirely) — nothing was written"
+        ),
+        (OntologyMode::Off, None) => set_entity_optout(conn, entity_id),
+        (OntologyMode::Strict, fallback) => set_entity_strict(conn, entity_id, fallback),
     }
 }
 
-/// `--fallback <type>`: write `fallback_node_type` into the target
-/// manifest's `manifest_json` (target defaults to `tier_fact`). The target
-/// row must already exist — this flag declares the §2.4.4 key explicitly and
-/// never fabricates a manifest row.
-pub fn write_fallback(conn: &Connection, target: &str, fallback: &str) -> Result<()> {
+/// Validate `fallback` against `manifest`'s DECLARED node types and return
+/// the manifest's canonical spelling (R2.4.4: a typo here would silently
+/// become the landed type of every future mint).
+fn canonical_fallback(
+    manifest: &serde_json::Value,
+    target: &str,
+    fallback: &str,
+) -> Result<String> {
+    let parsed: crate::wiki_graph::WikiManifest = serde_json::from_value(manifest.clone())
+        .map_err(|e| {
+            anyhow::anyhow!("manifest_json for `{target}` is not a valid manifest: {e}")
+        })?;
+    let vocab = crate::db::entity_gate::NodeVocabulary::from_manifest(&parsed);
+    match vocab.canonicalize(fallback) {
+        Some(canonical) => Ok(canonical.to_string()),
+        None => bail!(
+            "`{fallback}` is not a node type declared by `{target}`'s manifest — \
+             declare it in the manifest first, then set it as the fallback"
+        ),
+    }
+}
+
+/// Read `target`'s manifest row and compute the `--fallback` rewrite without
+/// writing: `(bytes read, rewritten manifest_json)`. Shared by
+/// [`validate_fallback`] (the pre-write check) and [`write_fallback`].
+fn fallback_rewrite(conn: &Connection, target: &str, fallback: &str) -> Result<(String, String)> {
     let json: Option<String> = conn
         .query_row(
             "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
@@ -151,24 +226,24 @@ pub fn write_fallback(conn: &Connection, target: &str, fallback: &str) -> Result
     };
     let mut manifest: serde_json::Value = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("manifest_json for `{target}` is not valid JSON: {e}"))?;
-    // R2.4.4 ("no invented label ever enters curated_entities.entity_type"):
-    // the fallback is the degrade target for EVERY unlabeled/undeclared
-    // mint, so a typo here (`--fallback projct`) would silently become the
-    // landed type of every future mint. Validate it against the manifest's
-    // DECLARED node types through the single normalization owner
-    // (`NodeVocabulary`) and store the manifest's canonical spelling.
-    let parsed: crate::wiki_graph::WikiManifest = serde_json::from_value(manifest.clone())
-        .map_err(|e| {
-            anyhow::anyhow!("manifest_json for `{target}` is not a valid manifest: {e}")
-        })?;
-    let vocab = crate::db::entity_gate::NodeVocabulary::from_manifest(&parsed);
-    let Some(canonical) = vocab.canonicalize(fallback).map(str::to_string) else {
-        bail!(
-            "`{fallback}` is not a node type declared by `{target}`'s manifest — \
-             declare it in the manifest first, then set it as the fallback"
-        );
-    };
+    let canonical = canonical_fallback(&manifest, target, fallback)?;
     manifest["fallback_node_type"] = serde_json::json!(canonical);
+    Ok((json, manifest.to_string()))
+}
+
+/// Check a `--fallback` write would succeed (target row exists, type
+/// declared) WITHOUT writing — the CLI runs this before any other write so
+/// a bad fallback never leaves a partial, unreported change behind.
+pub fn validate_fallback(conn: &Connection, target: &str, fallback: &str) -> Result<()> {
+    fallback_rewrite(conn, target, fallback).map(|_| ())
+}
+
+/// `--fallback <type>`: write `fallback_node_type` into the target
+/// manifest's `manifest_json` (target defaults to `tier_fact`). The target
+/// row must already exist — this flag declares the §2.4.4 key explicitly and
+/// never fabricates a manifest row.
+pub fn write_fallback(conn: &Connection, target: &str, fallback: &str) -> Result<()> {
+    let (json, manifest) = fallback_rewrite(conn, target, fallback)?;
     // Compare-and-swap on the bytes we READ (review finding, same rule as
     // `ensure_manifest_vocabulary`): a concurrent engine rewrite between the
     // read and this UPDATE must not be overwritten with an edited copy of
@@ -177,7 +252,7 @@ pub fn write_fallback(conn: &Connection, target: &str, fallback: &str) -> Result
     let changed = conn.execute(
         "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1, updated_at = strftime('%s','now')
          WHERE entity_id = ?2 AND manifest_json = ?3",
-        params![manifest.to_string(), target, json],
+        params![manifest, target, json],
     )?;
     if changed == 0 {
         bail!(
@@ -205,20 +280,33 @@ mod tests {
     use serde_json::json;
 
     fn memory_conn() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE llm_wiki_entity_manifests (
-                 entity_id TEXT PRIMARY KEY,
-                 mode TEXT NOT NULL DEFAULT 'off',
-                 manifest_json TEXT NOT NULL DEFAULT '{}',
-                 updated_at INTEGER NOT NULL);
-             CREATE TABLE ct_entity_optouts (
-                 entity_id TEXT PRIMARY KEY,
-                 reason TEXT,
-                 created_at INTEGER NOT NULL);",
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        for id in ["ent_x", "ent_lose"] {
+            conn.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES (?1, ?1, 'concept', '', 1, 1)",
+                params![id],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    fn seed_tier_fact(conn: &Connection) -> serde_json::Value {
+        let manifest = json!({
+            "node_types": [
+                {"type": "concept"}, {"type": "document"}, {"type": "process"}
+            ],
+            "edge_types": [],
+            "fallback_node_type": "document"
+        });
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', ?1, 1)",
+            params![manifest.to_string()],
         )
         .unwrap();
-        conn
+        manifest
     }
 
     fn ctx<'a>(
@@ -246,24 +334,12 @@ mod tests {
     #[test]
     fn off_then_strict_next_mint_is_gated() {
         let mut conn = memory_conn();
-        let manifest = json!({
-            "node_types": [
-                {"type": "concept"}, {"type": "document"}, {"type": "process"}
-            ],
-            "edge_types": [],
-            "fallback_node_type": "document"
-        });
-        conn.execute(
-            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
-             VALUES ('tier_fact', 'strict', ?1, 1)",
-            params![manifest.to_string()],
-        )
-        .unwrap();
+        let manifest = seed_tier_fact(&conn);
 
-        set_entity_mode(&mut conn, "ent_x", OntologyMode::Off).unwrap();
+        set_entity_mode(&mut conn, "ent_x", OntologyMode::Off, None).unwrap();
         assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::OptOut);
 
-        let out = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict).unwrap();
+        let out = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict, None).unwrap();
         assert!(out.optout_deleted && out.manifest_row_written);
         assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::Gate);
 
@@ -287,17 +363,107 @@ mod tests {
 
         // Review finding: `optout_deleted` reports what the DELETE did — a
         // repeat strict call with no opt-out row left must say false.
-        let again = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict).unwrap();
+        let again = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict, None).unwrap();
         assert!(!again.optout_deleted && again.manifest_row_written);
     }
 
     #[test]
     fn strict_without_tier_fact_row_refuses() {
         let mut conn = memory_conn();
-        let err = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict).unwrap_err();
+        let err = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict, None).unwrap_err();
         assert!(err.to_string().contains("tier_fact"));
         // No partial write: no manifest row, no optout change.
         assert_eq!(manifest_row_count(&conn).unwrap(), 0);
+    }
+
+    /// R2.7.5 r13-MAJOR-1: a merged-away loser id resolves to its survivor
+    /// before the write — the opt-out and the strict row land where the gate
+    /// reads them, and the outcome names the entity actually written.
+    #[test]
+    fn entity_writes_resolve_a_merged_loser_to_its_survivor() {
+        let mut conn = memory_conn();
+        seed_tier_fact(&conn);
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('ent_lose', 'ent_x', 1)",
+            [],
+        )
+        .unwrap();
+        let out = set_entity_mode(&mut conn, "ent_lose", OntologyMode::Off, None).unwrap();
+        assert_eq!(out.entity_id, "ent_x");
+        assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::OptOut);
+
+        let out = set_entity_mode(&mut conn, "ent_lose", OntologyMode::Strict, None).unwrap();
+        assert_eq!(out.entity_id, "ent_x");
+        assert!(out.optout_deleted);
+        assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::Gate);
+    }
+
+    /// The strict reversal clears an opt-out set on ANY cluster member (the
+    /// opt-out lookup is cluster-closed), or rung 1(a) keeps skipping.
+    #[test]
+    fn strict_reversal_clears_a_merged_members_optout() {
+        let mut conn = memory_conn();
+        seed_tier_fact(&conn);
+        conn.execute_batch(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at) VALUES ('ent_lose', 'user', 1);
+             INSERT INTO entity_redirects (entity_id, merged_into, created_at) VALUES ('ent_lose', 'ent_x', 1);",
+        )
+        .unwrap();
+        assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::OptOut);
+        let out = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict, None).unwrap();
+        assert!(out.optout_deleted);
+        assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::Gate);
+    }
+
+    #[test]
+    fn unknown_entity_id_is_refused_without_writing() {
+        let mut conn = memory_conn();
+        seed_tier_fact(&conn);
+        let err = set_entity_mode(&mut conn, "ent_typo", OntologyMode::Off, None).unwrap_err();
+        assert!(err.to_string().contains("no entity"), "{err}");
+        let optouts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ct_entity_optouts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(optouts, 0);
+    }
+
+    /// `--entity X --mode off --fallback F` is refused up front; a strict
+    /// write with an undeclared fallback writes NOTHING (one transaction).
+    #[test]
+    fn entity_fallback_errors_leave_no_partial_write() {
+        let mut conn = memory_conn();
+        seed_tier_fact(&conn);
+        let err =
+            set_entity_mode(&mut conn, "ent_x", OntologyMode::Off, Some("document")).unwrap_err();
+        assert!(err.to_string().contains("no effect"), "{err}");
+
+        conn.execute(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at) VALUES ('ent_x', 'user', 1)",
+            [],
+        )
+        .unwrap();
+        let err =
+            set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict, Some("projct")).unwrap_err();
+        assert!(
+            err.to_string().contains("not a node type declared"),
+            "{err}"
+        );
+        assert_eq!(verdict(&conn, "ent_x"), ModeVerdict::OptOut, "opt-out kept");
+        assert_eq!(manifest_row_count(&conn).unwrap(), 1, "only tier_fact");
+
+        let out =
+            set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict, Some("Process")).unwrap();
+        assert!(out.manifest_row_written);
+        let row: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'ent_x'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let row: serde_json::Value = serde_json::from_str(&row).unwrap();
+        assert_eq!(row["fallback_node_type"], "process", "canonical spelling");
     }
 
     #[test]

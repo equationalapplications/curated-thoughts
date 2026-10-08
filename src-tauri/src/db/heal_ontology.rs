@@ -421,9 +421,9 @@ fn remap_pass(
         // rows only, so facts can stay keyed to a LOSER — expand to the
         // whole redirect cluster (the coverage `endpoint_fact_source_paths`
         // uses) or a loser's off-directory source never reaches R2.3.6.
+        let cluster = crate::db::entities::cluster_ids(conn, &id)?;
+        let cluster_placeholders = crate::db::entities::in_placeholders(&cluster);
         let facts: Vec<(String, Option<String>)> = {
-            let cluster = crate::db::entities::cluster_ids(conn, &id)?;
-            let cluster_placeholders = vec!["?"; cluster.len()].join(",");
             let mut stmt = conn.prepare(&format!(
                 "SELECT id, source_ref FROM llm_wiki_entries
                  WHERE entity_id IN ({cluster_placeholders}) AND deleted_at IS NULL"
@@ -458,14 +458,37 @@ fn remap_pass(
             }
         }
 
-        let ledger: Option<(String, Option<String>)> = conn
-            .query_row(
-                "SELECT reason, source_directory FROM entity_type_origin WHERE entity_id = ?1",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let ledger_source_dir = ledger.as_ref().and_then(|(_, d)| d.clone());
+        // The origin ledger is cluster-closed too: a merge moves no rows, so
+        // a merged-in loser's `gate_skipped` / off-sourced row must keep
+        // shielding the merged entity (R2.4.6 / R2.3.5). A surfacing reason
+        // on ANY member wins; any member's source_directory counts.
+        let ledger_rows: Vec<(String, Option<String>)> = {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT reason, source_directory FROM entity_type_origin
+                 WHERE entity_id IN ({cluster_placeholders}) ORDER BY entity_id"
+            ))?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        let ledger: Option<(String, Option<String>)> = ledger_rows
+            .iter()
+            .find(|(reason, _)| {
+                matches!(
+                    OriginReason::parse(reason),
+                    Some(
+                        OriginReason::Degraded
+                            | OriginReason::UnlabeledLanding
+                            | OriginReason::GateSkipped
+                    )
+                )
+            })
+            .or_else(|| ledger_rows.first())
+            .cloned();
+        let ledger_source_dir = ledger_rows.iter().find_map(|(_, d)| d.clone());
         // An off-sourced mint (R2.3.5 ledger row) makes the entity
         // REPORT-or-QUEUE, never auto-retyped (R2.3.6).
         if ledger_source_dir.is_some() {
@@ -718,14 +741,14 @@ pub(crate) fn read_watermark(conn: &Connection) -> Result<Option<(String, i64)>>
         .map(|h| (h, 0)))
 }
 
-fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
-    let n: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            [name],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+pub(crate) fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    // Faults PROPAGATE (R2.3.2a): reading a failed probe as "table absent"
+    // would take the schema-pending early return and exit clean.
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |r| r.get(0),
+    )?;
     Ok(n > 0)
 }
 
@@ -1132,6 +1155,28 @@ mod tests {
         assert_eq!(r.retyped, 0, "{r:?}");
         assert_eq!(r.queued, 1, "{r:?}");
         assert_eq!(entity_type(&conn, "e1"), "agent");
+    }
+
+    /// The ledger is cluster-closed: a `gate_skipped` row on a merged-in
+    /// LOSER keeps the merged survivor surfaced + queued (a merge moves no
+    /// rows, R2.7.5), never auto-retyped.
+    #[test]
+    fn loser_gate_skipped_ledger_row_shields_survivor() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e_surv", "agent");
+        seed_entity(&conn, "e_lose", "agent");
+        conn.execute_batch(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+               VALUES ('e_lose', 'e_surv', 1);
+             INSERT INTO entity_type_origin (entity_id, original_type, reason, source_directory, recorded_at)
+               VALUES ('e_lose', 'agent', 'gate_skipped', NULL, 1);",
+        )
+        .unwrap();
+        let r = run_with(&mut conn, &IngestConfig::default(), DriftFlag::None, true);
+        assert_eq!(r.retyped, 0, "{r:?}");
+        assert_eq!(r.queued, 1, "{r:?}");
+        assert_eq!(entity_type(&conn, "e_surv"), "agent");
     }
 
     /// Dry run classifies but never mutates.

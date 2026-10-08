@@ -57,6 +57,16 @@ fn seed_tier_fact_manifest(dir: &std::path::Path) {
     .unwrap();
 }
 
+fn seed_entity(dir: &std::path::Path, id: &str) {
+    let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
+    conn.execute(
+        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+         VALUES (?1, ?1, 'concept', '', 1, 1)",
+        [id],
+    )
+    .unwrap();
+}
+
 fn optout_count(dir: &std::path::Path, id: &str) -> i64 {
     let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
     conn.query_row(
@@ -118,6 +128,105 @@ fn dir_mode_writes_the_folder_ontology_map() {
     });
 }
 
+/// An inert `--dir` (absolute, `./`-prefixed, or empty) is refused with
+/// config untouched; a trailing-slash form of an existing key REPLACES it
+/// (normalized) instead of writing a tie the heal pass would refuse.
+#[test]
+fn dir_mode_rejects_inert_keys_and_replaces_same_normalized_key() {
+    with_brain(|dir| {
+        std::fs::write(
+            dir.join("config.json"),
+            br#"{"ingest":{"folder_ontology":{"ops":"strict"}}}"#,
+        )
+        .unwrap();
+        let before = std::fs::read(dir.join("config.json")).unwrap();
+        for bad in ["./ops", "/abs/vault/ops", ""] {
+            let out = run_ct(dir, &["ontology", "set", "--mode", "off", "--dir", bad]);
+            assert_ne!(out.status.code(), Some(0), "{bad:?} must be refused");
+            assert_eq!(
+                std::fs::read(dir.join("config.json")).unwrap(),
+                before,
+                "{bad:?} must leave config untouched"
+            );
+        }
+
+        let out = run_ct(dir, &["ontology", "set", "--mode", "off", "--dir", "ops/"]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cfg: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("config.json")).unwrap()).unwrap();
+        assert_eq!(
+            cfg["ingest"]["folder_ontology"],
+            serde_json::json!({"ops": "off"}),
+            "{cfg}"
+        );
+    });
+}
+
+/// A `--fallback` that would fail is checked BEFORE any write: no opt-out
+/// row, no config rewrite, stdout empty.
+#[test]
+fn failing_fallback_writes_nothing() {
+    with_brain(|dir| {
+        seed_tier_fact_manifest(dir);
+        seed_entity(dir, "ent_x");
+        let out = run_ct(
+            dir,
+            &[
+                "ontology",
+                "set",
+                "--mode",
+                "off",
+                "--entity",
+                "ent_x",
+                "--fallback",
+                "concept",
+            ],
+        );
+        assert_ne!(out.status.code(), Some(0));
+        assert_eq!(optout_count(dir, "ent_x"), 0);
+
+        let cfg_before = std::fs::read(dir.join("config.json")).ok();
+        let out = run_ct(
+            dir,
+            &[
+                "ontology",
+                "set",
+                "--mode",
+                "off",
+                "--fallback",
+                "nosuchtype",
+            ],
+        );
+        assert_ne!(out.status.code(), Some(0));
+        assert_eq!(std::fs::read(dir.join("config.json")).ok(), cfg_before);
+        assert!(String::from_utf8_lossy(&out.stdout).trim().is_empty());
+    });
+}
+
+/// `--fallback` alone (no `--mode`) is a valid invocation and does NOT
+/// rewrite the host-wide default.
+#[test]
+fn fallback_alone_does_not_touch_the_host_default() {
+    with_brain(|dir| {
+        seed_tier_fact_manifest(dir);
+        let out = run_ct(dir, &["ontology", "set", "--fallback", "process"]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v = parse_stdout_object(&out);
+        assert_eq!(v["fallback_written"], true, "{v}");
+        assert_eq!(v["config_written"], false, "{v}");
+    });
+}
+
 #[test]
 fn entity_and_dir_are_rejected() {
     with_brain(|dir| {
@@ -143,6 +252,7 @@ fn entity_and_dir_are_rejected() {
 fn entity_off_then_strict_reversal() {
     with_brain(|dir| {
         seed_tier_fact_manifest(dir);
+        seed_entity(dir, "ent_x");
         let out = run_ct(
             dir,
             &["ontology", "set", "--mode", "off", "--entity", "ent_x"],
@@ -207,6 +317,7 @@ fn degraded_config_refuses_loudly() {
 #[test]
 fn no_manifest_rows_warns() {
     with_brain(|dir| {
+        seed_entity(dir, "ent_x");
         let out = run_ct(
             dir,
             &["ontology", "set", "--mode", "off", "--entity", "ent_x"],

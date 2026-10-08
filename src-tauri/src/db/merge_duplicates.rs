@@ -159,14 +159,7 @@ fn run(
 ) -> Result<()> {
     // Old-schema database on a read-only path: report, never fail — the
     // same posture as `ontology_heal_pass` (plan-p9-M3).
-    let has = |name: &str| -> Result<bool> {
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            [name],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
-    };
+    let has = |name: &str| crate::db::heal_ontology::table_exists(conn, name);
     if !has("llm_wiki_meta")? || !has("entity_redirects")? || !has("curated_entities")? {
         eprintln!(
             "merge-duplicates: schema pending (read-only) — run `ct heal --yes` once \
@@ -277,7 +270,7 @@ fn run(
         if group.queued.is_some() {
             continue;
         }
-        if apply_group(conn, &group, report)? {
+        if apply_group(conn, &group, report) {
             report.merged_groups += 1;
         }
     }
@@ -469,32 +462,52 @@ fn apply_group(
     conn: &mut Connection,
     group: &MergeGroup,
     report: &mut MergeDuplicatesReport,
-) -> Result<bool> {
+) -> bool {
+    // Every failure is contained to THIS group (one tx per group — a
+    // failure must not poison unrelated groups) and recorded, never
+    // overwritten: `report.error` accumulates one entry per failed group.
+    let fail = |report: &mut MergeDuplicatesReport, msg: String| {
+        report.error = Some(match report.error.take() {
+            Some(prev) => format!("{prev}; {msg}"),
+            None => msg,
+        });
+        false
+    };
+
     // Defensive cycle guard: the grouping scan excludes redirected rows,
     // so the survivor cannot carry a redirect row — if hand-edited data
     // made it one, refuse this group loudly rather than write a loop.
-    match resolve_redirect_chain(conn, &group.survivor)? {
-        ChainResolution::Cycle(id) => {
+    match resolve_redirect_chain(conn, &group.survivor) {
+        Err(e) => return fail(report, format!("group {} failed: {e:#}", group.survivor)),
+        Ok(ChainResolution::Cycle(id)) => {
             report.cycles.push(id.clone());
             eprintln!(
                 "merge-duplicates: survivor {} sits on a redirect cycle ({id}) — \
                  group refused",
                 group.survivor
             );
-            return Ok(false);
+            return false;
         }
-        ChainResolution::None => {}
-        ChainResolution::Survivor(_) => {
+        Ok(ChainResolution::None) => {}
+        Ok(ChainResolution::Survivor(_)) => {
             eprintln!(
                 "merge-duplicates: survivor {} already redirected — group refused \
                  (re-run the sweep)",
                 group.survivor
             );
-            return Ok(false);
+            return false;
         }
     }
 
-    let tx = ImmediateTx::begin(conn)?;
+    let tx = match ImmediateTx::begin(conn) {
+        Ok(tx) => tx,
+        Err(e) => {
+            return fail(
+                report,
+                format!("group {} failed to begin: {e:#}", group.survivor),
+            )
+        }
+    };
     let now = crate::db::commit::now_timestamps().0;
     let mut wrote: Vec<(String, String)> = Vec::new();
     let mut rewritten: Vec<(String, String, String)> = Vec::new();
@@ -509,23 +522,24 @@ fn apply_group(
         &mut cycles,
         &mut self_loops,
     );
-    match result {
-        Err(e) => {
-            // Roll back this GROUP only; the sweep continues (one tx per
-            // group — a failure must not poison unrelated groups).
-            tx.rollback()?;
-            report.error = Some(format!("group {} failed: {e:#}", group.survivor));
-            return Ok(false);
+    if let Err(e) = result {
+        let mut msg = format!("group {} failed: {e:#}", group.survivor);
+        if let Err(rb) = tx.rollback() {
+            msg.push_str(&format!("; rollback failed: {rb:#}"));
         }
-        Ok(()) => {
-            tx.commit()?;
-            report.redirects_written.extend(wrote);
-            report.redirects_rewritten.extend(rewritten);
-            report.cycles.extend(cycles);
-            report.self_loops.extend(self_loops);
-        }
+        return fail(report, msg);
     }
-    Ok(true)
+    if let Err(e) = tx.commit() {
+        return fail(
+            report,
+            format!("group {} failed to commit: {e:#}", group.survivor),
+        );
+    }
+    report.redirects_written.extend(wrote);
+    report.redirects_rewritten.extend(rewritten);
+    report.cycles.extend(cycles);
+    report.self_loops.extend(self_loops);
+    true
 }
 
 #[allow(clippy::type_complexity)]
@@ -705,6 +719,29 @@ mod tests {
             vec![("entity::aaa".to_string(), "ent_zzz".to_string())],
             "the report lists every redirect row written"
         );
+    }
+
+    /// A failing group is contained and RECORDED: with every group's
+    /// redirect write failing, nothing merges and `report.error` names
+    /// EVERY failed group, not just the last one.
+    #[test]
+    fn every_failed_group_is_recorded() {
+        let mut conn = open_in_memory().unwrap();
+        armed(&conn);
+        seed(&conn, "ent_a1", "Adrian", "concept", "same");
+        seed(&conn, "ent_a2", "Adrian", "concept", "same");
+        seed(&conn, "ent_b1", "Bianca", "concept", "same");
+        seed(&conn, "ent_b2", "Bianca", "concept", "same");
+        conn.execute_batch(
+            "CREATE TRIGGER boom BEFORE INSERT ON entity_redirects
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+        let r = merge_duplicates_pass(&mut conn, DriftFlag::None, true);
+        assert_eq!(r.merged_groups, 0, "{r:?}");
+        let err = r.error.expect("failures recorded");
+        assert!(err.contains("ent_a1") && err.contains("ent_b1"), "{err}");
+        assert_eq!(redirect_count(&conn), 0, "each failed group rolled back");
     }
 
     /// Punctuation/parentheses variants group (R2.7.2 live-census case).

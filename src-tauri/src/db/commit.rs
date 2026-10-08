@@ -184,6 +184,11 @@ struct CommitContext {
     /// item that names the endpoint and reused by every later edge in the
     /// SAME proposal.
     edge_endpoint_strict: std::collections::HashMap<String, Option<EdgeVocabulary>>,
+    /// The proposal entity's OWN strict edge vocabulary — the one the read
+    /// filter and the off-manifest purge judge an edge row by, since the
+    /// row is anchored to the proposal entity. Memoized once per proposal
+    /// (`None` = not yet resolved).
+    owner_edge_vocabulary: Option<Option<EdgeVocabulary>>,
     /// Human Verification Gate (hvg): reviewer identity to stamp on the
     /// proposal's final guarded UPDATE. Mirrored from `ResolveOptions` so
     /// `finalize_proposal_status_guarded` reads it from the ctx it already
@@ -1403,12 +1408,13 @@ fn create_entity_if_needed(
         .filter(|s| !s.is_empty());
 
     // The helper does the gate check + the insert (or refusal). For the
-    // LLM synthesis path the SKIP-path behavior is: today's `'concept'`
-    // literal stands (r2-M2a, no vocabulary to violate) AND a
+    // LLM synthesis path the SKIP-path behavior is today's: the proposed
+    // label lands verbatim (no vocabulary to violate, r2-M2a — the
+    // `'concept'` literal only for a label-less proposal) AND a
     // `gate_skipped` ledger row records the origin (R2.4.6 r21). The
-    // helper does NOT insert on Skip — we land the literal ourselves
-    // here so the proposal's `entity_id` is stamped and the existing
-    // flow proceeds.
+    // helper does NOT insert on Skip — we land the row ourselves here so
+    // the proposal's `entity_id` is stamped and the existing flow
+    // proceeds.
     let outcome = crate::db::entity_gate::shared_insert_entity(
         tx,
         Some(&entity_id),
@@ -1422,14 +1428,16 @@ fn create_entity_if_needed(
 
     match &outcome {
         crate::db::entity_gate::AdmitOutcome::Skipped { .. } => {
-            // SKIP path: today's `'concept'` literal stands. The helper
-            // did NOT insert; land the literal so the proposal flow
-            // proceeds. The ledger row goes after we land the literal
-            // (so we use the SKIP branch in `write_origin_ledger_for_outcome`).
+            // SKIP path: no gate ran, so there is no vocabulary to
+            // violate — today's behavior stands: the proposed label lands
+            // verbatim, the `'concept'` literal only when there is none.
+            // The helper did NOT insert; land the row so the proposal flow
+            // proceeds. The ledger row goes after (the SKIP branch of
+            // `write_origin_ledger_for_outcome`).
             tx.execute(
                 "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
-                 VALUES (?1, ?2, 'concept', '', NULL, ?3, ?3, NULL)",
-                params![entity_id, name, now_secs],
+                 VALUES (?1, ?2, ?3, '', NULL, ?4, ?4, NULL)",
+                params![entity_id, name, proposed_label.unwrap_or("concept"), now_secs],
             )?;
         }
         crate::db::entity_gate::AdmitOutcome::Held { .. } => {
@@ -1583,7 +1591,9 @@ fn commit_fact_add(
     let tags = parse_tags(payload);
 
     // Phase-1 dedupe: exact match on normalized body, scoped to the target
-    // entity. No fuzzy/similarity matching.
+    // entity's redirect cluster (a merge moves no facts, so a pre-merge fact
+    // can still be keyed to a loser — R2.7.5, same closure as fact
+    // update/archive). No fuzzy/similarity matching.
     let normalized = normalize_fact_body(&body);
     // TODO(pr-followup): loading every non-deleted body for the entity into
     // memory is O(N) per fact_add and unbounded as the entity grows. Consider
@@ -1592,11 +1602,15 @@ fn commit_fact_add(
     // aws-cloud-agent-pr-review on PR #84 as a theoretical perf concern;
     // not blocking this PR. Filed in procedures/curated-thoughts-improvement-backlog.md.
     let existing_bodies: Vec<String> = {
-        let mut stmt = conn.prepare(
+        let cluster = crate::db::entities::cluster_ids(conn, &ctx.entity_id)?;
+        let mut stmt = conn.prepare(&format!(
             "SELECT body FROM llm_wiki_entries
-             WHERE entity_id = ?1 AND deleted_at IS NULL",
-        )?;
-        let rows = stmt.query_map(params![ctx.entity_id], |r| r.get::<_, String>(0))?;
+             WHERE entity_id IN ({}) AND deleted_at IS NULL",
+            crate::db::entities::in_placeholders(&cluster)
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
+            r.get::<_, String>(0)
+        })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
     if existing_bodies
@@ -2175,7 +2189,33 @@ fn commit_edge_add(
     let edge_type = match resolved_vocabulary {
         Some(vocabulary) => match vocabulary.canonicalize(&edge_type) {
             // Issue #189: write the manifest's spelling, not the candidate's.
-            Some(canonical) => canonical.to_string(),
+            Some(canonical) => {
+                // The row is anchored to the proposal entity, and the read
+                // filter and the off-manifest purge judge it by THAT
+                // entity's strict vocabulary. When the endpoint gate fired
+                // under a different (endpoint-owner) vocabulary, the type
+                // must also be admissible under the anchor's, or the write
+                // gate admits an edge that is hidden on read and destroyed
+                // by the next sweep. Conjunctive: never loosens the gate.
+                let owner = ctx.owner_edge_vocabulary.get_or_insert_with(|| {
+                    resolve_strict_edge_vocabulary(conn, &proposal_entity_id)
+                });
+                if let Some(owner) = owner {
+                    if owner.canonicalize(canonical).is_none() {
+                        eprintln!(
+                            "[commit] edge_type {canonical:?} is declared by an endpoint's \
+                             ontology manifest but not by the anchoring entity {entity}'s \
+                             (declared: {declared:?}); dropping edge item {item}",
+                            entity = ctx.entity_id,
+                            declared = owner.declared_sorted(),
+                            item = item.id,
+                        );
+                        ctx.dropped_edges.push(item.id.clone());
+                        return Ok(());
+                    }
+                }
+                canonical.to_string()
+            }
             None => {
                 let declared = vocabulary.declared_sorted();
                 eprintln!(
@@ -2276,15 +2316,26 @@ fn resolve_edge_endpoint_vocabulary(
     // FAULT never reads as "no row" in the disarming direction (D8): it
     // warns and falls through to the ladder — the fail-safe direction, more
     // gating, never less.
+    //
+    // A fact/task endpoint's opt-out lives on its OWNING entity (the same
+    // mapping the ladder below walks), so check the owner as well as the
+    // raw endpoint id.
     for eid in [source_id, target_id] {
-        match crate::db::entity_gate::entity_has_optout(conn, eid) {
-            Ok(true) => return Ok(None),
-            Ok(false) => {}
-            Err(e) => {
-                eprintln!(
-                    "[commit] opt-out lookup failed for endpoint {eid}: {e}; \
-                     continuing with the edge ladder (fail-safe)"
-                );
+        let ladder_id = endpoint_ladder_id(conn, eid)?;
+        let mut ids = vec![eid];
+        if ladder_id != eid {
+            ids.push(&ladder_id);
+        }
+        for id in ids {
+            match crate::db::entity_gate::entity_has_optout(conn, id) {
+                Ok(true) => return Ok(None),
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!(
+                        "[commit] opt-out lookup failed for endpoint {id}: {e}; \
+                         continuing with the edge ladder (fail-safe)"
+                    );
+                }
             }
         }
     }
@@ -2356,10 +2407,7 @@ fn resolve_endpoint_ladder(
     // the old proposal-entity gate refused. Map a fact/task endpoint to its
     // OWNING entity (resolved to the merge survivor) and walk that entity's
     // ladder; the owner's fact source paths subsume the endpoint fact's.
-    let ladder_id: String = match endpoint_owner_entity(conn, endpoint_id)? {
-        Some(owner) => crate::db::entities::resolve_entity_id(conn, &owner)?,
-        None => endpoint_id.to_string(),
-    };
+    let ladder_id = endpoint_ladder_id(conn, endpoint_id)?;
 
     // Rung 1b — the endpoint's own manifest row.
     match ontology_leg(conn, &ladder_id, &ladder_id) {
@@ -2453,6 +2501,16 @@ fn resolve_endpoint_ladder(
             warn_ontology_unreadable(&ladder_id, &[&ladder_id, "tier_fact"], &e);
             None
         }
+    })
+}
+
+/// The entity id an edge endpoint's §2.3 ladder (and rung-1a opt-out) is
+/// keyed on: a fact/task endpoint maps to its owning entity, resolved to the
+/// merge survivor; any other id is used as-is.
+fn endpoint_ladder_id(conn: &Connection, endpoint_id: &str) -> Result<String> {
+    Ok(match endpoint_owner_entity(conn, endpoint_id)? {
+        Some(owner) => crate::db::entities::resolve_entity_id(conn, &owner)?,
+        None => endpoint_id.to_string(),
     })
 }
 
@@ -2843,6 +2901,7 @@ pub fn resolve_proposal(
             .clone()
             .unwrap_or_else(|| crate::config::DEFAULT_DEPOSIT_TIER.to_string()),
         edge_endpoint_strict: std::collections::HashMap::new(),
+        owner_edge_vocabulary: None,
         reviewed_by: options.reviewed_by.clone(),
     };
 
@@ -3271,6 +3330,7 @@ mod tests {
         CommitContext {
             deposit_default_tier: crate::config::DEFAULT_DEPOSIT_TIER.to_string(),
             edge_endpoint_strict: std::collections::HashMap::new(),
+            owner_edge_vocabulary: None,
             proposal_id: "prop-test".into(),
             proposal_created_at: 100,
             entity_id: entity_id.to_string(),
@@ -6165,6 +6225,50 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    /// R2.7.5: a merge moves no facts, so a pre-merge fact stays keyed to
+    /// the loser. Re-adding the same body on the SURVIVOR must dedupe
+    /// against the whole redirect cluster, not mint a duplicate.
+    #[test]
+    fn fact_add_dedupes_against_merged_loser_facts() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/documents/a.pdf");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        seed_entity(&conn, "ent-surv", "Rust", "Summary", 100);
+        seed_entity(&conn, "ent-lose", "Rust", "Summary", 100);
+        insert_test_proposal(
+            &conn,
+            "prop-f1",
+            ProposalKind::UpdateEntity,
+            Some("ent-lose"),
+            vec![fact_item("fact-1", chunk_id, "Rust is a systems language.")],
+            doc_id,
+        );
+        resolve_fact(&mut conn, "prop-f1", "fact-1");
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('ent-lose', 'ent-surv', 1)",
+            [],
+        )
+        .unwrap();
+
+        let doc2 = seed_document(&conn, "/vault/documents/b.pdf");
+        let chunk2 = seed_chunk(&conn, doc2);
+        insert_test_proposal(
+            &conn,
+            "prop-f2",
+            ProposalKind::UpdateEntity,
+            Some("ent-surv"),
+            vec![fact_item("fact-2", chunk2, "Rust is a  systems language.")],
+            doc2,
+        );
+        let result = resolve_fact(&mut conn, "prop-f2", "fact-2");
+        assert!(result.committed.is_empty(), "{:?}", result.committed);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
     #[test]
     fn fact_add_different_body_still_commits() {
         let mut conn = open_in_memory().unwrap();
@@ -7022,8 +7126,10 @@ mod tests {
         );
         let degraded = crate::config::OntologyDegradedState::default();
 
-        let mut ingest = crate::config::IngestConfig::default();
-        ingest.ontology_default = Some(crate::config::OntologyMode::Off);
+        let ingest = crate::config::IngestConfig {
+            ontology_default: Some(crate::config::OntologyMode::Off),
+            ..Default::default()
+        };
         let gate = edge_gate_ctx(&ingest, &degraded);
         let mut ctx = edge_test_ctx("ent_a");
         let outcome =

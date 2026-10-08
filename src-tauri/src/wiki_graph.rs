@@ -1724,6 +1724,44 @@ mod unit_tests {
             "the survivor anchors the walk"
         );
     }
+
+    /// `wiki_context` seeds from each fact's raw `entity_id`, which for a
+    /// pre-merge fact is the redirected LOSER. The composite walk must seed
+    /// its BFS under the resolved survivor id (the neighbor anchor compares
+    /// redirect-resolved endpoints), or the loser's edges never match.
+    #[test]
+    fn composite_walk_seeded_from_loser_reaches_its_edges() {
+        let conn = open_in_memory().unwrap();
+        for id in ["e_surv", "e_lose", "e_tgt"] {
+            conn.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES (?1, ?1, 'concept', 's', 100, 100)",
+                [id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('e_lose','e_surv',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('ed1','e_lose','e_lose','e_tgt','depends_on',1)",
+            [],
+        )
+        .unwrap();
+
+        let mut walk = CompositeWalk::default();
+        walk.walk_seed(&conn, "e_lose", "e_lose", 1, TraverseDirection::Both, &[])
+            .unwrap();
+        assert!(
+            walk.edges.iter().any(|e| e.target_id == "e_tgt"),
+            "the loser's edge must be reached from a loser seed, got: {:?}",
+            walk.edges
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1824,13 +1862,18 @@ impl CompositeWalk {
             return Ok(());
         };
 
-        let seed_key = (entity_id.to_string(), seed.id.clone());
+        let seed_id = seed.id.clone();
+        let seed_key = (entity_id.to_string(), seed_id.clone());
         if self.visited.insert(seed_key.clone()) {
             self.nodes.insert(seed_key, seed);
         }
 
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-        queue.push_back((source_id.to_string(), 0));
+        // Seed under the RESOLVED id (same rule as `scoped_traverse`): the
+        // neighbor anchor compares redirect-resolved endpoints, so a merged
+        // loser's raw id would match no edge at all. In entry space
+        // `seed.id == source_id`.
+        queue.push_back((seed_id, 0));
 
         while let Some((current_id, depth)) = queue.pop_front() {
             if depth >= max_depth {

@@ -247,8 +247,9 @@ enum OntologyCmd {
     /// (`tier_fact` unless `--entity` names one). One target per invocation:
     /// `--entity` and `--dir` are mutually exclusive.
     Set {
+        /// `off` or `strict`. Optional when only `--fallback` is being set.
         #[arg(long)]
-        mode: String,
+        mode: Option<String>,
         #[arg(long, conflicts_with = "dir")]
         entity: Option<String>,
         #[arg(long)]
@@ -607,7 +608,7 @@ fn run(cmd: Cmd) -> Result<i32> {
                 dir,
                 fallback,
             } => curated_thoughts_tools::cmds::ontology_set_run(
-                &mode,
+                mode.as_deref(),
                 entity.as_deref(),
                 dir.as_deref(),
                 fallback.as_deref(),

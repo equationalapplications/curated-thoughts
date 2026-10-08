@@ -335,13 +335,18 @@ pub struct CtHealOutput {
 /// The `ct ontology set` stdout shape: one JSON object per invocation.
 #[derive(serde::Serialize)]
 pub struct OntologySetOutput {
-    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
+    /// The entity the write landed on (`--entity` resolved through any
+    /// merge redirect to its survivor).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_entity: Option<String>,
     pub optout_written: bool,
     pub optout_deleted: bool,
     pub manifest_row_written: bool,
@@ -361,8 +366,12 @@ pub struct OntologySetOutput {
 /// Degraded-config refusal (r3-M3): the SAME detection the heal pass uses —
 /// a config whose ontology keys were dropped at load refuses the whole
 /// command (writing into a half-loaded config could persist the loss).
+///
+/// Every check that can refuse (`--dir` shape, `--fallback` target row and
+/// declared type, `--entity` existence) runs BEFORE the first write, so a
+/// refusal never leaves a partial, unreported change behind.
 pub fn ontology_set_run(
-    mode: &str,
+    mode: Option<&str>,
     entity: Option<&str>,
     dir: Option<&str>,
     fallback: Option<&str>,
@@ -371,13 +380,27 @@ pub fn ontology_set_run(
     use tauri_app_lib::db::ontology_set;
 
     let mode = match mode {
-        "off" => OntologyMode::Off,
-        "strict" => OntologyMode::Strict,
-        other => bail!("--mode must be `off` or `strict`, got {other:?}"),
+        None => None,
+        Some("off") => Some(OntologyMode::Off),
+        Some("strict") => Some(OntologyMode::Strict),
+        Some(other) => bail!("--mode must be `off` or `strict`, got {other:?}"),
     };
+    if mode.is_none() && fallback.is_none() {
+        bail!("nothing to set — pass --mode, --fallback, or both");
+    }
     if entity.is_some() && dir.is_some() {
         bail!("--entity and --dir are mutually exclusive — one target per invocation (§2.11)");
     }
+    if dir.is_some() && mode.is_none() {
+        bail!("--dir sets a folder's mode — pass --mode with it");
+    }
+    if entity.is_some() && mode == Some(OntologyMode::Off) && fallback.is_some() {
+        bail!(
+            "--fallback has no effect on an opted-out entity (`--mode off` skips the \
+             gate entirely) — nothing was written"
+        );
+    }
+    let dir_key = dir.map(validated_folder_key).transpose()?;
 
     let paths = retrieval::resolve_brain_paths();
     if !paths.db_path.exists() {
@@ -420,10 +443,11 @@ pub fn ontology_set_run(
     tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
 
     let mut out = OntologySetOutput {
-        mode: mode_str(mode),
+        mode: mode.map(mode_str),
         entity: entity.map(str::to_string),
-        dir: dir.map(str::to_string),
+        dir: dir_key.clone(),
         fallback: fallback.map(str::to_string),
+        resolved_entity: None,
         optout_written: false,
         optout_deleted: false,
         manifest_row_written: false,
@@ -444,24 +468,41 @@ pub fn ontology_set_run(
         out.warning = Some(warning);
     }
 
-    if let Some(id) = entity {
-        let outcome = ontology_set::set_entity_mode(&mut conn, id, mode)?;
-        out.optout_written = outcome.optout_written;
-        out.optout_deleted = outcome.optout_deleted;
-        out.manifest_row_written = outcome.manifest_row_written;
-    } else if dir.is_none() {
-        // Bare `--mode` (no --entity, no --dir): host-wide default in
-        // config (explicitly NOT a manifest row). May compose with
-        // `--fallback`, which is an independent manifest-level write.
-        write_config_mode(&paths, None, mode)?;
-        out.config_written = true;
+    // Pre-write validation. `--entity X --mode strict --fallback F` is
+    // validated inside its own single transaction (the row it writes is the
+    // fallback's target); every other `--fallback` target must already
+    // exist and declare the type.
+    let entity_target = entity
+        .map(|id| ontology_set::resolve_target_entity(&conn, id))
+        .transpose()?;
+    let separate_fallback = fallback.filter(|_| !(entity.is_some() && mode.is_some()));
+    let fallback_target = entity_target
+        .clone()
+        .unwrap_or_else(|| ontology_set::TIER_FACT.to_string());
+    if let Some(fb) = separate_fallback {
+        ontology_set::validate_fallback(&conn, &fallback_target, fb)?;
     }
-    if let Some(prefix) = dir {
-        write_config_mode(&paths, Some(prefix), mode)?;
-        out.config_written = true;
+
+    match (entity, mode) {
+        (Some(id), Some(mode)) => {
+            let outcome = ontology_set::set_entity_mode(&mut conn, id, mode, fallback)?;
+            out.resolved_entity = Some(outcome.entity_id);
+            out.optout_written = outcome.optout_written;
+            out.optout_deleted = outcome.optout_deleted;
+            out.manifest_row_written = outcome.manifest_row_written;
+            out.fallback_written = fallback.is_some();
+        }
+        (Some(_), None) => out.resolved_entity = entity_target,
+        (None, Some(mode)) => {
+            // Bare `--mode` → host-wide default in config (explicitly NOT a
+            // manifest row); `--dir` → the folder map.
+            write_config_mode(&paths, dir_key.as_deref(), mode)?;
+            out.config_written = true;
+        }
+        (None, None) => {}
     }
-    if let Some(fb) = fallback {
-        ontology_set::write_fallback(&conn, entity.unwrap_or(ontology_set::TIER_FACT), fb)?;
+    if let Some(fb) = separate_fallback {
+        ontology_set::write_fallback(&conn, &fallback_target, fb)?;
         out.fallback_written = true;
     }
 
@@ -477,20 +518,54 @@ fn mode_str(mode: tauri_app_lib::config::OntologyMode) -> String {
     }
 }
 
+/// Validate and normalize a `--dir` prefix into the `folder_ontology` key
+/// that will be written. An absolute path or an unmatchable key (empty,
+/// leading `./`, `.`/`..` segments) would be written INERT — the resolver
+/// skips it, so the folder the user meant to mark stays gated (the D8
+/// harm) while the command reports success.
+fn validated_folder_key(prefix: &str) -> Result<String> {
+    use tauri_app_lib::config::{key_is_matchable, normalize_key};
+    let looks_absolute = std::path::Path::new(prefix).is_absolute()
+        || prefix.starts_with('/')
+        || prefix.starts_with('\\')
+        || prefix.as_bytes().get(1) == Some(&b':');
+    if looks_absolute || !key_is_matchable(prefix) {
+        bail!(
+            "--dir {prefix:?} is not a vault-relative folder prefix (e.g. `ops` or \
+             `notes/work`; no leading `/`, `./`, `.` or `..` segments) — nothing was written"
+        );
+    }
+    Ok(normalize_key(prefix))
+}
+
 /// Write the config-side mode target: `None` → `ingest.ontology_default`,
-/// `Some(prefix)` → the `ingest.folder_ontology` map (spec §2.11).
+/// `Some(key)` → the `ingest.folder_ontology` map (spec §2.11). `key` is
+/// already normalized ([`validated_folder_key`]); any existing key that
+/// normalizes to the same prefix is REPLACED, never left beside it — two
+/// such keys are a tie the heal pass and this command refuse to interpret.
+///
+/// Loads with [`BrainConfig::load`] (not `load_lenient`): its fallback keeps
+/// generation/embedding/privacy blocks this binary cannot parse verbatim
+/// through the write, where `load_lenient` would reset them to defaults.
 fn write_config_mode(
     paths: &retrieval::BrainPaths,
-    prefix: Option<&str>,
+    key: Option<&str>,
     mode: tauri_app_lib::config::OntologyMode,
 ) -> Result<()> {
-    use tauri_app_lib::config::BrainConfig;
-    let report = BrainConfig::load_lenient(paths)
-        .map_err(|e| anyhow::anyhow!("load brain config {}: {e}", paths.config_path.display()))?;
-    let mut cfg = report.config;
-    match prefix {
-        Some(prefix) => {
-            cfg.ingest.folder_ontology.insert(prefix.to_string(), mode);
+    use tauri_app_lib::config::{normalize_key, BrainConfig};
+    let mut cfg = if paths.config_path.exists() {
+        BrainConfig::load(paths).map_err(|e| {
+            anyhow::anyhow!("load brain config {}: {e}", paths.config_path.display())
+        })?
+    } else {
+        BrainConfig::default()
+    };
+    match key {
+        Some(key) => {
+            cfg.ingest
+                .folder_ontology
+                .retain(|existing, _| normalize_key(existing) != key);
+            cfg.ingest.folder_ontology.insert(key.to_string(), mode);
         }
         None => cfg.ingest.ontology_default = Some(mode),
     }
@@ -533,8 +608,17 @@ pub fn merge_duplicates_run(
             brain.paths.db_path.display()
         );
     }
-    let mut conn = crate::write::open_rw(&brain)?;
-    tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
+    // The report arm (no `--yes`) writes NOTHING — not even a migration —
+    // so it opens read-only like `ct heal` / `ct wiki sweep`'s refusal arms
+    // (an old schema reports "schema pending (read-only)"). Only the apply
+    // arm opens read-write and brings the schema current.
+    let mut conn = if yes {
+        let conn = crate::write::open_rw(&brain)?;
+        tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
+        conn
+    } else {
+        tauri_app_lib::retrieval::open_brain_readonly(&brain.paths.db_path)?
+    };
     // `apply == false` computes the FULL report (groups, dispositions, drift
     // echo) and writes nothing — the report arm is the no-`--yes` behavior,
     // so the operator can read the echoed old hash to feed `--confirm-drift`.
