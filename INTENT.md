@@ -57,9 +57,12 @@ There are two ways in, both over the same pipeline:
   Agent deposits go in `immutable-source-files/agents/`.
 - **CTI** — curated-thoughts-integrations, a separate repo that delivers
   wisdom into agent sessions using `ct wisdom match`.
-- **System One / Jev** — a small, fast model that makes typed yes/no or
-  category judgments. Jev is the one CT uses. (INTENT has also named
-  "Laya"; it is not in the code.)
+- **System One** — small, fast, cheap models that make typed yes/no or
+  category judgments (classification). CT is building them into its
+  architecture. Two are named:
+  - **Jev** — the one CT uses today.
+  - **Laya** — an open-weight System One model for fast, cheap
+    classification. Not in the code yet.
 - **Migration 13** — the wiki-engine database change that added fact
   history columns (`valid_from`, `valid_to`, `superseded_by`); CT's copy is
   schema version V24.
@@ -155,7 +158,7 @@ should trust tiers it receives from another is an **open decision**.
 
 ### 6. The fast model judges; it never writes
 
-System One (Jev) gives quick, cheap judgments: should this file be
+System One models (Jev, Laya) give quick, cheap judgments: should this file be
 ingested, is this fact relevant to this question. Every judgment is logged
 so it can be evaluated. It never writes facts, approves anything, rewrites
 questions, or decides trust. It is optional: recall works without it.
@@ -165,7 +168,7 @@ questions, or decides trust. It is optional: recall works without it.
 **Status: Partly built, used differently.** Jev exists only as an optional
 classifier that assigns types to untyped facts. It is not used for ingest
 triage or recall relevance, and its judgments are not logged for
-evaluation.
+evaluation. Laya is not integrated yet.
 
 ### 7. Recall says "I don't know" rather than guess
 
