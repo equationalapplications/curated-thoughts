@@ -18,10 +18,21 @@ landed Task 0/1 code — this plan was revised the same day to match r21).
 | 0 r21 addendum (ledger shape) | DONE | `6f5ada2` |
 | 1 Config core | DONE | `f9998dc..7da4603` |
 | 1b Clippy cleanup (inserted: CI clippy was red since `7da4603`) | DONE | `dd10873` |
-| 2–10 | NOT STARTED — resume at Task 2 | — |
+| 2 Manifest vocab + gate core | DONE | `3864595..63127e8` |
+| 3 Write-time gate | DONE | `63127e8..1ec104d` |
+| 4 OKF doc_kind rename | DONE | `1ec104d..ec8822f` |
+| 5 Ontology heal | DONE | `ec8822f..c56806a` |
+| 6 Duplicate merge sweep | DONE | `c56806a..0fdeb9f` |
+| 7 Redirect resolution | DONE | `0fdeb9f..aadefd3` |
+| 8 CLI + MCP + CI | DONE | `aadefd3..8315d5d` |
+| 9 Migration + okf observability | DONE | `faa9787..5a4a443` |
+| 10 Docs + tracking issue #273 | DONE | `5a4a443..219002d` |
+| Final whole-branch review + fix wave | DONE | `219002d..8402d50` |
 
-The handoff for finishing Tasks 2–10 is
-`docs/superpowers/plans/2026-10-07-ontology-gate-implementation-handoff.md`.
+ALL TASKS COMPLETE. CI green on tip `8402d50` (8/8, mergeStateStatus CLEAN).
+Wave-1 deferred minors ride tracking issue #273. The implementation handoff
+(`2026-10-07-ontology-gate-implementation-handoff.md`) is obsolete and
+deleted. Merge decision belongs to the user.
 
 **Architecture:** The spec is the single source of truth for every design
 rule; this plan sequences the implementation into 10 tasks in dependency
