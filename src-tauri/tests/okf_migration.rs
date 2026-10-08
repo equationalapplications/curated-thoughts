@@ -892,6 +892,26 @@ fn okf_migration_aborts_without_fallback_records_diagnostic_and_retries_succeeds
                 "the gate's degrade ladder should land the entity as the \
                  manifest's declared fallback after the retry"
             );
+
+            // Task 9 fix round 1, Finding 1: the migration-time UNLABELED
+            // fallback landing writes the `unlabeled_landing` origin-ledger
+            // row (same situation, same row as bundle import's
+            // DegradedToFallback arm) so a fallback landing stays
+            // distinguishable from a declared type (R2.4.6). original_type
+            // is NULL (no label was supplied — r21 contract).
+            let (reason, original_type): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT reason, original_type FROM entity_type_origin
+                      WHERE entity_id = ?1",
+                    [&entity_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .expect("the unlabeled fallback landing must record an origin row");
+            assert_eq!(reason, "unlabeled_landing");
+            assert_eq!(
+                original_type, None,
+                "an unlabeled landing has no original label — NULL, never ''"
+            );
         },
     );
 }

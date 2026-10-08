@@ -191,11 +191,21 @@ fn migrate_approved_wiki_pages(tx: &ImmediateTx<'_>, vault_root: &Path, now: i64
             }
             (AdmitOutcome::DegradedToFallback { .. }, _) => {
                 // Helper inserted as the manifest's declared fallback.
-                // No ledger row (the helper inserted as a declared
-                // type, not as a degrade; r21 — `degraded` reason is
-                // reserved for label-proposed-and-degraded, not
-                // unlabeled-then-degraded). Bundle import owns the
-                // `unlabeled_landing` reason.
+                // The mint was UNLABELED (okf_migration supplies no
+                // proposed type), so R2.4.6's `unlabeled_landing` row
+                // records it — same situation, same row as bundle
+                // import's DegradedToFallback arm (bundle_apply.rs):
+                // a fallback landing must stay distinguishable from a
+                // declared type. `original_type` NULL (no label was
+                // supplied — r21 contract), `source_directory` NULL
+                // (no `off` folder caused this; the mint was gated).
+                crate::db::entity_gate::write_origin_ledger_row(
+                    tx,
+                    &entity_id,
+                    None,
+                    OriginReason::UnlabeledLanding,
+                    None,
+                )?;
             }
             _ => {
                 // Admitted as declared / aliased: nothing to do.

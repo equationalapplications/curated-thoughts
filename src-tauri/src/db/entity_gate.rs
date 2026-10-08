@@ -414,28 +414,33 @@ impl std::fmt::Debug for AdmitInternal {
 ///
 /// Empty-declared-set rule (§2.4.5): a strict manifest with ZERO usable types
 /// is a configuration error even when it has a fallback — there is nothing
-/// to admit. Held.
+/// to admit. Held (first arm below). A strict vocabulary that HAS types but
+/// NO fallback holds too (final arm): there is nothing to degrade onto and
+/// inventing a label is forbidden (R2.4.4).
 fn run_admit_ladder(vocab: &NodeVocabulary, proposed: Option<&str>) -> AdmitInternal {
     if vocab.is_empty() {
+        // §2.4.5 empty-declared-set configuration error — held even when a
+        // fallback is declared (there is nothing to admit onto).
         return AdmitInternal::Held;
     }
     let Some(label) = proposed else {
-        // No label proposed: the caller (e.g. okf_migration) has no
-        // proposed type for this mint. We must NOT silently invent a
-        // label (R2.4.4) — but the manifest's declared fallback IS a
-        // declared label, not an invention. When the caller is the
-        // gate's UNLABELED path (no proposed, no row, off, etc.) and the
-        // manifest declares a fallback, land there: the helper inserts
-        // as the fallback and the migration's abort-vs-skip decision is
-        // the caller's, not the ladder's. Only an EMPTY vocabulary
-        // without a fallback holds — that is the §2.4.5 configuration
-        // error, and the okf_migration abort handler reports it.
+        // UNLABELED mint (GUI blank-type / LLM synthesis without a type /
+        // okf_migration / bundle import — all pass no proposed label).
+        // We must NOT invent a label (R2.4.4), but the manifest's declared
+        // fallback IS a declared label, not an invention: land there
+        // (spec §2.5 GUI bullet "no-fallback-exists → refusal error
+        // shown; otherwise normal ladder"; bundle bullet "lands untyped
+        // entities as the MANIFEST'S DECLARED FALLBACK"). With NO
+        // fallback declared there is nothing to land on — Held, which
+        // each site surfaces per its own contract (GUI refusal error,
+        // bundle/migration atomic abort).
         if let Some(fallback) = vocab.fallback() {
             return AdmitInternal::DegradedToFallback {
                 original_label: String::new(),
                 landed_as: fallback.to_string(),
             };
         }
+        // Strict vocabulary WITH types but WITHOUT a fallback: held.
         return AdmitInternal::Held;
     };
     if let Some(canonical) = vocab.canonicalize(label) {
@@ -2141,6 +2146,98 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(outcome, AdmitOutcome::Held { .. }));
+        tx.commit().unwrap();
+    }
+
+    /// Task 9 fix round 1, Finding 2 pin: the UNLABELED ladder arm (Task 9)
+    /// reaches BOTH the GUI mint (entities::create_entity, blank type) and
+    /// LLM synthesis (commit.rs, no proposed type). Both sites route through
+    /// `shared_insert_entity` with `proposed_label = None` under a `Gate`
+    /// decision, so pinning the helper pins both paths:
+    ///
+    /// (a) Gate + declared fallback → the unlabeled mint LANDS as the
+    ///     fallback (no refusal) — spec §2.5 GUI bullet "no-fallback-exists
+    ///     → refusal error shown; otherwise normal ladder" (refusal is
+    ///     reserved for the no-fallback case) and the bundle bullet's
+    ///     "lands untyped entities as the MANIFEST'S DECLARED FALLBACK".
+    /// (b) Gate + NO fallback → still Held (refusal), the pre-Task-9
+    ///     contract.
+    #[test]
+    fn unlabeled_mint_under_gate_lands_as_fallback_else_held() {
+        let conn = open_in_memory().unwrap();
+        let mut conn = conn;
+
+        let vocab_with_fallback = {
+            let mut by_key = std::collections::HashMap::new();
+            by_key.insert("person".to_string(), "person".to_string());
+            NodeVocabulary {
+                by_key,
+                fallback: Some("project".to_string()),
+            }
+        };
+        let vocab_without_fallback = {
+            let mut by_key = std::collections::HashMap::new();
+            by_key.insert("person".to_string(), "person".to_string());
+            NodeVocabulary {
+                by_key,
+                fallback: None,
+            }
+        };
+
+        // (a) Unlabeled + declared fallback → lands as the fallback.
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_unlabeled_fb"),
+            "Unlabeled-mint",
+            None,
+            "",
+            500,
+            GateDecision::Gate(vocab_with_fallback),
+            false,
+        )
+        .unwrap();
+        match outcome {
+            AdmitOutcome::DegradedToFallback { landed_as, .. } => {
+                assert_eq!(landed_as, "project");
+            }
+            other => panic!("expected DegradedToFallback, got {other:?}"),
+        }
+        let landed: String = tx
+            .query_row(
+                "SELECT entity_type FROM curated_entities WHERE id = 'ent_unlabeled_fb'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(landed, "project", "the row landed as the declared fallback");
+        tx.commit().unwrap();
+
+        // (b) Unlabeled + NO fallback → Held, no row (refusal preserved).
+        let tx = ImmediateTx::begin(&mut conn).unwrap();
+        let outcome = shared_insert_entity(
+            &tx,
+            Some("ent_unlabeled_nofb"),
+            "Unlabeled-mint-2",
+            None,
+            "",
+            600,
+            GateDecision::Gate(vocab_without_fallback),
+            false,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, AdmitOutcome::Held { .. }),
+            "unlabeled without a declared fallback must still refuse, got {outcome:?}"
+        );
+        let count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM curated_entities WHERE id = 'ent_unlabeled_nofb'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "Held must NOT insert a row");
         tx.commit().unwrap();
     }
 
