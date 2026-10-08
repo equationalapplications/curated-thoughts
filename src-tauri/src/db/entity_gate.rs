@@ -1184,6 +1184,20 @@ pub fn resolve_node_gate_decision(
         };
     }
     if hold_seen && !any_climb {
+        // r4-m4 parity with the `off_found` arm below (review finding): an
+        // UNREADABLE entity manifest row is REPORT-OR-HOLD — never a silent
+        // SKIP — even when the held source is the only deciding signal and
+        // `tier_fact` is absent. Without this guard the deferred Hold
+        // returned Off and the mint landed ungated, exactly the silent
+        // admission the rung-4 `Ok(_)` arm's `entity_row_unreadable` check
+        // exists to prevent.
+        if entity_row_unreadable {
+            return NodeGateDecision {
+                verdict: ModeVerdict::StrictNoVocab,
+                vocabulary: None,
+                source_directory: None,
+            };
+        }
         // No source resolved strict and none climbs, so the deferred Hold
         // verdict from r10-MINOR-2 applies (same arms as the original
         // in-loop return): with no strict `tier_fact` row there is nothing
@@ -2846,6 +2860,39 @@ mod tests {
         );
         assert_eq!(node.verdict, ModeVerdict::StrictNoVocab);
         assert_eq!(node.source_directory.as_deref(), Some("held/a.md"));
+    }
+
+    /// r4-m4 parity (review finding): an UNREADABLE entity manifest row
+    /// HOLDS even when the only deciding signal is a HELD source with no
+    /// climbing sibling and no strict `tier_fact` row — the same guard the
+    /// `off_found` arm and rung 4 apply. Pre-fix, the deferred-Hold arm
+    /// returned Off (SKIP) here and the mint landed silently.
+    #[test]
+    fn held_source_with_unreadable_entity_row_holds() {
+        let conn = open_in_memory().unwrap();
+        // The entity's OWN manifest row is corrupt — rung 1b sets
+        // `entity_row_unreadable` (it may have declared a strict mode we
+        // cannot read).
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('ent_new', 'strict', 'not json at all', 1)",
+            [],
+        )
+        .unwrap();
+        let degraded = crate::config::OntologyDegradedState {
+            dropped_prefixes: vec!["held".to_string()],
+            ..Default::default()
+        };
+        let ctx = GateResolutionContext {
+            ingest: &crate::config::IngestConfig::default(),
+            degraded: &degraded,
+            schema: None,
+            schema_unparseable: false,
+            vault_root: None,
+        };
+        let node = resolve_node_gate_decision(&conn, "ent_new", &["held/a.md".to_string()], ctx);
+        assert_eq!(node.verdict, ModeVerdict::StrictNoVocab);
+        assert_eq!(node.into_gate_decision(), GateDecision::Held);
     }
 
     /// Ensure dedupe is case-insensitive (review finding): a manifest that

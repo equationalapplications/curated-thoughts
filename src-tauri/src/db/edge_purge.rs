@@ -247,8 +247,12 @@ pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str) -> Result<us
         schema_unparseable: policy.ontology_unparseable,
         vault_root: policy.vault_root.as_deref(),
     };
+    // ONE probe context for every doomed edge in this entity's partition:
+    // the E2 memo maps key on endpoint ladder ids, so shared endpoints
+    // (the common hub shape) resolve once, not per edge.
+    let mut probe = crate::db::commit::CommitContext::purge_probe();
     let tx = conn.unchecked_transaction()?;
-    let outcome = purge_off_manifest_edges_in_tx(&tx, entity_id, &gate)?;
+    let outcome = purge_off_manifest_edges_in_tx(&tx, entity_id, &gate, &mut probe)?;
     tx.commit()?;
     for (id, edge_type) in &outcome.deleted {
         warn_purged_off_manifest_edge(entity_id, id, edge_type);
@@ -273,8 +277,11 @@ pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str) -> Result<us
 /// would leave ungated today (both off / no-manifest, an opt-out, a strict
 /// manifest with no edge types) is NOT deleted — the write gate's SKIP is a
 /// deliberate output, and destroying it retroactively is the D8 violation.
-/// The check resolves each doomed edge's endpoint ladder, so it costs one
-/// ladder walk per DOOMED edge only (never per surviving edge).
+/// The check resolves each doomed edge's endpoint ladder through the CALLER'S
+/// shared probe context, so it costs one ladder walk per DISTINCT endpoint
+/// (never per edge, never per surviving edge) — nothing the purge mutates
+/// (`llm_wiki_edges` rows only) feeds the ladders, so the memo stays sound
+/// across the deletions.
 ///
 /// Count semantics match the wrapper: returns empty lists and deletes
 /// nothing when the entity has no strict ontology or no off-manifest edges.
@@ -282,6 +289,7 @@ fn purge_off_manifest_edges_in_tx(
     conn: &Connection,
     entity_id: &str,
     gate: &crate::db::entity_gate::GateResolutionContext<'_>,
+    probe: &mut crate::db::commit::CommitContext,
 ) -> Result<OffManifestPurge> {
     let Some(vocab) = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id) else {
         return Ok(OffManifestPurge::default());
@@ -308,7 +316,8 @@ fn purge_off_manifest_edges_in_tx(
 
     let mut outcome = OffManifestPurge::default();
     for (id, _edge_type, source_id, target_id) in candidates {
-        if crate::db::commit::edge_write_gate_would_skip(conn, &source_id, &target_id, gate)? {
+        if crate::db::commit::edge_write_gate_would_skip(conn, &source_id, &target_id, gate, probe)?
+        {
             outcome.spared.push(id);
             continue;
         }
@@ -362,6 +371,14 @@ pub fn purge_off_manifest_edges_all(conn: &Connection) -> Result<usize> {
         schema_unparseable: policy.ontology_unparseable,
         vault_root: policy.vault_root.as_deref(),
     };
+    // ONE probe context for the whole sweep (review finding: a fresh
+    // context per doomed edge re-walked both endpoints' full ladders —
+    // manifest reads, cluster expansion, per-fact source resolution —
+    // inside the IMMEDIATE write transaction; the write gate memoizes per
+    // proposal for exactly this reason). The memo keys are endpoint ladder
+    // ids and nothing the sweep deletes feeds the ladders, so sharing
+    // across partitions is sound.
+    let mut probe = crate::db::commit::CommitContext::purge_probe();
     let tx = conn.unchecked_transaction()?;
 
     // Enumerate the curated `entity_id` partitions actually carrying edges.
@@ -381,7 +398,7 @@ pub fn purge_off_manifest_edges_all(conn: &Connection) -> Result<usize> {
     let mut all_doomed: Vec<(String, String, String)> = Vec::new();
     let mut all_spared: Vec<(String, String)> = Vec::new();
     for entity_id in &entity_ids {
-        let outcome = purge_off_manifest_edges_in_tx(&tx, entity_id, &gate)?;
+        let outcome = purge_off_manifest_edges_in_tx(&tx, entity_id, &gate, &mut probe)?;
         total += outcome.deleted.len();
         for (id, edge_type) in outcome.deleted {
             all_doomed.push((entity_id.clone(), id, edge_type));
@@ -914,7 +931,8 @@ mod tests {
         // The helper must run against the open caller transaction without
         // attempting a nested BEGIN. It returns the outcome (the wrapper
         // audits deletions post-commit); it must NOT log inside the tx.
-        let outcome = purge_off_manifest_edges_in_tx(&tx, "ent_demo", &gate).unwrap();
+        let mut probe = crate::db::commit::CommitContext::purge_probe();
+        let outcome = purge_off_manifest_edges_in_tx(&tx, "ent_demo", &gate, &mut probe).unwrap();
         assert_eq!(
             outcome.deleted.len(),
             1,

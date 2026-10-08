@@ -145,7 +145,9 @@ pub(crate) struct LoadedItem {
     pub(crate) edited_payload: Option<serde_json::Value>,
 }
 
-struct CommitContext {
+/// `pub(crate)` so the E2 purge probe ([`edge_write_gate_would_skip`]) can
+/// hold ONE context across a whole sweep — the fields stay module-private.
+pub(crate) struct CommitContext {
     proposal_id: String,
     proposal_created_at: i64,
     entity_id: String,
@@ -2336,42 +2338,60 @@ fn commit_edge_add(
 /// anchor-vocabulary read filter but are RECOVERABLE (declare the type /
 /// change the mode), which deletion is not.
 ///
-/// Purely a read probe: the memo maps are fresh per call, `entity_id` is
-/// `""` (never a real ladder id, so the mid-commit proposal-source
-/// fallback cannot fire) and `proposal_id` matches no proposal row.
+/// Purely a read probe: the caller supplies the (shareable) probe context
+/// ([`CommitContext::purge_probe`]), `entity_id` is `""` (never a real
+/// ladder id, so the mid-commit proposal-source fallback cannot fire) and
+/// `proposal_id` matches no proposal row. One context may serve MANY
+/// probes: the memo maps key on ladder ids and nothing a purge mutates
+/// (`llm_wiki_edges` rows only) feeds the ladders, so the per-endpoint
+/// walks memoize across a whole sweep instead of re-running per doomed
+/// edge (review finding: the write gate memoizes per proposal for exactly
+/// this reason).
 pub(crate) fn edge_write_gate_would_skip(
     conn: &Connection,
     source_id: &str,
     target_id: &str,
     gate: &crate::db::entity_gate::GateResolutionContext<'_>,
+    probe: &mut CommitContext,
 ) -> Result<bool> {
-    let mut ctx = CommitContext {
-        proposal_id: String::new(),
-        proposal_created_at: 0,
-        entity_id: String::new(),
-        entity_name: String::new(),
-        source_type: "purge_probe",
-        now_secs: 0,
-        now_ms: 0,
-        committed: Vec::new(),
-        conflicts: Vec::new(),
-        dropped_edges: Vec::new(),
-        accepted_count: 0,
-        rejected_count: 0,
-        facts_added: 0,
-        facts_updated: 0,
-        facts_archived: 0,
-        tasks_added: 0,
-        facts_duplicated: 0,
-        skipped_unanchored: 0,
-        entry_embeddings: std::collections::HashMap::new(),
-        deposit_default_tier: crate::config::DEFAULT_DEPOSIT_TIER.to_string(),
-        edge_endpoint_strict: std::collections::HashMap::new(),
-        edge_endpoint_optout: std::collections::HashMap::new(),
-        owner_edge_vocabulary: None,
-        reviewed_by: None,
-    };
-    Ok(resolve_edge_endpoint_vocabulary(conn, "", source_id, target_id, &mut ctx, gate)?.is_none())
+    Ok(resolve_edge_endpoint_vocabulary(conn, "", source_id, target_id, probe, gate)?.is_none())
+}
+
+impl CommitContext {
+    /// Fresh read-probe context for the E2 purge spare check (see
+    /// [`edge_write_gate_would_skip`]): no proposal, no entity, empty memo
+    /// maps. Callers probing many edges share ONE context so each
+    /// endpoint's ladder — manifest reads, cluster expansion, per-fact
+    /// source resolution — runs once per distinct endpoint, not once per
+    /// edge.
+    pub(crate) fn purge_probe() -> Self {
+        CommitContext {
+            proposal_id: String::new(),
+            proposal_created_at: 0,
+            entity_id: String::new(),
+            entity_name: String::new(),
+            source_type: "purge_probe",
+            now_secs: 0,
+            now_ms: 0,
+            committed: Vec::new(),
+            conflicts: Vec::new(),
+            dropped_edges: Vec::new(),
+            accepted_count: 0,
+            rejected_count: 0,
+            facts_added: 0,
+            facts_updated: 0,
+            facts_archived: 0,
+            tasks_added: 0,
+            facts_duplicated: 0,
+            skipped_unanchored: 0,
+            entry_embeddings: std::collections::HashMap::new(),
+            deposit_default_tier: crate::config::DEFAULT_DEPOSIT_TIER.to_string(),
+            edge_endpoint_strict: std::collections::HashMap::new(),
+            edge_endpoint_optout: std::collections::HashMap::new(),
+            owner_edge_vocabulary: None,
+            reviewed_by: None,
+        }
+    }
 }
 
 fn resolve_edge_endpoint_vocabulary(
