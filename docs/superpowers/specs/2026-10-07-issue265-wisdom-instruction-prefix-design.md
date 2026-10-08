@@ -125,6 +125,24 @@ Cutover = one atomic `UPDATE` executed by an admin command
    window (route is deterministic, so fidelity is preserved). Rollback
    is therefore a deliberate, owner-executed procedure, not an
    instant revert; the tripwire below is what triggers it.
+   - **WRITE side of rollback:** the WRITE scheme must flip back to
+     `raw` BEFORE any raw re-embed runs — the re-embed must stamp and
+     text-function under `raw` (via `doc_text_for_entry`), never keep
+     writing `instr1` while raw vectors accumulate. Order is: flip
+     READ meta to `raw`, flip WRITE to `raw`, then sweep raw. A
+     re-embed under a stale `instr1` WRITE would re-mix schemes and
+     reproduce the exact corruption rollback exists to undo.
+   - **Mechanism gap (follow-up, not this PR):** `WRITE_SCHEME` is
+     currently a compile-time constant
+     (`src-tauri/src/embed_scheme.rs`, `pub const WRITE_SCHEME`), so
+     the WRITE flip cannot be actuated at runtime — every writer
+     (deposit, commit, sweep, parity) reads the constant. Rollback
+     today therefore requires a code change + rebuild between the
+     meta flip and the re-embed, and the tripwire cron can only
+     perform the READ half. Follow-up: make the WRITE scheme a
+     second stored control (or derive it from the same meta row with
+     a separate write-path resolution) so the owner/cron rollback
+     procedure is a runtime operation like cutover.
 
 ## Merge blockers (all four restated in testable form)
 

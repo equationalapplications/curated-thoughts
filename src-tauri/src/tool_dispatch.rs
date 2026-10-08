@@ -2220,6 +2220,7 @@ mod curated_proposals_tests {
 /// with the SAME scheme-derived string the `ct wisdom match` path uses
 /// (spec §Decision, option (a)). `wiki_query_text` is the shared helper both
 /// `wiki_search` and `wiki_context` route their query text through.
+#[cfg(test)]
 mod wiki_query_prefix_tests {
     use super::*;
     use crate::db::connection::open_app_db;
