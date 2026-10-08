@@ -135,6 +135,20 @@ pub fn query_text_for_scheme(truncated_query: &str, scheme: Scheme) -> String {
     }
 }
 
+/// Read-scheme resolution for generic readers (MCP `wiki_search` /
+/// `wiki_context`): on a pre-V26 table shape (no `embed_scheme` column on
+/// `llm_wiki_entries`) there is no scheme dimension at all — degrade to raw
+/// instead of probing `llm_wiki_meta`, which may not exist either. On the
+/// V26+ shape this is exactly `read_scheme` (fail-closed on unknown values).
+pub fn read_scheme_for_reader(conn: &Connection) -> Result<Scheme> {
+    let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
+    if cols.iter().any(|c| c == "embed_scheme") {
+        read_scheme(conn)
+    } else {
+        Ok(Scheme::Raw)
+    }
+}
+
 /// Outcome of [`activate_instr1`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivateOutcome {
@@ -531,6 +545,46 @@ mod tests {
             floor_key_for(model, Scheme::Instr1),
             "external:qwen/qwen3-embedding-4b:instr1"
         );
+    }
+
+    #[test]
+    fn reader_scheme_degrades_to_raw_on_pre_v26_shape() {
+        // A bare connection with a pre-V26 `llm_wiki_entries` (no
+        // `embed_scheme` column) and no meta table: a generic reader must
+        // degrade to raw, not fail on the missing migration artifacts.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT PRIMARY KEY, embedding_blob BLOB);",
+        )
+        .unwrap();
+        assert_eq!(read_scheme_for_reader(&conn).unwrap(), Scheme::Raw);
+    }
+
+    #[test]
+    fn reader_scheme_fail_closed_on_v26_shape_with_unknown_value() {
+        // V26+ shape: `read_scheme_for_reader` is exactly `read_scheme` —
+        // an unknown meta value is a hard error, never a raw fallback.
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "UPDATE llm_wiki_meta SET value = 'some_future_scheme' \
+             WHERE key = 'wisdom_active_scheme'",
+            [],
+        )
+        .unwrap();
+        let err = read_scheme_for_reader(&conn).unwrap_err();
+        assert!(err.to_string().contains("fail-closed"), "{err}");
+    }
+
+    #[test]
+    fn reader_scheme_resolves_active_scheme_on_v26_shape() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "UPDATE llm_wiki_meta SET value = 'instr1' \
+             WHERE key = 'wisdom_active_scheme'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(read_scheme_for_reader(&conn).unwrap(), Scheme::Instr1);
     }
 
     #[test]

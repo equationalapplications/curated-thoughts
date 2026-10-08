@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::embedder::EmbedProfile;
 use crate::search::SearchResult;
+use crate::wisdom_match as wm;
 use crate::wiki_graph::{
     self, TraverseDirection, WikiContextResult, WikiOntologyResult, WikiSearchHit,
     WikiTraverseResult, DEFAULT_CONTEXT_DEPTH, DEFAULT_CONTEXT_MAX_FACTS, DEFAULT_MAX_DEPTH,
@@ -1044,6 +1045,43 @@ async fn embed_query(profile: &EmbedProfile, query: String) -> Result<Vec<f32>> 
     tokio::task::spawn_blocking(move || crate::embedder::embed_one(&profile, query)).await?
 }
 
+/// Scheme-aware query text for the wiki READ tools (spec §Decision:
+/// `wiki_search`/`wiki_context` queries are prefixed with the SAME string the
+/// gate uses). Resolves the read scheme ONCE against the locked connection,
+/// truncates BEFORE the prefix (the prefix never consumes the 2000-char
+/// budget), and routes through the SAME `query_text_for_scheme` the
+/// `ct wisdom match` path uses. Pre-V26 tables (no `embed_scheme` column)
+/// degrade to raw via `read_scheme_for_reader`.
+pub(crate) async fn wiki_query_text(
+    conn: &Arc<Mutex<Connection>>,
+    raw_query: &str,
+) -> Result<String> {
+    let raw_query = raw_query.to_string();
+    spawn_blocking_with_conn(conn, move |conn| {
+        let scheme = crate::embed_scheme::read_scheme_for_reader(conn)?;
+        Ok(crate::embed_scheme::query_text_for_scheme(
+            wm::truncate_text(&raw_query),
+            scheme,
+        ))
+    })
+    .await?
+}
+/// Run a closure against the locked connection on the blocking thread pool.
+/// Clone-out helper for call sites that must derive request values from the
+/// DB (e.g. scheme resolution) while keeping the lock short — the guard drops
+/// before the returned values are used.
+fn spawn_blocking_with_conn<T, F>(conn: &Arc<Mutex<Connection>>, f: F) -> tokio::task::JoinHandle<Result<T>>
+where
+    T: Send + 'static,
+    F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+{
+    let conn = conn.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn_guard = lock_conn(&conn)?;
+        f(&conn_guard)
+    })
+}
+
 fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<std::sync::MutexGuard<'_, Connection>> {
     conn.lock()
         .map_err(|_| anyhow::anyhow!("database mutex poisoned"))
@@ -1120,8 +1158,13 @@ pub async fn dispatch_tool_call(
         }
         "wiki_search" => {
             let p: WikiSearchParams = serde_json::from_value(params)?;
-            let query_vec = embed_query(&ctx.profile, p.query).await?;
             let conn = ctx.conn.clone();
+            // Scheme-aware query text (spec §Decision): same prefix, same
+            // helper as the gate path; truncation BEFORE the prefix;
+            // pre-V26 tables degrade to raw.
+            let query_text = wiki_query_text(&conn, &p.query).await?;
+            // Embed OUTSIDE the DB lock (blocking network call).
+            let query_vec = embed_query(&ctx.profile, query_text).await?;
             let (entity_ids, tier, limit) = (p.entity_ids, p.tier, p.limit);
             let hits = tokio::task::spawn_blocking(move || {
                 let conn_guard = lock_conn(&conn)?;
@@ -1132,8 +1175,12 @@ pub async fn dispatch_tool_call(
         }
         "wiki_context" => {
             let p: WikiContextParams = serde_json::from_value(params)?;
-            let query_vec = embed_query(&ctx.profile, p.query).await?;
             let conn = ctx.conn.clone();
+            // Scheme-aware query text — identical to `wiki_search` (spec
+            // §Decision): one resolution, same prefix helper, raw on pre-V26.
+            let query_text = wiki_query_text(&conn, &p.query).await?;
+            // Embed OUTSIDE the DB lock (blocking network call).
+            let query_vec = embed_query(&ctx.profile, query_text).await?;
             let (tier, depth, max_facts) = (p.tier, p.depth, p.max_facts);
             let result = tokio::task::spawn_blocking(move || {
                 let conn_guard = lock_conn(&conn)?;
@@ -2166,5 +2213,100 @@ mod curated_proposals_tests {
                 "fresh brain must list an empty array, got: {v2}"
             );
         });
+    }
+}
+
+/// Issue #265 review fix: the MCP wiki READ tools must prefix their queries
+/// with the SAME scheme-derived string the `ct wisdom match` path uses
+/// (spec §Decision, option (a)). `wiki_query_text` is the shared helper both
+/// `wiki_search` and `wiki_context` route their query text through.
+mod wiki_query_prefix_tests {
+    use super::*;
+    use crate::db::connection::open_app_db;
+    use tempfile::TempDir;
+
+    /// Full-schema migrated FILE brain (same fixture shape as
+    /// `curated_proposals_tests::file_ctx`) — has `llm_wiki_meta` and the V26
+    /// `embed_scheme` column.
+    fn file_ctx() -> (TempDir, ToolDispatchContext) {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("brain.db");
+        let conn = open_app_db(&db_path, None).unwrap();
+        let ctx = ToolDispatchContext {
+            conn: Arc::new(Mutex::new(conn)),
+            profile: EmbedProfile::default(),
+            vault_dir: Some(dir.path().to_path_buf()),
+            client: "test".into(),
+            db_path,
+            rw_conn: Arc::new(Mutex::new(None)),
+        };
+        (dir, ctx)
+    }
+
+    fn set_active_scheme(conn: &Connection, value: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![crate::embed_scheme::ACTIVE_SCHEME_META_KEY, value],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn wiki_query_text_is_raw_by_default() {
+        let (_dir, ctx) = file_ctx();
+        let text = wiki_query_text(&ctx.conn, "vault documents").await.unwrap();
+        assert_eq!(text, "vault documents");
+    }
+
+    #[tokio::test]
+    async fn wiki_query_text_is_prefixed_under_active_instr1() {
+        let (_dir, ctx) = file_ctx();
+        set_active_scheme(&lock_conn(&ctx.conn).unwrap(), "instr1");
+        let text = wiki_query_text(&ctx.conn, "vault documents").await.unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "{}vault documents",
+                crate::embed_scheme::QUERY_INSTRUCTION_PREFIX
+            ),
+            "wiki READ queries must carry the SAME byte-exact prefix as the gate"
+        );
+        // And it is exactly `query_text_for_scheme`'s output — one helper, no
+        // per-site format!.
+        assert_eq!(
+            text,
+            crate::embed_scheme::query_text_for_scheme(
+                "vault documents",
+                crate::embed_scheme::Scheme::Instr1
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn wiki_query_text_truncates_before_prefixing() {
+        let (_dir, ctx) = file_ctx();
+        set_active_scheme(&lock_conn(&ctx.conn).unwrap(), "instr1");
+        let long = "é".repeat(crate::wisdom_match::MAX_TEXT_CHARS + 5);
+        let text = wiki_query_text(&ctx.conn, &long).await.unwrap();
+        let stripped = text
+            .strip_prefix(crate::embed_scheme::QUERY_INSTRUCTION_PREFIX)
+            .expect("prefixed under instr1");
+        assert_eq!(
+            stripped.chars().count(),
+            crate::wisdom_match::MAX_TEXT_CHARS,
+            "truncation must run BEFORE the prefix (prefix never consumes the budget)"
+        );
+    }
+
+    #[tokio::test]
+    async fn wiki_query_text_unknown_scheme_fails_closed() {
+        let (_dir, ctx) = file_ctx();
+        set_active_scheme(&lock_conn(&ctx.conn).unwrap(), "bogus-scheme");
+        let err = wiki_query_text(&ctx.conn, "q").await.unwrap_err();
+        assert!(
+            err.to_string().contains("bogus-scheme"),
+            "error should name the scheme: {err}"
+        );
     }
 }
