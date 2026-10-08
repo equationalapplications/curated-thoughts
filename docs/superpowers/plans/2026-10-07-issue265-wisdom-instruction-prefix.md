@@ -104,7 +104,7 @@ commit, never touch the live brain).
   regenerate fixtures — per the Task 2 guardrail). Extend `wisdom_gate_bench.rs` to
   replay both schemes. Run the bench locally (`--features slow-tests`), paste output
   in the PR.
-- [ ] **Task 6 — Tests (a) + (e) + log line.** Byte-exact literal test (a);
+- [x] **Task 6 — Tests (a) + (e) + log line.** (c01f2f0) Byte-exact literal test (a);
   reader-inventory grep test (e); the gate-decision log line per spec blocker 3 —
   format pinned for machine parsing (F5): one line, tab-separated fields in order
   `ts<TAB>scheme<TAB>open|closed<TAB>n_results` (the tripwire cron parses this).
