@@ -225,7 +225,10 @@ fn run_inner(
         return Ok(());
     }
 
-    // 3. FINAL RULE drift gate (R2.2.8): blocks retypes/remaps only.
+    // 3. FINAL RULE drift gate (R2.2.8): blocks retypes/remaps only. A
+    //    read-only run (`!apply`) performs neither, so unconfirmed drift
+    //    falls through to the read-only census below — the operator sees
+    //    what confirming would do instead of confirming blind.
     match (&report.drift, &flag) {
         (Some(_), DriftFlag::None) => {
             report.skipped_reason = Some("unconfirmed_drift".into());
@@ -233,7 +236,9 @@ fn run_inner(
                 "ontology heal: unconfirmed drift report — ontology retypes/remaps \
                  skipped this run"
             );
-            return Ok(());
+            if apply {
+                return Ok(());
+            }
         }
         (Some(d), DriftFlag::Confirm(h)) | (Some(d), DriftFlag::Waive(h)) => {
             if h != &d.old_hash {
@@ -243,9 +248,10 @@ fn run_inner(
                     d.old_hash
                 );
                 report.skipped_reason = Some("unconfirmed_drift".into());
-                return Ok(());
-            }
-            if let DriftFlag::Confirm(_) = flag {
+                if apply {
+                    return Ok(());
+                }
+            } else if let DriftFlag::Confirm(_) = flag {
                 report.drift = report.drift.take().map(|mut d| {
                     d.confirmed = true;
                     d
@@ -559,9 +565,11 @@ fn remap_pass(
         let alias = ALIAS_TABLE
             .iter()
             .find(|(from, _)| NodeVocabulary::key(from) == key)
-            .filter(|(_, to)| vocab.contains(to));
+            // Retype to the MANIFEST's spelling of the target, as the
+            // write-time admit ladder does.
+            .and_then(|(_, to)| vocab.canonicalize(to));
         match alias {
-            Some((_, target)) => {
+            Some(target) => {
                 if dry {
                     counts.retyped += 1;
                     continue;
@@ -585,6 +593,14 @@ fn remap_pass(
                         None,
                     )?;
                     counts.retyped += 1;
+                } else {
+                    // The row moved between the scan and this transaction
+                    // (concurrent retype/archive). Nothing was written; say
+                    // so rather than let a previewed retype vanish silently.
+                    eprintln!(
+                        "ontology heal: {id} changed concurrently (was '{entity_type}') — \
+                         alias retype skipped; re-run heal to re-evaluate it"
+                    );
                 }
                 tx.commit()?;
             }
@@ -768,7 +784,9 @@ mod tests {
         }
         if matches!((&report.drift, &flag), (Some(_), DriftFlag::None)) {
             report.skipped_reason = Some("unconfirmed_drift".into());
-            return Ok(());
+            if apply {
+                return Ok(());
+            }
         }
         if !apply {
             let _ = ensure_pending_readonly(conn)?;
@@ -1166,6 +1184,33 @@ mod tests {
             "watermark must be untouched"
         );
         assert_eq!(entity_type(&conn, "e1"), "agent");
+        assert!(meta(&conn, ALIAS_REMAP_MARKER_KEY).is_none());
+    }
+
+    /// Review finding: unconfirmed drift blocks only DESTRUCTIVE actions —
+    /// a read-only run still reports the would-be census/remap counts so
+    /// the operator does not confirm drift blind; nothing is written.
+    #[test]
+    fn unconfirmed_drift_dry_run_still_reports_census() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_meta (key, value) VALUES ('ontology_config_watermark', ?1)",
+            params![r#"{"hash":"deadbeef","stamped_at":7}"#],
+        )
+        .unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        let r = ontology_heal_pass(&mut conn, DriftFlag::None, false);
+        assert_eq!(r.skipped_reason.as_deref(), Some("unconfirmed_drift"));
+        assert_eq!(
+            r.retyped, 1,
+            "dry run must preview the would-be retype: {r:?}"
+        );
+        assert_eq!(entity_type(&conn, "e1"), "agent", "dry run never writes");
+        assert_eq!(
+            meta(&conn, WATERMARK_KEY).as_deref(),
+            Some(r#"{"hash":"deadbeef","stamped_at":7}"#)
+        );
         assert!(meta(&conn, ALIAS_REMAP_MARKER_KEY).is_none());
     }
 

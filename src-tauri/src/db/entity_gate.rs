@@ -449,10 +449,13 @@ fn run_admit_ladder(vocab: &NodeVocabulary, proposed: Option<&str>) -> AdmitInte
     let label_key = NodeVocabulary::key(label);
     for (alias_from, alias_to) in ALIAS_TABLE {
         if NodeVocabulary::key(alias_from) == label_key {
-            if vocab.contains(alias_to) {
+            // Land the MANIFEST's spelling of the target (as the declared
+            // arm does), never the alias table's: `agent` against a
+            // manifest declaring `Role` lands `Role`, not `role`.
+            if let Some(canonical) = vocab.canonicalize(alias_to) {
                 return AdmitInternal::Aliased {
                     original_label: label.to_string(),
-                    landed_as: alias_to.to_string(),
+                    landed_as: canonical.to_string(),
                 };
             }
             // alias target not declared → fall through to fallback
@@ -562,18 +565,15 @@ pub(crate) fn plan_manifest_ensure(manifest_json: &str) -> Result<EnsurePlan> {
         })
         .unwrap_or_default();
 
+    let declared_lower: HashSet<String> = declared.iter().map(|s| NodeVocabulary::key(s)).collect();
+
     // Subset guard: every EA slug ⊆ declared? If yes, do the full work;
     // otherwise do only the fallback declare-or-report.
-    let is_ea_subset = {
-        let declared_lower: HashSet<String> =
-            declared.iter().map(|s| NodeVocabulary::key(s)).collect();
-        EA_SEED_TYPES
-            .iter()
-            .all(|seed| declared_lower.contains(&NodeVocabulary::key(seed)))
-    };
+    let is_ea_subset = EA_SEED_TYPES
+        .iter()
+        .all(|seed| declared_lower.contains(&NodeVocabulary::key(seed)));
 
     // Pick the fallback value (prefer `concept` if declared; else `project`).
-    let declared_lower: HashSet<String> = declared.iter().map(|s| NodeVocabulary::key(s)).collect();
     let fallback_choice: Option<&'static str> = if declared_lower.contains("concept") {
         Some("concept")
     } else if declared_lower.contains("project") {
@@ -1549,6 +1549,26 @@ mod tests {
                 assert_eq!(original_label, "agent");
                 assert_eq!(landed_as, "role");
             }
+            other => panic!("expected Aliased, got {other:?}"),
+        }
+    }
+
+    /// Review finding: the alias rung lands the MANIFEST's spelling of the
+    /// target (`Role`), not the alias table's (`role`) — same as the
+    /// declared rung, so one concept never stores two spellings.
+    #[test]
+    fn alias_ladder_lands_manifest_spelling() {
+        let manifest = WikiManifest {
+            node_types: vec![WikiNodeType {
+                type_name: "Role".into(),
+                ..Default::default()
+            }],
+            edge_types: vec![],
+            fallback_node_type: Some("Role".into()),
+        };
+        let v = NodeVocabulary::from_manifest(&manifest);
+        match run_admit_ladder(&v, Some("agent")) {
+            AdmitInternal::Aliased { landed_as, .. } => assert_eq!(landed_as, "Role"),
             other => panic!("expected Aliased, got {other:?}"),
         }
     }

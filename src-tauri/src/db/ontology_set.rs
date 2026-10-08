@@ -68,7 +68,13 @@ pub fn set_entity_optout(conn: &mut Connection, entity_id: &str) -> Result<Entit
 /// synthesized empty edge list would hand the edge gate a vocabulary that
 /// purges every edge the tier manifest declares.
 pub fn set_entity_strict(conn: &mut Connection, entity_id: &str) -> Result<EntityModeOutcome> {
-    let tier_json: Option<String> = conn
+    // The tier_fact read happens INSIDE the IMMEDIATE transaction (review
+    // finding): the write lock is held from the read through the
+    // INSERT OR REPLACE, so a concurrent engine rewrite of the tier row can
+    // neither land between them nor be overwritten by a copy of the older
+    // vocabulary. An early `bail!` drops the tx, which rolls back.
+    let tx = ImmediateTx::begin(conn)?;
+    let tier_json: Option<String> = tx
         .query_row(
             "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
             params![TIER_FACT],
@@ -95,8 +101,7 @@ pub fn set_entity_strict(conn: &mut Connection, entity_id: &str) -> Result<Entit
         entity_manifest["fallback_node_type"] = fallback.clone();
     }
 
-    let tx = ImmediateTx::begin(conn)?;
-    tx.execute(
+    let optouts_deleted = tx.execute(
         "DELETE FROM ct_entity_optouts WHERE entity_id = ?1",
         params![entity_id],
     )?;
@@ -108,7 +113,7 @@ pub fn set_entity_strict(conn: &mut Connection, entity_id: &str) -> Result<Entit
     tx.commit()?;
     Ok(EntityModeOutcome {
         optout_written: false,
-        optout_deleted: true,
+        optout_deleted: optouts_deleted > 0,
         manifest_row_written: true,
     })
 }
@@ -152,8 +157,10 @@ pub fn write_fallback(conn: &Connection, target: &str, fallback: &str) -> Result
     // landed type of every future mint. Validate it against the manifest's
     // DECLARED node types through the single normalization owner
     // (`NodeVocabulary`) and store the manifest's canonical spelling.
-    let parsed: crate::wiki_graph::WikiManifest = serde_json::from_str(&json)
-        .map_err(|e| anyhow::anyhow!("manifest_json for `{target}` is not valid JSON: {e}"))?;
+    let parsed: crate::wiki_graph::WikiManifest = serde_json::from_value(manifest.clone())
+        .map_err(|e| {
+            anyhow::anyhow!("manifest_json for `{target}` is not a valid manifest: {e}")
+        })?;
     let vocab = crate::db::entity_gate::NodeVocabulary::from_manifest(&parsed);
     let Some(canonical) = vocab.canonicalize(fallback).map(str::to_string) else {
         bail!(
@@ -277,6 +284,11 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM ct_entity_optouts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(optouts, 0);
+
+        // Review finding: `optout_deleted` reports what the DELETE did — a
+        // repeat strict call with no opt-out row left must say false.
+        let again = set_entity_mode(&mut conn, "ent_x", OntologyMode::Strict).unwrap();
+        assert!(!again.optout_deleted && again.manifest_row_written);
     }
 
     #[test]

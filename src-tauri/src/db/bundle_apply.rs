@@ -864,7 +864,24 @@ fn ensure_entity(
 /// Returns the ids that were **hard**-deleted (entries + tasks) so the caller
 /// can purge their edges once, after the entity loop — see the call site in
 /// `apply_import`.
+/// Replace-mode wipe of `entity_id`'s content, CLUSTER-CLOSED: the target
+/// is a (possibly merge-resolved) survivor, and facts/tasks/events still
+/// keyed to a redirect loser are part of what recall shows for it (spec
+/// R2.7.5 transitive fact closure). Wiping only `entity_id = survivor`
+/// would leave the loser-keyed rows alive beside the imported copies and
+/// push no Delete outbox rows for them (the #132 class).
 fn clear_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result<Vec<String>> {
+    let mut hard_deleted = Vec::new();
+    for member in crate::db::entities::cluster_ids(tx, entity_id)? {
+        hard_deleted.extend(clear_one_entity_content(tx, &member, now_ms)?);
+    }
+    Ok(hard_deleted)
+}
+
+/// Wipe the rows keyed to exactly `entity_id` — see [`clear_entity_content`].
+/// Outbox rows carry the row's own owner id so replicas address the row
+/// they actually hold.
+fn clear_one_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result<Vec<String>> {
     let fact_ids: Vec<String> = tx
         .prepare("SELECT id FROM llm_wiki_entries WHERE entity_id=?1")?
         .query_map([entity_id], |r| r.get(0))?
@@ -1171,6 +1188,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dangling, 0);
+    }
+
+    #[test]
+    fn replace_on_merge_survivor_wipes_loser_keyed_content() {
+        // Review finding: the bundle's `ent_a` was merged into `ent_s` on
+        // this host, so Replace resolves to the survivor. A fact still keyed
+        // to the loser is part of the survivor's cluster and must be wiped
+        // (with a Delete outbox row) like the survivor's own.
+        let mut conn = open_in_memory().unwrap();
+        for id in ["ent_a", "ent_s"] {
+            conn.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES (?1, ?1, 'concept', '', 1, 1)",
+                [id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('ent_a', 'ent_s', 1)",
+            [],
+        )
+        .unwrap();
+        for (fact_id, entity_id) in [("fact_loser", "ent_a"), ("fact_surv", "ent_s")] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, 'T', 'B', '[]', 'inferred', 'librarian_inferred', 1, 1)",
+                params![fact_id, entity_id],
+            )
+            .unwrap();
+        }
+
+        apply_import(&mut conn, &sample_bundle(), ImportMode::Replace).unwrap();
+
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM llm_wiki_entries ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(ids, vec!["fact_1".to_string()]);
+        let loser_delete: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_outbox
+                 WHERE table_name='entries' AND record_id='fact_loser' AND operation='DELETE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(loser_delete, 1);
     }
 
     #[test]

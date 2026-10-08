@@ -2386,16 +2386,35 @@ fn resolve_endpoint_ladder(
     // §2.3 "first hit decides" / R2.3.0: an endpoint whose EVERY source
     // resolves `off` is off — a strict rung-4 tier_fact never overrides it.
     // Any climbing (or held) source reaches rung 4, so strict-wins there.
-    let mut off_found = false;
-    let mut reaches_rung_4 = paths.is_empty();
-    for path in &paths {
-        match gate.ingest.ontology_lookup(
-            path,
-            gate.vault_root,
+    //
+    // R2.3.4: an endpoint with NO resolvable sources climbs from rung 3
+    // (the host default) — the same pathless resolution the node gate's
+    // GUI/bundle mint arm uses — so a host-wide `ontology_default: "off"`
+    // shields a fact-less endpoint exactly as it shields the mint.
+    let lookups: Vec<crate::config::OntologyLookup> = if paths.is_empty() {
+        vec![gate.ingest.ontology_lookup_pathless(
             gate.degraded,
             gate.schema,
             gate.schema_unparseable,
-        ) {
+        )]
+    } else {
+        paths
+            .iter()
+            .map(|path| {
+                gate.ingest.ontology_lookup(
+                    path,
+                    gate.vault_root,
+                    gate.degraded,
+                    gate.schema,
+                    gate.schema_unparseable,
+                )
+            })
+            .collect()
+    };
+    let mut off_found = false;
+    let mut reaches_rung_4 = false;
+    for lookup in lookups {
+        match lookup {
             crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Strict) => {
                 // Vocabulary from `tier_fact` (mode-vs-vocabulary rule).
                 return Ok(match ontology_leg(conn, &ladder_id, "tier_fact") {
@@ -6982,6 +7001,49 @@ mod tests {
         assert!(
             outcome.is_none(),
             "both endpoints off → the edge gate must SKIP, not climb to tier_fact"
+        );
+    }
+
+    /// R2.3.4 (review finding): an endpoint with NO resolvable sources
+    /// climbs from rung 3 — a host-wide `ontology_default: "off"` disarms
+    /// the edge gate even under a strict tier_fact, matching the node
+    /// gate's pathless arm. Pre-fix, empty paths jumped straight to rung 4.
+    #[test]
+    fn sourceless_endpoints_honor_host_default_off() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent_a", "A", "summary", 100);
+        seed_entity(&conn, "ent_b", "B", "summary", 100);
+        seed_manifest(
+            &conn,
+            "tier_fact",
+            "strict",
+            &["thing"],
+            &[("depends_on", "thing", "thing")],
+        );
+        let degraded = crate::config::OntologyDegradedState::default();
+
+        let mut ingest = crate::config::IngestConfig::default();
+        ingest.ontology_default = Some(crate::config::OntologyMode::Off);
+        let gate = edge_gate_ctx(&ingest, &degraded);
+        let mut ctx = edge_test_ctx("ent_a");
+        let outcome =
+            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate)
+                .unwrap();
+        assert!(
+            outcome.is_none(),
+            "host default off must shield fact-less endpoints, not fall to tier_fact"
+        );
+
+        // Control: no host default → rung 3 climbs → strict tier_fact gates.
+        let ingest = crate::config::IngestConfig::default();
+        let gate = edge_gate_ctx(&ingest, &degraded);
+        let mut ctx = edge_test_ctx("ent_a");
+        let outcome =
+            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate)
+                .unwrap();
+        assert!(
+            outcome.is_some(),
+            "no host default → rung 4 strict tier_fact gates"
         );
     }
 
