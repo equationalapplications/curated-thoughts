@@ -40,7 +40,7 @@ fn get_endpoint_labels_batch(
         return Ok(labels);
     }
 
-    let cluster_ph = vec!["?"; cluster.len()].join(",");
+    let cluster_ph = crate::db::entities::in_placeholders(cluster);
 
     // Load fact titles in one batch (cluster-closed: labels for the
     // survivor's redirected losers' rows resolve identically).
@@ -135,7 +135,7 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
 
     let mut outgoing = Vec::new();
     {
-        let placeholders = vec!["?"; cluster.len()].join(",");
+        let placeholders = crate::db::entities::in_placeholders(&cluster);
         let mut stmt = conn.prepare(&format!(
             "SELECT id, source_id, target_id, edge_type FROM llm_wiki_edges
              WHERE entity_id IN ({placeholders})

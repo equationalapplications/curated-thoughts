@@ -516,7 +516,7 @@ fn load_candidate_entities(
             // the survivor ∪ its redirected losers, so recall on a survivor
             // returns the losers' facts too.
             let cluster = crate::db::entities::cluster_ids(conn, &entity_id)?;
-            let placeholders = vec!["?"; cluster.len()].join(",");
+            let placeholders = crate::db::entities::in_placeholders(&cluster);
             let mut fact_stmt = conn.prepare(&format!(
                 "SELECT id, body FROM llm_wiki_entries
                  WHERE entity_id IN ({placeholders}) AND deleted_at IS NULL
@@ -651,40 +651,30 @@ fn build_system_prompt(
                 edge_vocabulary.join(", ")
             ));
         }
-        // R2.4.1 closed-set clause for nodes (Task 3): Synthesize mode
-        // only — Summarize mode emits no new entities, so an empty node
-        // vocabulary there would only over-constrain the model.
-        if matches!(mode, SynthesisMode::Synthesize) && !node_vocabulary.is_empty() {
+    } else {
+        prompt.push_str(
+            "\n\nEach candidate entity declares its own edge_type vocabulary. \
+             For a proposal targeting existing_id X, use ONLY the edge_type values \
+             listed for X (fall back to the shared list when X has none). \
+             If no listed edge_type fits a relationship, omit the edge entirely \
+             rather than inventing a new type.",
+        );
+        if !edge_vocabulary.is_empty() {
             prompt.push_str(&format!(
-                "\n\nFor any new entity (entity_type on a new-target proposal), use ONLY the \
-                 following entity_type values, exactly as written: {}. \
-                 If no listed entity_type fits the entity, omit the entity entirely rather \
-                 than inventing a new type.",
-                node_vocabulary.join(", ")
+                "\nShared edge_type values (any target): {}.",
+                edge_vocabulary.join(", ")
             ));
         }
-        return prompt;
+        for (target, types) in edge_vocabulary_by_target {
+            prompt.push_str(&format!(
+                "\nFor {target}: use ONLY these edge_type values, exactly as written: {}.",
+                types.join(", ")
+            ));
+        }
     }
-    prompt.push_str(
-        "\n\nEach candidate entity declares its own edge_type vocabulary. \
-         For a proposal targeting existing_id X, use ONLY the edge_type values \
-         listed for X (fall back to the shared list when X has none). \
-         If no listed edge_type fits a relationship, omit the edge entirely \
-         rather than inventing a new type.",
-    );
-    if !edge_vocabulary.is_empty() {
-        prompt.push_str(&format!(
-            "\nShared edge_type values (any target): {}.",
-            edge_vocabulary.join(", ")
-        ));
-    }
-    for (target, types) in edge_vocabulary_by_target {
-        prompt.push_str(&format!(
-            "\nFor {target}: use ONLY these edge_type values, exactly as written: {}.",
-            types.join(", ")
-        ));
-    }
-    // R2.4.1 closed-set clause for nodes — same Synthesize-only rule.
+    // R2.4.1 closed-set clause for nodes (Task 3): Synthesize mode only —
+    // Summarize mode emits no new entities, so an empty node vocabulary
+    // there would only over-constrain the model.
     if matches!(mode, SynthesisMode::Synthesize) && !node_vocabulary.is_empty() {
         prompt.push_str(&format!(
             "\n\nFor any new entity (entity_type on a new-target proposal), use ONLY the \

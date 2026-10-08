@@ -548,6 +548,17 @@ CREATE TABLE IF NOT EXISTS entity_redirects (
     created_at  INTEGER NOT NULL
 );
 
+-- Cluster expansion (`cluster_ids`, every cluster-closed read) walks
+-- redirects BY SURVIVOR; without this every call scans the table.
+CREATE INDEX IF NOT EXISTS idx_entity_redirects_merged_into
+    ON entity_redirects(merged_into);
+
+-- The shared source-resolution core (`resolve_source_core`) looks chunks up
+-- by content_hash alone, per evidence entry, from the heal scan and from
+-- the edge gate inside the commit write lock; `idx_chunks_doc_hash` leads
+-- with doc_id and cannot serve it.
+CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
+
 CREATE TABLE IF NOT EXISTS ct_entity_optouts (
     entity_id  TEXT PRIMARY KEY,
     reason     TEXT,
@@ -603,8 +614,9 @@ pub enum OriginReason {
     Degraded,
     /// A bundle import landed a label-less entity as the fallback.
     UnlabeledLanding,
-    /// The gate SKIPped: the `'concept'` literal landed, or the mint's mode
-    /// came from an `off` `folder_ontology` entry.
+    /// The gate SKIPped: the mint landed ungated (its own label, or the
+    /// `'concept'` literal when it had none), or the mint's mode came from
+    /// an `off` `folder_ontology` entry.
     GateSkipped,
     /// Heal applied a signed alias. A reversibility record, never drift.
     AliasRetype,

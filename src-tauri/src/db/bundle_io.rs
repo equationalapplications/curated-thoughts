@@ -26,9 +26,21 @@ pub fn load_export_entities(
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
+    // An explicit selection may name a merged-away LOSER (a stale id from
+    // the GUI or an MCP caller): resolve it to the survivor HTTP-style
+    // (R2.7.5) — the loser has no live_entities row, so matching the raw id
+    // would silently export nothing for it.
+    let wanted: Option<std::collections::HashSet<String>> = entity_ids
+        .map(|ids| {
+            ids.iter()
+                .map(|id| crate::db::entities::resolve_entity_id(conn, id))
+                .collect::<Result<_>>()
+        })
+        .transpose()?;
+
     let mut entities = Vec::new();
     for (id, name, summary) in rows {
-        if let Some(wanted) = entity_ids {
+        if let Some(wanted) = &wanted {
             if !wanted.contains(&id) {
                 continue;
             }
@@ -54,7 +66,7 @@ pub fn load_export_entities(
 }
 
 fn load_facts(conn: &Connection, survivor: &str, cluster: &[String]) -> Result<Vec<WikiFact>> {
-    let placeholders = vec!["?"; cluster.len()].join(",");
+    let placeholders = crate::db::entities::in_placeholders(cluster);
     let mut stmt = conn.prepare(&format!(
         "SELECT id, title, body, tags, confidence, source_type, source_hash, source_ref,
                 created_at, updated_at, last_accessed_at, access_count, deleted_at, okf_type,
@@ -103,7 +115,7 @@ fn load_facts(conn: &Connection, survivor: &str, cluster: &[String]) -> Result<V
 }
 
 fn load_tasks(conn: &Connection, survivor: &str, cluster: &[String]) -> Result<Vec<WikiTask>> {
-    let placeholders = vec!["?"; cluster.len()].join(",");
+    let placeholders = crate::db::entities::in_placeholders(cluster);
     let mut stmt = conn.prepare(&format!(
         "SELECT id, description, status, priority, created_at, updated_at,
                 resolved_at, deleted_at, okf_type,
@@ -147,7 +159,7 @@ fn load_edges(
     // carried the off-manifest edge into another vault. Apply the same gate
     // `wiki_graph::fetch_neighbors` uses on the traversal path.
     let vocab = crate::db::commit::resolve_strict_edge_vocabulary(conn, survivor);
-    let placeholders = vec!["?"; cluster.len()].join(",");
+    let placeholders = crate::db::entities::in_placeholders(cluster);
     let mut stmt = conn.prepare(&format!(
         "SELECT source_id, target_id, edge_type FROM llm_wiki_edges
          WHERE entity_id IN ({placeholders}) ORDER BY created_at, id"
@@ -191,7 +203,7 @@ fn rekey_endpoint(conn: &Connection, id: &str) -> Result<String> {
 }
 
 fn load_events(conn: &Connection, _survivor: &str, cluster: &[String]) -> Result<Vec<ExportEvent>> {
-    let placeholders = vec!["?"; cluster.len()].join(",");
+    let placeholders = crate::db::entities::in_placeholders(cluster);
     let mut stmt = conn.prepare(&format!(
         "SELECT id, event_type, summary, related_entry_id, created_at
          FROM llm_wiki_events WHERE entity_id IN ({placeholders}) ORDER BY created_at, id"
@@ -277,6 +289,24 @@ mod tests {
         seed(&conn);
         let none = load_export_entities(&conn, Some(&["ent_missing".to_string()])).unwrap();
         assert!(none.is_empty());
+    }
+
+    /// An explicit selection naming a merged-away LOSER exports its
+    /// survivor (with the whole cluster's facts), never an empty bundle.
+    #[test]
+    fn selection_naming_a_merged_loser_exports_its_survivor() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+               VALUES ('ent_lose', 'Project X', 'project', '', 100, 100);
+             INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+               VALUES ('ent_lose', 'ent_a', 1);",
+        )
+        .unwrap();
+        let entities = load_export_entities(&conn, Some(&["ent_lose".to_string()])).unwrap();
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].entity_id, "ent_a");
     }
 
     /// Regression test for issue #158 on the bundle-export read path.

@@ -1434,10 +1434,13 @@ fn create_entity_if_needed(
             // The helper did NOT insert; land the row so the proposal flow
             // proceeds. The ledger row goes after (the SKIP branch of
             // `write_origin_ledger_for_outcome`).
-            tx.execute(
-                "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
-                 VALUES (?1, ?2, ?3, '', NULL, ?4, ?4, NULL)",
-                params![entity_id, name, proposed_label.unwrap_or("concept"), now_secs],
+            crate::db::entity_gate::land_skipped_entity(
+                tx,
+                &entity_id,
+                &name,
+                proposed_label,
+                "",
+                now_secs,
             )?;
         }
         crate::db::entity_gate::AdmitOutcome::Held { .. } => {
@@ -1778,7 +1781,7 @@ fn commit_fact_update(
     // UPDATE. A bare `entity_id = ?` bail here would roll back the whole
     // resolution and wedge the auto-approve retry loop on every later run.
     let cluster = crate::db::entities::cluster_ids(conn, &ctx.entity_id)?;
-    let cluster_placeholders = vec!["?"; cluster.len()].join(",");
+    let cluster_placeholders = crate::db::entities::in_placeholders(&cluster);
     let survivor = ctx.entity_id.clone();
 
     let existing: WikiFactRow = conn
@@ -1956,7 +1959,7 @@ fn commit_fact_archive(
     // survivor in the same UPDATE, so the archived row and the Delete
     // outbox payload (`entity_id` = survivor) agree on the owner (#132).
     let cluster = crate::db::entities::cluster_ids(conn, &ctx.entity_id)?;
-    let cluster_placeholders = vec!["?"; cluster.len()].join(",");
+    let cluster_placeholders = crate::db::entities::in_placeholders(&cluster);
     // ?1 timestamp, ?2 fact id, ?3 survivor rekey, ?4.. the cluster list.
     let mut archive_params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
         Box::new(ctx.now_ms),
@@ -2362,18 +2365,16 @@ fn endpoint_edge_vocabulary(
     gate: &crate::db::entity_gate::GateResolutionContext<'_>,
     ctx: &mut CommitContext,
 ) -> Result<Option<EdgeVocabulary>> {
-    if let Some(cached) = ctx.edge_endpoint_strict.get(endpoint_id) {
+    // Memoized on the LADDER id (the owning entity for a fact/task
+    // endpoint): N fact endpoints of one hub entity resolve its ladder —
+    // and walk its facts' sources — once, not N times inside the write lock.
+    let ladder_id = endpoint_ladder_id(conn, endpoint_id)?;
+    if let Some(cached) = ctx.edge_endpoint_strict.get(&ladder_id) {
         return Ok(cached.clone());
     }
-    let resolved = resolve_endpoint_ladder(
-        conn,
-        endpoint_id,
-        proposal_entity_id,
-        gate,
-        &ctx.proposal_id,
-    )?;
-    ctx.edge_endpoint_strict
-        .insert(endpoint_id.to_string(), resolved.clone());
+    let resolved =
+        resolve_endpoint_ladder(conn, &ladder_id, proposal_entity_id, gate, &ctx.proposal_id)?;
+    ctx.edge_endpoint_strict.insert(ladder_id, resolved.clone());
     Ok(resolved)
 }
 
@@ -2393,21 +2394,23 @@ fn endpoint_edge_vocabulary(
 ///     verdict with no strict `tier_fact` vocabulary disarms (mode = GATE +
 ///     no vocabulary row → SKIP + census warning, mirroring §2.1).
 ///   * rung 4 — `tier_fact` itself (unmarked/off row → `None`, §2.3.1).
+///
+/// `ladder_id` is the endpoint's [`endpoint_ladder_id`] — review finding
+/// (fact/task endpoints): edge endpoints are frequently
+/// `llm_wiki_entries`/`llm_wiki_tasks` ids, not entity ids, and the
+/// ladder's rungs are ENTITY-keyed, so running them against a fact id finds
+/// no manifest row and no source paths and falls to rung 4, ungating edges
+/// the old proposal-entity gate refused. The caller maps a fact/task
+/// endpoint to its OWNING entity (resolved to the merge survivor); the
+/// owner's fact source paths subsume the endpoint fact's.
 fn resolve_endpoint_ladder(
     conn: &Connection,
-    endpoint_id: &str,
+    ladder_id: &str,
     proposal_entity_id: &str,
     gate: &crate::db::entity_gate::GateResolutionContext<'_>,
     proposal_id: &str,
 ) -> Result<Option<EdgeVocabulary>> {
-    // Review finding (fact/task endpoints): edge endpoints are frequently
-    // `llm_wiki_entries`/`llm_wiki_tasks` ids, not entity ids — the ladder's
-    // rungs are ENTITY-keyed, so running them against a fact id finds no
-    // manifest row and no source paths and falls to rung 4, ungating edges
-    // the old proposal-entity gate refused. Map a fact/task endpoint to its
-    // OWNING entity (resolved to the merge survivor) and walk that entity's
-    // ladder; the owner's fact source paths subsume the endpoint fact's.
-    let ladder_id = endpoint_ladder_id(conn, endpoint_id)?;
+    let ladder_id = ladder_id.to_string();
 
     // Rung 1b — the endpoint's own manifest row.
     match ontology_leg(conn, &ladder_id, &ladder_id) {
@@ -2439,29 +2442,10 @@ fn resolve_endpoint_ladder(
     // (the host default) — the same pathless resolution the node gate's
     // GUI/bundle mint arm uses — so a host-wide `ontology_default: "off"`
     // shields a fact-less endpoint exactly as it shields the mint.
-    let lookups: Vec<crate::config::OntologyLookup> = if paths.is_empty() {
-        vec![gate.ingest.ontology_lookup_pathless(
-            gate.degraded,
-            gate.schema,
-            gate.schema_unparseable,
-        )]
-    } else {
-        paths
-            .iter()
-            .map(|path| {
-                gate.ingest.ontology_lookup(
-                    path,
-                    gate.vault_root,
-                    gate.degraded,
-                    gate.schema,
-                    gate.schema_unparseable,
-                )
-            })
-            .collect()
-    };
+    let lookups = gate.source_lookups(&paths);
     let mut off_found = false;
     let mut reaches_rung_4 = false;
-    for lookup in lookups {
+    for (_, lookup) in lookups {
         match lookup {
             crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Strict) => {
                 // Vocabulary from `tier_fact` (mode-vs-vocabulary rule).
@@ -2547,7 +2531,7 @@ fn endpoint_fact_source_paths(conn: &Connection, endpoint_id: &str) -> Result<Ve
     // ladder must see them) — expand to the whole redirect cluster, the same
     // coverage `commit_fact_update`/`commit_fact_archive`/`get_entity` use.
     let cluster = crate::db::entities::cluster_ids(conn, endpoint_id)?;
-    let cluster_placeholders = vec!["?"; cluster.len()].join(",");
+    let cluster_placeholders = crate::db::entities::in_placeholders(&cluster);
     let mut stmt = conn.prepare(&format!(
         "SELECT id, source_ref FROM llm_wiki_entries
          WHERE entity_id IN ({cluster_placeholders}) AND deleted_at IS NULL"
@@ -6842,6 +6826,111 @@ mod tests {
         assert!(
             vocab.canonicalize("invented_type").is_none(),
             "an off-manifest type must fail the owner's gate"
+        );
+    }
+
+    /// Rung 1a for fact/task endpoints: a deliberate opt-out on the OWNING
+    /// entity disarms the edge gate, exactly as it would for the entity id
+    /// itself (the opt-out lives on the entity, never on a fact row).
+    #[test]
+    fn edge_fact_endpoints_honor_owning_entitys_optout() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent_a", "A", "summary", 100);
+        seed_manifest(
+            &conn,
+            "ent_a",
+            "strict",
+            &["thing"],
+            &[("depends_on", "thing", "thing")],
+        );
+        seed_fact_row(&conn, "fact-src", "ent_a", "source fact");
+        seed_fact_row(&conn, "fact-dst", "ent_a", "target fact");
+        conn.execute(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at) VALUES ('ent_a', 'user', 1)",
+            [],
+        )
+        .unwrap();
+
+        let ingest = crate::config::IngestConfig::default();
+        let degraded = crate::config::OntologyDegradedState::default();
+        let gate = edge_gate_ctx(&ingest, &degraded);
+        let mut ctx = edge_test_ctx("ent_a");
+        let outcome = resolve_edge_endpoint_vocabulary(
+            &conn, "ent_a", "fact-src", "fact-dst", &mut ctx, &gate,
+        )
+        .unwrap();
+        assert!(
+            outcome.is_none(),
+            "the owner's opt-out must disarm the edge gate"
+        );
+    }
+
+    /// The edge row is anchored to the PROPOSAL entity, and the read filter
+    /// and the off-manifest purge judge it by that entity's strict
+    /// vocabulary. A type admitted only by an ENDPOINT's vocabulary must be
+    /// dropped at write time, or it is hidden on read and destroyed by the
+    /// next sweep; a type both vocabularies declare is written.
+    #[test]
+    fn edge_admitted_by_endpoint_vocab_must_also_fit_the_anchor() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent_a", "A", "summary", 100);
+        seed_entity(&conn, "ent_b", "B", "summary", 100);
+        seed_manifest(
+            &conn,
+            "ent_a",
+            "strict",
+            &["thing"],
+            &[("related", "thing", "thing")],
+        );
+        seed_manifest(
+            &conn,
+            "ent_b",
+            "strict",
+            &["thing"],
+            &[
+                ("related", "thing", "thing"),
+                ("mentions", "thing", "thing"),
+            ],
+        );
+        seed_fact_row(&conn, "fact-b", "ent_b", "b fact");
+        seed_fact_row(&conn, "fact-a", "ent_a", "a fact");
+
+        let ingest = crate::config::IngestConfig::default();
+        let degraded = crate::config::OntologyDegradedState::default();
+        let gate = edge_gate_ctx(&ingest, &degraded);
+        let mut ctx = edge_test_ctx("ent_a");
+        let item = |id: &str| LoadedItem {
+            id: id.into(),
+            item_type: "edge_add".into(),
+            target_id: None,
+            payload: serde_json::Value::Null,
+            evidence: Vec::new(),
+            edited_payload: None,
+        };
+        let payload = |edge_type: &str| {
+            serde_json::json!({
+                "edge_type": edge_type,
+                "source": {"existing_id": "fact-b"},
+                "target": {"existing_id": "fact-a"},
+            })
+        };
+
+        commit_edge_add(&conn, &gate, &mut ctx, &item("e1"), &payload("mentions")).unwrap();
+        assert_eq!(ctx.dropped_edges, vec!["e1".to_string()]);
+
+        commit_edge_add(&conn, &gate, &mut ctx, &item("e2"), &payload("related")).unwrap();
+        let written: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_edges WHERE entity_id = 'ent_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(written, 1, "a type both vocabularies declare is written");
+        assert_eq!(
+            crate::db::edge_purge::purge_off_manifest_edges_all(&conn).unwrap(),
+            0,
+            "nothing the write gate admitted is purged"
         );
     }
 

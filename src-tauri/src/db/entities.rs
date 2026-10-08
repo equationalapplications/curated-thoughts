@@ -193,6 +193,9 @@ fn parse_okf_usage_window(raw: Option<&str>) -> Option<OkfUsageWindow> {
     serde_json::from_str(raw).ok()
 }
 
+/// One resolved source: `(document path, content hash)`.
+type SourceDoc = (String, Option<String>);
+
 /// The three outcomes of the shared source-resolution core (spec R2.3.2a).
 ///
 /// Distinct on purpose: today's empty-Vec hides all of them and lets a DB
@@ -225,14 +228,29 @@ pub(crate) fn resolve_source_core(
     entry_id: &str,
     source_ref: Option<&str>,
 ) -> rusqlite::Result<SourceResolution> {
+    resolve_source_walk(conn, entry_id, source_ref).map(|(class, _)| class)
+}
+
+/// The single evidence walk behind [`resolve_source_core`] and the display
+/// wrapper: the classification PLUS every path that did resolve. An
+/// unresolved entry classifies the whole ref `HadEvidenceUnresolved` (the
+/// gate/heal contract) but does not stop the walk, so the display can still
+/// show the sibling entries that resolved (one stale hash after a re-chunk
+/// must not blank a fact's whole provenance list).
+fn resolve_source_walk(
+    conn: &Connection,
+    entry_id: &str,
+    source_ref: Option<&str>,
+) -> rusqlite::Result<(SourceResolution, Vec<SourceDoc>)> {
+    let unresolved = || Ok((SourceResolution::HadEvidenceUnresolved, Vec::new()));
     let raw: String = match source_ref {
-        None => return Ok(SourceResolution::NoEvidence),
+        None => return Ok((SourceResolution::NoEvidence, Vec::new())),
         Some(r) if is_librarian_source_ref_token(r) => {
             // The two split-arm sites from entities.rs:213-217 — errors do not
             // masquerade as "no source" (spec L792).
             match evidence_json_for_entry(conn, entry_id) {
                 Ok(Some(json)) => json,
-                Ok(None) => return Ok(SourceResolution::HadEvidenceUnresolved),
+                Ok(None) => return unresolved(),
                 Err(e) => return Err(e),
             }
         }
@@ -241,13 +259,14 @@ pub(crate) fn resolve_source_core(
 
     let value: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
-        Err(_) => return Ok(SourceResolution::HadEvidenceUnresolved),
+        Err(_) => return unresolved(),
     };
     let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
         // JSON object with NO `evidence` key → HadEvidenceUnresolved.
-        return Ok(SourceResolution::HadEvidenceUnresolved);
+        return unresolved();
     };
     let mut out: Vec<(String, Option<String>)> = Vec::new();
+    let mut any_unresolved = false;
     for entry in evidence {
         let Some(hash) = entry
             .get("content_hash")
@@ -255,7 +274,8 @@ pub(crate) fn resolve_source_core(
             .filter(|s| !s.is_empty())
         else {
             // Pre-migration chunk-id-only entries (legacy) → unresolved.
-            return Ok(SourceResolution::HadEvidenceUnresolved);
+            any_unresolved = true;
+            continue;
         };
         let resolved: Option<String> = conn
             .query_row(
@@ -271,14 +291,16 @@ pub(crate) fn resolve_source_core(
             }
         } else {
             // ≥1 entry did not resolve → HadEvidenceUnresolved.
-            return Ok(SourceResolution::HadEvidenceUnresolved);
+            any_unresolved = true;
         }
     }
-    if out.is_empty() {
-        // JSON with `"evidence": []` (the V20 doomed-row shape) → unresolved.
-        Ok(SourceResolution::HadEvidenceUnresolved)
+    if any_unresolved || out.is_empty() {
+        // An unresolved entry, or JSON with `"evidence": []` (the V20
+        // doomed-row shape) → unresolved; the resolved siblings ride along
+        // for display only.
+        Ok((SourceResolution::HadEvidenceUnresolved, out))
     } else {
-        Ok(SourceResolution::Resolved(out))
+        Ok((SourceResolution::Resolved(out.clone()), out))
     }
 }
 
@@ -299,11 +321,11 @@ pub(crate) fn source_docs_from_ref(
     entry_id: &str,
     source_ref: Option<&str>,
 ) -> Vec<(String, Option<String>)> {
-    match resolve_source_core(conn, entry_id, source_ref) {
-        Ok(SourceResolution::Resolved(paths)) => paths,
-        Ok(_) => Vec::new(),
-        Err(_) => Vec::new(),
-    }
+    // Display keeps every path that DID resolve, even when a sibling entry
+    // is stale (the core still classifies the ref unresolved for gate/heal).
+    resolve_source_walk(conn, entry_id, source_ref)
+        .map(|(_, paths)| paths)
+        .unwrap_or_default()
 }
 
 fn order_clause(sort: EntitySort) -> &'static str {
@@ -349,7 +371,7 @@ pub(crate) fn resolve_entity_id(conn: &Connection, entity_id: &str) -> Result<St
 pub(crate) fn cluster_ids(conn: &Connection, survivor: &str) -> Result<Vec<String>> {
     let mut ids = vec![survivor.to_string()];
     loop {
-        let placeholders = vec!["?"; ids.len()].join(",");
+        let placeholders = in_placeholders(&ids);
         let sql =
             format!("SELECT entity_id FROM entity_redirects WHERE merged_into IN ({placeholders})");
         let params: Vec<&str> = ids.iter().map(String::as_str).collect();
@@ -778,11 +800,13 @@ pub fn create_entity(conn: &mut Connection, input: &CreateEntityInput) -> Result
             // verbatim, the `'concept'` literal only for a blank type
             // (§2.5 / r2-M2a). The origin ledger records a `gate_skipped`
             // row.
-            tx.execute(
-                "INSERT INTO curated_entities (
-                    id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at
-                 ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5, NULL)",
-                params![id, name, proposed_label.unwrap_or("concept"), summary, now],
+            crate::db::entity_gate::land_skipped_entity(
+                &tx,
+                &id,
+                name,
+                proposed_label,
+                summary,
+                now,
             )?;
         }
         _ => {
@@ -993,21 +1017,42 @@ mod tests {
 
     #[test]
     fn source_docs_from_ref_handles_evidence_without_chunk_id() {
-        // Spec R2.3.2a (Task 2): ANY evidence entry that lacks content_hash is
-        // an unresolved entry — the WHOLE ref resolves to
-        // `SourceResolution::HadEvidenceUnresolved`, which the display
-        // wrapper degrades to `[]`. Pre-wave-1 semantics used to skip the
-        // entry and keep the sibling; the spec r10-MINOR-4 consolidated both
-        // cases (chunk-id legacy, malformed JSON, empty hash) under one
-        // report-only outcome, so a sibling's resolution cannot be trusted
-        // when one entry is unverifiable.
+        // Spec R2.3.2a / r10-MINOR-4: ANY evidence entry that lacks
+        // content_hash is an unresolved entry — the core classifies the
+        // WHOLE ref `HadEvidenceUnresolved` (report-only for gate/heal; a
+        // sibling cannot vouch for an unverifiable entry). The DISPLAY
+        // wrapper still shows the sibling that resolved: one legacy or
+        // stale entry must not blank the fact's provenance list.
         let conn = open_in_memory().unwrap();
         let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
         let source_ref = format!(
             r#"{{"proposal_id":"prop_1","evidence":[{{"quote":"no chunk id","start_line":1,"end_line":3}},{{"content_hash":"{}","quote":"q","start_line":1,"end_line":3}}]}}"#,
             chunks[0].1
         );
-        assert!(source_docs_from_ref(&conn, "fact_t", Some(&source_ref)).is_empty());
+        assert_eq!(
+            resolve_source_core(&conn, "fact_t", Some(&source_ref)).unwrap(),
+            SourceResolution::HadEvidenceUnresolved
+        );
+        assert_eq!(
+            source_docs_from_ref(&conn, "fact_t", Some(&source_ref)),
+            vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]
+        );
+    }
+
+    /// Same split for a STALE sibling hash (the common post-re-chunk case).
+    #[test]
+    fn source_docs_from_ref_keeps_resolved_paths_when_one_hash_is_stale() {
+        let conn = open_in_memory().unwrap();
+        let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
+        let source_ref = source_ref_json(&[chunks[0].1.clone(), "0".repeat(32)]);
+        assert_eq!(
+            resolve_source_core(&conn, "fact_t", Some(&source_ref)).unwrap(),
+            SourceResolution::HadEvidenceUnresolved
+        );
+        assert_eq!(
+            source_docs_from_ref(&conn, "fact_t", Some(&source_ref)).len(),
+            1
+        );
     }
 
     #[test]
@@ -1077,19 +1122,25 @@ mod tests {
 
     #[test]
     fn source_docs_from_ref_skips_evidence_with_empty_content_hash() {
-        // Spec R2.3.2a: empty content_hash is an unresolved entry — the WHOLE
-        // ref degrades to `[]`. The pre-wave-1 "skip and continue" behavior is
-        // gone: spec r10-MINOR-4 unified chunk-id legacy / malformed JSON /
-        // empty hash under one report-only outcome.
+        // Spec R2.3.2a: empty content_hash is an unresolved entry — the core
+        // classifies the WHOLE ref unresolved (r10-MINOR-4: chunk-id legacy /
+        // malformed JSON / empty hash share one report-only outcome). The
+        // display skips the empty entry and keeps the resolved sibling.
         let conn = open_in_memory().unwrap();
         let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
         let source_ref = format!(
             r#"{{"proposal_id":"prop_1","evidence":[{{"content_hash":"","quote":"empty","start_line":1,"end_line":3}},{{"content_hash":"{}","quote":"q","start_line":1,"end_line":3}}]}}"#,
             chunks[0].1
         );
-        assert!(
-            source_docs_from_ref(&conn, "fact_t", Some(&source_ref)).is_empty(),
-            "any unresolved evidence entry must degrade the whole ref"
+        assert_eq!(
+            resolve_source_core(&conn, "fact_t", Some(&source_ref)).unwrap(),
+            SourceResolution::HadEvidenceUnresolved,
+            "any unresolved evidence entry classifies the whole ref unresolved"
+        );
+        assert_eq!(
+            source_docs_from_ref(&conn, "fact_t", Some(&source_ref)).len(),
+            1,
+            "the display keeps the resolved sibling"
         );
     }
 

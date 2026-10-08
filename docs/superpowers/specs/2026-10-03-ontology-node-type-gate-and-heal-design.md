@@ -12,6 +12,10 @@ redirect behavior pinned, R2.7.6 wording, citations re-anchored.
 branch `spec/ontology-node-type-gate-and-heal` (PR #269); tracking
 issue #273; wave-2 boundary (§5) remains open. Revision history above
 is intact.
+r22 (2026-10-08, `/code-review max` wave): R2.3.0 anchor-vocabulary rule
++ fact/task-endpoint opt-out added; R2.7.5 cluster-closed opt-out /
+origin ledger / fact dedupe pinned; §2.5 SKIP landing for labeled GUI/LLM
+mints clarified (label verbatim, `concept` only when blank).
 **Date:** 2026-10-03 (written 2026-10-04; r21 2026-10-07)
 **Baseline:** `main` @ `9c2281b` (v3.2.0) for the design; line citations
 re-anchored (r21) to branch tip after merging `main` @ `0f7ea9f` (v3.3.0).
@@ -749,7 +753,17 @@ Applies to edges AND nodes AND heal. Resolve in order; first hit decides:
    (`commit.rs:348-351`) stays valid and no per-traversal source
    resolution is introduced. Edge gating at write time resolves the
    endpoints' sources once per proposal (per-proposal memoization, not
-   per edge).
+   per edge — memoized per OWNING entity, so N fact endpoints of one
+   entity resolve its ladder once).
+   **Anchor vocabulary (r22):** the edge row is anchored to the PROPOSAL
+   entity, and the read filter and the off-manifest purge judge a row by
+   that entity's strict vocabulary. So when the endpoint gate fires under
+   an endpoint's vocabulary, the type must ALSO be declared by the
+   anchoring entity's strict vocabulary (when it has one) — conjunctive,
+   never loosening — or the write gate would admit an edge that is hidden
+   on read and destroyed by the next sweep. **Fact/task endpoints (r22):**
+   rung 1a's opt-out is checked on the endpoint's OWNING entity (the same
+   mapping the ladder walks), not only on the raw fact/task id.
 
 Additional rules:
 
@@ -1106,9 +1120,11 @@ hard-coded literal). Single consolidated rule:
   the origin ledger (§2.4.6) with the original label; queue items
   reference the ledger, not the column. No reader (recall, injection,
   bundles, outbox, TS consumers) ever sees an invented type. (Skip-path
-  writes keep today's `'concept'` literal + a ledger row — §2.5, r2-M2a;
-  the literal is pre-existing behavior on a no-gate path, not an
-  invention.)
+  writes keep TODAY's landing + a ledger row — §2.5, r2-M2a: a labeled
+  GUI/LLM mint lands its label verbatim (no vocabulary exists to
+  violate), the `'concept'` literal lands only where it did pre-wave-1
+  — blank-type GUI, bundle, `okf_migration` (r22). Pre-existing
+  behavior on a no-gate path, not an invention.)
 
 **R2.4.5 Configuration error (SG6, consolidated).** A strict manifest with
 zero usable types or no declared fallback is a configuration ERROR:
@@ -1344,6 +1360,14 @@ entity_type (post-remap), the group goes to the review queue — the
 survivor must not silently win with the wrong type.
 
 **R2.7.5 Local redirect (wave-1 semantics — no facts move):**
+- **Cluster-closed ontology state (r22).** Because a merge moves no
+  rows, a member's `ct_entity_optouts` row, `entity_type_origin` ledger
+  row, and pre-merge facts stay keyed to the loser. Rung 1a's opt-out
+  lookup, heal's ledger read, and `fact_add`'s Phase-1 dedupe therefore
+  cover the whole redirect cluster (a deliberate opt-out on ANY member
+  keeps applying — D8), and the `--mode strict` reversal clears opt-outs
+  across the cluster. `ct ontology set --entity <loser>` resolves to the
+  survivor before writing (and refuses an id naming no entity).
 - The loser stays live-but-redirected: a local `merged_into` redirect
   record is written (new table); the loser is NEVER returned as an entity
   by reads.

@@ -242,13 +242,12 @@ pub fn update_provider_with_brain_path(
             // (commit f9998dc reset `generation` to the shipped default
             // and rewrote the file) wiped real credentials and provider
             // settings on a failed init. NEITHER failure path in this
-            // function writes to disk: the in-memory state machine
-            // reports `Unconfigured` because the panel's values were
-            // never persisted, and the file keeps the last valid
-            // configuration untouched (same contract as the post-write
-            // site below).
-            let mut guard = state.0.lock().unwrap();
-            *guard = GenerationProvider::Unconfigured;
+            // function writes to disk, and neither touches the in-memory
+            // state: the file keeps the last valid configuration, so the
+            // provider already running from it stays active (dropping it
+            // to `Unconfigured` would disable a working provider for the
+            // session while disk still says it is configured). Same
+            // contract as the post-write site below.
             return Err(e.to_string());
         }
     };
@@ -283,11 +282,9 @@ pub fn update_provider_with_brain_path(
         // the generation block with any legacy plaintext api_key — keeps
         // the user's last valid configuration untouched.
         //
-        // In-memory, the state machine still goes to `Unconfigured` below:
-        // the panel's values were NOT persisted, so reporting them active
-        // would lie.
-        let mut guard = state.0.lock().unwrap();
-        *guard = GenerationProvider::Unconfigured;
+        // In-memory, the PRIOR provider stays: it is exactly what disk
+        // still describes. The panel's values were not persisted, so they
+        // are not activated either (`new_provider` is dropped).
         return Err(format!("settings could not be saved to disk: {e}"));
     }
 

@@ -507,9 +507,15 @@ impl IngestConfig {
         // residual prefix. A key with NO usable path form (empty, "/",
         // or any `..` segment — the latter would root the prefix above
         // the vault) legitimately holds nothing.
+        //
+        // A key that PARSED but is unmatchable (`{"./ops": "off"}`) is
+        // inert to the prefix resolver yet carries the same intent — its
+        // load diagnostic promises the same hold, so it holds the same way
+        // (else the folder the user marked silently climbs to strict, D8).
         if let Some(rel) = &detailed.rel_path {
             let mut deepest_dropped: Option<usize> = None;
-            for dropped in &degraded.dropped_prefixes {
+            let inert_keys = self.folder_ontology.keys().filter(|k| !key_is_matchable(k));
+            for dropped in degraded.dropped_prefixes.iter().chain(inert_keys) {
                 let usable = usable_prefix(dropped);
                 if usable.is_empty() {
                     continue;
@@ -561,7 +567,12 @@ impl IngestConfig {
                     .folder_ontology
                     .values()
                     .any(|m| *m == OntologyMode::Off);
+                let has_inert_key = self
+                    .folder_ontology
+                    .keys()
+                    .any(|k| !key_is_matchable(k) && !usable_prefix(k).is_empty());
                 if has_off
+                    || has_inert_key
                     || !crate::config::ontology_ties(self).is_empty()
                     || !degraded.dropped_prefixes.is_empty()
                     || degraded.default_dropped
@@ -3708,6 +3719,28 @@ mod tests {
             IngestConfig::default().ontology_lookup("ops/a.md", None, &slash, None, false),
             OntologyLookup::Climb,
             "a key with no usable path form holds nothing"
+        );
+    }
+
+    /// A key that PARSED cleanly but is unmatchable (`./ops`) holds under
+    /// its usable form exactly like a dropped one — its load diagnostic
+    /// promises "mints under \"ops\" hold until it is fixed", and a silent
+    /// climb would gate strict a folder the user marked off (D8).
+    #[test]
+    fn present_unmatchable_key_holds_under_usable_form() {
+        let mut ingest = IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("./ops".to_string(), OntologyMode::Off);
+        let clean = OntologyDegradedState::default();
+        assert_eq!(
+            ingest.ontology_lookup("ops/a.md", None, &clean, None, false),
+            OntologyLookup::Hold
+        );
+        assert_eq!(
+            ingest.ontology_lookup("other/x.md", None, &clean, None, false),
+            OntologyLookup::Climb,
+            "unrelated paths still resolve"
         );
     }
 }

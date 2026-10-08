@@ -280,7 +280,7 @@ pub fn update_wisdom_in_tx(
     // Transitive fact closure (r13-m3): the row being updated may still be
     // keyed to a redirected loser from before the merge.
     let cluster = crate::db::entities::cluster_ids(tx, &entity_id)?;
-    let placeholders = vec!["?"; cluster.len()].join(",");
+    let placeholders = crate::db::entities::in_placeholders(&cluster);
     let existing = tx
         .query_row(
             &format!(

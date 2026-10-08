@@ -142,7 +142,13 @@ pub fn ontology_heal_pass(
 /// than writing the manifest extension itself.
 pub fn ontology_retype_pass(conn: &mut Connection) -> OntologyHealReport {
     let mut report = OntologyHealReport::default();
-    if let Err(e) = run_inner(conn, DriftFlag::None, true, false, &mut report) {
+    if let Err(e) = run_inner(
+        conn,
+        DriftFlag::None,
+        true,
+        PassScope::RetypeOnly,
+        &mut report,
+    ) {
         report.error = Some(format!("{e:#}"));
     }
     report
@@ -154,18 +160,31 @@ fn run(
     apply: bool,
     report: &mut OntologyHealReport,
 ) -> Result<()> {
-    run_inner(conn, flag, apply, true, report)
+    run_inner(conn, flag, apply, PassScope::Heal, report)
 }
 
-/// `bookkeeping == false` strips heal's writes (ensure, marker, watermark)
-/// for the sweep's retyping-only surface ([`ontology_retype_pass`]); the
-/// degraded/ties and drift refusals stay — a sweep cannot clear a drift
-/// gate (DriftFlag::None there by construction).
+/// Which surface is running the pass. Explicit (not a bool) because the
+/// heal-only writes are a CLOSED list a new step must opt into: anything
+/// that satisfies or vacates `alias_remap_completed` must never run from a
+/// sweep, or `ct wiki merge-duplicates`'s R2.7.1 precondition could be met
+/// by a brain where no real heal remap ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassScope {
+    /// `ct heal`: the full pass — §2.4.4 ensure, remap, then the
+    /// `alias_remap_completed` marker + watermark (heal is the sole
+    /// watermark writer, R2.2.8).
+    Heal,
+    /// `ct wiki sweep --yes` ([`ontology_retype_pass`]): the remap only. The
+    /// degraded/ties and drift refusals stay — a sweep cannot clear a drift
+    /// gate (DriftFlag::None there by construction).
+    RetypeOnly,
+}
+
 fn run_inner(
     conn: &mut Connection,
     flag: DriftFlag,
     apply: bool,
-    bookkeeping: bool,
+    scope: PassScope,
     report: &mut OntologyHealReport,
 ) -> Result<()> {
     if !table_exists(conn, "llm_wiki_meta")? || !table_exists(conn, "entity_type_origin")? {
@@ -195,22 +214,17 @@ fn run_inner(
     );
 
     // 1. Drift compare (R2.2.8). First run (no row) → no report (r7-m4).
-    if let Some((old_hash, old_ts)) = read_watermark(conn)? {
-        if old_hash != live_hash {
-            report.drift = Some(DriftReport {
-                old_hash: old_hash.clone(),
-                old_stamped_at: old_ts,
-                new_hash: live_hash.clone(),
-                confirmed: false,
-                waived: false,
-            });
-            eprintln!(
-                "ontology drift: config hash changed since the last recorded state \
-                 (old {old_hash} stamped_at {old_ts} vs live {live_hash}); \
-                 confirm with `ct heal --yes --confirm-drift {old_hash}` or \
-                 acknowledge with `ct heal --yes --waive-drift {old_hash}`"
-            );
-        }
+    report.drift = drift_report(conn, &policy)?;
+    if let Some(d) = &report.drift {
+        eprintln!(
+            "ontology drift: config hash changed since the last recorded state \
+             (old {old} stamped_at {ts} vs live {new}); \
+             confirm with `ct heal --yes --confirm-drift {old}` or \
+             acknowledge with `ct heal --yes --waive-drift {old}`",
+            old = d.old_hash,
+            ts = d.old_stamped_at,
+            new = d.new_hash,
+        );
     }
 
     // 2. Degraded/tied config — the DESTRUCTIVE ONTOLOGY actions are
@@ -229,8 +243,8 @@ fn run_inner(
     //    read-only run (`!apply`) performs neither, so unconfirmed drift
     //    falls through to the read-only census below — the operator sees
     //    what confirming would do instead of confirming blind.
-    match (&report.drift, &flag) {
-        (Some(_), DriftFlag::None) => {
+    match check_drift_flag(&mut report.drift, &flag, "ontology heal") {
+        DriftCheck::Unconfirmed => {
             report.skipped_reason = Some("unconfirmed_drift".into());
             eprintln!(
                 "ontology heal: unconfirmed drift report — ontology retypes/remaps \
@@ -240,45 +254,17 @@ fn run_inner(
                 return Ok(());
             }
         }
-        (Some(d), DriftFlag::Confirm(h)) | (Some(d), DriftFlag::Waive(h)) => {
-            if h != &d.old_hash {
-                eprintln!(
-                    "ontology heal: drift flag {h:?} does not match the echoed old hash \
-                     {} — echoed pair NOT confirmed",
-                    d.old_hash
-                );
-                report.skipped_reason = Some("unconfirmed_drift".into());
-                if apply {
-                    return Ok(());
-                }
-            } else if let DriftFlag::Confirm(_) = flag {
-                report.drift = report.drift.take().map(|mut d| {
-                    d.confirmed = true;
-                    d
-                });
-            } else {
-                // Waive (plan-p9-M2): no retypes, remaps, or watermark
-                // storage; the waive event lives in this output only.
-                report.drift = report.drift.take().map(|mut d| {
-                    d.waived = true;
-                    d
-                });
-                report.skipped_reason = Some("drift_waived".into());
-                eprintln!(
-                    "ontology heal: drift waived — no retypes, remaps, or watermark \
-                     storage this run"
-                );
-                return Ok(());
-            }
-        }
-        (None, DriftFlag::Confirm(_)) | (None, DriftFlag::Waive(_)) => {
-            // No-drift case (plan-p14-m3): flags ignored with a note.
+        DriftCheck::Waived => {
+            // Waive (plan-p9-M2): no retypes, remaps, or watermark
+            // storage; the waive event lives in this output only.
+            report.skipped_reason = Some("drift_waived".into());
             eprintln!(
-                "ontology heal: no drift report fired this run — \
-                 --confirm-drift/--waive-drift ignored"
+                "ontology heal: drift waived — no retypes, remaps, or watermark \
+                 storage this run"
             );
+            return Ok(());
         }
-        (None, DriftFlag::None) => {}
+        DriftCheck::Confirmed | DriftCheck::Clear => {}
     }
 
     let ctx = GateResolutionContext {
@@ -309,8 +295,8 @@ fn run_inner(
     }
 
     // 4. Ensure BEFORE census (plan-p7-m2). The retyping-only surface
-    //    (bookkeeping == false) skips it — see [`ontology_retype_pass`].
-    if bookkeeping {
+    //    (`PassScope::RetypeOnly`) skips it — see [`ontology_retype_pass`].
+    if scope == PassScope::Heal {
         match crate::db::entity_gate::ensure_all_manifest_vocabularies(conn) {
             Ok(s) => {
                 if s.extended
@@ -351,10 +337,10 @@ fn run_inner(
     // 7. Marker at the END of a successful remap pass (§2.7.1), then the
     //    watermark — heal is the sole watermark writer (R2.2.8). Waive
     //    returned above, so reaching here means confirmed-or-no-drift. The
-    //    retyping-only surface (bookkeeping == false) writes NEITHER — a
+    //    retyping-only surface (`PassScope::RetypeOnly`) writes NEITHER — a
     //    sweep must not change what the next `ct heal` drift report compares
     //    against, nor claim the remap marker.
-    if !bookkeeping {
+    if scope == PassScope::RetypeOnly {
         return Ok(());
     }
     let (_, now_ms) = crate::db::commit::now_timestamps();
@@ -529,16 +515,11 @@ fn remap_pass(
                 // R2.3.5 ledger fallback: live resolution empty → resolve
                 // the mode from the recorded source directory.
                 paths.push(dir.clone());
-            } else {
-                // Rung 3 for source-less entities (R2.3.4: climb from the
-                // host default): an off host-default (or a Hold) means the
-                // entity is not gated — nothing to heal.
-                match lookup_path(ctx, "") {
-                    crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Off)
-                    | crate::config::OntologyLookup::Hold => continue,
-                    _ => {}
-                }
             }
+            // Otherwise the ladder below resolves the source-less entity
+            // exactly as the mint gate does (R2.3.4): rung 1 first (its own
+            // opt-out / strict row), then the pathless rung 3 — an off or
+            // held host default never reaches GATE, so nothing heals.
         }
 
         let decision = resolve_node_gate_decision(conn, &id, &paths, ctx.clone());
@@ -708,6 +689,83 @@ fn ensure_pending_readonly(conn: &Connection) -> Result<(usize, usize)> {
         }
     }
     Ok((would_write, foreign_no_choice))
+}
+
+/// R2.2.8 drift compare, shared by every destructive surface (heal, merge):
+/// the live config hash vs. the recorded watermark. First run (no row) → no
+/// report (r7-m4). The live hash is computed one way for every surface.
+pub(crate) fn drift_report(
+    conn: &Connection,
+    policy: &crate::config::IngestPolicy,
+) -> Result<Option<DriftReport>> {
+    let live_hash = crate::config::ontology_config_watermark_hash(
+        &policy.tiers,
+        policy.ontology_selection,
+        policy.ontology_unparseable,
+    );
+    Ok(match read_watermark(conn)? {
+        Some((old_hash, old_stamped_at)) if old_hash != live_hash => Some(DriftReport {
+            old_hash,
+            old_stamped_at,
+            new_hash: live_hash,
+            confirmed: false,
+            waived: false,
+        }),
+        _ => None,
+    })
+}
+
+/// How a `--confirm-drift` / `--waive-drift` flag met the drift report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DriftCheck {
+    /// No drift fired (any flag was ignored with a note).
+    Clear,
+    /// Drift fired and no flag, or a flag echoing the WRONG hash: the
+    /// FINAL RULE blocks destructive actions this run.
+    Unconfirmed,
+    /// The flag echoed the old hash; the report is marked `confirmed`.
+    Confirmed,
+    /// The flag echoed the old hash; the report is marked `waived`.
+    Waived,
+}
+
+/// The ONE echo-validation rule for the R2.2.8 FINAL RULE: a flag clears
+/// the block only when it echoes the report's OLD hash exactly. Marks the
+/// report confirmed/waived and prints the shared notes (prefixed with
+/// `surface`); each caller applies its own consequences.
+pub(crate) fn check_drift_flag(
+    drift: &mut Option<DriftReport>,
+    flag: &DriftFlag,
+    surface: &str,
+) -> DriftCheck {
+    match (drift.as_mut(), flag) {
+        (Some(_), DriftFlag::None) => DriftCheck::Unconfirmed,
+        (Some(d), DriftFlag::Confirm(h)) | (Some(d), DriftFlag::Waive(h)) => {
+            if h != &d.old_hash {
+                eprintln!(
+                    "{surface}: drift flag {h:?} does not match the echoed old hash {} — \
+                     echoed pair NOT confirmed",
+                    d.old_hash
+                );
+                DriftCheck::Unconfirmed
+            } else if let DriftFlag::Confirm(_) = flag {
+                d.confirmed = true;
+                DriftCheck::Confirmed
+            } else {
+                d.waived = true;
+                DriftCheck::Waived
+            }
+        }
+        (None, DriftFlag::Confirm(_)) | (None, DriftFlag::Waive(_)) => {
+            // No-drift case (plan-p14-m3): flags ignored with a note.
+            eprintln!(
+                "{surface}: no drift report fired this run — \
+                 --confirm-drift/--waive-drift ignored"
+            );
+            DriftCheck::Clear
+        }
+        (None, DriftFlag::None) => DriftCheck::Clear,
+    }
 }
 
 /// The old watermark: the authoritative row when present, else the
@@ -954,6 +1012,31 @@ mod tests {
         let r2 = run_with(&mut conn, &ingest, DriftFlag::None, true);
         assert_eq!(r2.retyped, 0, "{r2:?}");
         assert_eq!(r2.queued, 0, "{r2:?}");
+    }
+
+    /// Heal resolves a SOURCE-LESS entity exactly as the mint gate does:
+    /// rung 1 (its own strict manifest row) before the pathless rung 3. A
+    /// host-wide `ontology_default: off` therefore does not shield an
+    /// entity the user made strict with `ct ontology set --entity`.
+    #[test]
+    fn sourceless_entity_with_own_strict_row_heals_despite_host_off() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             SELECT 'e1', 'strict', manifest_json, 1 FROM llm_wiki_entity_manifests
+              WHERE entity_id = 'tier_fact'",
+            [],
+        )
+        .unwrap();
+        let ingest = IngestConfig {
+            ontology_default: Some(OntologyMode::Off),
+            ..Default::default()
+        };
+        let r = run_with(&mut conn, &ingest, DriftFlag::None, true);
+        assert_eq!(r.retyped, 1, "{r:?}");
+        assert_eq!(entity_type(&conn, "e1"), "role");
     }
 
     /// Drifted type with no signed alias (`character`) → queued, untouched.

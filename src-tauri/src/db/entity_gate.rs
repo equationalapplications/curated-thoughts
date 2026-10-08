@@ -22,7 +22,7 @@
 use crate::db::schema::OriginReason;
 use crate::hasher::hash_bytes;
 use crate::wiki_graph::WikiManifest;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::json;
 use std::collections::HashSet;
@@ -873,35 +873,6 @@ pub struct EnsureSummary {
     pub errors: usize,
 }
 
-/// `NodeVocabulary` end-to-end test (plan §1, ensure → `wiki_get_ontology` →
-/// `NodeVocabulary` sees the fallback). And the canonicalize casing rule.
-impl WikiManifest {
-    /// Build the vocabulary from this manifest, with the same rule as the
-    /// node-gate helper uses. Thin pass-through kept here for ergonomics; the
-    /// real single owner is [`NodeVocabulary::from_manifest`].
-    pub fn node_vocabulary(&self) -> NodeVocabulary {
-        NodeVocabulary::from_manifest(self)
-    }
-
-    /// Lookup helper used by tests + the ensure probe: "does this manifest
-    /// declare `slug` (case/whitespace insensitive)?"
-    pub fn declares_node_type(&self, slug: &str) -> bool {
-        self.node_vocabulary().contains(slug)
-    }
-}
-
-/// Silent guard: callers using `tx` after `rollback()` accidentally would
-/// crash at the next borrow. This empty method documents that the
-/// `rollback()` variant on `ImmediateTx` is consuming — the caller cannot
-/// continue to use the transaction after rolling back.
-#[allow(dead_code)]
-fn _rollback_is_consuming() -> Result<()> {
-    let mut conn = Connection::open_in_memory().unwrap();
-    let tx = ImmediateTx::begin(&mut conn).unwrap();
-    let _ = tx.rollback();
-    Err(anyhow!("after rollback"))
-}
-
 /// The §2.3 ladder's MODE verdict, separate from the vocabulary that
 /// may or may not back it. The shared insert helper takes a [`GateDecision`]
 /// (which couples mode + vocabulary) — `ModeVerdict` is the intermediate the
@@ -921,18 +892,12 @@ fn _rollback_is_consuming() -> Result<()> {
 ///   * `StrictNoVocab` — rung 4: tier_fact is strict with no usable
 ///     vocabulary (no `node_types` OR no fallback_node_type).
 ///     HELD per §2.4.5 — config error.
-///   * `Climb` — the rungs above resolved nothing; the caller should
-///     resolve mode via the `folder_ontology` / `ontology_default` /
-///     `tier_fact` ladder. Today the gate resolver threads the
-///     IngestConfig + degraded state to do that climb here — `Climb` is
-///     kept for callers that want to do it themselves (e.g. test fixtures).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModeVerdict {
     OptOut,
     Gate,
     Off,
     StrictNoVocab,
-    Climb,
 }
 
 /// What `resolve_node_gate_decision` did — Task 3 wires this at the four
@@ -950,11 +915,11 @@ pub struct NodeGateDecision {
 
 impl NodeGateDecision {
     /// Convert to a [`GateDecision`] for the shared insert helper. An
-    /// off/opt-out/climb verdict becomes `Skip`; an empty vocabulary
+    /// off/opt-out verdict becomes `Skip`; an empty vocabulary
     /// becomes `Held`; a populated vocabulary becomes `Gate(vocab)`.
     pub fn into_gate_decision(self) -> GateDecision {
         match self.verdict {
-            ModeVerdict::OptOut | ModeVerdict::Off | ModeVerdict::Climb => GateDecision::Skip,
+            ModeVerdict::OptOut | ModeVerdict::Off => GateDecision::Skip,
             ModeVerdict::StrictNoVocab => GateDecision::Held,
             ModeVerdict::Gate => match self.vocabulary {
                 Some(v) => GateDecision::Gate(v),
@@ -991,6 +956,61 @@ pub struct GateResolutionContext<'a> {
     pub vault_root: Option<&'a Path>,
 }
 
+impl GateResolutionContext<'_> {
+    /// Rungs 2–3 for a set of source paths — the ONE construction both the
+    /// node ladder and the edge endpoint ladder walk: each path through
+    /// `folder_ontology` / the host default, or — for a mint with NO
+    /// resolvable source (GUI / bundle / fact-less endpoint, R2.3.4) — one
+    /// pathless rung-3 resolution with the same degraded guards.
+    pub(crate) fn source_lookups<'p>(
+        &self,
+        source_paths: &'p [String],
+    ) -> Vec<(Option<&'p String>, crate::config::OntologyLookup)> {
+        if source_paths.is_empty() {
+            return vec![(
+                None,
+                self.ingest.ontology_lookup_pathless(
+                    self.degraded,
+                    self.schema,
+                    self.schema_unparseable,
+                ),
+            )];
+        }
+        source_paths
+            .iter()
+            .map(|source| {
+                (
+                    Some(source),
+                    self.ingest.ontology_lookup(
+                        source,
+                        self.vault_root,
+                        self.degraded,
+                        self.schema,
+                        self.schema_unparseable,
+                    ),
+                )
+            })
+            .collect()
+    }
+}
+
+/// The verdict of a STRICT manifest row (rung 1b's own row, or rung 4's
+/// `tier_fact`): GATE under its vocabulary, or HELD (§2.4.5) when the row
+/// declares no usable `fallback_node_type` / no parseable manifest.
+fn strict_row_decision(manifest: Option<&crate::wiki_graph::WikiManifest>) -> NodeGateDecision {
+    let vocabulary = manifest.map(NodeVocabulary::from_manifest);
+    let usable = vocabulary.as_ref().is_some_and(|v| v.fallback().is_some());
+    NodeGateDecision {
+        verdict: if usable {
+            ModeVerdict::Gate
+        } else {
+            ModeVerdict::StrictNoVocab
+        },
+        vocabulary,
+        source_directory: None,
+    }
+}
+
 /// `ingest` carries `folder_ontology`/`ontology_default`; `degraded` is the
 /// load-time degraded state (carries dropped prefixes + global flag);
 /// `schema` is the user's `OntologySelection` for rung 3; `vault_root` is
@@ -1009,11 +1029,6 @@ pub fn resolve_node_gate_decision(
     source_paths: &[String],
     ctx: GateResolutionContext<'_>,
 ) -> NodeGateDecision {
-    let ingest = ctx.ingest;
-    let degraded = ctx.degraded;
-    let schema = ctx.schema;
-    let schema_unparseable = ctx.schema_unparseable;
-    let vault_root = ctx.vault_root;
     // Rung 1a — ct_entity_optouts row → opt-out, skip edge gating too (§2.1).
     // D8: a read FAULT is never "no row" — it maps to Held (loud), so a
     // locked/faulting lookup cannot silently push an opted-out entity back
@@ -1052,24 +1067,7 @@ pub fn resolve_node_gate_decision(
             // + `fallback_node_type` written. A pre-wave-1 manifest was caught
             // at the gate-resolve call below; if the strict row STILL lacks a
             // fallback the helper holds per §2.4.5.
-            let manifest = o.manifest.as_ref();
-            let vocab = manifest.map(NodeVocabulary::from_manifest);
-            let strict_with_no_fallback = match &vocab {
-                Some(v) => v.fallback().is_none(),
-                None => true,
-            };
-            if strict_with_no_fallback {
-                return NodeGateDecision {
-                    verdict: ModeVerdict::StrictNoVocab,
-                    vocabulary: vocab,
-                    source_directory: None,
-                };
-            }
-            return NodeGateDecision {
-                verdict: ModeVerdict::Gate,
-                vocabulary: vocab,
-                source_directory: None,
-            };
+            return strict_row_decision(o.manifest.as_ref());
         }
         Ok(_) => {
             // Not strict (mark explicit OFF/emergent): rung 1d, climb.
@@ -1097,29 +1095,7 @@ pub fn resolve_node_gate_decision(
     let mut any_climb = false;
     // Pathless mints (GUI / bundle, R2.3.4) START at rung 3: resolve the
     // host default once, with the same degraded guards as a path lookup.
-    let lookups: Vec<(Option<&String>, crate::config::OntologyLookup)> = if source_paths.is_empty()
-    {
-        vec![(
-            None,
-            ingest.ontology_lookup_pathless(degraded, schema, schema_unparseable),
-        )]
-    } else {
-        source_paths
-            .iter()
-            .map(|source| {
-                (
-                    Some(source),
-                    ingest.ontology_lookup(
-                        source,
-                        vault_root,
-                        degraded,
-                        schema,
-                        schema_unparseable,
-                    ),
-                )
-            })
-            .collect()
-    };
+    let lookups = ctx.source_lookups(source_paths);
     let mut strict_found = false;
     let mut off_found = false;
     for (source, lookup) in lookups {
@@ -1141,6 +1117,18 @@ pub fn resolve_node_gate_decision(
                 continue;
             }
             crate::config::OntologyLookup::Hold => {
+                // r10-MINOR-2: the vocabulary check runs FIRST — with no
+                // strict `tier_fact` row there is nothing a hold could
+                // protect (SKIP per §2.1), so the mint succeeds. Hold only
+                // when the mint would otherwise be gated, or when the
+                // vocabulary row cannot be read (fail-closed).
+                if tier_fact_row_state(conn) == TierFactRow::NotStrict {
+                    return NodeGateDecision {
+                        verdict: ModeVerdict::Off,
+                        vocabulary: None,
+                        source_directory: None,
+                    };
+                }
                 return NodeGateDecision {
                     verdict: ModeVerdict::StrictNoVocab,
                     vocabulary: None,
@@ -1155,15 +1143,37 @@ pub fn resolve_node_gate_decision(
         }
     }
     if strict_found {
-        // Pull the tier_fact vocabulary for the gate.
-        let tier_fact_vocab = tier_fact_vocabulary(conn);
-        return match tier_fact_vocab {
-            Some(v) => NodeGateDecision {
+        // Mode vs vocabulary (r9-M1): rungs 2–3 supply a MODE, never a
+        // vocabulary — that comes from `tier_fact`. Mode = GATE with no
+        // strict vocabulary row → SKIP + census warning, mirroring §2.1's
+        // no-row SKIP (matrix: fresh brain + `ct ontology set --mode
+        // strict` + one LLM mint → SKIP + warning, mint succeeds). Only a
+        // strict row that is unusable (no fallback, §2.4.5) or unreadable
+        // holds.
+        return match tier_fact_row_state(conn) {
+            TierFactRow::NotStrict => {
+                eprintln!(
+                    "[entity-gate] {entity_id}: strict mode resolved from folder/host \
+                     config but no strict `tier_fact` vocabulary row exists — SKIP \
+                     (run `ct heal --yes` so the ensure creates it)"
+                );
+                NodeGateDecision {
+                    verdict: ModeVerdict::Off,
+                    vocabulary: None,
+                    source_directory: None,
+                }
+            }
+            TierFactRow::Strict(Some(v)) if v.fallback().is_some() => NodeGateDecision {
                 verdict: ModeVerdict::Gate,
                 vocabulary: Some(v),
                 source_directory: strict_source_dir,
             },
-            None => NodeGateDecision {
+            TierFactRow::Strict(vocab) => NodeGateDecision {
+                verdict: ModeVerdict::StrictNoVocab,
+                vocabulary: vocab,
+                source_directory: strict_source_dir,
+            },
+            TierFactRow::Unreadable => NodeGateDecision {
                 verdict: ModeVerdict::StrictNoVocab,
                 vocabulary: None,
                 source_directory: strict_source_dir,
@@ -1191,26 +1201,7 @@ pub fn resolve_node_gate_decision(
 
     // Rung 4 — tier_fact itself.
     match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
-        Ok(o) if o.mode == "strict" => {
-            let vocab = o.manifest.as_ref().map(NodeVocabulary::from_manifest);
-            let strict_with_no_fallback = match &vocab {
-                Some(v) => v.fallback().is_none(),
-                None => true,
-            };
-            if strict_with_no_fallback {
-                NodeGateDecision {
-                    verdict: ModeVerdict::StrictNoVocab,
-                    vocabulary: vocab,
-                    source_directory: None,
-                }
-            } else {
-                NodeGateDecision {
-                    verdict: ModeVerdict::Gate,
-                    vocabulary: vocab,
-                    source_directory: None,
-                }
-            }
-        }
+        Ok(o) if o.mode == "strict" => strict_row_decision(o.manifest.as_ref()),
         Ok(_) => {
             // Unmarked/off tier_fact row: §2.3.1 SKIP — UNLESS the entity's
             // own manifest row was unreadable: r4-m4's Held promise (no
@@ -1298,6 +1289,49 @@ pub fn resolve_production_gate(
     (node.clone().into_gate_decision(), node)
 }
 
+/// The same ladder as [`resolve_production_gate`], strictly READ-ONLY (no
+/// watermark stamp, no transaction): what a mint WOULD resolve to. For
+/// previews that must agree with the apply they describe.
+pub fn preview_production_gate(
+    conn: &Connection,
+    policy: &crate::config::IngestPolicy,
+    entity_id: &str,
+    source_paths: &[String],
+) -> GateDecision {
+    let degraded = policy.ontology_degraded_state();
+    let ctx = GateResolutionContext {
+        ingest: &policy.tiers,
+        degraded: &degraded,
+        schema: policy.ontology_selection,
+        schema_unparseable: policy.ontology_unparseable,
+        vault_root: policy.vault_root.as_deref(),
+    };
+    resolve_node_gate_decision(conn, entity_id, source_paths, ctx).into_gate_decision()
+}
+
+/// Land a mint the gate SKIPped (the shared insert helper does not insert
+/// on Skip). No gate ran, so there is no vocabulary to violate: the
+/// caller's label lands verbatim, the pre-existing `'concept'` literal only
+/// when there is none (§2.5 / r2-M2a). The LLM and GUI mint paths share
+/// this; bundle import and okf_migration keep their own literal landings
+/// (no label to carry, §2.5).
+pub(crate) fn land_skipped_entity(
+    tx: &ImmediateTx<'_>,
+    id: &str,
+    name: &str,
+    label: Option<&str>,
+    summary: &str,
+    now_secs: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO curated_entities (
+            id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at
+         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5, NULL)",
+        params![id, name, label.unwrap_or("concept"), summary, now_secs],
+    )?;
+    Ok(())
+}
+
 /// The SINGLE origin-ledger writer for gate outcomes shared by the insert
 /// sites (fix-round-1 I3; replaces the former per-site copies in
 /// `commit.rs` / `entities.rs`). Row shape per the R2.4.6 r21 table:
@@ -1355,13 +1389,23 @@ pub fn write_gate_origin_ledger(
     Ok(())
 }
 
-/// Look up the tier_fact vocabulary (the rung 4 fallback when a strict rung
-/// 2/3 fires). Memoized per-call: rung 2 may deliver a strict verdict, but
-/// the tier_fact `wiki_get_ontology` runs at most ONCE per gate resolution.
-fn tier_fact_vocabulary(conn: &Connection) -> Option<NodeVocabulary> {
+/// The `tier_fact` manifest row as the mode-vs-vocabulary rule (r9-M1)
+/// needs it: strict (with its vocabulary, if the manifest parses), present
+/// but not strict / absent, or unreadable.
+#[derive(Debug, PartialEq, Eq)]
+enum TierFactRow {
+    Strict(Option<NodeVocabulary>),
+    NotStrict,
+    Unreadable,
+}
+
+fn tier_fact_row_state(conn: &Connection) -> TierFactRow {
     match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
-        Ok(o) if o.mode == "strict" => o.manifest.as_ref().map(NodeVocabulary::from_manifest),
-        _ => None,
+        Ok(o) if o.mode == "strict" => {
+            TierFactRow::Strict(o.manifest.as_ref().map(NodeVocabulary::from_manifest))
+        }
+        Ok(_) => TierFactRow::NotStrict,
+        Err(_) => TierFactRow::Unreadable,
     }
 }
 
@@ -2697,6 +2741,60 @@ mod tests {
         );
         assert_eq!(node.verdict, ModeVerdict::Off);
         assert_eq!(node.source_directory.as_deref(), Some("ops/a.md"));
+    }
+
+    /// The same ladder on a brain with NO `tier_fact` row at all.
+    fn ladder_without_tier_fact(
+        ingest: &crate::config::IngestConfig,
+        degraded: &crate::config::OntologyDegradedState,
+        source_paths: &[String],
+    ) -> NodeGateDecision {
+        let conn = open_in_memory().unwrap();
+        conn.execute("DELETE FROM llm_wiki_entity_manifests", [])
+            .unwrap();
+        let ctx = GateResolutionContext {
+            ingest,
+            degraded,
+            schema: None,
+            schema_unparseable: false,
+            vault_root: None,
+        };
+        resolve_node_gate_decision(&conn, "ent_new", source_paths, ctx)
+    }
+
+    /// r9-M1 mode vs vocabulary: a strict folder supplies a MODE only; with
+    /// no `tier_fact` vocabulary row the mint SKIPs (+ census warning), it
+    /// is not a §2.4.5 hold. Matrix: fresh brain + strict + one mint.
+    #[test]
+    fn strict_folder_without_tier_fact_row_skips() {
+        let mut ingest = crate::config::IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("people".to_string(), crate::config::OntologyMode::Strict);
+        let node = ladder_without_tier_fact(
+            &ingest,
+            &crate::config::OntologyDegradedState::default(),
+            &["people/x.md".to_string()],
+        );
+        assert_eq!(node.verdict, ModeVerdict::Off);
+        assert_eq!(node.into_gate_decision(), GateDecision::Skip);
+    }
+
+    /// r10-MINOR-2: the vocabulary check runs FIRST — a degraded-config
+    /// hold is moot with no `tier_fact` row (fresh brain + typo → SKIP),
+    /// while the same degraded config over a strict row still holds.
+    #[test]
+    fn degraded_hold_is_moot_without_tier_fact_row() {
+        let degraded = crate::config::OntologyDegradedState {
+            global: true,
+            ..Default::default()
+        };
+        let node =
+            ladder_without_tier_fact(&crate::config::IngestConfig::default(), &degraded, &[]);
+        assert_eq!(node.verdict, ModeVerdict::Off);
+        let node =
+            ladder_with_strict_tier_fact(&crate::config::IngestConfig::default(), &degraded, &[]);
+        assert_eq!(node.verdict, ModeVerdict::StrictNoVocab);
     }
 
     /// R2.3.3 strict-wins: an off source never downgrades an entity whose

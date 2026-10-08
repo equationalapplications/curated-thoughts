@@ -40,7 +40,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::db::entity_gate::ImmediateTx;
-use crate::db::heal_ontology::{read_watermark, DriftFlag, DriftReport, ALIAS_REMAP_MARKER_KEY};
+use crate::db::heal_ontology::{DriftFlag, DriftReport, ALIAS_REMAP_MARKER_KEY};
 
 /// Why a group was not auto-merged (review-queue disposition).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -171,26 +171,16 @@ fn run(
     // 1. Drift compare (R2.2.8). The live hash is computed exactly as heal
     //    computes it; first run (no row) → no report (r7-m4).
     let policy = crate::config::ingest_policy_for_db(conn.path());
-    let live_hash = crate::config::ontology_config_watermark_hash(
-        &policy.tiers,
-        policy.ontology_selection,
-        policy.ontology_unparseable,
-    );
-    if let Some((old_hash, old_ts)) = read_watermark(conn)? {
-        if old_hash != live_hash {
-            report.drift = Some(DriftReport {
-                old_hash: old_hash.clone(),
-                old_stamped_at: old_ts,
-                new_hash: live_hash.clone(),
-                confirmed: false,
-                waived: false,
-            });
-            eprintln!(
-                "merge-duplicates: ontology drift pending (old {old_hash} stamped_at \
-                 {old_ts} vs live {live_hash}); confirm with --confirm-drift {old_hash} \
-                 or acknowledge with --waive-drift {old_hash}"
-            );
-        }
+    report.drift = crate::db::heal_ontology::drift_report(conn, &policy)?;
+    if let Some(d) = &report.drift {
+        eprintln!(
+            "merge-duplicates: ontology drift pending (old {old} stamped_at {ts} vs \
+             live {new}); confirm with --confirm-drift {old} or acknowledge with \
+             --waive-drift {old}",
+            old = d.old_hash,
+            ts = d.old_stamped_at,
+            new = d.new_hash,
+        );
     }
 
     // 2. Grouping + disposition (identical for report and apply arms —
@@ -221,47 +211,18 @@ fn run(
         );
         return Ok(());
     }
-    match (&report.drift, &flag) {
-        (Some(_), DriftFlag::None) => {
-            report.skipped_reason = Some("unconfirmed_drift".into());
-            eprintln!(
-                "merge-duplicates: unconfirmed drift report — destructive pass \
-                 refused this run (R2.2.8 FINAL RULE)"
-            );
-            return Ok(());
-        }
-        (Some(d), DriftFlag::Confirm(h)) | (Some(d), DriftFlag::Waive(h)) => {
-            if h != &d.old_hash {
-                eprintln!(
-                    "merge-duplicates: drift flag {h:?} does not match the echoed old \
-                     hash {} — echoed pair NOT confirmed",
-                    d.old_hash
-                );
-                report.skipped_reason = Some("unconfirmed_drift".into());
-                return Ok(());
-            }
-            // Both flags clear the FINAL-RULE block for MERGES (R2.2.8):
-            // drift concerns the ontology config, not name grouping. The
-            // watermark is NEVER written here — heal is the sole writer.
-            if let DriftFlag::Waive(_) = flag {
-                report.drift = report.drift.take().map(|mut d| {
-                    d.waived = true;
-                    d
-                });
-            } else {
-                report.drift = report.drift.take().map(|mut d| {
-                    d.confirmed = true;
-                    d
-                });
-            }
-        }
-        (None, DriftFlag::Confirm(_)) | (None, DriftFlag::Waive(_)) => {
-            eprintln!(
-                "merge-duplicates: no drift report fired this run — \
-                 --confirm-drift/--waive-drift ignored"
-            );
-        }
-        (None, DriftFlag::None) => {}
+    // Both flags clear the FINAL-RULE block for MERGES (R2.2.8): drift
+    // concerns the ontology config, not name grouping. The watermark is
+    // NEVER written here — heal is the sole writer.
+    if crate::db::heal_ontology::check_drift_flag(&mut report.drift, &flag, "merge-duplicates")
+        == crate::db::heal_ontology::DriftCheck::Unconfirmed
+    {
+        report.skipped_reason = Some("unconfirmed_drift".into());
+        eprintln!(
+            "merge-duplicates: unconfirmed drift report — destructive pass \
+             refused this run (R2.2.8 FINAL RULE)"
+        );
+        return Ok(());
     }
 
     // 4. Apply: ONE ImmediateTx per merge GROUP (never one per sweep).
@@ -272,6 +233,25 @@ fn run(
         }
         if apply_group(conn, &group, report) {
             report.merged_groups += 1;
+        }
+    }
+
+    // 5. Cycle census, ONCE per sweep (r2-m6): a hand-crafted redirect
+    //    loop anywhere in the table is reported, never looped. Per-group
+    //    compression only re-walks rows pointing at that group's losers,
+    //    so the whole-table walk lives here rather than in every group.
+    let ids: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT entity_id FROM entity_redirects")?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        rows
+    };
+    for id in ids {
+        if let ChainResolution::Cycle(at) = resolve_redirect_chain(conn, &id)? {
+            if !report.cycles.contains(&at) {
+                report.cycles.push(at);
+            }
         }
     }
     Ok(())
@@ -572,7 +552,7 @@ fn write_group_redirects(
     //    that is SHOWN with its original attributes, but listed here so
     //    the user can prune. Never auto-hidden, never dropped.
     {
-        let placeholders = vec!["?"; group.members.len()].join(",");
+        let placeholders = crate::db::entities::in_placeholders(&group.members);
         let sql = format!(
             "SELECT id, source_id, target_id FROM llm_wiki_edges
              WHERE source_id != target_id
@@ -592,15 +572,21 @@ fn write_group_redirects(
         }
     }
 
-    // 3. Path compression (r2-m6): EVERY pre-existing row is re-resolved
-    //    through the fresh rows (visible inside this tx) and rewritten to
-    //    its FINAL survivor (A→B, B merges into C ⇒ A rewrites to A→C;
-    //    deeper chains flatten in the same pass). A chain that loops is
-    //    recorded in `cycles` and left untouched — reported, never
-    //    looped, never rewritten onto itself.
+    // 3. Path compression (r2-m6): every pre-existing row that points at
+    //    one of THIS group's losers is re-resolved through the fresh rows
+    //    (visible inside this tx) and rewritten to its FINAL survivor
+    //    (A→B, B merges into C ⇒ A rewrites to A→C). Chains are flat at
+    //    rest (each merge compresses), so only rows targeting a fresh
+    //    loser can have grown a hop — re-walking the whole table per group
+    //    made a sweep quadratic inside each group's write lock. A chain
+    //    that loops is recorded in `cycles` and left untouched — reported,
+    //    never looped, never rewritten onto itself.
     let rows: Vec<(String, String)> = {
-        let mut stmt = tx.prepare("SELECT entity_id, merged_into FROM entity_redirects")?;
-        let mut rs = stmt.query([])?;
+        let mut stmt = tx.prepare(&format!(
+            "SELECT entity_id, merged_into FROM entity_redirects WHERE merged_into IN ({})",
+            crate::db::entities::in_placeholders(&group.losers)
+        ))?;
+        let mut rs = stmt.query(rusqlite::params_from_iter(group.losers.iter()))?;
         let mut out = Vec::new();
         while let Some(row) = rs.next()? {
             out.push((row.get(0)?, row.get(1)?));

@@ -229,6 +229,12 @@ pub fn preview_import(
     mode: ImportMode,
 ) -> Result<ImportPreview> {
     let mut entities = Vec::new();
+    let mut warnings = bundle.warnings.clone();
+    // The apply mints every NEW entity through the §2.5 production gate and
+    // aborts atomically on a Held mint; preview resolves the same ladder
+    // (read-only) so it never reports an import the apply will refuse.
+    let policy = crate::config::ingest_policy_for_db(conn.path());
+    let mut held: Vec<String> = Vec::new();
     for entity in &bundle.entities {
         // Task 7: preview resolves bundle source ids through redirects the
         // same way apply does, so a merged-away id previews as its survivor.
@@ -238,6 +244,12 @@ pub fn preview_import(
             "SELECT 1 FROM curated_entities WHERE id=?1",
             &[&resolved],
         )?;
+        if !entity_exists
+            && crate::db::entity_gate::preview_production_gate(conn, &policy, &resolved, &[])
+                == crate::db::entity_gate::GateDecision::Held
+        {
+            held.push(entity.entity_id.clone());
+        }
         let local_summary: Option<String> = conn
             .query_row(
                 "SELECT summary FROM curated_entities WHERE id=?1",
@@ -309,10 +321,20 @@ pub fn preview_import(
             summary_action,
         });
     }
+    if !held.is_empty() {
+        warnings.push(format!(
+            "import will abort: the strict ontology gate would hold {} new entit{} ({}) — \
+             the manifest declares no usable fallback_node_type (§2.4.5); declare one \
+             (`ct ontology set --fallback <type>`) before applying",
+            held.len(),
+            if held.len() == 1 { "y" } else { "ies" },
+            held.join(", ")
+        ));
+    }
     Ok(ImportPreview {
         profile: bundle.profile.clone(),
         entities,
-        warnings: bundle.warnings.clone(),
+        warnings,
     })
 }
 
@@ -1393,6 +1415,30 @@ mod tests {
         assert_eq!(preview.entities[0].facts_new, 0);
         assert_eq!(preview.entities[0].facts_existing, 1);
         assert_eq!(preview.entities[0].events_duplicate, 1);
+    }
+
+    /// Preview and apply agree: on a strict tier_fact with no usable
+    /// fallback the apply aborts on the held mint, so the preview must warn
+    /// instead of reporting the bundle importable.
+    #[test]
+    fn preview_warns_when_apply_would_hold() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', '{\"node_types\":[{\"type\":\"person\"}],\"edge_types\":[]}', 1)",
+            [],
+        )
+        .unwrap();
+        let preview = preview_import(&conn, &sample_bundle(), ImportMode::Merge).unwrap();
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|w| w.contains("import will abort")),
+            "{:?}",
+            preview.warnings
+        );
+        assert!(apply_import(&mut conn, &sample_bundle(), ImportMode::Merge).is_err());
     }
 
     #[test]
