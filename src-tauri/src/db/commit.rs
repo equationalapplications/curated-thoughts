@@ -1938,11 +1938,17 @@ fn commit_fact_archive(
     // Transitive fact closure (r13-m3, review finding): the target row may
     // still be keyed to a redirected loser from before a merge — match the
     // cluster (same rule as `archive_wisdom_in_tx`) instead of bailing,
-    // which would roll back the whole resolution.
+    // which would roll back the whole resolution — and rekey the row to the
+    // survivor in the same UPDATE, so the archived row and the Delete
+    // outbox payload (`entity_id` = survivor) agree on the owner (#132).
     let cluster = crate::db::entities::cluster_ids(conn, &ctx.entity_id)?;
     let cluster_placeholders = vec!["?"; cluster.len()].join(",");
-    let mut archive_params: Vec<Box<dyn rusqlite::types::ToSql>> =
-        vec![Box::new(ctx.now_ms), Box::new(fact_id.to_string())];
+    // ?1 timestamp, ?2 fact id, ?3 survivor rekey, ?4.. the cluster list.
+    let mut archive_params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+        Box::new(ctx.now_ms),
+        Box::new(fact_id.to_string()),
+        Box::new(ctx.entity_id.clone()),
+    ];
     for id in &cluster {
         archive_params.push(Box::new(id.clone()));
     }
@@ -1951,7 +1957,7 @@ fn commit_fact_archive(
     let changes = conn.execute(
         &format!(
             "UPDATE llm_wiki_entries
-             SET deleted_at = ?1, updated_at = ?1
+             SET deleted_at = ?1, updated_at = ?1, entity_id = ?3
              WHERE id = ?2 AND entity_id IN ({cluster_placeholders}) AND deleted_at IS NULL"
         ),
         archive_param_refs.as_slice(),
@@ -2330,7 +2336,9 @@ fn endpoint_edge_vocabulary(
 ///     and heal get report-or-hold).
 ///   * rungs 2–3 — the endpoint's source directories. The vocabulary comes
 ///     from `tier_fact` (the mode-vs-vocabulary rule). Strict-wins across
-///     paths; a mode that resolves off keeps climbing. A rung-2/3 strict
+///     paths; an `off` path loses to any strict path, but when EVERY
+///     path resolves off the endpoint is off (`None`) — a strict rung-4
+///     tier_fact never overrides it (R2.3.0 / §2.3). A rung-2/3 strict
 ///     verdict with no strict `tier_fact` vocabulary disarms (mode = GATE +
 ///     no vocabulary row → SKIP + census warning, mirroring §2.1).
 ///   * rung 4 — `tier_fact` itself (unmarked/off row → `None`, §2.3.1).
@@ -2369,10 +2377,17 @@ fn resolve_endpoint_ladder(
     // gate walked for it (R2.3.4).
     let mut paths = endpoint_fact_source_paths(conn, &ladder_id)?;
     if paths.is_empty() && ladder_id == proposal_entity_id {
-        if let Ok(trigger) = load_proposal_source_paths(conn, proposal_id) {
-            paths = trigger;
-        }
+        // DB faults PROPAGATE (review finding / R2.3.2a, same rule as
+        // `endpoint_fact_source_paths`): swallowing one here would leave
+        // the proposal entity's rung-2 inputs empty and silently disarm the
+        // strict edge gate.
+        paths = load_proposal_source_paths(conn, proposal_id)?;
     }
+    // §2.3 "first hit decides" / R2.3.0: an endpoint whose EVERY source
+    // resolves `off` is off — a strict rung-4 tier_fact never overrides it.
+    // Any climbing (or held) source reaches rung 4, so strict-wins there.
+    let mut off_found = false;
+    let mut reaches_rung_4 = paths.is_empty();
     for path in &paths {
         match gate.ingest.ontology_lookup(
             path,
@@ -2393,7 +2408,8 @@ fn resolve_endpoint_ladder(
                 });
             }
             crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Off) => {
-                // Off loses to a strict rung (R2.3.3) — keep climbing.
+                // Off loses to a strict rung (R2.3.3) — keep looking.
+                off_found = true;
                 continue;
             }
             // Degraded-config Hold: the edge gate keeps today's posture
@@ -2401,9 +2417,13 @@ fn resolve_endpoint_ladder(
             // §2.2.4 scoped hold is the node gate's. Falls through to
             // rung 4, which still gates under `tier_fact` when strict.
             crate::config::OntologyLookup::Hold | crate::config::OntologyLookup::Climb => {
+                reaches_rung_4 = true;
                 continue;
             }
         }
+    }
+    if off_found && !reaches_rung_4 {
+        return Ok(None);
     }
 
     // Rung 4 — tier_fact itself.
@@ -2460,13 +2480,16 @@ fn endpoint_fact_source_paths(conn: &Connection, endpoint_id: &str) -> Result<Ve
             Ok((r.get(0)?, r.get(1)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
+    // Ordered output + a HashSet shadow for O(1) dedup (review finding: a
+    // `Vec::contains` scan made this quadratic inside the IMMEDIATE tx).
     let mut paths: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (entry_id, source_ref) in &facts {
-        if let Ok(crate::db::entities::SourceResolution::Resolved(resolved)) =
-            crate::db::entities::resolve_source_core(conn, entry_id, source_ref.as_deref())
+        if let crate::db::entities::SourceResolution::Resolved(resolved) =
+            crate::db::entities::resolve_source_core(conn, entry_id, source_ref.as_deref())?
         {
             for (path, _) in resolved {
-                if !paths.contains(&path) {
+                if seen.insert(path.clone()) {
                     paths.push(path);
                 }
             }
@@ -3700,7 +3723,8 @@ mod tests {
     }
 
     /// Same rule for archive (review finding): a loser-keyed fact_archive
-    /// target must archive instead of bailing the resolution.
+    /// target must archive instead of bailing the resolution, and rekey to
+    /// the survivor so the row agrees with its Delete outbox payload (#132).
     #[test]
     fn fact_archive_targets_loser_keyed_row() {
         let conn = open_in_memory().unwrap();
@@ -3717,14 +3741,30 @@ mod tests {
         let item = test_item("item-2", "fact_archive", Some("fact_b"));
         commit_fact_archive(&conn, &mut ctx, &item).unwrap();
 
-        let deleted_at: Option<i64> = conn
+        let (entity_id, deleted_at): (String, Option<i64>) = conn
             .query_row(
-                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'fact_b'",
+                "SELECT entity_id, deleted_at FROM llm_wiki_entries WHERE id = 'fact_b'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(deleted_at.is_some(), "the loser-keyed row is archived");
+        assert_eq!(
+            entity_id, "ent-1",
+            "the archived row is rekeyed to the survivor"
+        );
+        let outbox_payload: String = conn
+            .query_row(
+                "SELECT payload FROM llm_wiki_outbox WHERE record_id = 'fact_b'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(deleted_at.is_some(), "the loser-keyed row is archived");
+        let payload: serde_json::Value = serde_json::from_str(&outbox_payload).unwrap();
+        assert_eq!(
+            payload["entity_id"], "ent-1",
+            "outbox owner matches the row"
+        );
     }
 
     #[test]
@@ -6880,6 +6920,71 @@ mod tests {
         }
     }
 
+    /// R2.3.0 "both endpoints resolve off → SKIP" (§2.3 rung 2: off =
+    /// SKIP, first hit decides): endpoints whose every source sits under an
+    /// `off` folder disarm the edge gate even when tier_fact is strict —
+    /// pre-fix, an off path "kept climbing" to the strict rung 4.
+    #[test]
+    fn all_off_source_endpoints_skip_despite_strict_tier_fact() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent_a", "A", "summary", 100);
+        seed_entity(&conn, "ent_b", "B", "summary", 100);
+        let doc_id = seed_document(&conn, "ops/runbook.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        // `seed_chunk` writes an empty content_hash, which never resolves —
+        // give the chunk a real one so rung 2 actually sees the path.
+        conn.execute(
+            "UPDATE chunks SET content_hash = 'h_off_runbook' WHERE id = ?1",
+            [chunk_id],
+        )
+        .unwrap();
+        let content_hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let source_ref = serde_json::json!({
+            "evidence": [{ "content_hash": content_hash }]
+        })
+        .to_string();
+        for (fact, ent) in [("fact_a", "ent_a"), ("fact_b", "ent_b")] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type,
+                    source_ref, created_at, updated_at
+                 ) VALUES (?1, ?2, 't', 'body', '[]',
+                           'inferred', 'librarian_inferred', ?3, 100, 100)",
+                params![fact, ent, source_ref],
+            )
+            .unwrap();
+        }
+        seed_manifest(
+            &conn,
+            "tier_fact",
+            "strict",
+            &["thing"],
+            &[("depends_on", "thing", "thing")],
+        );
+
+        let mut ingest = crate::config::IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".to_string(), crate::config::OntologyMode::Off);
+        let degraded = crate::config::OntologyDegradedState::default();
+        let gate = edge_gate_ctx(&ingest, &degraded);
+        let mut ctx = edge_test_ctx("ent_a");
+
+        let outcome =
+            resolve_edge_endpoint_vocabulary(&conn, "ent_a", "ent_a", "ent_b", &mut ctx, &gate)
+                .unwrap();
+        assert!(
+            outcome.is_none(),
+            "both endpoints off → the edge gate must SKIP, not climb to tier_fact"
+        );
+    }
+
     /// §6 item 1b (R2.3.0 rungs 2–3): an endpoint whose SOURCE DIRECTORY
     /// resolves a strict `folder_ontology` prefix gates the edge under the
     /// `tier_fact` vocabulary (mode-vs-vocabulary rule) — even when the
@@ -6897,6 +7002,13 @@ mod tests {
         // the strict `ops/` folder (the rung-2 walk resolves its source).
         let doc_id = seed_document(&conn, "/vault/ops/runbook.md");
         let chunk_id = seed_chunk(&conn, doc_id);
+        // `seed_chunk` writes an empty content_hash, which never resolves —
+        // give the chunk a real one so rung 2 actually sees the path.
+        conn.execute(
+            "UPDATE chunks SET content_hash = 'h_strict_runbook' WHERE id = ?1",
+            [chunk_id],
+        )
+        .unwrap();
         let content_hash: String = conn
             .query_row(
                 "SELECT content_hash FROM chunks WHERE id = ?1",

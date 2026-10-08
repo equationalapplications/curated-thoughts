@@ -76,7 +76,10 @@ pub struct MergeDuplicatesReport {
     pub drift: Option<DriftReport>,
     /// Every duplicate group found this run, in byte-wise id order.
     pub groups: Vec<MergeGroup>,
-    /// Groups auto-merged (dry run: that WOULD merge).
+    /// Groups auto-merged. Dry run: groups that WOULD merge. `--yes`:
+    /// groups whose redirects actually COMMITTED this run (review finding)
+    /// — 0 when the destructive pass is refused (`skipped_reason`), and a
+    /// refused/rolled-back group is not counted.
     pub merged_groups: usize,
     /// Groups queued for a Kurt ruling.
     pub queued_groups: usize,
@@ -213,6 +216,9 @@ fn run(
     if !apply {
         return Ok(());
     }
+    // From here `merged_groups` means APPLIED: a refusal below must not
+    // report the planned merges as done (the groups list still shows them).
+    report.merged_groups = 0;
     if matches!(merge_precondition(conn), MergePrecondition::RemapNotRun) {
         report.skipped_reason = Some("alias_remap_not_run".into());
         eprintln!(
@@ -266,11 +272,14 @@ fn run(
     }
 
     // 4. Apply: ONE ImmediateTx per merge GROUP (never one per sweep).
+    //    `merged_groups` counts only groups that COMMITTED.
     for group in report.groups.clone() {
         if group.queued.is_some() {
             continue;
         }
-        apply_group(conn, &group, report)?;
+        if apply_group(conn, &group, report)? {
+            report.merged_groups += 1;
+        }
     }
     Ok(())
 }
@@ -454,11 +463,13 @@ pub fn resolve_redirect_chain(conn: &Connection, entity_id: &str) -> Result<Chai
 /// resolved self-loop edges for the report (R2.7.5). A hand-crafted cycle
 /// touching this group's chains is recorded in `report.cycles` and left
 /// untouched — it must not loop or fail the group's transaction.
+/// Returns whether the group's redirects COMMITTED (`false` = refused or
+/// rolled back; the reason is on `report`).
 fn apply_group(
     conn: &mut Connection,
     group: &MergeGroup,
     report: &mut MergeDuplicatesReport,
-) -> Result<()> {
+) -> Result<bool> {
     // Defensive cycle guard: the grouping scan excludes redirected rows,
     // so the survivor cannot carry a redirect row — if hand-edited data
     // made it one, refuse this group loudly rather than write a loop.
@@ -470,7 +481,7 @@ fn apply_group(
                  group refused",
                 group.survivor
             );
-            return Ok(());
+            return Ok(false);
         }
         ChainResolution::None => {}
         ChainResolution::Survivor(_) => {
@@ -479,7 +490,7 @@ fn apply_group(
                  (re-run the sweep)",
                 group.survivor
             );
-            return Ok(());
+            return Ok(false);
         }
     }
 
@@ -504,7 +515,7 @@ fn apply_group(
             // group — a failure must not poison unrelated groups).
             tx.rollback()?;
             report.error = Some(format!("group {} failed: {e:#}", group.survivor));
-            return Ok(());
+            return Ok(false);
         }
         Ok(()) => {
             tx.commit()?;
@@ -514,7 +525,7 @@ fn apply_group(
             report.self_loops.extend(self_loops);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 #[allow(clippy::type_complexity)]
@@ -988,11 +999,17 @@ mod tests {
         seed(&conn, "e1", "Adrian", "concept", "s");
         seed(&conn, "e2", "Adrian", "concept", "s");
 
-        // No flag → refused.
+        // Report arm: merged_groups is the PLANNED count.
+        let r = merge_duplicates_pass(&mut conn, DriftFlag::None, false);
+        assert_eq!(r.merged_groups, 1, "{r:?}");
+
+        // No flag → refused; nothing merged, so nothing counted as merged.
         let r = merge_duplicates_pass(&mut conn, DriftFlag::None, true);
         assert_eq!(r.skipped_reason.as_deref(), Some("unconfirmed_drift"));
         assert_eq!(r.drift.as_ref().unwrap().old_hash, "deadbeef");
         assert_eq!(redirect_count(&conn), 0);
+        assert_eq!(r.merged_groups, 0, "a refused pass applied no merge: {r:?}");
+        assert_eq!(r.groups.len(), 1, "the planned group is still listed");
 
         // Wrong hash → still unconfirmed.
         let r = merge_duplicates_pass(&mut conn, DriftFlag::Confirm("beef".into()), true);
@@ -1004,6 +1021,7 @@ mod tests {
         assert_eq!(r.skipped_reason, None, "{r:?}");
         assert!(r.drift.as_ref().unwrap().confirmed);
         assert_eq!(redirect_count(&conn), 1);
+        assert_eq!(r.merged_groups, 1, "the applied group is counted");
         let v: String = conn
             .query_row(
                 "SELECT value FROM llm_wiki_meta WHERE key = ?1",

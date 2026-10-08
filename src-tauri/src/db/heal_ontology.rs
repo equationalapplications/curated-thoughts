@@ -307,16 +307,22 @@ fn run_inner(
     if bookkeeping {
         match crate::db::entity_gate::ensure_all_manifest_vocabularies(conn) {
             Ok(s) => {
-                if s.extended + s.fallbacks_set + s.foreign_no_preferred_fallback + s.malformed > 0
+                if s.extended
+                    + s.fallbacks_set
+                    + s.foreign_no_preferred_fallback
+                    + s.malformed
+                    + s.raced
+                    > 0
                 {
                     eprintln!(
                         "ontology ensure: visited={} extended={} fallbacks_set={} \
-                         foreign_no_preferred_fallback={} malformed={}",
+                         foreign_no_preferred_fallback={} malformed={} raced={}",
                         s.visited,
                         s.extended,
                         s.fallbacks_set,
                         s.foreign_no_preferred_fallback,
-                        s.malformed
+                        s.malformed,
+                        s.raced
                     );
                 }
             }
@@ -405,13 +411,18 @@ fn remap_pass(
 
     for (id, entity_type) in rows {
         // Conservative per-entity rollup (R2.3.2): resolve EVERY live
-        // fact's source through the shared core.
+        // fact's source through the shared core. A merge writes redirect
+        // rows only, so facts can stay keyed to a LOSER — expand to the
+        // whole redirect cluster (the coverage `endpoint_fact_source_paths`
+        // uses) or a loser's off-directory source never reaches R2.3.6.
         let facts: Vec<(String, Option<String>)> = {
-            let mut stmt = conn.prepare(
+            let cluster = crate::db::entities::cluster_ids(conn, &id)?;
+            let cluster_placeholders = vec!["?"; cluster.len()].join(",");
+            let mut stmt = conn.prepare(&format!(
                 "SELECT id, source_ref FROM llm_wiki_entries
-                 WHERE entity_id = ?1 AND deleted_at IS NULL",
-            )?;
-            let mut rs = stmt.query([&id])?;
+                 WHERE entity_id IN ({cluster_placeholders}) AND deleted_at IS NULL"
+            ))?;
+            let mut rs = stmt.query(rusqlite::params_from_iter(cluster.iter()))?;
             let mut out = Vec::new();
             while let Some(row) = rs.next()? {
                 out.push((row.get(0)?, row.get(1)?));
@@ -646,45 +657,15 @@ fn ensure_pending_readonly(conn: &Connection) -> Result<(usize, usize)> {
     let mut would_write = 0;
     let mut foreign_no_choice = 0;
     for manifest_json in rows {
-        let Ok(root) = serde_json::from_str::<serde_json::Value>(&manifest_json) else {
-            continue; // Malformed: the ensure leaves it alone.
-        };
-        let declared: Vec<String> = root
-            .get("node_types")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let declared_lower: std::collections::HashSet<String> =
-            declared.iter().map(|s| NodeVocabulary::key(s)).collect();
-        let is_ea_subset = crate::db::entity_gate::EA_SEED_TYPES
-            .iter()
-            .all(|seed| declared_lower.contains(&NodeVocabulary::key(seed)));
-        let has_fallback = root
-            .get("fallback_node_type")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .is_some_and(|s| !s.is_empty());
-        let choice = if declared_lower.contains("concept") {
-            true
-        } else {
-            declared_lower.contains("project")
-        };
-        if is_ea_subset {
-            let missing_doc = !declared_lower.contains("document");
-            let missing_proc = !declared_lower.contains("process");
-            if missing_doc || missing_proc || (!has_fallback && choice) {
-                would_write += 1;
+        // The SAME pure planner the real ensure runs — the read-only report
+        // cannot drift from what `--yes` writes.
+        match crate::db::entity_gate::plan_manifest_ensure(&manifest_json)? {
+            crate::db::entity_gate::EnsurePlan::Edit { .. } => would_write += 1,
+            crate::db::entity_gate::EnsurePlan::ForeignNoPreferredFallback => {
+                foreign_no_choice += 1
             }
-        } else if !has_fallback {
-            if choice {
-                would_write += 1;
-            } else {
-                foreign_no_choice += 1;
-            }
+            crate::db::entity_gate::EnsurePlan::Malformed(_)
+            | crate::db::entity_gate::EnsurePlan::Complete => {}
         }
     }
     Ok((would_write, foreign_no_choice))
@@ -1025,8 +1006,8 @@ mod tests {
         assert_eq!(r.report_only, 1, "{r:?}");
     }
 
-    /// R2.3.6: an entity with an off-directory source is queue-only, never
-    /// auto-retyped.
+    /// R2.3.6 matrix: an off-minted entity that later GAINS a strict
+    /// source (strict-wins → GATE) is queue-only, never auto-retyped.
     #[test]
     fn off_sourced_entity_queues_not_retypes() {
         let mut conn = open_in_memory().unwrap();
@@ -1054,6 +1035,10 @@ mod tests {
             "e1",
             Some(r#"{"evidence":[{"content_hash":"abc123"}]}"#),
         );
+        // The later strict source: outside the off folder, it climbs to the
+        // strict tier_fact residual rung.
+        seed_grounded_doc(&conn, "notes/b.md", "def456");
+        seed_evidence_fact(&conn, "e1", "def456");
         let mut ingest = IngestConfig::default();
         ingest
             .folder_ontology
@@ -1062,6 +1047,54 @@ mod tests {
         assert_eq!(r.retyped, 0, "{r:?}");
         assert_eq!(r.queued, 1, "{r:?}");
         assert_eq!(entity_type(&conn, "e1"), "agent");
+    }
+
+    /// §2.3 rung 2 "off = SKIP": an entity whose EVERY source sits under an
+    /// off folder is ungated — a strict tier_fact never overrides it, so
+    /// heal neither retypes nor queues it.
+    #[test]
+    fn all_off_sourced_entity_is_ungated_for_heal() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+        seed_grounded_doc(&conn, "ops/a.md", "abc123");
+        seed_evidence_fact(&conn, "e1", "abc123");
+        let mut ingest = IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".into(), OntologyMode::Off);
+        let r = run_with(&mut conn, &ingest, DriftFlag::None, true);
+        assert_eq!((r.retyped, r.queued), (0, 0), "{r:?}");
+        assert_eq!(entity_type(&conn, "e1"), "agent");
+    }
+
+    /// Review finding: the census expands the redirect cluster — a merge
+    /// survivor whose only off-directory fact stays keyed to the LOSER is
+    /// still R2.3.6 queue-only, never auto-retyped via its own facts.
+    #[test]
+    fn census_sees_loser_keyed_off_source() {
+        let mut conn = open_in_memory().unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "a", "agent");
+        seed_entity(&conn, "b", "agent");
+        // Survivor `a` has a strict-climbing source; loser `b` an off one.
+        seed_grounded_doc(&conn, "notes/a.md", "aaa111");
+        seed_evidence_fact(&conn, "a", "aaa111");
+        seed_grounded_doc(&conn, "ops/b.md", "bbb222");
+        seed_evidence_fact(&conn, "b", "bbb222");
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at) VALUES ('b', 'a', 1)",
+            [],
+        )
+        .unwrap();
+        let mut ingest = IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".into(), OntologyMode::Off);
+        let r = run_with(&mut conn, &ingest, DriftFlag::None, true);
+        assert_eq!(r.retyped, 0, "{r:?}");
+        assert_eq!(r.queued, 1, "{r:?}");
+        assert_eq!(entity_type(&conn, "a"), "agent");
     }
 
     /// R2.4.6 surfacing: a `gate_skipped` ledger row on a drifted entity

@@ -522,49 +522,33 @@ pub fn single_hop_redirect(
     })
 }
 
-/// Idempotent ensure step (spec §2.4.4, plan-p10-m4).
-///
-/// Adds `document` and `process` to a manifest that already declares every EA
-/// seed slug (subset guard), and writes `fallback_node_type` (preferring
-/// `concept` if declared, otherwise `project`) under the SAME guard.
-///
-/// Foreign manifests (not a subset of `EA_SEED_TYPES`) get the fallback-only
-/// declare-or-report treatment: do nothing on the manifest itself, but record
-/// the loud diagnostic. The full `document`+`process` injection is reserved
-/// for the EA seed family.
-///
-/// Best-effort at `AppDb::open_with_config` — log on failure, never fail the
-/// open. Memoization key is `(entity_id, sha256(manifest_json))` and is
-/// recorded ONLY after the write commits (r11-m4). In a contended read-only
-/// open the ensure's write may fail; callers can fall back to in-memory
-/// vocabulary computation.
-pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<EnsureOutcome> {
-    // 1. Read the existing row.
-    let row: Option<(String, String)> = conn
-        .query_row(
-            "SELECT mode, manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
-            [entity_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((_mode, manifest_json)) = row else {
-        // No row to ensure — the spec's "missing row" case is a normal
-        // SKIP per §2.1.
-        return Ok(EnsureOutcome::NoRow);
-    };
+/// The ensure's pure decision (§2.4.4): what [`ensure_manifest_vocabulary`]
+/// WOULD do to `manifest_json`, without touching the database. The single
+/// owner of the subset guard / fallback preference / `document`+`process`
+/// extension rules — the read-only `ct heal` report derives from this too
+/// (review finding: a hand-rolled second copy could silently diverge).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EnsurePlan {
+    /// Unparseable manifest_json — never guess, leave alone.
+    Malformed(String),
+    /// Nothing to change.
+    Complete,
+    /// Foreign manifest with no declared fallback and no preferred choice.
+    ForeignNoPreferredFallback,
+    /// The edited manifest to write back.
+    Edit {
+        new_json: String,
+        extended: bool,
+        fallback_set: bool,
+    },
+}
 
-    // 2. Memoization: skip if (entity_id, sha256(manifest_json)) is recorded.
-    let manifest_hash = hash_bytes(manifest_json.as_bytes());
-    if manifest_ensure_already_done(conn, entity_id, &manifest_hash)? {
-        return Ok(EnsureOutcome::AlreadyEnsured);
-    }
-
-    // 3. Parse, classify, edit.
-    let mut root: serde_json::Value = match serde_json::from_str(&manifest_json) {
+pub(crate) fn plan_manifest_ensure(manifest_json: &str) -> Result<EnsurePlan> {
+    let mut root: serde_json::Value = match serde_json::from_str(manifest_json) {
         Ok(v) => v,
         Err(e) => {
             // Malformed manifest_json: never guess — leave alone.
-            return Ok(EnsureOutcome::Malformed(format!("{e}")));
+            return Ok(EnsurePlan::Malformed(format!("{e}")));
         }
     };
 
@@ -647,9 +631,7 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
             .filter(|s| !s.is_empty())
             .map(str::to_string);
         if existing_fallback.is_none() && fallback_choice.is_none() {
-            return Ok(EnsureOutcome::ForeignNoPreferredFallback {
-                entity_id: entity_id.to_string(),
-            });
+            return Ok(EnsurePlan::ForeignNoPreferredFallback);
         }
         // Foreign manifest with a declared fallback — fine. With no declared
         // fallback but `project` declared — declare it. With nothing
@@ -662,12 +644,75 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
         }
     }
 
+    if did_set_fallback || did_extend {
+        Ok(EnsurePlan::Edit {
+            new_json: serde_json::to_string(&root)?,
+            extended: did_extend,
+            fallback_set: did_set_fallback,
+        })
+    } else {
+        Ok(EnsurePlan::Complete)
+    }
+}
+
+/// Idempotent ensure step (spec §2.4.4, plan-p10-m4).
+///
+/// Adds `document` and `process` to a manifest that already declares every EA
+/// seed slug (subset guard), and writes `fallback_node_type` (preferring
+/// `concept` if declared, otherwise `project`) under the SAME guard.
+///
+/// Foreign manifests (not a subset of `EA_SEED_TYPES`) get the fallback-only
+/// declare-or-report treatment: do nothing on the manifest itself, but record
+/// the loud diagnostic. The full `document`+`process` injection is reserved
+/// for the EA seed family.
+///
+/// Best-effort at `AppDb::open_with_config` — log on failure, never fail the
+/// open. Memoization key is `(entity_id, sha256(manifest_json))` and is
+/// recorded ONLY after the write commits (r11-m4). In a contended read-only
+/// open the ensure's write may fail; callers can fall back to in-memory
+/// vocabulary computation.
+pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<EnsureOutcome> {
+    // 1. Read the existing row.
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT mode, manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
+            [entity_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((_mode, manifest_json)) = row else {
+        // No row to ensure — the spec's "missing row" case is a normal
+        // SKIP per §2.1.
+        return Ok(EnsureOutcome::NoRow);
+    };
+
+    // 2. Memoization: skip if (entity_id, sha256(manifest_json)) is recorded.
+    let manifest_hash = hash_bytes(manifest_json.as_bytes());
+    if manifest_ensure_already_done(conn, entity_id, &manifest_hash)? {
+        return Ok(EnsureOutcome::AlreadyEnsured);
+    }
+
+    // 3. Parse, classify, edit (the pure planner).
+    let (new_json, did_extend, did_set_fallback) = match plan_manifest_ensure(&manifest_json)? {
+        EnsurePlan::Malformed(e) => return Ok(EnsureOutcome::Malformed(e)),
+        EnsurePlan::ForeignNoPreferredFallback => {
+            return Ok(EnsureOutcome::ForeignNoPreferredFallback {
+                entity_id: entity_id.to_string(),
+            });
+        }
+        EnsurePlan::Complete => (None, false, false),
+        EnsurePlan::Edit {
+            new_json,
+            extended,
+            fallback_set,
+        } => (Some(new_json), extended, fallback_set),
+    };
+
     // 4. Write the edited manifest_json back + record the memo ONLY if the
     //    write commits (r11-m4). The memo key is the POST-WRITE hash so the
     //    next call reads the new manifest_json, computes its hash, and finds
     //    the memo — short-circuiting to AlreadyEnsured.
-    if did_set_fallback || did_extend {
-        let new_json = serde_json::to_string(&root)?;
+    if let Some(new_json) = new_json {
         let new_hash = hash_bytes(new_json.as_bytes());
         let tx = conn.unchecked_transaction()?;
         // Compare-and-swap on the bytes we READ (review finding): the read
@@ -683,7 +728,9 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
             params![new_json, entity_id, manifest_json],
         )?;
         if changed == 0 {
-            return Ok(EnsureOutcome::AlreadyEnsured);
+            // NOT a success (review finding): the fallback the gate needs
+            // may still be missing — report the race distinctly.
+            return Ok(EnsureOutcome::RacedConcurrentWrite);
         }
         tx.execute(
             "INSERT OR REPLACE INTO manifest_ensure_memo (entity_id, manifest_hash, recorded_at)
@@ -732,6 +779,10 @@ pub enum EnsureOutcome {
     /// Foreign manifest without a preferred-fallback option declared; the
     /// ensure refused to inject and surfaced a §2.4.5 loud diagnostic.
     ForeignNoPreferredFallback { entity_id: String },
+    /// The compare-and-swap write changed zero rows — the manifest was
+    /// rewritten concurrently between read and UPDATE. Nothing was written
+    /// and no memo recorded; the next pass re-reads the newer bytes.
+    RacedConcurrentWrite,
 }
 
 fn manifest_ensure_already_done(
@@ -739,13 +790,15 @@ fn manifest_ensure_already_done(
     entity_id: &str,
     manifest_hash: &str,
 ) -> Result<bool> {
-    let exists: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM manifest_ensure_memo WHERE entity_id = ?1 AND manifest_hash = ?2",
-            params![entity_id, manifest_hash],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+    // D8 (review finding): a faulting memo read PROPAGATES — it is never
+    // "not memoized". `ensure_all_manifest_vocabularies` is best-effort per
+    // row, so one fault surfaces as that row's error without stopping the
+    // pass.
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM manifest_ensure_memo WHERE entity_id = ?1 AND manifest_hash = ?2",
+        params![entity_id, manifest_hash],
+        |r| r.get(0),
+    )?;
     Ok(exists > 0)
 }
 
@@ -779,6 +832,13 @@ pub fn ensure_all_manifest_vocabularies(conn: &Connection) -> Result<EnsureSumma
                         summary.foreign_no_preferred_fallback += 1;
                     }
                     EnsureOutcome::Malformed(_) => summary.malformed += 1,
+                    EnsureOutcome::RacedConcurrentWrite => {
+                        summary.raced += 1;
+                        eprintln!(
+                            "[entity-gate] manifest ensure for {entity_id} raced a concurrent \
+                             manifest rewrite; nothing written — the next ensure pass retries"
+                        );
+                    }
                     EnsureOutcome::AlreadyEnsured
                     | EnsureOutcome::AlreadyComplete
                     | EnsureOutcome::NoRow => {}
@@ -808,6 +868,8 @@ pub struct EnsureSummary {
     pub fallbacks_set: usize,
     pub foreign_no_preferred_fallback: usize,
     pub malformed: usize,
+    /// Rows whose CAS write lost a concurrent rewrite (nothing written).
+    pub raced: usize,
     pub errors: usize,
 }
 
@@ -1023,53 +1085,107 @@ pub fn resolve_node_gate_decision(
     }
 
     // Rungs 2-3 — folder_ontology + ontology_default + schema (strict-wins
-    // across all source paths; an `off` loses to any strict rung).
+    // across all source paths; an `off` source loses to a strict or climbing
+    // sibling, but all-`off` SKIPs — rung 4 never overrides it).
     let mut strict_source_dir: Option<String> = None;
     // First `off` resolution seen at rung 2/3 — when the ladder's final
     // verdict is Off (SKIP), the r21 ledger table records "the `off` folder
     // if rung 2 caused the SKIP" as the row's `source_directory`.
     let mut off_source_dir: Option<String> = None;
-    for source in source_paths {
-        match ingest.ontology_lookup(source, vault_root, degraded, schema, schema_unparseable) {
+    // Some source climbed past rungs 2-3 — it resolves at the strict
+    // residual rung 4, so an `off` sibling cannot decide SKIP (R2.3.3).
+    let mut any_climb = false;
+    // Pathless mints (GUI / bundle, R2.3.4) START at rung 3: resolve the
+    // host default once, with the same degraded guards as a path lookup.
+    let lookups: Vec<(Option<&String>, crate::config::OntologyLookup)> = if source_paths.is_empty()
+    {
+        vec![(
+            None,
+            ingest.ontology_lookup_pathless(degraded, schema, schema_unparseable),
+        )]
+    } else {
+        source_paths
+            .iter()
+            .map(|source| {
+                (
+                    Some(source),
+                    ingest.ontology_lookup(
+                        source,
+                        vault_root,
+                        degraded,
+                        schema,
+                        schema_unparseable,
+                    ),
+                )
+            })
+            .collect()
+    };
+    let mut strict_found = false;
+    let mut off_found = false;
+    for (source, lookup) in lookups {
+        match lookup {
             crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Strict) => {
                 // Found a strict rung; vocabulary comes from tier_fact below.
-                strict_source_dir = Some(source.clone());
+                strict_found = true;
+                strict_source_dir = source.cloned();
                 break;
             }
             crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Off) => {
                 // Off found, but continue to look for any strict rung
                 // (strict-wins, R2.3.3). Remember the off folder for the
                 // SKIP ledger row's source_directory (R2.4.6 r21).
-                off_source_dir.get_or_insert_with(|| source.clone());
+                off_found = true;
+                if off_source_dir.is_none() {
+                    off_source_dir = source.cloned();
+                }
                 continue;
             }
             crate::config::OntologyLookup::Hold => {
                 return NodeGateDecision {
                     verdict: ModeVerdict::StrictNoVocab,
                     vocabulary: None,
-                    source_directory: Some(source.clone()),
+                    source_directory: source.cloned(),
                 };
             }
             crate::config::OntologyLookup::Climb => {
                 // Try the next source; if all climb we fall through to rung 4.
+                any_climb = true;
                 continue;
             }
         }
     }
-    if let Some(dir) = strict_source_dir {
+    if strict_found {
         // Pull the tier_fact vocabulary for the gate.
         let tier_fact_vocab = tier_fact_vocabulary(conn);
         return match tier_fact_vocab {
             Some(v) => NodeGateDecision {
                 verdict: ModeVerdict::Gate,
                 vocabulary: Some(v),
-                source_directory: Some(dir),
+                source_directory: strict_source_dir,
             },
             None => NodeGateDecision {
                 verdict: ModeVerdict::StrictNoVocab,
                 vocabulary: None,
-                source_directory: Some(dir),
+                source_directory: strict_source_dir,
             },
+        };
+    }
+    if off_found && !any_climb {
+        // Every source decided `off` at rung 2/3 — §2.3 "first hit
+        // decides": SKIP, never overridden by a strict rung-4 tier_fact
+        // (the D8 matrix case "bare host-off + GUI-minted character →
+        // ungated"). r4-m4 still applies: an unreadable entity row holds.
+        if entity_row_unreadable {
+            return NodeGateDecision {
+                verdict: ModeVerdict::StrictNoVocab,
+                vocabulary: None,
+                source_directory: None,
+            };
+        }
+        return NodeGateDecision {
+            verdict: ModeVerdict::Off,
+            vocabulary: None,
+            source_directory: off_source_dir,
         };
     }
 
@@ -2420,5 +2536,114 @@ mod tests {
                 }
             },
         );
+    }
+
+    /// Resolve the ladder against a strict `tier_fact` row (fallback set)
+    /// with the given ingest config — the shape where a rung-2/3 `off`
+    /// used to be silently overridden by rung 4.
+    fn ladder_with_strict_tier_fact(
+        ingest: &crate::config::IngestConfig,
+        degraded: &crate::config::OntologyDegradedState,
+        source_paths: &[String],
+    ) -> NodeGateDecision {
+        let conn = open_in_memory().unwrap();
+        conn.execute("DELETE FROM llm_wiki_entity_manifests", [])
+            .unwrap();
+        let manifest = serde_json::json!({
+            "node_types": [{"type": "person"}, {"type": "concept"}],
+            "edge_types": [],
+            "fallback_node_type": "concept",
+        });
+        insert_manifest(
+            &conn,
+            "tier_fact",
+            "strict",
+            &serde_json::to_string(&manifest).unwrap(),
+        );
+        let ctx = GateResolutionContext {
+            ingest,
+            degraded,
+            schema: None,
+            schema_unparseable: false,
+            vault_root: None,
+        };
+        resolve_node_gate_decision(&conn, "ent_new", source_paths, ctx)
+    }
+
+    /// R2.3.4 / spec §6 matrix "bare host-off + GUI-minted character →
+    /// ungated": a pathless mint (GUI / bundle) STARTS at rung 3, so a
+    /// host-wide `ontology_default: off` SKIPs even under a strict tier_fact.
+    #[test]
+    fn pathless_mint_honors_rung_3_host_off_default() {
+        let ingest = crate::config::IngestConfig {
+            ontology_default: Some(crate::config::OntologyMode::Off),
+            ..Default::default()
+        };
+        let node = ladder_with_strict_tier_fact(
+            &ingest,
+            &crate::config::OntologyDegradedState::default(),
+            &[],
+        );
+        assert_eq!(node.verdict, ModeVerdict::Off);
+        assert_eq!(node.source_directory, None);
+    }
+
+    /// A pathless mint under a load-degraded config holds (step 0, D8) —
+    /// it must not fall through to the strict tier_fact vocabulary.
+    #[test]
+    fn pathless_mint_holds_under_degraded_global() {
+        let degraded = crate::config::OntologyDegradedState {
+            global: true,
+            ..Default::default()
+        };
+        let node =
+            ladder_with_strict_tier_fact(&crate::config::IngestConfig::default(), &degraded, &[]);
+        assert_eq!(node.verdict, ModeVerdict::StrictNoVocab);
+    }
+
+    /// No default + no schema → rung 3 climbs; rung 4 strict tier_fact
+    /// gates (the residual "default STRICT" rule).
+    #[test]
+    fn pathless_mint_climbs_to_tier_fact_without_default() {
+        let node = ladder_with_strict_tier_fact(
+            &crate::config::IngestConfig::default(),
+            &crate::config::OntologyDegradedState::default(),
+            &[],
+        );
+        assert_eq!(node.verdict, ModeVerdict::Gate);
+    }
+
+    /// §2.3 rung 2 "off = SKIP, first hit decides": every source resolving
+    /// to an `off` folder SKIPs even when tier_fact is strict, recording the
+    /// off folder for the ledger row.
+    #[test]
+    fn all_off_sources_skip_despite_strict_tier_fact() {
+        let mut ingest = crate::config::IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".to_string(), crate::config::OntologyMode::Off);
+        let node = ladder_with_strict_tier_fact(
+            &ingest,
+            &crate::config::OntologyDegradedState::default(),
+            &["ops/a.md".to_string(), "ops/b.md".to_string()],
+        );
+        assert_eq!(node.verdict, ModeVerdict::Off);
+        assert_eq!(node.source_directory.as_deref(), Some("ops/a.md"));
+    }
+
+    /// R2.3.3 strict-wins: an off source never downgrades an entity whose
+    /// other source climbs to the strict residual rung.
+    #[test]
+    fn off_plus_climbing_source_gates_via_tier_fact() {
+        let mut ingest = crate::config::IngestConfig::default();
+        ingest
+            .folder_ontology
+            .insert("ops".to_string(), crate::config::OntologyMode::Off);
+        let node = ladder_with_strict_tier_fact(
+            &ingest,
+            &crate::config::OntologyDegradedState::default(),
+            &["ops/a.md".to_string(), "notes/b.md".to_string()],
+        );
+        assert_eq!(node.verdict, ModeVerdict::Gate);
     }
 }

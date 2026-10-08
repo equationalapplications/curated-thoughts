@@ -596,6 +596,29 @@ impl IngestConfig {
     }
 }
 
+impl IngestConfig {
+    /// Rung 3 for a mint with NO source path (spec R2.3.4: GUI and bundle
+    /// mints START at rung 3). The degraded guards [`Self::ontology_lookup`]
+    /// applies before its rung-3 arm still apply — global degraded, a
+    /// dropped default, or an absent default with unreadable schema intent
+    /// → Hold (D8). Dropped `folder_ontology` prefixes and ties are scoped
+    /// to paths, so a pathless mint is never under one.
+    pub fn ontology_lookup_pathless(
+        &self,
+        degraded: &OntologyDegradedState,
+        schema: Option<crate::ontology_config::OntologySelection>,
+        schema_unparseable: bool,
+    ) -> OntologyLookup {
+        if degraded.global || degraded.default_dropped {
+            return OntologyLookup::Hold;
+        }
+        if self.ontology_default.is_none() && schema.is_none() && schema_unparseable {
+            return OntologyLookup::Hold;
+        }
+        rung3_resolution(self, schema)
+    }
+}
+
 /// Rung-3 mode resolution for a path no `folder_ontology` entry decided
 /// (spec R2.2.3, r5-M2/r6-M2 live rule): an explicit `ontology_default`
 /// wins; an absent default resolves LIVE from `ontology.schema` (`Off`

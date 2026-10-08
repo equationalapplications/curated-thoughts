@@ -162,11 +162,22 @@ pub fn write_fallback(conn: &Connection, target: &str, fallback: &str) -> Result
         );
     };
     manifest["fallback_node_type"] = serde_json::json!(canonical);
-    conn.execute(
+    // Compare-and-swap on the bytes we READ (review finding, same rule as
+    // `ensure_manifest_vocabulary`): a concurrent engine rewrite between the
+    // read and this UPDATE must not be overwritten with an edited copy of
+    // the OLDER manifest. Zero rows = the row moved under us — refuse loudly
+    // so the operator re-runs against the new manifest.
+    let changed = conn.execute(
         "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1, updated_at = strftime('%s','now')
-         WHERE entity_id = ?2",
-        params![manifest.to_string(), target],
+         WHERE entity_id = ?2 AND manifest_json = ?3",
+        params![manifest.to_string(), target, json],
     )?;
+    if changed == 0 {
+        bail!(
+            "`{target}`'s manifest changed while `--fallback` was being applied — \
+             nothing was written; re-run the command"
+        );
+    }
     Ok(())
 }
 
