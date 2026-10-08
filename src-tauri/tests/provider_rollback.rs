@@ -107,7 +107,7 @@ fn update_provider_rolls_back_to_unconfigured_when_config_write_fails() {
 
 #[cfg(unix)]
 #[test]
-fn update_provider_preserves_state_when_config_and_rollback_fail() {
+fn update_provider_write_failure_preserves_prior_provider() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = TempDir::new().expect("tempdir");
@@ -138,7 +138,12 @@ fn update_provider_preserves_state_when_config_and_rollback_fail() {
 
     std::fs::set_permissions(brain_path, original_perms).expect("restore permissions");
 
-    assert!(err.contains("rollback failed"));
+    // m4 contract: a failed write is the ONLY failure — there is no
+    // separate rollback write, and errors never carry a "rollback failed"
+    // suffix. The file is untouched, so the provider it describes — the
+    // one already running — stays active in memory.
+    assert!(err.contains("settings could not be saved to disk"));
+    assert!(!err.contains("rollback failed"));
     let guard = state.0.lock().unwrap();
     if let GenerationProvider::External {
         base_url,
@@ -150,6 +155,6 @@ fn update_provider_preserves_state_when_config_and_rollback_fail() {
         assert_eq!(api_key.as_deref(), Some("sk-test"));
         assert_eq!(model_name, "gpt-3.5-turbo");
     } else {
-        panic!("expected state to preserve existing external provider");
+        panic!("expected state to preserve the existing external provider");
     }
 }

@@ -10,7 +10,7 @@ mod helpers;
 use helpers::TestApp;
 use serde_json::json;
 use std::path::Path;
-use tauri_app_lib::okf::{EntityType, OkfFrontmatter};
+use tauri_app_lib::okf::{DocKind, OkfFrontmatter};
 
 /// Helper: create valid OKF frontmatter for testing
 fn create_test_frontmatter(title: &str) -> OkfFrontmatter {
@@ -18,7 +18,7 @@ fn create_test_frontmatter(title: &str) -> OkfFrontmatter {
         okf_version: "0.1".to_string(),
         profile: "llm-wiki/1".to_string(),
         title: title.to_string(),
-        entity_type: EntityType::Fact,
+        doc_kind: DocKind::Fact,
         tags: Some(vec!["test".to_string(), "integration".to_string()]),
         created_at: "2024-01-01T00:00:00Z".to_string(),
         updated_at: None,
@@ -112,7 +112,7 @@ fn e1_write_new_note_and_verify_frontmatter() {
     assert_eq!(parsed_fm.okf_version, "0.1");
     assert_eq!(parsed_fm.profile, "llm-wiki/1");
     assert_eq!(parsed_fm.title, "Test Fact");
-    assert_eq!(parsed_fm.entity_type, EntityType::Fact);
+    assert_eq!(parsed_fm.doc_kind, DocKind::Fact);
     assert_eq!(
         parsed_fm.tags,
         Some(vec!["test".to_string(), "integration".to_string()])

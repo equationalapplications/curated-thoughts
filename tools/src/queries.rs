@@ -679,13 +679,76 @@ pub fn wiki_sweep_cmd(yes: bool) -> Result<i32> {
              (a write). Pass --yes to proceed.",
             brain.paths.db_path.display()
         );
+        // §2.10 node-type extension, report-only arm: the read-only preview
+        // of the SAME retype-only pass `--yes` runs (no ensure promise,
+        // nothing retyped, no watermark). Human-readable census/drift text
+        // comes from inside the pass on STDERR; the summary line below is
+        // the sweep's own display of it.
+        if let Ok(mut ro) = tauri_app_lib::retrieval::open_brain_readonly(&brain.paths.db_path) {
+            let report = tauri_app_lib::db::heal_ontology::ontology_retype_pass_preview(&mut ro);
+            print_ontology_pass_summary(&report, true);
+        }
         return Ok(1);
     }
     let brain = resolve()?;
-    let conn = open_rw(&brain)?;
+    let mut conn = open_rw(&brain)?;
+    // plan-p9-M3 symmetry (final-review Minor 5): `open_rw` is
+    // migration-free by design, but the `--yes` apply arm runs the retyping
+    // pass against tables the headless binary may be the FIRST thing to
+    // open after a schema bump — bring the DB up to the current schema on
+    // the same connection, exactly like `ct heal` / `ct wiki
+    // merge-duplicates` / `ct ontology set --yes` do. Ungated and
+    // idempotent (CREATE ... IF NOT EXISTS), so a no-op on a current brain.
+    // The refusal arm above stays read-only ("schema pending (read-only)"
+    // census behavior unchanged).
+    tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
     let removed = tauri_app_lib::db::edge_purge::purge_off_manifest_edges_all(&conn)?;
     println!("purged {removed} off-manifest edge(s)");
-    Ok(0)
+    // §2.10 node-type extension, apply arm: the RETYPING-ONLY pass
+    // (`ontology_retype_pass`, controller ruling R10) — alias retypes with
+    // the same vocabulary + alias table and the same degraded/drift
+    // refusals, but NONE of heal's bookkeeping: no §2.4.4 ensure, no
+    // watermark stamp (heal stays the sole watermark writer), no
+    // alias_remap_completed marker. The edge half already ran above; a
+    // refusal here prints, never masks it.
+    let report = tauri_app_lib::db::heal_ontology::ontology_retype_pass(&mut conn);
+    print_ontology_pass_summary(&report, false);
+    // Same exit contract as `ct heal`: a faulted pass (e.g. a census DB
+    // error) OR a refused one (unconfirmed drift / degraded config — the
+    // retypes never applied) reports failure to the calling script instead
+    // of a silent 0, so `ct wiki sweep --yes && …` chains stop. The
+    // edge-purge line above already printed; a non-zero exit does not mask
+    // it. Drift is cleared only by `ct heal --yes --confirm-drift` (§2.2.8).
+    let refused = matches!(
+        report.skipped_reason.as_deref(),
+        Some("unconfirmed_drift") | Some("degraded_config")
+    );
+    Ok(if report.error.is_some() || refused {
+        1
+    } else {
+        0
+    })
+}
+
+/// One-line human display of the ontology pass result for `ct wiki sweep`
+/// (§2.10 census display; Task 8 owns the display only — the flags/exit
+/// contract stays `ct heal`'s). Human text on STDERR; the sweep's stdout
+/// stays the edge-purge line.
+fn print_ontology_pass_summary(
+    report: &tauri_app_lib::db::heal_ontology::OntologyHealReport,
+    read_only: bool,
+) {
+    let scope = if read_only { " (read-only)" } else { "" };
+    eprintln!(
+        "ontology node-type pass{scope}: retyped {}, queued {}, report-only {}",
+        report.retyped, report.queued, report.report_only
+    );
+    if let Some(reason) = &report.skipped_reason {
+        eprintln!("ontology node-type pass: skipped ({reason})");
+    }
+    if let Some(err) = &report.error {
+        eprintln!("ontology node-type pass: error: {err}");
+    }
 }
 
 // ---------------------------------------------------------------------------

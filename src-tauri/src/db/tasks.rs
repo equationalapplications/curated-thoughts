@@ -26,10 +26,17 @@ pub fn list_tasks(
     status: Option<&str>,
     include_archived: bool,
 ) -> Result<Vec<TaskRow>> {
+    // Task 7 (R2.7.5): a task keyed by a merged-away loser entity maps
+    // through its redirect (single hop — merge-time path compression keeps
+    // healthy chains one hop deep) onto the survivor, whose live_entities
+    // row supplies the name. Loser-keyed tasks therefore stay visible under
+    // the survivor instead of vanishing from the JOIN.
     let mut stmt = conn.prepare(
         "SELECT t.id, t.entity_id, ce.name, t.description, t.status, t.priority, t.created_at, t.resolved_at
          FROM llm_wiki_tasks t
-         JOIN curated_entities ce ON ce.id = t.entity_id
+         JOIN live_entities ce
+           ON ce.id = COALESCE((SELECT merged_into FROM entity_redirects r
+                                WHERE r.entity_id = t.entity_id), t.entity_id)
          WHERE (t.status = :status OR :status IS NULL)
            AND (t.deleted_at IS NULL OR :include_archived)
          ORDER BY ce.name COLLATE NOCASE ASC, t.priority DESC, t.created_at ASC",
@@ -73,11 +80,14 @@ pub fn create_task(conn: &mut Connection, entity_id: &str, description: &str) ->
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    // Verify entity exists and is not archived.
+    // Verify entity exists and is not archived. Task 7 (r13-MAJOR-1): a
+    // loser id resolves to the survivor BEFORE the task is keyed to it, so
+    // a task created via a stale loser link lands on the survivor.
+    let resolved = crate::db::entities::resolve_entity_id(&tx, entity_id)?;
     let entity_name: Option<String> = tx
         .query_row(
-            "SELECT name FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL",
-            [entity_id],
+            "SELECT name FROM live_entities WHERE id = ?1 AND deleted_at IS NULL",
+            [&resolved],
             |r| r.get(0),
         )
         .optional()?;
@@ -91,17 +101,21 @@ pub fn create_task(conn: &mut Connection, entity_id: &str, description: &str) ->
             id, entity_id, description, status, priority,
             created_at, updated_at, resolved_at, deleted_at
          ) VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?5, NULL, NULL)",
-        params![task_id, entity_id, description, priority, now_ms],
+        params![task_id, resolved, description, priority, now_ms],
     )?;
 
     push_tasks_outbox(
         &tx,
-        entity_id,
+        &resolved,
         &task_id,
         OutboxOperation::Insert,
         wiki_task_outbox_payload(
             &task_id,
-            entity_id,
+            // Fix round 1 (Important 1): the replica payload must carry the
+            // SAME resolved survivor id the row persists under — a payload
+            // keyed to the loser diverges the prisma-outbox replica (#132
+            // class).
+            &resolved,
             description,
             "pending",
             priority,
@@ -131,7 +145,9 @@ pub fn create_task(conn: &mut Connection, entity_id: &str, description: &str) ->
 
     Ok(TaskRow {
         id: task_id,
-        entity_id: entity_id.to_string(),
+        // Fix round 1 (Important 1): report the row's ACTUAL owner, the
+        // resolved survivor — never the stale loser link.
+        entity_id: resolved.clone(),
         entity_name,
         description: description.to_string(),
         status: "pending".into(),
@@ -345,7 +361,7 @@ mod tests {
     use crate::db::entities::{create_entity, CreateEntityInput};
     use rusqlite::params;
 
-    fn make_entity(conn: &Connection) -> String {
+    fn make_entity(conn: &mut Connection) -> String {
         create_entity(
             conn,
             &CreateEntityInput {
@@ -370,8 +386,8 @@ mod tests {
 
     #[test]
     fn list_tasks_groups_carry_entity_names_and_filter_by_status() {
-        let conn = open_in_memory().unwrap();
-        let ent1 = make_entity(&conn);
+        let mut conn = open_in_memory().unwrap();
+        let ent1 = make_entity(&mut conn);
         let ent2_id = "ent_second";
         conn.execute(
             "INSERT INTO curated_entities (id, name, entity_type, created_at, updated_at)
@@ -427,7 +443,7 @@ mod tests {
     #[test]
     fn create_task_inserts_row_and_outbox() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
 
         let task = create_task(&mut conn, &entity_id, "  Create a test  ").unwrap();
         assert!(task.id.starts_with("task_"));
@@ -466,7 +482,7 @@ mod tests {
     #[test]
     fn set_task_status_done_sets_resolved_at_and_outbox_update() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let task = create_task(&mut conn, &entity_id, "Task to resolve").unwrap();
 
         set_task_status(&mut conn, &task.id, "done").unwrap();
@@ -488,7 +504,7 @@ mod tests {
     #[test]
     fn archive_task_sets_deleted_at_and_outbox_update() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let task = create_task(&mut conn, &entity_id, "Task to archive").unwrap();
 
         archive_task(&mut conn, &task.id).unwrap();
@@ -507,5 +523,44 @@ mod tests {
 
         let outbox_count_val = outbox_count(&conn, &task.id, "UPDATE");
         assert_eq!(outbox_count_val, 1);
+    }
+
+    /// Fix round 1 (Important 1): a task created via a stale loser link
+    /// persists on the survivor AND its outbox payload + TaskRow carry the
+    /// survivor id — a payload keyed to the loser diverges the prisma-outbox
+    /// replica (#132 class).
+    #[test]
+    fn create_task_via_loser_keys_row_outbox_and_result_to_survivor() {
+        let mut conn = open_in_memory().unwrap();
+        let surv = make_entity(&mut conn);
+        let loser = make_entity(&mut conn);
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?2, 1)",
+            params![loser, surv],
+        )
+        .unwrap();
+
+        let row = create_task(&mut conn, &loser, "Via a stale loser link").unwrap();
+        assert_eq!(row.entity_id, surv, "TaskRow reports the survivor owner");
+
+        let (stored_entity, payload): (String, String) = conn
+            .query_row(
+                "SELECT t.entity_id, o.payload FROM llm_wiki_tasks t
+                 JOIN llm_wiki_outbox o ON o.record_id = t.id
+                 WHERE t.id = ?1 AND o.table_name = 'tasks'
+                 ORDER BY o.id DESC LIMIT 1",
+                [&row.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_entity, surv, "the row persists on the survivor");
+        let payload_json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            payload_json["entity_id"].as_str().unwrap(),
+            surv,
+            "the replica payload is keyed to the survivor, never the loser"
+        );
+        assert_ne!(payload_json["entity_id"].as_str().unwrap(), loser);
     }
 }

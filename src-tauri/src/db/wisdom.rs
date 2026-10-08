@@ -20,18 +20,23 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 // point. NULL sits outside the engine's selector entirely. The V18 migration
 // normalizes pre-existing sentinel/mangled rows on upgraded brains.
 
-fn assert_entity_active(conn: &Connection, entity_id: &str) -> Result<()> {
+fn assert_entity_active(conn: &Connection, entity_id: &str) -> Result<String> {
+    // Task 7 (r13-MAJOR-1): a fact mutator keyed by a merged-away loser id
+    // resolves to the survivor BEFORE acting — the fact lands on the entity
+    // recall shows, never on a row no reader surfaces. Returns the resolved
+    // survivor id so callers key every write to it.
+    let resolved = crate::db::entities::resolve_entity_id(conn, entity_id)?;
     let exists: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL",
-            [entity_id],
+            "SELECT 1 FROM live_entities WHERE id = ?1 AND deleted_at IS NULL",
+            [&resolved],
             |r| r.get(0),
         )
         .optional()?;
     if exists.is_none() {
         bail!("entity not found or archived: {entity_id}");
     }
-    Ok(())
+    Ok(resolved)
 }
 
 fn touch_entity(conn: &Connection, entity_id: &str, now_secs: i64) -> Result<()> {
@@ -133,7 +138,7 @@ pub fn add_wisdom_in_tx(
     let wisdom_id = generate_llm_id("fact_");
     let title = fact_title_from_body(body);
 
-    assert_entity_active(tx, entity_id)?;
+    let entity_id = assert_entity_active(tx, entity_id)?;
     tx.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type,
@@ -144,12 +149,12 @@ pub fn add_wisdom_in_tx(
     )?;
     push_entries_outbox(
         tx,
-        entity_id,
+        &entity_id,
         &wisdom_id,
         OutboxOperation::Insert,
         wiki_fact_outbox_payload(
             &wisdom_id,
-            entity_id,
+            &entity_id,
             &title,
             body,
             &[],
@@ -181,7 +186,7 @@ pub fn add_wisdom_in_tx(
         ),
         now_ms,
     )?;
-    touch_entity(tx, entity_id, now_secs)?;
+    touch_entity(tx, &entity_id, now_secs)?;
 
     Ok(EntityWisdom {
         id: wisdom_id,
@@ -271,16 +276,26 @@ pub fn update_wisdom_in_tx(
     let (now_secs, now_ms) = now_timestamps();
     let title = fact_title_from_body(body);
 
-    assert_entity_active(tx, entity_id)?;
+    let entity_id = assert_entity_active(tx, entity_id)?;
+    // Transitive fact closure (r13-m3): the row being updated may still be
+    // keyed to a redirected loser from before the merge.
+    let cluster = crate::db::entities::cluster_ids(tx, &entity_id)?;
+    let placeholders = crate::db::entities::in_placeholders(&cluster);
     let existing = tx
         .query_row(
-            "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at,
-                    source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
-                    lifecycle_status, stale_after, generated_by,
-                    last_verified_at, last_verified_by
-             FROM llm_wiki_entries
-             WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
-            params![wisdom_id, entity_id],
+            &format!(
+                "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at,
+                        source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
+                        lifecycle_status, stale_after, generated_by,
+                        last_verified_at, last_verified_by
+                 FROM llm_wiki_entries
+                 WHERE id = ? AND entity_id IN ({placeholders}) AND deleted_at IS NULL"
+            ),
+            rusqlite::params_from_iter(
+                std::iter::once(wisdom_id)
+                    .map(String::from)
+                    .chain(cluster.iter().cloned()),
+            ),
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -326,21 +341,26 @@ pub fn update_wisdom_in_tx(
     // Write the caller's freshly computed vector, or NULL when there is none
     // so the sweep re-derives it — never leave a vector describing text the
     // entry no longer contains. Mirrors `commit_fact_update`.
+    //
+    // The lookup above matched anywhere in the survivor's redirect cluster,
+    // so a pre-merge row may still be keyed to a loser — rekey it to the
+    // survivor here so the persisted row and the outbox payload agree (the
+    // #132 prisma-outbox divergence class `create_task` guards against).
     tx.execute(
         "UPDATE llm_wiki_entries
-            SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = ?4
+            SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = ?4, entity_id = ?6
           WHERE id = ?5",
-        params![title, body, now_ms, embedding_blob, wisdom_id],
+        params![title, body, now_ms, embedding_blob, wisdom_id, entity_id],
     )?;
     let tags: Vec<String> = serde_json::from_str(&tags_raw).unwrap_or_default();
     push_entries_outbox(
         tx,
-        entity_id,
+        &entity_id,
         wisdom_id,
         OutboxOperation::Update,
         wiki_fact_outbox_payload(
             wisdom_id,
-            entity_id,
+            &entity_id,
             &title,
             body,
             &tags,
@@ -363,7 +383,7 @@ pub fn update_wisdom_in_tx(
         ),
         now_ms,
     )?;
-    touch_entity(tx, entity_id, now_secs)?;
+    touch_entity(tx, &entity_id, now_secs)?;
     Ok(())
 }
 
@@ -380,12 +400,30 @@ pub fn archive_wisdom(conn: &mut Connection, entity_id: &str, wisdom_id: &str) -
 pub fn archive_wisdom_in_tx(tx: &Transaction<'_>, entity_id: &str, wisdom_id: &str) -> Result<()> {
     let (now_secs, now_ms) = now_timestamps();
 
-    assert_entity_active(tx, entity_id)?;
+    let entity_id = assert_entity_active(tx, entity_id)?;
+    // Transitive fact closure (r13-m3), same as `update_wisdom_in_tx`: the
+    // row may still be keyed to a redirected loser from before the merge.
+    // Widen the match to the survivor's cluster and rekey the row to the
+    // survivor in the same UPDATE, so the archived row and the outbox
+    // payload agree (#132 prisma-outbox divergence class) — without this,
+    // archiving a loser-keyed row bails "not found" even though reads
+    // surface it through the redirect.
+    let cluster = crate::db::entities::cluster_ids(tx, &entity_id)?;
+    let placeholders = (4..4 + cluster.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut bind: Vec<&dyn rusqlite::ToSql> = vec![&now_ms, &entity_id, &wisdom_id];
+    for id in &cluster {
+        bind.push(id);
+    }
     let changes = tx.execute(
-        "UPDATE llm_wiki_entries
-         SET deleted_at = ?1, updated_at = ?1
-         WHERE id = ?2 AND entity_id = ?3 AND deleted_at IS NULL",
-        params![now_ms, wisdom_id, entity_id],
+        &format!(
+            "UPDATE llm_wiki_entries
+             SET deleted_at = ?1, updated_at = ?1, entity_id = ?2
+             WHERE id = ?3 AND entity_id IN ({placeholders}) AND deleted_at IS NULL"
+        ),
+        bind.as_slice(),
     )?;
     if changes == 0 {
         bail!("wisdom not found or already archived: {wisdom_id}");
@@ -396,7 +434,7 @@ pub fn archive_wisdom_in_tx(tx: &Transaction<'_>, entity_id: &str, wisdom_id: &s
 
     push_entries_outbox(
         tx,
-        entity_id,
+        &entity_id,
         wisdom_id,
         OutboxOperation::Delete,
         serde_json::json!({
@@ -406,7 +444,7 @@ pub fn archive_wisdom_in_tx(tx: &Transaction<'_>, entity_id: &str, wisdom_id: &s
         }),
         now_ms,
     )?;
-    touch_entity(tx, entity_id, now_secs)?;
+    touch_entity(tx, &entity_id, now_secs)?;
     Ok(())
 }
 
@@ -424,7 +462,7 @@ mod tests {
     fn add_wisdom_with_profile_stores_an_embedding() {
         temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
             let mut conn = open_in_memory().unwrap();
-            let entity_id = make_entity(&conn);
+            let entity_id = make_entity(&mut conn);
             let profile = crate::embedder::EmbedProfile::default();
 
             let fact = add_wisdom_with_profile(
@@ -449,7 +487,7 @@ mod tests {
     #[test]
     fn add_wisdom_without_a_profile_leaves_the_blob_null() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
 
         let fact = add_wisdom(&mut conn, &entity_id, "A user-stated fact.").unwrap();
 
@@ -467,7 +505,7 @@ mod tests {
     // pre-existing tests
     // -------------------------------------------------------------------------
 
-    fn make_entity(conn: &Connection) -> String {
+    fn make_entity(conn: &mut Connection) -> String {
         create_entity(
             conn,
             &CreateEntityInput {
@@ -493,7 +531,7 @@ mod tests {
     #[test]
     fn add_wisdom_inserts_row_outbox_and_touches_entity() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         conn.execute(
             "UPDATE curated_entities SET updated_at = 1 WHERE id = ?1",
             [&entity_id],
@@ -535,7 +573,7 @@ mod tests {
         // `proposal_idnullevidence`, identical for every manual row. NULL is
         // the "no provenance" value and sits outside the engine's selector.
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
 
         let fact = add_wisdom(&mut conn, &entity_id, "A user-stated fact.").unwrap();
 
@@ -555,7 +593,7 @@ mod tests {
     #[test]
     fn add_wisdom_rejects_empty_body_and_missing_entity() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         assert!(add_wisdom(&mut conn, &entity_id, "   ").is_err());
         assert!(add_wisdom(&mut conn, "ent_missing", "Body").is_err());
     }
@@ -563,7 +601,7 @@ mod tests {
     #[test]
     fn update_wisdom_rewrites_body_and_pushes_outbox_update() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let fact = add_wisdom(&mut conn, &entity_id, "Old body.").unwrap();
 
         update_wisdom(
@@ -584,7 +622,7 @@ mod tests {
     fn update_wisdom_clears_embedding_blob_so_sweep_rederives_it() {
         temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
             let mut conn = open_in_memory().unwrap();
-            let entity_id = make_entity(&conn);
+            let entity_id = make_entity(&mut conn);
             let profile = crate::embedder::EmbedProfile::default();
 
             // Seed a fact with a real (non-NULL) embedding blob.
@@ -623,7 +661,7 @@ mod tests {
     #[test]
     fn update_wisdom_rejects_unknown_or_archived_fact() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         assert!(update_wisdom(&mut conn, &entity_id, "fact_missing", "x").is_err());
         let fact = add_wisdom(&mut conn, &entity_id, "Body.").unwrap();
         archive_wisdom(&mut conn, &entity_id, &fact.id).unwrap();
@@ -633,7 +671,7 @@ mod tests {
     #[test]
     fn archive_wisdom_soft_deletes_and_pushes_outbox_delete() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let fact = add_wisdom(&mut conn, &entity_id, "Ephemeral.").unwrap();
 
         archive_wisdom(&mut conn, &entity_id, &fact.id).unwrap();
@@ -650,7 +688,7 @@ mod tests {
     #[test]
     fn archive_wisdom_purges_edges_touching_the_fact() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let fact = add_wisdom(&mut conn, &entity_id, "The archived fact body.").unwrap();
         let other = add_wisdom(&mut conn, &entity_id, "The surviving fact body.").unwrap();
 
@@ -692,7 +730,7 @@ mod tests {
     #[test]
     fn archive_wisdom_leaves_unrelated_edges_alone() {
         let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&conn);
+        let entity_id = make_entity(&mut conn);
         let fact = add_wisdom(&mut conn, &entity_id, "The archived fact body.").unwrap();
         let b = add_wisdom(&mut conn, &entity_id, "Fact B body.").unwrap();
         let c = add_wisdom(&mut conn, &entity_id, "Fact C body.").unwrap();
@@ -710,5 +748,97 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))
             .unwrap();
         assert_eq!(remaining, 1, "an edge between two live facts must survive");
+    }
+
+    /// Review fix (final review): a loser-keyed row updated through the
+    /// survivor's redirect cluster must be REKEYED to the survivor — the row
+    /// and the outbox payload have to agree (#132 prisma-outbox divergence
+    /// class, same guard as `create_task_via_loser_keys_row_outbox_and_result_to_survivor`).
+    #[test]
+    fn update_wisdom_via_loser_rekeys_row_and_outbox_to_survivor() {
+        let mut conn = open_in_memory().unwrap();
+        let surv = make_entity(&mut conn);
+        let loser = make_entity(&mut conn);
+        let fact = add_wisdom(&mut conn, &surv, "Pre-merge body.").unwrap();
+        // Simulate a pre-merge row: keyed to the entity that later lost the merge.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET entity_id = ?1 WHERE id = ?2",
+            params![loser, fact.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?2, 1)",
+            params![loser, surv],
+        )
+        .unwrap();
+
+        update_wisdom(&mut conn, &surv, &fact.id, "Post-merge body.").unwrap();
+
+        let (stored_entity, payload): (String, String) = conn
+            .query_row(
+                "SELECT e.entity_id, o.payload FROM llm_wiki_entries e
+                 JOIN llm_wiki_outbox o ON o.record_id = e.id
+                 WHERE e.id = ?1 AND o.table_name = 'entries' AND o.operation = 'UPDATE'
+                 ORDER BY o.id DESC LIMIT 1",
+                [&fact.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_entity, surv, "the row is rekeyed to the survivor");
+        let payload_json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            payload_json["entity_id"].as_str().unwrap(),
+            surv,
+            "the replica payload is keyed to the survivor, never the loser"
+        );
+        assert_ne!(payload_json["entity_id"].as_str().unwrap(), loser);
+    }
+
+    /// Review fix (final review): archiving a loser-keyed row through the
+    /// survivor must succeed (not bail "not found"), soft-delete it, and
+    /// rekey it so the archived row and the DELETE payload agree.
+    #[test]
+    fn archive_wisdom_via_loser_soft_deletes_and_rekeys_to_survivor() {
+        let mut conn = open_in_memory().unwrap();
+        let surv = make_entity(&mut conn);
+        let loser = make_entity(&mut conn);
+        let fact = add_wisdom(&mut conn, &surv, "Pre-merge body.").unwrap();
+        conn.execute(
+            "UPDATE llm_wiki_entries SET entity_id = ?1 WHERE id = ?2",
+            params![loser, fact.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?2, 1)",
+            params![loser, surv],
+        )
+        .unwrap();
+
+        archive_wisdom(&mut conn, &surv, &fact.id).unwrap();
+
+        let (deleted_at, stored_entity, payload): (Option<i64>, String, String) = conn
+            .query_row(
+                "SELECT e.deleted_at, e.entity_id, o.payload FROM llm_wiki_entries e
+                 JOIN llm_wiki_outbox o ON o.record_id = e.id
+                 WHERE e.id = ?1 AND o.table_name = 'entries' AND o.operation = 'DELETE'
+                 ORDER BY o.id DESC LIMIT 1",
+                [&fact.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(deleted_at.is_some(), "the loser-keyed row is soft-deleted");
+        assert_eq!(
+            stored_entity, surv,
+            "the archived row is rekeyed to the survivor"
+        );
+        let payload_json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            payload_json["entity_id"].as_str().unwrap(),
+            surv,
+            "the DELETE payload is keyed to the survivor, never the loser"
+        );
+        assert_ne!(payload_json["entity_id"].as_str().unwrap(), loser);
     }
 }

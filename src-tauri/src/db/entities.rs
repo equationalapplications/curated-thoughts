@@ -1,5 +1,6 @@
 //! CRUD for `curated_entities` — OKF entity surface for Brain mode (Phase 4).
 
+use crate::db::commit::{evidence_json_for_entry, is_librarian_source_ref_token};
 use anyhow::{bail, Context, Result};
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -192,52 +193,88 @@ fn parse_okf_usage_window(raw: Option<&str>) -> Option<OkfUsageWindow> {
     serde_json::from_str(raw).ok()
 }
 
-/// Resolve an entry's `source_ref` evidence to `(document path, content hash)`
-/// pairs, deduplicated by path.
+/// One resolved source: `(document path, content hash)`.
+type SourceDoc = (String, Option<String>);
+
+/// The three outcomes of the shared source-resolution core (spec R2.3.2a).
 ///
-/// `pub(crate)` so `wiki_graph::wiki_context` can build its provenance list
-/// from the same resolution the entity reader uses — two implementations of
-/// "where did this fact come from" would be free to disagree.
-pub(crate) fn source_docs_from_ref(
+/// Distinct on purpose: today's empty-Vec hides all of them and lets a DB
+/// fault masquerade as "no source", which would let a stale hash climb to
+/// strict and get retyped (the spec L792 case). The classification table is
+/// authoritative; this enum is the Rust mirror.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SourceResolution {
+    /// ≥1 evidence entry resolved to a document path (the healthy case).
+    Resolved(Vec<(String, Option<String>)>),
+    /// Had at least one evidence entry that did NOT resolve, OR the shape was
+    /// an unknown provenance shape — never a silent climb.
+    HadEvidenceUnresolved,
+    /// Ref was absent (`None` or an explicitly-listed non-provenance value) —
+    /// nothing claimed.
+    NoEvidence,
+}
+
+/// Shared source-resolution core (spec L756-764, L795-815, plan-p11-MAJOR-1).
+///
+/// Both the write-time gate (Task 3) and the heal census (Task 5) consume
+/// THIS function. [`source_docs_from_ref`] remains a second DISPLAY wrapper
+/// that degrades on error (spec L792).
+///
+/// ORDER pinned (R2.3.2a): librarian-token shape FIRST, then JSON-parse the
+/// rest. The two orders agree today (a `librarian-<hex>` token is never
+/// valid JSON) but "one resolver" must not grow a second ordering.
+pub(crate) fn resolve_source_core(
     conn: &Connection,
     entry_id: &str,
     source_ref: Option<&str>,
-) -> Vec<(String, Option<String>)> {
-    // Librarian rows carry a token; their evidence is CT-owned. Spec §2.3.
-    // Strict shape match — see `is_librarian_source_ref_token` for why a
-    // prefix test is not enough.
-    let raw = match source_ref {
-        Some(r) if crate::db::commit::is_librarian_source_ref_token(r) => {
-            match crate::db::commit::evidence_json_for_entry(conn, entry_id) {
+) -> rusqlite::Result<SourceResolution> {
+    resolve_source_walk(conn, entry_id, source_ref).map(|(class, _)| class)
+}
+
+/// The single evidence walk behind [`resolve_source_core`] and the display
+/// wrapper: the classification PLUS every path that did resolve. An
+/// unresolved entry classifies the whole ref `HadEvidenceUnresolved` (the
+/// gate/heal contract) but does not stop the walk, so the display can still
+/// show the sibling entries that resolved (one stale hash after a re-chunk
+/// must not blank a fact's whole provenance list).
+fn resolve_source_walk(
+    conn: &Connection,
+    entry_id: &str,
+    source_ref: Option<&str>,
+) -> rusqlite::Result<(SourceResolution, Vec<SourceDoc>)> {
+    let unresolved = || Ok((SourceResolution::HadEvidenceUnresolved, Vec::new()));
+    let raw: String = match source_ref {
+        None => return Ok((SourceResolution::NoEvidence, Vec::new())),
+        Some(r) if is_librarian_source_ref_token(r) => {
+            // The two split-arm sites from entities.rs:213-217 — errors do not
+            // masquerade as "no source" (spec L792).
+            match evidence_json_for_entry(conn, entry_id) {
                 Ok(Some(json)) => json,
-                // Read-path degradation only (review round 5): a DB fault is
-                // not "no provenance", but this feeds the entity reader/UI,
-                // which degrades defensively everywhere else. Export and
-                // destructive callers of the same helper propagate.
-                _ => return Vec::new(),
+                Ok(None) => return unresolved(),
+                Err(e) => return Err(e),
             }
         }
         Some(r) => r.to_string(),
-        None => return Vec::new(),
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return Vec::new();
+
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return unresolved(),
     };
     let Some(evidence) = value.get("evidence").and_then(|v| v.as_array()) else {
-        return Vec::new();
+        // JSON object with NO `evidence` key → HadEvidenceUnresolved.
+        return unresolved();
     };
     let mut out: Vec<(String, Option<String>)> = Vec::new();
+    let mut any_unresolved = false;
     for entry in evidence {
         let Some(hash) = entry
             .get("content_hash")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         else {
-            // Pre-migration writes still carry chunk_id (legacy rowid) —
-            // the migration in Task 3 rewrites these. During the
-            // migration window (or for malformed evidence), skip the
-            // entry rather than try to resolve by rowid (the rowid is
-            // unstable across re-chunks).
+            // Pre-migration chunk-id-only entries (legacy) → unresolved.
+            any_unresolved = true;
             continue;
         };
         let resolved: Option<String> = conn
@@ -247,15 +284,48 @@ pub(crate) fn source_docs_from_ref(
                 [hash],
                 |r| r.get(0),
             )
-            .optional()
-            .unwrap_or(None);
+            .optional()?; // propagate DB faults (entities.rs:251 swallow site)
         if let Some(path) = resolved {
             if !out.iter().any(|(existing, _)| existing == &path) {
                 out.push((path, Some(hash.to_string())));
             }
+        } else {
+            // ≥1 entry did not resolve → HadEvidenceUnresolved.
+            any_unresolved = true;
         }
     }
-    out
+    if any_unresolved || out.is_empty() {
+        // An unresolved entry, or JSON with `"evidence": []` (the V20
+        // doomed-row shape) → unresolved; the resolved siblings ride along
+        // for display only.
+        Ok((SourceResolution::HadEvidenceUnresolved, out))
+    } else {
+        Ok((SourceResolution::Resolved(out.clone()), out))
+    }
+}
+
+/// Resolve an entry's `source_ref` evidence to `(document path, content hash)`
+/// pairs, deduplicated by path.
+///
+/// `pub(crate)` so `wiki_graph::wiki_context` can build its provenance list
+/// from the same resolution the entity reader uses — two implementations of
+/// "where did this fact come from" would be free to disagree.
+///
+/// DISPLAY wrapper only (spec L795-815): the shared resolver core lives in
+/// this module as [`resolve_source_core`] and returns a `SourceResolution`
+/// with `Resolved`/`HadEvidenceUnresolved`/`NoEvidence` kept distinct. A DB
+/// fault is propagated by the core (Task 2) and caught here to degrade the
+/// display, not to let "no source" climb to strict.
+pub(crate) fn source_docs_from_ref(
+    conn: &Connection,
+    entry_id: &str,
+    source_ref: Option<&str>,
+) -> Vec<(String, Option<String>)> {
+    // Display keeps every path that DID resolve, even when a sibling entry
+    // is stale (the core still classifies the ref unresolved for gate/heal).
+    resolve_source_walk(conn, entry_id, source_ref)
+        .map(|(_, paths)| paths)
+        .unwrap_or_default()
 }
 
 fn order_clause(sort: EntitySort) -> &'static str {
@@ -267,24 +337,64 @@ fn order_clause(sort: EntitySort) -> &'static str {
     }
 }
 
-fn fact_count(conn: &Connection, entity_id: &str) -> Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM llm_wiki_entries
-         WHERE entity_id = ?1 AND deleted_at IS NULL",
-        [entity_id],
-        |r| r.get(0),
-    )
-    .map_err(Into::into)
+/// Resolve a possibly-redirected entity id to its FINAL survivor (Task 7,
+/// spec R2.7.5 / r13-MAJOR-1).
+///
+/// This is the ONE shared resolution helper every read AND mutate path
+/// goes through — it reuses Task 6's cycle-guarded chain walk
+/// (`merge_duplicates::resolve_redirect_chain`); resolution is never
+/// re-implemented at a call site. A hand-crafted cycle is an error (never
+/// an infinite loop, never a guess): the caller surfaces it and the row is
+/// repaired by hand. `ChainResolution::None` (no redirect row) returns the
+/// input id unchanged.
+pub(crate) fn resolve_entity_id(conn: &Connection, entity_id: &str) -> Result<String> {
+    match crate::db::merge_duplicates::resolve_redirect_chain(conn, entity_id)? {
+        crate::db::merge_duplicates::ChainResolution::None => Ok(entity_id.to_string()),
+        crate::db::merge_duplicates::ChainResolution::Survivor(s) => Ok(s),
+        crate::db::merge_duplicates::ChainResolution::Cycle(on_loop) => bail!(
+            "entity {entity_id} sits on an entity_redirects cycle (loop member \
+             {on_loop}); delete the looping rows by hand — refusing to guess a \
+             survivor"
+        ),
+    }
 }
 
-fn open_task_count(conn: &Connection, entity_id: &str) -> Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM llm_wiki_tasks
-         WHERE entity_id = ?1 AND status = 'pending' AND deleted_at IS NULL",
-        [entity_id],
-        |r| r.get(0),
-    )
-    .map_err(Into::into)
+/// The survivor plus every loser whose redirect resolves to it — the
+/// TRANSITIVE FACT CLOSURE id set (spec R2.7.5 / r13-m3): reads for a
+/// survivor must cover `entity_id IN (survivor ∪ redirected losers)`.
+///
+/// Merge-time path compression keeps healthy chains one hop deep, so the
+/// first reverse hop (`merged_into = survivor`) finds every merge-written
+/// loser; the loop to a fixpoint additionally collects hand-crafted
+/// multi-hop rows that terminate at the survivor, and is bounded by the
+/// table size (each iteration must add at least one NEW id or it stops).
+pub(crate) fn cluster_ids(conn: &Connection, survivor: &str) -> Result<Vec<String>> {
+    let mut ids = vec![survivor.to_string()];
+    loop {
+        let placeholders = in_placeholders(&ids);
+        let sql =
+            format!("SELECT entity_id FROM entity_redirects WHERE merged_into IN ({placeholders})");
+        let params: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows: Vec<String> = stmt
+            .query_map(rusqlite::params_from_iter(params), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let grew = rows.iter().any(|r| !ids.contains(r));
+        for r in rows {
+            if !ids.contains(&r) {
+                ids.push(r);
+            }
+        }
+        if !grew {
+            return Ok(ids);
+        }
+    }
+}
+
+/// Build an `IN (…)` placeholder list for `ids`. The caller binds the ids
+/// positionally in the same order.
+pub(crate) fn in_placeholders(ids: &[String]) -> String {
+    vec!["?"; ids.len()].join(",")
 }
 
 /// List non-archived entities (unless `filter.include_archived`).
@@ -313,7 +423,7 @@ pub fn list_entities(
 
     let sql = format!(
         "SELECT id, name, entity_type, summary, created_at, updated_at
-         FROM curated_entities
+         FROM live_entities
          {where_clause}
          ORDER BY {}",
         order_clause(sort)
@@ -340,14 +450,22 @@ pub fn list_entities(
     };
 
     let mut out = Vec::with_capacity(rows.len());
+    // Batched cluster aggregates (review finding): the per-entity
+    // `cluster_ids` + `fact_count` + `open_task_count` loop prepared 3
+    // statements per row (~6k statements at 2k entities, each with rebuilt
+    // `IN`-placeholder SQL). Same closure, three queries total: load the
+    // (small) redirects table once, resolve every counted row's terminal
+    // survivor in Rust, and bucket two grouped COUNTs.
+    let counts = batched_cluster_counts(conn)?;
     for (id, name, entity_type, summary, created_at, updated_at) in rows {
+        let (facts, tasks) = counts.get(&id).copied().unwrap_or((0, 0));
         out.push(EntitySummary {
-            id: id.clone(),
+            id,
             name,
             entity_type,
             summary_snippet: summary_snippet(&summary),
-            fact_count: fact_count(conn, &id)?,
-            open_task_count: open_task_count(conn, &id)?,
+            fact_count: facts,
+            open_task_count: tasks,
             created_at,
             updated_at,
         });
@@ -355,16 +473,85 @@ pub fn list_entities(
     Ok(out)
 }
 
-fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityWisdom>> {
-    let mut stmt = conn.prepare(
+/// Terminal survivor of a redirect chain walked through `map`, with a
+/// visited-set cycle guard: a hand-crafted loop stops at the id it closed
+/// on (counts are attributed, never dropped — repairing the loop is the
+/// operator's job, same rule as `resolve_entity_id`).
+fn terminal_survivor<'a>(
+    map: &'a std::collections::HashMap<String, String>,
+    mut id: &'a str,
+) -> &'a str {
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(id.to_string()) {
+        match map.get(id) {
+            Some(next) if next != id => id = next,
+            _ => break,
+        }
+    }
+    id
+}
+
+/// `(fact_count, open_task_count)` per terminal survivor over the whole
+/// brain: one full scan of `entity_redirects` plus one grouped COUNT per
+/// content table. Rows keyed to redirected losers land in their survivor's
+/// bucket — the same transitive closure [`cluster_ids`] computes per
+/// entity, batched.
+fn batched_cluster_counts(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, (i64, i64)>> {
+    let mut redirects: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT entity_id, merged_into FROM entity_redirects")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (loser, survivor) = row?;
+            redirects.insert(loser, survivor);
+        }
+    }
+    let mut out: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, COUNT(*) FROM llm_wiki_entries
+             WHERE deleted_at IS NULL GROUP BY entity_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (id, n) = row?;
+            out.entry(terminal_survivor(&redirects, &id).to_string())
+                .or_insert((0, 0))
+                .0 += n;
+        }
+    }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, COUNT(*) FROM llm_wiki_tasks
+             WHERE status = 'pending' AND deleted_at IS NULL GROUP BY entity_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (id, n) = row?;
+            out.entry(terminal_survivor(&redirects, &id).to_string())
+                .or_insert((0, 0))
+                .1 += n;
+        }
+    }
+    Ok(out)
+}
+
+/// Load facts for a cluster (`survivor ∪ redirected losers`, r13-m3
+/// transitive closure). Callers pass [`cluster_ids`].
+fn load_facts(conn: &Connection, ids: &[String]) -> Result<Vec<EntityWisdom>> {
+    let sql = format!(
         "SELECT id, title, body, tags, confidence, source_type, source_ref, updated_at,
                 lifecycle_status, stale_after, generated_by, okf_sources, okf_verified,
                 okf_usage_window, last_verified_at, last_verified_by
          FROM llm_wiki_entries
-         WHERE entity_id = ?1 AND deleted_at IS NULL
+         WHERE entity_id IN ({}) AND deleted_at IS NULL
          ORDER BY updated_at DESC",
-    )?;
-    let rows = stmt.query_map([entity_id], |r| {
+        in_placeholders(ids)
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
@@ -430,14 +617,16 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<EntityWisdom>> {
     Ok(out)
 }
 
-fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<EntityTask>> {
-    let mut stmt = conn.prepare(
+fn load_tasks(conn: &Connection, ids: &[String]) -> Result<Vec<EntityTask>> {
+    let sql = format!(
         "SELECT id, description, status, priority, created_at
          FROM llm_wiki_tasks
-         WHERE entity_id = ?1 AND deleted_at IS NULL AND status = 'pending'
+         WHERE entity_id IN ({}) AND deleted_at IS NULL AND status = 'pending'
          ORDER BY priority DESC, created_at ASC",
-    )?;
-    let rows = stmt.query_map([entity_id], |r| {
+        in_placeholders(ids)
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
@@ -460,7 +649,7 @@ fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<EntityTask>> {
     Ok(out)
 }
 
-fn load_events(conn: &Connection, entity_id: &str) -> Result<Vec<EntityEvent>> {
+fn load_events(conn: &Connection, ids: &[String]) -> Result<Vec<EntityEvent>> {
     // TODO(pr-followup): `ORDER BY created_at DESC` has no secondary
     // tiebreaker (e.g. `, id DESC`). When two events for the same entity
     // share a millisecond timestamp, SQLite returns rows in rowid/insertion
@@ -470,14 +659,16 @@ fn load_events(conn: &Connection, entity_id: &str) -> Result<Vec<EntityEvent>> {
     // is scoped by entity_id and returns a list, not a single row), but
     // worth a sweep across the codebase. See
     // procedures/curated-thoughts-improvement-backlog.md.
-    let mut stmt = conn.prepare(
+    // RECENT_EVENTS_LIMIT is a compile-time constant, formatted not bound.
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, event_type, summary, related_entry_id, created_at
          FROM llm_wiki_events
-         WHERE entity_id = ?1
+         WHERE entity_id IN ({})
          ORDER BY created_at DESC
-         LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(params![entity_id, RECENT_EVENTS_LIMIT], |r| {
+         LIMIT {RECENT_EVENTS_LIMIT}",
+        in_placeholders(ids)
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
@@ -501,12 +692,22 @@ fn load_events(conn: &Connection, entity_id: &str) -> Result<Vec<EntityEvent>> {
 }
 
 /// Entity + facts + open tasks + recent events.
+///
+/// Task 7 (spec R2.7.5 / r13-m3 / r11-M4): a loser id REDIRECTS to its
+/// survivor — `EntityDetail.id` is always the SURVIVOR id, never the
+/// requested loser id (else the GUI pins the loser and later mutations
+/// re-hit r13-MAJOR-1). The redirect is followed REGARDLESS of the
+/// survivor's `deleted_at` (r21): an archived survivor is returned exactly
+/// as `get_entity(survivor)` returns it — archived detail, `deleted_at`
+/// populated — never `None` (a live-only hop would make a stale loser link
+/// look like a deleted entity the user never archived).
 pub fn get_entity(conn: &Connection, entity_id: &str) -> Result<Option<EntityDetail>> {
+    let survivor_id = resolve_entity_id(conn, entity_id)?;
     let row = conn
         .query_row(
             "SELECT name, entity_type, summary, created_at, updated_at, deleted_at
-             FROM curated_entities WHERE id = ?1",
-            [entity_id],
+             FROM live_entities WHERE id = ?1",
+            [&survivor_id],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -524,53 +725,122 @@ pub fn get_entity(conn: &Connection, entity_id: &str) -> Result<Option<EntityDet
         return Ok(None);
     };
 
+    // Transitive fact closure (r13-m3): the survivor's reads cover the
+    // loser rows' facts/tasks/events too.
+    let cluster = cluster_ids(conn, &survivor_id)?;
     Ok(Some(EntityDetail {
-        id: entity_id.to_string(),
+        id: survivor_id,
         name,
         entity_type,
         summary,
         created_at,
         updated_at,
         deleted_at,
-        facts: load_facts(conn, entity_id)?,
-        tasks: load_tasks(conn, entity_id)?,
-        events: load_events(conn, entity_id)?,
+        facts: load_facts(conn, &cluster)?,
+        tasks: load_tasks(conn, &cluster)?,
+        events: load_events(conn, &cluster)?,
     }))
 }
 
 /// Create a new curated entity (`summary_embedding` backfill deferred).
-pub fn create_entity(conn: &Connection, input: &CreateEntityInput) -> Result<EntityDetail> {
+///
+/// Wave-1 gate (Task 3, spec R2.4.2): opens an IMMEDIATE transaction so the
+/// shared insert helper's `&ImmediateTx` parameter type-checks. GUI mints
+/// have NO proposal, so the §2.3 ladder starts at rung 3 (host default);
+/// the resolver walks rung 1 (`ct_entity_optouts` + entity manifest) and
+/// rung 4 (`tier_fact`).
+pub fn create_entity(conn: &mut Connection, input: &CreateEntityInput) -> Result<EntityDetail> {
     let name = input.name.trim();
     if name.is_empty() {
         bail!("entity name must not be empty");
     }
-    let entity_type = input
+    let proposed_label = input
         .entity_type
         .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("concept");
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let summary = input.summary.as_deref().unwrap_or("");
     let id = generate_entity_id();
     let now = now_secs();
 
-    conn.execute(
-        "INSERT INTO curated_entities (
-            id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at
-         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5, NULL)",
-        params![id, name, entity_type, summary, now],
+    // Open IMMEDIATE so the shared insert helper's `&ImmediateTx` parameter
+    // type-checks. Spec R2.4.2 (r1-MAJOR-3): GUI mints must go through the
+    // gate; a plain `&Connection` is a compile-time impossibility now that
+    // the helper is the single insert point. The policy load (filesystem)
+    // happens BEFORE the transaction opens — r21 hold-time rule.
+    let policy = crate::config::ingest_policy_for_db(conn.path());
+    let tx = crate::db::entity_gate::ImmediateTx::begin(conn)?;
+    let (decision, gate) = crate::db::entity_gate::resolve_production_gate(&tx, &policy, &id, &[]);
+    let outcome = crate::db::entity_gate::shared_insert_entity(
+        &tx,
+        Some(&id),
+        name,
+        proposed_label,
+        summary,
+        now,
+        decision.clone(),
+        false,
     )?;
+
+    // Held → refusal error surfaced to the GUI (spec §2.4.5: "no-fallback-
+    // exists → refusal error shown; otherwise normal ladder" / §2.5 GUI
+    // bullet). The transaction rolls back when this function returns Err.
+    match &outcome {
+        crate::db::entity_gate::AdmitOutcome::Held { .. } => {
+            let _ = tx.rollback();
+            bail!(
+                "ontology gate held the entity mint: manifest is strict with no declared \
+                 fallback_node_type (spec §2.4.5); facts survive, retry after naming a fallback"
+            );
+        }
+        crate::db::entity_gate::AdmitOutcome::Skipped { .. } => {
+            // SKIP path: helper did NOT insert (off folder / off host /
+            // no manifest). No gate ran, so there is no vocabulary to
+            // violate — today's behavior stands: the caller's label lands
+            // verbatim, the `'concept'` literal only for a blank type
+            // (§2.5 / r2-M2a). The origin ledger records a `gate_skipped`
+            // row.
+            crate::db::entity_gate::land_skipped_entity(
+                &tx,
+                &id,
+                name,
+                proposed_label,
+                summary,
+                now,
+            )?;
+        }
+        _ => {
+            // Helper inserted; nothing more to do.
+        }
+    }
+
+    crate::db::entity_gate::write_gate_origin_ledger(
+        &tx,
+        &id,
+        &outcome,
+        decision,
+        gate.source_directory.as_deref(),
+    )?;
+
+    tx.commit()?;
 
     get_entity(conn, &id)?.context("entity missing immediately after insert")
 }
 
 /// Replace entity summary; clears `summary_embedding` for lazy re-embed.
+///
+/// Task 7 (r13-MAJOR-1 / r15-m3): a loser id resolves to the survivor
+/// BEFORE acting — a mutator keyed by a stale loser link edits the
+/// SURVIVOR (rejecting loser ids was rejected as hostile to stale GUI
+/// state).
 pub fn update_entity_summary(conn: &Connection, entity_id: &str, summary: &str) -> Result<()> {
+    let resolved = resolve_entity_id(conn, entity_id)?;
     let now = now_secs();
     let changes = conn.execute(
         "UPDATE curated_entities
          SET summary = ?1, summary_embedding = NULL, updated_at = ?2
          WHERE id = ?3 AND deleted_at IS NULL",
-        params![summary, now, entity_id],
+        params![summary, now, resolved],
     )?;
     if changes == 0 {
         bail!("entity not found or archived: {entity_id}");
@@ -579,15 +849,37 @@ pub fn update_entity_summary(conn: &Connection, entity_id: &str, summary: &str) 
 }
 
 /// Soft-delete entity (`deleted_at` set; facts/tasks remain for audit).
-pub fn archive_entity(conn: &Connection, entity_id: &str) -> Result<()> {
+///
+/// Task 7 (r13-MAJOR-1): archiving a SURVIVOR archives the whole cluster —
+/// the survivor AND its redirected losers — so bundle export (which maps
+/// loser facts onto the survivor, r2-M8) consistently excludes the entire
+/// archived cluster with zero orphaned facts. `entity_redirects` rows are
+/// KEPT (r21): archiving touches only `curated_entities.deleted_at`, so a
+/// stale loser link still resolves to the (archived) survivor and the
+/// loser never reappears as a standalone row. Archive via a loser id acts
+/// on the survivor's cluster (r15-m3).
+pub fn archive_entity(conn: &mut Connection, entity_id: &str) -> Result<()> {
+    // Fix round 1 (Important 4, Global Constraints): the whole cluster
+    // archives in ONE ImmediateTx — N separate autocommitted writes would
+    // leave a half-archived cluster (survivor archived, losers live) if
+    // interrupted mid-way.
+    let tx = crate::db::entity_gate::ImmediateTx::begin(conn)?;
+    let resolved = resolve_entity_id(&tx, entity_id)?;
+    let cluster = cluster_ids(&tx, &resolved)?;
     let now = now_secs();
-    let changes = conn.execute(
-        "UPDATE curated_entities SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-        params![now, entity_id],
-    )?;
+    let mut changes = 0usize;
+    for id in &cluster {
+        changes += tx.execute(
+            "UPDATE curated_entities SET deleted_at = ?1, updated_at = ?1
+             WHERE id = ?2 AND deleted_at IS NULL",
+            params![now, id],
+        )?;
+    }
     if changes == 0 {
+        let _ = tx.rollback();
         bail!("entity not found or already archived: {entity_id}");
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -725,17 +1017,41 @@ mod tests {
 
     #[test]
     fn source_docs_from_ref_handles_evidence_without_chunk_id() {
-        // Evidence entry with no content_hash is skipped; a valid sibling still resolves.
+        // Spec R2.3.2a / r10-MINOR-4: ANY evidence entry that lacks
+        // content_hash is an unresolved entry — the core classifies the
+        // WHOLE ref `HadEvidenceUnresolved` (report-only for gate/heal; a
+        // sibling cannot vouch for an unverifiable entry). The DISPLAY
+        // wrapper still shows the sibling that resolved: one legacy or
+        // stale entry must not blank the fact's provenance list.
         let conn = open_in_memory().unwrap();
         let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
         let source_ref = format!(
             r#"{{"proposal_id":"prop_1","evidence":[{{"quote":"no chunk id","start_line":1,"end_line":3}},{{"content_hash":"{}","quote":"q","start_line":1,"end_line":3}}]}}"#,
             chunks[0].1
         );
-        let docs = source_docs_from_ref(&conn, "fact_t", Some(&source_ref));
         assert_eq!(
-            docs,
+            resolve_source_core(&conn, "fact_t", Some(&source_ref)).unwrap(),
+            SourceResolution::HadEvidenceUnresolved
+        );
+        assert_eq!(
+            source_docs_from_ref(&conn, "fact_t", Some(&source_ref)),
             vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))]
+        );
+    }
+
+    /// Same split for a STALE sibling hash (the common post-re-chunk case).
+    #[test]
+    fn source_docs_from_ref_keeps_resolved_paths_when_one_hash_is_stale() {
+        let conn = open_in_memory().unwrap();
+        let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
+        let source_ref = source_ref_json(&[chunks[0].1.clone(), "0".repeat(32)]);
+        assert_eq!(
+            resolve_source_core(&conn, "fact_t", Some(&source_ref)).unwrap(),
+            SourceResolution::HadEvidenceUnresolved
+        );
+        assert_eq!(
+            source_docs_from_ref(&conn, "fact_t", Some(&source_ref)).len(),
+            1
         );
     }
 
@@ -806,25 +1122,33 @@ mod tests {
 
     #[test]
     fn source_docs_from_ref_skips_evidence_with_empty_content_hash() {
+        // Spec R2.3.2a: empty content_hash is an unresolved entry — the core
+        // classifies the WHOLE ref unresolved (r10-MINOR-4: chunk-id legacy /
+        // malformed JSON / empty hash share one report-only outcome). The
+        // display skips the empty entry and keeps the resolved sibling.
         let conn = open_in_memory().unwrap();
         let chunks = seed_doc_with_chunks(&conn, "documents/notes.md", 1);
         let source_ref = format!(
             r#"{{"proposal_id":"prop_1","evidence":[{{"content_hash":"","quote":"empty","start_line":1,"end_line":3}},{{"content_hash":"{}","quote":"q","start_line":1,"end_line":3}}]}}"#,
             chunks[0].1
         );
-        let docs = source_docs_from_ref(&conn, "fact_t", Some(&source_ref));
         assert_eq!(
-            docs,
-            vec![("documents/notes.md".to_string(), Some(chunks[0].1.clone()))],
-            "empty content_hash entries must be skipped"
+            resolve_source_core(&conn, "fact_t", Some(&source_ref)).unwrap(),
+            SourceResolution::HadEvidenceUnresolved,
+            "any unresolved evidence entry classifies the whole ref unresolved"
+        );
+        assert_eq!(
+            source_docs_from_ref(&conn, "fact_t", Some(&source_ref)).len(),
+            1,
+            "the display keeps the resolved sibling"
         );
     }
 
     #[test]
     fn create_and_get_entity_round_trip() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Project Alpha".into(),
                 entity_type: Some("project".into()),
@@ -834,19 +1158,49 @@ mod tests {
         .unwrap();
         assert!(detail.id.starts_with("ent_"));
         assert_eq!(detail.name, "Project Alpha");
+        // Spec §2.5 GUI bullet / r2-M2a: on a SKIP (no manifest row → no
+        // vocabulary to violate) today's behavior stands — the caller's
+        // label lands verbatim. The `gate_skipped` ledger row (below) is
+        // what surfaces the entity to heal if a later strict flip leaves
+        // the label undeclared.
         assert_eq!(detail.entity_type, "project");
         assert_eq!(detail.summary, "Summary prose.");
+        let (reason, original): (String, Option<String>) = conn
+            .query_row(
+                "SELECT reason, original_type FROM entity_type_origin WHERE entity_id = ?1",
+                [&detail.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(reason, "gate_skipped");
+        assert_eq!(original.as_deref(), Some("project"));
 
         let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
         assert_eq!(loaded.name, "Project Alpha");
         assert!(loaded.facts.is_empty());
     }
 
+    /// SKIP with a BLANK type lands the pre-existing `'concept'` literal.
+    #[test]
+    fn create_entity_skip_with_blank_type_lands_concept() {
+        let mut conn = open_in_memory().unwrap();
+        let detail = create_entity(
+            &mut conn,
+            &CreateEntityInput {
+                name: "Untyped".into(),
+                entity_type: Some("  ".into()),
+                summary: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(detail.entity_type, "concept");
+    }
+
     #[test]
     fn list_entities_excludes_archived_by_default() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let active = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Active".into(),
                 entity_type: None,
@@ -855,7 +1209,7 @@ mod tests {
         )
         .unwrap();
         let archived = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Gone".into(),
                 entity_type: None,
@@ -863,7 +1217,7 @@ mod tests {
             },
         )
         .unwrap();
-        archive_entity(&conn, &archived.id).unwrap();
+        archive_entity(&mut conn, &archived.id).unwrap();
 
         let list = list_entities(&conn, EntitySort::NameAsc, &EntityListFilter::default()).unwrap();
         assert_eq!(list.len(), 1);
@@ -883,9 +1237,9 @@ mod tests {
 
     #[test]
     fn get_entity_hydrates_facts_tasks_events() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Hydrated".into(),
                 entity_type: None,
@@ -911,9 +1265,9 @@ mod tests {
 
     #[test]
     fn update_entity_summary_clears_embedding() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Edit me".into(),
                 entity_type: None,
@@ -949,9 +1303,9 @@ mod tests {
 
     #[test]
     fn fact_source_docs_resolved_from_source_ref() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Sourced".into(),
                 entity_type: None,
@@ -1004,9 +1358,9 @@ mod tests {
     fn fact_v02_fields_populated_from_okf_sources_column() {
         // Seed a fact with okf_sources / okf_verified populated, then load via get_entity
         // and assert the parsed Vec<OkfSourceEntry> / Vec<OkfVerifiedEntry> round-trip.
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "V02".into(),
                 entity_type: None,
@@ -1041,9 +1395,9 @@ mod tests {
         // (e.g. `2026-07-02T00:00:00.000Z`); the importer round-trips that
         // JSON into `llm_wiki_entries.okf_verified` verbatim. `parse_okf_verified`
         // must normalize the ISO form to epoch ms so the UI sees the record.
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let detail = create_entity(
-            &conn,
+            &mut conn,
             &CreateEntityInput {
                 name: "Iso".into(),
                 entity_type: None,
@@ -1070,5 +1424,336 @@ mod tests {
         // 2026-07-02T00:00:00.000Z = 1782950400000 ms; exact value locked in to
         // catch silent deserializer regressions.
         assert_eq!(fact.okf_verified[0].at, 1782950400000);
+    }
+
+    /// `resolve_source_core` distinguishes all three outcomes for the matrix.
+    #[test]
+    fn resolve_source_core_distinguishes_three_outcomes() {
+        let conn = open_in_memory().unwrap();
+
+        // 1. Resolved — librarian token + valid evidence + matching chunk.
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status) VALUES ('/v/a.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        let doc_id: i64 = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, start_line, end_line, strategy, entity_id)
+             VALUES (?1, 'c', 0, 1, 1, 'prose', 'tier_wisdom')",
+            [doc_id],
+        )
+        .unwrap();
+        let chunk_id: i64 = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE chunks SET content_hash = 'deadbeef' WHERE id = ?1",
+            [chunk_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact1', 'ent1', 't', 'b', '[]', 'inferred', 'librarian_inferred',
+                     'librarian-deadbeefdeadbeefdeadbeefdeadbeef', 1, 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, unanchored, created_at)
+             VALUES ('fact1', 'p1', '{\"proposal_id\":\"p1\",\"evidence\":[{\"content_hash\":\"deadbeef\"}]}', 0, 1)",
+            [],
+        )
+        .unwrap();
+        let r = resolve_source_core(
+            &conn,
+            "fact1",
+            Some("librarian-deadbeefdeadbeefdeadbeefdeadbeef"),
+        )
+        .unwrap();
+        assert!(matches!(r, SourceResolution::Resolved(_)), "got {r:?}");
+
+        // 2. HadEvidenceUnresolved — librarian token but evidence row missing.
+        let r = resolve_source_core(
+            &conn,
+            "fact_missing",
+            Some("librarian-deadbeefdeadbeefdeadbeefdeadbeef"),
+        )
+        .unwrap();
+        assert_eq!(r, SourceResolution::HadEvidenceUnresolved);
+
+        // 3. NoEvidence — source_ref is None.
+        let r = resolve_source_core(&conn, "fact1", None).unwrap();
+        assert_eq!(r, SourceResolution::NoEvidence);
+    }
+
+    /// Plain path ref (non-librarian, non-JSON) → HadEvidenceUnresolved
+    /// (spec R2.3.2a: not a NoEvidence).
+    #[test]
+    fn resolve_source_core_plain_path_is_unresolved() {
+        let conn = open_in_memory().unwrap();
+        let r = resolve_source_core(&conn, "fact1", Some("documents/notes.md")).unwrap();
+        assert_eq!(r, SourceResolution::HadEvidenceUnresolved);
+    }
+
+    /// JSON with `evidence: []` → HadEvidenceUnresolved (the V20 doomed-row
+    /// shape).
+    #[test]
+    fn resolve_source_core_empty_evidence_is_unresolved() {
+        let conn = open_in_memory().unwrap();
+        let r = resolve_source_core(
+            &conn,
+            "fact1",
+            Some(r#"{"proposal_id":null,"evidence":[]}"#),
+        )
+        .unwrap();
+        assert_eq!(r, SourceResolution::HadEvidenceUnresolved);
+    }
+
+    /// DB fault in the chunks query → propagates the error (R2.3.2: a DB
+    /// fault must NOT masquerade as "no source").
+    #[test]
+    fn resolve_source_core_propagates_db_faults() {
+        // Open an in-memory connection WITHOUT running migrations to force a
+        // fault on the chunk join. The helper expects a librarian token, so
+        // the chunks query is the first DB call.
+        let conn = Connection::open_in_memory().unwrap();
+        let r = resolve_source_core(
+            &conn,
+            "fact1",
+            Some("librarian-deadbeefdeadbeefdeadbeefdeadbeef"),
+        );
+        // No documents table at all → the chunks query errors.
+        assert!(r.is_err(), "a DB fault must propagate, not swallow");
+    }
+
+    // ---- Task 7 (spec R2.7.5): read/write redirect resolution ----------
+
+    fn redirect(conn: &Connection, loser: &str, survivor: &str) {
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?2, 1)",
+            params![loser, survivor],
+        )
+        .unwrap();
+    }
+
+    fn seed_pair() -> (rusqlite::Connection, String, String) {
+        let mut conn = open_in_memory().unwrap();
+        let a = create_entity(
+            &mut conn,
+            &CreateEntityInput {
+                name: "Adrian".into(),
+                entity_type: None,
+                summary: Some("same".into()),
+            },
+        )
+        .unwrap();
+        let b = create_entity(
+            &mut conn,
+            &CreateEntityInput {
+                name: "Adrian".into(),
+                entity_type: None,
+                summary: Some("same".into()),
+            },
+        )
+        .unwrap();
+        (conn, a.id, b.id)
+    }
+
+    /// r11-M4 (§6 item 10): after a merge, `get_entity(loser)` returns the
+    /// SURVIVOR (`EntityDetail.id` = survivor), the survivor's reads cover
+    /// the loser's facts/tasks (transitive closure, r13-m3), counts include
+    /// them, and the loser never appears in `list_entities`.
+    #[test]
+    fn get_entity_loser_redirects_to_survivor_with_transitive_closure() {
+        let (conn, surv, loser) = seed_pair();
+        seed_fact(&conn, &loser, "fact-loser", "Loser fact.");
+        seed_fact(&conn, &surv, "fact-surv", "Survivor fact.");
+        seed_task(&conn, &loser, "task-loser", "pending");
+        redirect(&conn, &loser, &surv);
+
+        // get_entity(loser) → survivor detail (r13-m3: id is the SURVIVOR).
+        let via_loser = get_entity(&conn, &loser).unwrap().unwrap();
+        assert_eq!(via_loser.id, surv, "EntityDetail.id must be the survivor");
+        assert_eq!(via_loser.facts.len(), 2, "closure covers both facts");
+        assert_eq!(via_loser.tasks.len(), 1);
+        assert!(via_loser.facts.iter().any(|f| f.id == "fact-loser"));
+
+        // get_entity(survivor) covers the loser's facts too.
+        let via_surv = get_entity(&conn, &surv).unwrap().unwrap();
+        assert_eq!(via_surv.id, surv);
+        assert!(via_surv.facts.iter().any(|f| f.id == "fact-loser"));
+
+        // list_entities: loser never listed; survivor's counts include the
+        // loser's fact + open task.
+        let list = list_entities(&conn, EntitySort::default(), &EntityListFilter::default())
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.id == surv)
+            .collect::<Vec<_>>();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].fact_count, 2, "{:?}", list[0]);
+        assert_eq!(list[0].open_task_count, 1);
+        let listed_ids: Vec<String> =
+            list_entities(&conn, EntitySort::default(), &EntityListFilter::default())
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
+        assert!(!listed_ids.contains(&loser), "loser is never returned");
+    }
+
+    /// r21: the redirect hop is followed REGARDLESS of the survivor's
+    /// `deleted_at` — an archived survivor returns archived detail, never
+    /// `None` (a stale loser link must not look like a deleted entity).
+    #[test]
+    fn get_entity_loser_follows_redirect_to_archived_survivor() {
+        let (mut conn, surv, loser) = seed_pair();
+        redirect(&conn, &loser, &surv);
+        archive_entity(&mut conn, &surv).unwrap();
+
+        let detail = get_entity(&conn, &loser).unwrap();
+        let detail = detail.expect("archived survivor is returned, never None");
+        assert_eq!(detail.id, surv);
+        assert!(detail.deleted_at.is_some(), "archived detail as-is");
+    }
+
+    /// r13-MAJOR-1 / r15-m3: a mutator keyed by a loser id acts on the
+    /// SURVIVOR — editing via a stale loser link edits the survivor.
+    #[test]
+    fn update_entity_summary_via_loser_hits_survivor() {
+        let (conn, surv, loser) = seed_pair();
+        redirect(&conn, &loser, &surv);
+        update_entity_summary(&conn, &loser, "Edited via loser").unwrap();
+        let summary: String = conn
+            .query_row(
+                "SELECT summary FROM curated_entities WHERE id = ?1",
+                [&surv],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(summary, "Edited via loser");
+    }
+
+    /// r13-MAJOR-1: archiving a survivor archives the WHOLE cluster
+    /// (survivor + losers); redirect rows are KEPT (r21) so a stale loser
+    /// link still resolves.
+    #[test]
+    fn archive_entity_archives_whole_cluster_and_keeps_redirects() {
+        let (mut conn, surv, loser) = seed_pair();
+        redirect(&conn, &loser, &surv);
+        // Archive via the LOSER link (r15-m3): acts on the survivor cluster.
+        archive_entity(&mut conn, &loser).unwrap();
+        let surv_deleted: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM curated_entities WHERE id = ?1",
+                [&surv],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let loser_deleted: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM curated_entities WHERE id = ?1",
+                [&loser],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(surv_deleted.is_some(), "survivor archived with the cluster");
+        assert!(loser_deleted.is_some(), "loser archived with the cluster");
+        let redirects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entity_redirects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(redirects, 1, "archive keeps the redirect row (r21)");
+    }
+
+    /// r21 merge reversal: deleting the loser's redirect row fully restores
+    /// it as a standalone entity — reads, recall, and export exactly as
+    /// before the merge (the merge's only state is the redirect row).
+    #[test]
+    fn deleting_redirect_row_restores_loser() {
+        let (conn, surv, loser) = seed_pair();
+        seed_fact(&conn, &loser, "fact-loser", "Loser fact.");
+        redirect(&conn, &loser, &surv);
+        // Merged state: loser hidden.
+        assert_eq!(get_entity(&conn, &loser).unwrap().unwrap().id, surv);
+
+        conn.execute(
+            "DELETE FROM entity_redirects WHERE entity_id = ?1",
+            [&loser],
+        )
+        .unwrap();
+
+        let detail = get_entity(&conn, &loser).unwrap().unwrap();
+        assert_eq!(detail.id, loser, "loser reads as itself again");
+        assert_eq!(detail.facts.len(), 1);
+        assert_eq!(detail.facts[0].id, "fact-loser");
+        let listed: Vec<String> =
+            list_entities(&conn, EntitySort::default(), &EntityListFilter::default())
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
+        assert!(listed.contains(&loser), "loser lists again");
+        // Export ships it standalone again with its facts.
+        let exported = crate::db::bundle_io::load_export_entities(&conn, None).unwrap();
+        assert_eq!(exported.len(), 2);
+        let restored = exported.iter().find(|e| e.entity_id == loser).unwrap();
+        assert_eq!(restored.facts.len(), 1);
+    }
+
+    /// r2-m6 read-side cycle guard: a hand-crafted cycle errors (reported),
+    /// never loops, never returns a guessed survivor.
+    #[test]
+    fn redirect_cycle_errors_not_loops() {
+        let (conn, a, b) = seed_pair();
+        redirect(&conn, &a, &b);
+        redirect(&conn, &b, &a);
+        assert!(get_entity(&conn, &a).is_err());
+        assert!(resolve_entity_id(&conn, &a).is_err());
+        // A self-cycle too.
+        conn.execute(
+            "INSERT OR REPLACE INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES (?1, ?1, 1)",
+            params![b],
+        )
+        .unwrap();
+        assert!(resolve_entity_id(&conn, &b).is_err());
+    }
+
+    /// Fix round 1 (Important 4, Global Constraints): the cluster archive is
+    /// ONE transaction — a failure on ANY member's UPDATE (simulated here
+    /// with an aborting trigger, the interruption-equivalent) rolls back
+    /// every member, never leaving a half-archived cluster.
+    #[test]
+    fn archive_cluster_rolls_back_entirely_when_one_member_fails() {
+        let (mut conn, surv, loser) = seed_pair();
+        redirect(&conn, &loser, &surv);
+        // Abort any UPDATE that would archive the survivor — whichever
+        // order the cluster is walked in, the other member's write must not
+        // survive.
+        // Triggers cannot bind parameters — inline the id (ent ids are
+        // `ent_<hex>`, so no quoting hazards).
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER forbid_surv_archive BEFORE UPDATE ON curated_entities
+             WHEN NEW.id = '{surv}' AND NEW.deleted_at IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'simulated interruption'); END"
+        ))
+        .unwrap();
+
+        assert!(archive_entity(&mut conn, &loser).is_err());
+
+        for id in [&surv, &loser] {
+            let deleted: Option<i64> = conn
+                .query_row(
+                    "SELECT deleted_at FROM curated_entities WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                deleted.is_none(),
+                "cluster member {id} must not be archived when the tx aborts"
+            );
+        }
+        // The guard trigger stays for this connection only (in-memory).
     }
 }

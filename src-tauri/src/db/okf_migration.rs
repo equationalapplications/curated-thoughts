@@ -3,11 +3,23 @@
 
 use crate::db::okf_ddl::LLM_WIKI_META_TABLE;
 use crate::hasher::hash_bytes;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Component, Path};
 
+/// One-shot owner of the IMMEDIATE transaction for okf_migration (Task 2).
+///
+/// `run_okf_migration` opens its own `ImmediateTx` here so the gate call
+/// (Task 3) at every minted row sees the same IMMEDIATE contract the helper
+/// demands. No other path opens an IMMEDIATE transaction with raw
+/// `BEGIN IMMEDIATE;` after Task 2 ships.
+use crate::db::entity_gate::ImmediateTx;
+
 pub const OKF_MIGRATED_META_KEY: &str = "okf_migrated_at";
+/// `llm_wiki_meta` key carrying the most-recent abort's cause. Cleared on
+/// a successful run (spec §2.5 r6-M2: the heal report surfaces it; a
+/// successful retry must overwrite the stale failure note).
+pub const OKF_MIGRATION_DIAG_KEY: &str = "okf_migration_diagnostic";
 
 fn normalize_wiki_relative_path(path: &str) -> String {
     let normalized = path.replace('\\', "/");
@@ -76,32 +88,189 @@ fn okf_migration_complete(conn: &Connection) -> Result<bool> {
     Ok(migrated.is_some())
 }
 
-fn migrate_approved_wiki_pages(conn: &Connection, vault_root: &Path, now: i64) -> Result<usize> {
+/// One approved page with its body ALREADY READ (R15: the filesystem read
+/// happens before the migration transaction opens — the r21 hold-time rule
+/// forbids file I/O inside the IMMEDIATE transaction).
+struct PreloadedPage {
+    path: String,
+    body: String,
+    file_found: bool,
+}
+
+/// Read every approved page's body BEFORE the transaction opens (R15b).
+/// A read failure here is the same `(String::new(), false)` the in-tx read
+/// produced — the page migrates with an empty body and a
+/// "(file missing)" event, unchanged.
+fn preload_approved_pages(conn: &Connection, vault_root: &Path) -> Result<Vec<PreloadedPage>> {
     let mut stmt =
-        conn.prepare("SELECT id, path FROM wiki_pages WHERE status = 'approved' ORDER BY id")?;
-    let rows: Vec<(i64, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        conn.prepare("SELECT path FROM wiki_pages WHERE status = 'approved' ORDER BY id")?;
+    let paths: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(paths
+        .into_iter()
+        .map(|path| {
+            let (body, file_found) = read_wiki_page_body(vault_root, &path);
+            PreloadedPage {
+                path,
+                body,
+                file_found,
+            }
+        })
+        .collect())
+}
+
+fn migrate_approved_wiki_pages(
+    tx: &ImmediateTx<'_>,
+    policy: &crate::config::IngestPolicy,
+    pages: &[PreloadedPage],
+    now: i64,
+) -> Result<usize> {
+    let conn: &Connection = tx;
 
     let mut count = 0usize;
-    for (_page_id, path) in rows {
-        let entity_id = entity_id_from_wiki_path(&path);
-        let (body, file_found) = read_wiki_page_body(vault_root, &path);
-        let name = wiki_page_entity_name(&path, &body);
-        let summary = body;
+    for page in pages {
+        let path = &page.path;
+        // The path-derived id resolves to its TERMINAL survivor up front
+        // (review finding): the admit arms already insert under the
+        // survivor (`shared_insert_entity` resolves), but the SKIP arm's
+        // literal upsert, the ledger rows and the event below keyed on the
+        // RAW id — refreshing a merged-away loser row no survivor-resolving
+        // reader sees. A cycle errors, aborting the migration loudly
+        // (mutate path — never guess a survivor).
+        let raw_entity_id = entity_id_from_wiki_path(path);
+        let entity_id = crate::db::entities::resolve_entity_id(tx, &raw_entity_id)?;
+        let name = wiki_page_entity_name(path, &page.body);
+        let summary = page.body.clone();
 
-        conn.execute(
-            "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
-             VALUES (?1, ?2, 'concept', ?3, NULL, ?4, ?4, NULL)
-             ON CONFLICT(id) DO UPDATE SET
-               name = excluded.name,
-               summary = excluded.summary,
-               updated_at = excluded.updated_at",
-            params![entity_id, name, summary, now],
+        // §2.5 okf_migration bullet: ids are path-derived, so it
+        // resolves `folder_ontology` mode from the note's path like
+        // any ingest. The abort-vs-skip decision (plan-p3-m4) is
+        // THIS task's:
+        //
+        //   * Gate without fallback (Held) → abort WITHOUT setting
+        //     `okf_migrated_at`. The V7 guard at `mark_okf_migrated`
+        //     makes retry safe (no half-stamp).
+        //   * Gate with declared fallback → helper inserts via the
+        //     shared helper (upsert mode r6-M3 preserves
+        //     `entity_type`).
+        //   * Skip → today's `'concept'` literal stands + ledger row.
+        //
+        // `tx` is already an `ImmediateTx` opened by `run_okf_migration`;
+        // a `bail!` here rolls back the entire batch and the caller
+        // observes the abort at the `AppDb::open_with_config` site
+        // (Task 9 owns the loud logging there).
+        let (decision, gate) = crate::db::entity_gate::resolve_production_gate(
+            tx,
+            policy,
+            &entity_id,
+            std::slice::from_ref(path),
+        );
+        let outcome = crate::db::entity_gate::shared_insert_entity(
+            tx,
+            Some(&entity_id),
+            &name,
+            None,
+            &summary,
+            now,
+            decision.clone(),
+            true,
         )?;
 
-        let event_id = format!("evt-migrate-{}", &hash_bytes(entity_id.as_bytes())[..12]);
-        let summary_text = if file_found {
+        use crate::db::entity_gate::AdmitOutcome;
+        use crate::db::entity_gate::GateDecision;
+        use crate::db::schema::OriginReason;
+
+        match (&outcome, &decision) {
+            (AdmitOutcome::Skipped { .. }, GateDecision::Skip) => {
+                // SKIP path: today's `'concept'` literal stands (r2-M2a).
+                // Helper did NOT insert (upsert mode preserved
+                // `entity_type` on the upsert path; here the SKIP path
+                // is a literal hardcoded `'concept'` per spec). Land
+                // the literal + write the `gate_skipped` ledger row.
+                conn.execute(
+                    "INSERT INTO curated_entities (id, name, entity_type, summary, summary_embedding, created_at, updated_at, deleted_at)
+                     VALUES (?1, ?2, 'concept', ?3, NULL, ?4, ?4, NULL)
+                     ON CONFLICT(id) DO UPDATE SET
+                       name = excluded.name,
+                       summary = excluded.summary,
+                       updated_at = excluded.updated_at",
+                    params![entity_id, name, summary, now],
+                )?;
+                crate::db::entity_gate::write_origin_ledger_row(
+                    tx,
+                    &entity_id,
+                    // r21 contract: NULL for "no label supplied" — the
+                    // migration passes `None` to `shared_insert_entity`, so
+                    // the ledger must not record the landed `'concept'`
+                    // literal as if it were a proposed label (review
+                    // finding; bundle import's Skip arm already writes
+                    // NULL).
+                    None,
+                    OriginReason::GateSkipped,
+                    gate.source_directory.as_deref(),
+                )?;
+            }
+            (AdmitOutcome::Held { .. }, _) => {
+                // §2.5 abort trigger (r12-M2/r3-M1): abort WITHOUT
+                // setting `okf_migrated_at`. The dominant trigger is the
+                // rung-4 strict vocabulary LACKING a declared
+                // `fallback_node_type` (`ModeVerdict::StrictNoVocab` →
+                // `GateDecision::Held` in
+                // `NodeGateDecision::into_gate_decision`). The outer
+                // `ImmediateTx::rollback` rolls back the entire
+                // migration, so the retry safety holds.
+                //
+                // The match stays WIDE (Task 3's shipped semantics — Task
+                // 9 owns observability, not the abort-vs-skip decision):
+                // the only other route to Held here is
+                // `GateDecision::Gate` over an EMPTY declared set (strict
+                // + `fallback_node_type` + zero `node_types`), which is
+                // the §2.4.5 configuration error — aborting is correct
+                // there too, and the diagnostic below names the recovery
+                // for EACH trigger (fix-before-merge: the old phrase said
+                // "gains a fallback" for both, but adding a fallback to a
+                // manifest that already declares one is a NO-OP — that
+                // corner's recovery is adding node types).
+                bail!(
+                    "okf_migration aborted: strict ontology gate held a wiki-page mint \
+                     (entity {entity_id}, path {path:?}): the strict manifest has no \
+                     usable vocabulary — no declared `fallback_node_type`, or a declared \
+                     fallback over an EMPTY `node_types` set. Retry after naming a \
+                     `fallback_node_type` (first case) or adding node types to the \
+                     manifest (second case) (spec §2.4.5 / §2.5 r12-M2)"
+                );
+            }
+            (AdmitOutcome::DegradedToFallback { .. }, _) => {
+                // Helper inserted as the manifest's declared fallback.
+                // The mint was UNLABELED (okf_migration supplies no
+                // proposed type), so R2.4.6's `unlabeled_landing` row
+                // records it — same situation, same row as bundle
+                // import's DegradedToFallback arm (bundle_apply.rs):
+                // a fallback landing must stay distinguishable from a
+                // declared type. `original_type` NULL (no label was
+                // supplied — r21 contract), `source_directory` NULL
+                // (no `off` folder caused this; the mint was gated).
+                crate::db::entity_gate::write_origin_ledger_row(
+                    tx,
+                    &entity_id,
+                    None,
+                    OriginReason::UnlabeledLanding,
+                    None,
+                )?;
+            }
+            _ => {
+                // Admitted as declared / aliased: nothing to do.
+            }
+        }
+
+        // Keyed on the RAW path id so the event id stays stable however the
+        // entity has since been merged (the INSERT OR IGNORE idempotency key).
+        let event_id = format!(
+            "evt-migrate-{}",
+            &hash_bytes(raw_entity_id.as_bytes())[..12]
+        );
+        let summary_text = if page.file_found {
             format!("Migrated from wiki page *{path}*")
         } else {
             format!("Migrated from wiki page *{path}* (file missing)")
@@ -116,7 +285,17 @@ fn migrate_approved_wiki_pages(conn: &Connection, vault_root: &Path, now: i64) -
     Ok(count)
 }
 
-fn drop_pending_wiki_proposals(conn: &Connection, vault_root: &Path) -> Result<()> {
+/// DB mutations only: `wiki_pages` rows are orphaned and their source docs
+/// returned to `pending` INSIDE the transaction; the proposed-file removals
+/// are COLLECTED and returned for the caller to run AFTER `COMMIT` — the
+/// r21 hold-time rule (R15) forbids filesystem I/O inside the IMMEDIATE
+/// transaction, the same rule that moved the page-body reads out
+/// (`preload_approved_pages`). Best-effort either way: a failed removal
+/// leaves an orphaned row's proposed file on disk, exactly as before.
+fn drop_pending_wiki_proposals(
+    conn: &Connection,
+    vault_root: &Path,
+) -> Result<Vec<std::path::PathBuf>> {
     let mut stmt = conn.prepare(
         "SELECT id, path, source_doc_ids FROM wiki_pages WHERE status = 'pending_review'",
     )?;
@@ -124,14 +303,14 @@ fn drop_pending_wiki_proposals(conn: &Connection, vault_root: &Path) -> Result<(
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    let mut to_remove = Vec::new();
     for (page_id, path, source_doc_ids) in rows {
         conn.execute(
             "UPDATE wiki_pages SET status = 'orphaned' WHERE id = ?1",
             [page_id],
         )?;
 
-        let proposed_path = vault_root.join(".brain").join("proposed").join(&path);
-        let _ = std::fs::remove_file(&proposed_path);
+        to_remove.push(vault_root.join(".brain").join("proposed").join(&path));
 
         if let Ok(doc_ids) = serde_json::from_str::<Vec<i64>>(&source_doc_ids) {
             for doc_id in doc_ids {
@@ -142,7 +321,7 @@ fn drop_pending_wiki_proposals(conn: &Connection, vault_root: &Path) -> Result<(
             }
         }
     }
-    Ok(())
+    Ok(to_remove)
 }
 
 fn purge_wiki_tier_documents(conn: &Connection) -> Result<()> {
@@ -159,8 +338,55 @@ fn mark_okf_migrated(conn: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
+/// Record the most-recent abort's cause so a later heal pass can surface it
+/// (spec §2.5 r6-M2: "the only production caller discards the error ...
+/// change the caller to log loudly and record a diagnostic (heal report
+/// surfaces it)"). The row lives in `llm_wiki_meta` (the same table the
+/// `okf_migrated_at` and `ontology_config_watermark` keys live in) and is
+/// read back by [`read_okf_migration_diagnostic`]. Cleared on a successful
+/// run so a stale failure never shadows a green open.
+fn record_okf_migration_diagnostic(conn: &Connection, message: &str) -> Result<()> {
+    let escaped = message.replace('\0', "");
+    conn.execute(
+        "INSERT INTO llm_wiki_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![OKF_MIGRATION_DIAG_KEY, escaped],
+    )?;
+    Ok(())
+}
+
+/// Read the most-recent abort's cause (the row written by
+/// [`record_okf_migration_diagnostic`]). Returns `None` when the migration
+/// has never aborted on this brain, or after a successful retry cleared it.
+pub fn read_okf_migration_diagnostic(conn: &Connection) -> Result<Option<String>> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM llm_wiki_meta WHERE key = ?1",
+            [OKF_MIGRATION_DIAG_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(value.filter(|v| !v.is_empty()))
+}
+
+/// Clear the diagnostic row so a successful retry doesn't surface a stale
+/// failure in the next heal pass. Called inside the same transaction as
+/// `mark_okf_migrated` so the two writes commit or roll back together.
+fn clear_okf_migration_diagnostic(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM llm_wiki_meta WHERE key = ?1",
+        [OKF_MIGRATION_DIAG_KEY],
+    )?;
+    Ok(())
+}
+
 /// Run V7 data conversion when vault path is known. Safe to call repeatedly.
-pub fn run_okf_migration(conn: &Connection, vault_root: &Path) -> Result<()> {
+///
+/// Takes `&mut Connection` (Task 2): the body opens an IMMEDIATE transaction
+/// through [`ImmediateTx::begin`] so the gate call (Task 3) at every minted
+/// row sees the same IMMEDIATE contract. Callers must hold a mutable borrow
+/// (the `let mut conn` fixup at the call site in `connection.rs`).
+pub fn run_okf_migration(conn: &mut Connection, vault_root: &Path) -> Result<()> {
     if okf_migration_complete(conn)? {
         return Ok(());
     }
@@ -170,19 +396,47 @@ pub fn run_okf_migration(conn: &Connection, vault_root: &Path) -> Result<()> {
         .context("system clock before unix epoch")?
         .as_secs() as i64;
 
-    conn.execute_batch("BEGIN IMMEDIATE;")?;
-    let result = (|| -> Result<()> {
-        migrate_approved_wiki_pages(conn, vault_root, now)?;
-        drop_pending_wiki_proposals(conn, vault_root)?;
-        purge_wiki_tier_documents(conn)?;
-        mark_okf_migrated(conn, now)?;
+    // R15 (r21 hold-time rule): BOTH filesystem reads — the ingest policy
+    // config and the wiki-page bodies — happen BEFORE the IMMEDIATE
+    // transaction opens. The V7 migration is a one-shot open-time pass, so
+    // the (tiny) window between this read query and the transaction is the
+    // pre-existing V7 posture, not a new race.
+    let policy = crate::config::ingest_policy_for_db(conn.path());
+    let pages = preload_approved_pages(conn, vault_root)?;
+
+    let tx = ImmediateTx::begin(conn)?;
+    // Proposed-file removals run AFTER commit (r21 hold-time rule — no
+    // filesystem I/O inside the IMMEDIATE transaction; see
+    // `drop_pending_wiki_proposals`).
+    let mut proposed_to_remove: Vec<std::path::PathBuf> = Vec::new();
+    let commit_result = (|| -> Result<()> {
+        migrate_approved_wiki_pages(&tx, &policy, &pages, now)?;
+        proposed_to_remove = drop_pending_wiki_proposals(&tx, vault_root)?;
+        purge_wiki_tier_documents(&tx)?;
+        mark_okf_migrated(&tx, now)?;
+        // Spec §2.5 r6-M2: clear any prior abort note so a successful
+        // retry doesn't surface a stale failure in the next heal pass.
+        clear_okf_migration_diagnostic(&tx)?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = conn.execute_batch("ROLLBACK;");
-        return result;
+    match commit_result {
+        Ok(()) => tx.commit(),
+        Err(e) => {
+            let _ = tx.rollback();
+            // Spec §2.5 r6-M2: record the abort's cause so heal can surface
+            // it on the next run. Best-effort: a closed transaction left the
+            // connection in a recoverable state; a failed write here would
+            // just deny the user the diagnostic, not their data.
+            let _ = record_okf_migration_diagnostic(conn, &format!("{e:#}"));
+            return Err(e);
+        }
+    }?;
+    // Best-effort, post-commit: the rows are already orphaned durably; a
+    // failed removal leaves the proposed file on disk (same outcome as the
+    // previous in-transaction `let _ = remove_file`).
+    for path in &proposed_to_remove {
+        let _ = std::fs::remove_file(path);
     }
-    conn.execute_batch("COMMIT;")?;
 
     conn.execute_batch("VACUUM;")?;
     Ok(())
@@ -229,7 +483,7 @@ mod tests {
         std::fs::create_dir_all(vault.join("wiki")).unwrap();
         std::fs::write(vault.join("wiki/page.md"), "# Page\n\nBody.").unwrap();
 
-        let conn = open_v7_db();
+        let mut conn = open_v7_db();
         conn.execute(
             "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
              VALUES ('page.md', '[]', 'test', 'approved')",
@@ -237,17 +491,82 @@ mod tests {
         )
         .unwrap();
 
-        run_okf_migration(&conn, vault).unwrap();
+        run_okf_migration(&mut conn, vault).unwrap();
         let count1: i64 = conn
             .query_row("SELECT COUNT(*) FROM curated_entities", [], |r| r.get(0))
             .unwrap();
 
-        run_okf_migration(&conn, vault).unwrap();
+        run_okf_migration(&mut conn, vault).unwrap();
         let count2: i64 = conn
             .query_row("SELECT COUNT(*) FROM curated_entities", [], |r| r.get(0))
             .unwrap();
 
         assert_eq!(count1, 1);
         assert_eq!(count2, 1);
+    }
+
+    /// Review finding: the SKIP arm (no `tier_fact` row) lands on the
+    /// path-derived id's TERMINAL survivor, like the admit arms — never on
+    /// the merged-away loser row no survivor-resolving reader sees.
+    #[test]
+    fn skip_arm_lands_on_the_redirect_survivor() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path();
+        std::fs::create_dir_all(vault.join("wiki")).unwrap();
+        std::fs::write(vault.join("wiki/page.md"), "# Page\n\nBody.").unwrap();
+
+        let mut conn = open_v7_db();
+        conn.execute(
+            "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
+             VALUES ('page.md', '[]', 'test', 'approved')",
+            [],
+        )
+        .unwrap();
+        let raw = entity_id_from_wiki_path("page.md");
+        for (id, summary) in [(raw.as_str(), "loser"), ("ent_surv", "survivor")] {
+            conn.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES (?1, 'Page', 'concept', ?2, 1, 1)",
+                params![id, summary],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at) VALUES (?1, 'ent_surv', 1)",
+            params![raw],
+        )
+        .unwrap();
+
+        run_okf_migration(&mut conn, vault).unwrap();
+
+        let summary_of = |id: &str| -> String {
+            conn.query_row(
+                "SELECT summary FROM curated_entities WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(summary_of(&raw), "loser", "the loser row is left untouched");
+        assert!(
+            summary_of("ent_surv").contains("Body."),
+            "survivor refreshed"
+        );
+        let ledger: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity_type_origin WHERE entity_id = 'ent_surv'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ledger, 1, "gate_skipped row keyed on the survivor");
+        let event_owner: String = conn
+            .query_row(
+                "SELECT entity_id FROM llm_wiki_events WHERE event_type = 'imported'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_owner, "ent_surv");
     }
 }

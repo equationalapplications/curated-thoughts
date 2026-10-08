@@ -234,18 +234,20 @@ pub fn update_provider_with_brain_path(
     let new_provider = match initialize_provider_inner(brain_path, &config, app) {
         Ok(provider) => provider,
         Err(e) => {
-            // Roll back to a default config via the unified writer so the
-            // panel state is cleared even when provider init fails.
-            let paths = crate::retrieval::brain_paths_for(brain_path);
-            let fallback = crate::config::BrainConfig::default();
-            let rollback_err = fallback.write(&paths).err();
-            if let Some(rollback_err) = rollback_err {
-                return Err(format!(
-                    "provider init failed: {e}; rollback failed: {rollback_err}"
-                ));
-            }
-            let mut guard = state.0.lock().unwrap();
-            *guard = GenerationProvider::Unconfigured;
+            // No disk write on this failure path (M1, opus confirming
+            // review): initialize_provider_inner failed BEFORE any disk
+            // write, so the on-disk config — including the generation
+            // block with any legacy plaintext api_key — is already
+            // exactly the user's last valid state. A rollback write here
+            // (commit f9998dc reset `generation` to the shipped default
+            // and rewrote the file) wiped real credentials and provider
+            // settings on a failed init. NEITHER failure path in this
+            // function writes to disk, and neither touches the in-memory
+            // state: the file keeps the last valid configuration, so the
+            // provider already running from it stays active (dropping it
+            // to `Unconfigured` would disable a working provider for the
+            // session while disk still says it is configured). Same
+            // contract as the post-write site below.
             return Err(e.to_string());
         }
     };
@@ -269,15 +271,20 @@ pub fn update_provider_with_brain_path(
     cfg.generation = config_for_disk;
 
     if let Err(e) = cfg.write(&paths) {
-        let fallback = crate::config::BrainConfig::default();
-        let rollback_err = fallback.write(&paths).err();
-        if let Some(rollback_err) = rollback_err {
-            return Err(format!(
-                "settings could not be saved to disk: {e}; rollback failed: {rollback_err}"
-            ));
-        }
-        let mut guard = state.0.lock().unwrap();
-        *guard = GenerationProvider::Unconfigured;
+        // No rollback write on this failure path (m4, opus confirming
+        // review): `BrainConfig::write` is atomic — it writes a unique
+        // temp file and renames only on success — so a failed write never
+        // changed the file. There is nothing to undo, and re-writing the
+        // just-loaded config could only add a second failure mode.
+        //
+        // This matches the pre-write site above: NEITHER failure path in
+        // this function writes to disk. The on-disk config — including
+        // the generation block with any legacy plaintext api_key — keeps
+        // the user's last valid configuration untouched.
+        //
+        // In-memory, the PRIOR provider stays: it is exactly what disk
+        // still describes. The panel's values were not persisted, so they
+        // are not activated either (`new_provider` is dropped).
         return Err(format!("settings could not be saved to disk: {e}"));
     }
 
@@ -693,5 +700,125 @@ mod tests {
         assert!(resp.missing_blocks.generation);
         assert!(resp.missing_blocks.embedding);
         assert!(resp.missing_blocks.vault_path);
+    }
+
+    /// m3 (opus confirming review): exercise the REAL failure paths of
+    /// `update_provider_with_brain_path` — not hand-rolled re-creations.
+    ///
+    /// Both failure paths must leave the on-disk config.json byte-identical:
+    /// NEITHER failure path may write to disk (M1/m4), so the user's last
+    /// valid configuration — including the generation block with any legacy
+    /// plaintext api_key — survives a failed save untouched, while the
+    /// in-memory state machine reports `Unconfigured` (the panel's values
+    /// were never persisted, so reporting them active would lie).
+    #[test]
+    fn update_provider_init_failure_leaves_disk_untouched() {
+        use crate::config::BrainConfig;
+
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.json");
+        // Privacy is pre-chosen + ephemeral so resolve_privacy_state neither
+        // queries the keyring nor writes the Strict default into the file —
+        // the only disk mutation under test is the handler's own.
+        std::fs::write(
+            &config_path,
+            r#"{"generation":{"provider":"unconfigured"},"privacy":{"mode":"ephemeral","chosen":true},"x_custom":1}"#,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        // External + empty external_url fails inside initialize_provider_inner
+        // BEFORE any disk write (the pre-write failure path).
+        let state = InferenceState(Mutex::new(GenerationProvider::Unconfigured));
+        let err = update_provider_with_brain_path(
+            temp.path(),
+            GenerationConfig {
+                provider: GenerationProviderKind::External,
+                external_url: Some(String::new()),
+                ..GenerationConfig::default()
+            },
+            &state,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("external URL must not be empty"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            before,
+            "pre-write failure path must not touch config.json"
+        );
+        assert!(matches!(
+            *state.0.lock().unwrap(),
+            GenerationProvider::Unconfigured
+        ));
+        // Sanity: the file is still loadable and carries the unknown key.
+        let cfg = BrainConfig::load_lenient(&crate::retrieval::brain_paths_for(temp.path()))
+            .unwrap()
+            .config;
+        assert_eq!(
+            cfg.preserved_keys.as_ref().and_then(|v| v.get("x_custom")),
+            Some(&serde_json::json!(1))
+        );
+    }
+
+    /// m3 twin-site companion (opus confirming review): the POST-write
+    /// failure path (cfg.write fails) must also leave the on-disk file
+    /// byte-identical and drop the state machine to `Unconfigured`. The
+    /// brain dir is made read-only AFTER the config is written, so the
+    /// atomic write fails creating its temp file while every read in the
+    /// handler still succeeds; the pre-chosen privacy block keeps
+    /// resolve_privacy_state from writing.
+    #[test]
+    #[cfg(unix)] // PermissionsExt — the read-only-dir trick has no Windows twin
+    fn update_provider_write_failure_leaves_disk_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{"generation":{"provider":"unconfigured"},"privacy":{"mode":"ephemeral","chosen":true},"x_custom":1}"#,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let state = InferenceState(Mutex::new(GenerationProvider::Unconfigured));
+        let err = update_provider_with_brain_path(
+            temp.path(),
+            GenerationConfig {
+                provider: GenerationProviderKind::External,
+                external_url: Some("http://localhost:11434/v1".to_string()),
+                ..GenerationConfig::default()
+            },
+            &state,
+            None,
+        )
+        .unwrap_err();
+
+        // Restore before TempDir drop (remove_dir_all needs write access).
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            err.starts_with("settings could not be saved to disk:"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !err.contains("rollback failed:"),
+            "no rollback write exists, so no rollback-failure suffix: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            before,
+            "post-write failure path must not touch config.json"
+        );
+        assert!(matches!(
+            *state.0.lock().unwrap(),
+            GenerationProvider::Unconfigured
+        ));
     }
 }

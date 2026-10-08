@@ -4,8 +4,10 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use anyhow::{bail, Result};
+use rusqlite::{params, Connection, OptionalExtension};
+
+use crate::db::entity_gate::ImmediateTx;
 use serde::{Deserialize, Serialize};
 
 use crate::db::commit::{
@@ -227,19 +229,58 @@ pub fn preview_import(
     mode: ImportMode,
 ) -> Result<ImportPreview> {
     let mut entities = Vec::new();
+    let mut warnings = bundle.warnings.clone();
+    // The apply mints every NEW entity through the §2.5 production gate and
+    // aborts atomically on a Held mint; preview resolves the same ladder
+    // (read-only) so it never reports an import the apply will refuse.
+    let policy = crate::config::ingest_policy_for_db(conn.path());
+    let mut held: Vec<String> = Vec::new();
     for entity in &bundle.entities {
+        // Task 7: preview resolves bundle source ids through redirects the
+        // same way apply does, so a merged-away id previews as its survivor.
+        let resolved = crate::db::entities::resolve_entity_id(conn, &entity.entity_id)?;
         let entity_exists = row_exists(
             conn,
             "SELECT 1 FROM curated_entities WHERE id=?1",
-            &[&entity.entity_id],
+            &[&resolved],
         )?;
+        // Probe the gate exactly as apply will mint (review finding): Clone
+        // mode ALWAYS mints a fresh `ent_` id and gates THAT id — whether
+        // or not the bundle id exists locally — so the probe uses a fresh
+        // id too (the gate consults per-id state: rung 1a opt-outs,
+        // entity-scoped manifests). Merge/Replace mint under the resolved
+        // bundle id, only when it does not exist yet.
+        let (probe_id, mints_new) = if mode == ImportMode::Clone {
+            (generate_id("ent_"), true)
+        } else {
+            (resolved.clone(), !entity_exists)
+        };
+        if mints_new {
+            let decision =
+                crate::db::entity_gate::preview_production_gate(conn, &policy, &probe_id, &[]);
+            // The apply's Held set, not just `GateDecision::Held`: the
+            // shared insert helper ALSO holds a `Gate` decision whose
+            // vocabulary is empty (§2.4.5's second trigger — a declared
+            // `fallback_node_type` over ZERO `node_types`). Preview must
+            // refuse exactly what the apply would abort on, else it reports
+            // an import the apply refuses (bundle mints are unlabeled, so
+            // no other ladder arm can turn Held inside a `Gate` decision).
+            let would_hold = match &decision {
+                crate::db::entity_gate::GateDecision::Held => true,
+                crate::db::entity_gate::GateDecision::Gate(v) => v.is_empty(),
+                crate::db::entity_gate::GateDecision::Skip => false,
+            };
+            if would_hold {
+                held.push(entity.entity_id.clone());
+            }
+        }
         let local_summary: Option<String> = conn
             .query_row(
                 "SELECT summary FROM curated_entities WHERE id=?1",
-                [&entity.entity_id],
+                [&resolved],
                 |r| r.get(0),
             )
-            .ok();
+            .optional()?;
 
         let (mut facts_new, mut facts_existing) = (0i64, 0i64);
         for fact in &entity.facts {
@@ -304,10 +345,20 @@ pub fn preview_import(
             summary_action,
         });
     }
+    if !held.is_empty() {
+        warnings.push(format!(
+            "import will abort: the strict ontology gate would hold {} new entit{} ({}) — \
+             the manifest declares no usable fallback_node_type (§2.4.5); declare one \
+             (`ct ontology set --fallback <type>`) before applying",
+            held.len(),
+            if held.len() == 1 { "y" } else { "ies" },
+            held.join(", ")
+        ));
+    }
     Ok(ImportPreview {
         profile: bundle.profile.clone(),
         entities,
-        warnings: bundle.warnings.clone(),
+        warnings,
     })
 }
 
@@ -317,7 +368,14 @@ pub fn apply_import(
     mode: ImportMode,
 ) -> Result<ImportResult> {
     let (now_secs, now_ms) = now_timestamps();
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Swap (plan-p7-m4): the newtype guarantees IMMEDIATE at the type level
+    // so the shared insert helper's `&ImmediateTx` parameter type-checks once
+    // Task 3 calls it from `ensure_entity`. Existing callers (`tx.commit()`,
+    // `&tx` → &Connection helpers) work unchanged because Transaction derefs
+    // transitively to Connection. The policy load (filesystem) happens
+    // BEFORE the transaction opens — r21 hold-time rule (R15).
+    let policy = crate::config::ingest_policy_for_db(conn.path());
+    let tx = ImmediateTx::begin(conn)?;
     let mut result = ImportResult::default();
 
     // v0.1 → v0.2 fallback (upstream §4.8): if a profile-1 fact has no `sources` key
@@ -333,7 +391,13 @@ pub fn apply_import(
         let mut id_map: HashMap<String, String> = HashMap::new();
         let target_entity_id = match mode {
             ImportMode::Clone => generate_id("ent_"),
-            _ => entity.entity_id.clone(),
+            // Task 7 (r15-m4 / r2-m9): a bundle carries SOURCE-HOST ids; a
+            // peer import of an id this host merged away must land on the
+            // local survivor, else new facts attach to a loser recall can
+            // never see (and cross-host re-imports recreate the duplicates
+            // the merge removed). Resolution PROPAGATES errors — a DB fault
+            // aborts the import, never mints a duplicate.
+            _ => crate::db::entities::resolve_entity_id(&tx, &entity.entity_id)?,
         };
         if mode == ImportMode::Clone {
             for fact in &entity.facts {
@@ -347,7 +411,7 @@ pub fn apply_import(
             map.get(id).cloned().unwrap_or_else(|| id.to_string())
         };
 
-        ensure_entity(&tx, entity, &target_entity_id, mode, now_secs)?;
+        ensure_entity(&tx, &policy, entity, &target_entity_id, mode, now_secs)?;
 
         if mode == ImportMode::Replace {
             hard_deleted_ids.extend(clear_entity_content(&tx, &target_entity_id, now_ms)?);
@@ -709,7 +773,8 @@ pub fn apply_import(
 }
 
 fn ensure_entity(
-    tx: &Connection,
+    tx: &ImmediateTx<'_>,
+    policy: &crate::config::IngestPolicy,
     entity: &ParsedEntity,
     target_entity_id: &str,
     mode: ImportMode,
@@ -720,34 +785,122 @@ fn ensure_entity(
         .clone()
         .unwrap_or_else(|| entity.entity_id.clone());
     let bundle_summary = entity.summary.clone().unwrap_or_default();
+    // r2-m9: the existence probe PROPAGATES DB faults (the pre-Task-7
+    // `.ok()` swallowed them as "not found", so a transient fault during
+    // import minted a duplicate). `optional()` keeps only the genuinely
+    // no-row case as `None`. The caller already resolved the id through
+    // the redirect chain, so this probe is on a terminal survivor.
     let existing: Option<String> = tx
         .query_row(
             "SELECT summary FROM curated_entities WHERE id=?1",
             [target_entity_id],
             |r| r.get(0),
         )
-        .ok();
-    match existing {
-        None => {
-            tx.execute(
-                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
-                 VALUES (?1, ?2, 'concept', ?3, ?4, ?4)",
-                params![target_entity_id, name, bundle_summary, now_secs],
-            )?;
-        }
-        Some(local_summary) => {
-            let write_summary = match mode {
-                ImportMode::Replace => entity.summary.is_some(),
-                ImportMode::Merge => entity.summary.is_some() && local_summary.trim().is_empty(),
-                ImportMode::Clone => false,
-            };
-            if write_summary {
+        .optional()?;
+
+    // Bundle import path (spec §2.5 / R2.4.2). Wave-1 bundles carry NO
+    // graph type label — the gate's caller supplies `None` for the
+    // proposed label. The four §2.5 ladder branches are summarized below.
+    //
+    // * Gate → unlabeled entity → insert as `fallback_node_type`
+    //   (NEVER the literal `'concept'`). Write an `unlabeled_landing` row
+    //   in the origin ledger; the entity goes to the review queue.
+    // * Gate → no declared fallback (Held) → atomic ABORT. Per spec §2.5
+    //   bundle bullet: "If no fallback is declared, the import ABORTS
+    //   ATOMICALLY with a report, facts intact." We bail here and the
+    // outer IMMEDIATE transaction rolls back the bundle.
+    // * Skip → SKIP-path `'concept'` literal + `gate_skipped` row.
+    //   source_directory is NULL here (the §2.5 bundle bullet never sets
+    //   a source directory because bundle import has no document path).
+    // * Skip on a label-less entity (per spec R2.4.6 r21 "SKIP on
+    //   bundle import (no label)"): the gate returns Skipped with
+    //   `original_label: None`; we land `'concept'` and write a
+    //   `gate_skipped` row with original_type = NULL.
+    if existing.is_none() {
+        let (decision, _gate) =
+            crate::db::entity_gate::resolve_production_gate(tx, policy, target_entity_id, &[]);
+        let outcome = crate::db::entity_gate::shared_insert_entity(
+            tx,
+            Some(target_entity_id),
+            &name,
+            None,
+            &bundle_summary,
+            now_secs,
+            decision.clone(),
+            false,
+        )?;
+
+        use crate::db::entity_gate::AdmitOutcome;
+        use crate::db::entity_gate::GateDecision;
+        use crate::db::schema::OriginReason;
+
+        match (&outcome, &decision) {
+            (AdmitOutcome::DegradedToFallback { landed_as, .. }, _) => {
+                // Degraded/unlabeled landing: helper inserted as the
+                // declared fallback. Write an `unlabeled_landing` ledger
+                // row (original_type NULL — r21 contract).
+                crate::db::entity_gate::write_origin_ledger_row(
+                    tx,
+                    target_entity_id,
+                    None,
+                    OriginReason::UnlabeledLanding,
+                    None,
+                )?;
+                let _ = landed_as;
+            }
+            (AdmitOutcome::Skipped { .. }, GateDecision::Skip) => {
+                // SKIP path: today's `'concept'` literal stands (spec
+                // §2.5 bundle bullet, r2-M2a). Helper did NOT insert —
+                // land the literal ourselves, then write the
+                // `gate_skipped` ledger row (original_type NULL when no
+                // label was supplied, r21 table).
                 tx.execute(
-                    "UPDATE curated_entities SET summary=?2, updated_at=?3 WHERE id=?1",
-                    params![target_entity_id, bundle_summary, now_secs],
+                    "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                     VALUES (?1, ?2, 'concept', ?3, ?4, ?4)",
+                    params![target_entity_id, name, bundle_summary, now_secs],
+                )?;
+                crate::db::entity_gate::write_origin_ledger_row(
+                    tx,
+                    target_entity_id,
+                    None,
+                    OriginReason::GateSkipped,
+                    None,
                 )?;
             }
+            (AdmitOutcome::Held { .. }, _) => {
+                // §2.5 bullet: "If no fallback is declared, the import
+                // ABORTS ATOMICALLY with a report, facts intact." The
+                // outer IMMEDIATE transaction rolls back via bail!
+                // (caller propagates → apply_import returns Err →
+                // tx.rollback()). Facts intact because the LLM-mint
+                // path is in the same batch.
+                bail!(
+                    "bundle import aborted: strict ontology gate held an unlabeled entity mint \
+                     (spec §2.4.5: no fallback_node_type declared); facts are intact and will \
+                     re-enter when the manifest names a fallback"
+                );
+            }
+            _ => {
+                // Admitted-as-declared or alias-admitted without a label —
+                // nothing the bundle entry needed, but the helper
+                // inserted anyway. We don't write a ledger row.
+            }
         }
+        return Ok(());
+    }
+
+    // Existing row: only the summary update path remains.
+    let local_summary = existing.unwrap_or_default();
+    let write_summary = match mode {
+        ImportMode::Replace => entity.summary.is_some(),
+        ImportMode::Merge => entity.summary.is_some() && local_summary.trim().is_empty(),
+        ImportMode::Clone => false,
+    };
+    if write_summary {
+        tx.execute(
+            "UPDATE curated_entities SET summary=?2, updated_at=?3 WHERE id=?1",
+            params![target_entity_id, bundle_summary, now_secs],
+        )?;
     }
     Ok(())
 }
@@ -757,7 +910,24 @@ fn ensure_entity(
 /// Returns the ids that were **hard**-deleted (entries + tasks) so the caller
 /// can purge their edges once, after the entity loop — see the call site in
 /// `apply_import`.
+/// Replace-mode wipe of `entity_id`'s content, CLUSTER-CLOSED: the target
+/// is a (possibly merge-resolved) survivor, and facts/tasks/events still
+/// keyed to a redirect loser are part of what recall shows for it (spec
+/// R2.7.5 transitive fact closure). Wiping only `entity_id = survivor`
+/// would leave the loser-keyed rows alive beside the imported copies and
+/// push no Delete outbox rows for them (the #132 class).
 fn clear_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result<Vec<String>> {
+    let mut hard_deleted = Vec::new();
+    for member in crate::db::entities::cluster_ids(tx, entity_id)? {
+        hard_deleted.extend(clear_one_entity_content(tx, &member, now_ms)?);
+    }
+    Ok(hard_deleted)
+}
+
+/// Wipe the rows keyed to exactly `entity_id` — see [`clear_entity_content`].
+/// Outbox rows carry the row's own owner id so replicas address the row
+/// they actually hold.
+fn clear_one_entity_content(tx: &Connection, entity_id: &str, now_ms: i64) -> Result<Vec<String>> {
     let fact_ids: Vec<String> = tx
         .prepare("SELECT id FROM llm_wiki_entries WHERE entity_id=?1")?
         .query_map([entity_id], |r| r.get(0))?
@@ -1067,6 +1237,59 @@ mod tests {
     }
 
     #[test]
+    fn replace_on_merge_survivor_wipes_loser_keyed_content() {
+        // Review finding: the bundle's `ent_a` was merged into `ent_s` on
+        // this host, so Replace resolves to the survivor. A fact still keyed
+        // to the loser is part of the survivor's cluster and must be wiped
+        // (with a Delete outbox row) like the survivor's own.
+        let mut conn = open_in_memory().unwrap();
+        for id in ["ent_a", "ent_s"] {
+            conn.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES (?1, ?1, 'concept', '', 1, 1)",
+                [id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('ent_a', 'ent_s', 1)",
+            [],
+        )
+        .unwrap();
+        for (fact_id, entity_id) in [("fact_loser", "ent_a"), ("fact_surv", "ent_s")] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, 'T', 'B', '[]', 'inferred', 'librarian_inferred', 1, 1)",
+                params![fact_id, entity_id],
+            )
+            .unwrap();
+        }
+
+        apply_import(&mut conn, &sample_bundle(), ImportMode::Replace).unwrap();
+
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM llm_wiki_entries ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(ids, vec!["fact_1".to_string()]);
+        let loser_delete: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_outbox
+                 WHERE table_name='entries' AND record_id='fact_loser' AND operation='DELETE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(loser_delete, 1);
+    }
+
+    #[test]
     fn replace_keeps_edges_stamped_with_the_entity_whose_endpoints_live_elsewhere() {
         // R1 proof: `clear_entity_content` (called by Replace mode) used to
         // DELETE every llm_wiki_edges row stamped with the dying entity_id,
@@ -1216,6 +1439,57 @@ mod tests {
         assert_eq!(preview.entities[0].facts_new, 0);
         assert_eq!(preview.entities[0].facts_existing, 1);
         assert_eq!(preview.entities[0].events_duplicate, 1);
+    }
+
+    /// Preview and apply agree: on a strict tier_fact with no usable
+    /// fallback the apply aborts on the held mint, so the preview must warn
+    /// instead of reporting the bundle importable.
+    #[test]
+    fn preview_warns_when_apply_would_hold() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', '{\"node_types\":[{\"type\":\"person\"}],\"edge_types\":[]}', 1)",
+            [],
+        )
+        .unwrap();
+        let preview = preview_import(&conn, &sample_bundle(), ImportMode::Merge).unwrap();
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|w| w.contains("import will abort")),
+            "{:?}",
+            preview.warnings
+        );
+        assert!(apply_import(&mut conn, &sample_bundle(), ImportMode::Merge).is_err());
+    }
+
+    /// Preview/apply parity for §2.4.5's SECOND Held trigger: a strict
+    /// tier_fact that DECLARES a fallback over ZERO node_types. The gate
+    /// decision is `Gate` (not `Held`), but the shared insert helper holds
+    /// an empty vocabulary — the preview must warn exactly as the apply
+    /// aborts (review finding: the `== GateDecision::Held` probe reported
+    /// this brain importable).
+    #[test]
+    fn preview_warns_on_declared_fallback_over_empty_node_types() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', '{\"node_types\":[],\"edge_types\":[],\"fallback_node_type\":\"person\"}', 1)",
+            [],
+        )
+        .unwrap();
+        let preview = preview_import(&conn, &sample_bundle(), ImportMode::Merge).unwrap();
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|w| w.contains("import will abort")),
+            "{:?}",
+            preview.warnings
+        );
+        assert!(apply_import(&mut conn, &sample_bundle(), ImportMode::Merge).is_err());
     }
 
     #[test]

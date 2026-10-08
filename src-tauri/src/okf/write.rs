@@ -1348,7 +1348,7 @@ mod tests {
             okf_version: "0.1".to_string(),
             profile: "llm-wiki/1".to_string(),
             title: title.to_string(),
-            entity_type: super::super::EntityType::Fact,
+            doc_kind: super::super::DocKind::Fact,
             tags: Some(vec!["test".to_string()]),
             created_at: "2026-08-27T00:00:00Z".to_string(),
             updated_at: updated_at.map(str::to_string),
@@ -3271,6 +3271,22 @@ mod tests {
         let mut sorted = KNOWN_KEYS;
         sorted.sort_unstable();
         assert_eq!(sorted, KNOWN_KEYS);
+    }
+
+    /// r14-m3: the DocKind rename touches ONLY the Rust field/enum names —
+    /// the on-disk key literal in KNOWN_KEYS stays `entity_type` or the
+    /// round-trip / #231/#245 key-drop guards start writing `doc_kind:` to
+    /// disk.
+    #[test]
+    fn known_keys_pins_entity_type_key_after_doc_kind_rename() {
+        assert!(
+            KNOWN_KEYS.contains(&"entity_type"),
+            "KNOWN_KEYS must keep the on-disk `entity_type` key"
+        );
+        assert!(
+            !KNOWN_KEYS.contains(&"doc_kind"),
+            "KNOWN_KEYS must not admit `doc_kind`"
+        );
     }
 
     #[test]

@@ -46,16 +46,19 @@ const EXPECTED_PRODUCTION_WRITERS: &[(&str, &str)] = &[
 const EXPECTED_FIXTURE_COUNTS: &[(&str, usize)] = &[
     ("src/db/bundle_apply.rs", 4),
     ("src/db/commit.rs", 3),
-    ("src/db/connections.rs", 3),
+    ("src/db/connections.rs", 5), // +2 Task 7 fix-round-1 cluster-closure test fixtures
     ("src/db/edge_purge.rs", 2),
     ("src/db/bundle_io.rs", 2),
     ("src/db/evidence_regrade.rs", 1),
     ("src/db/heal.rs", 1),
+    // merge_duplicates.rs: in-memory fixture for the R2.7.5 self-loop
+    // census test (report lists resolved self-loops) — read-side only.
+    ("src/db/merge_duplicates.rs", 1),
     ("src/db/queries.rs", 1),
     ("src/db/wiki_forget.rs", 1),
     ("src/db/wisdom.rs", 3),
     ("src/lib.rs", 3),
-    ("src/wiki_graph.rs", 1),
+    ("src/wiki_graph.rs", 3), // +1 Task 7 redirected-loser endpoint-resolution test fixture; +1 loser-seeded CompositeWalk fixture
 ];
 
 const REMEDIATION: &str = "\n\

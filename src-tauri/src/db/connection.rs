@@ -2,7 +2,8 @@ use crate::db::okf_ddl;
 use crate::db::schema::{
     DELETED_SOURCES_DDL, MIGRATION_V1, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13,
     MIGRATION_V14, MIGRATION_V15, MIGRATION_V16, MIGRATION_V18, MIGRATION_V19, MIGRATION_V2,
-    MIGRATION_V21, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V9,
+    MIGRATION_V21, MIGRATION_V26, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
+    MIGRATION_V9,
 };
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
@@ -785,6 +786,27 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         )?;
     }
 
+    // V26 — ontology node-type gate wave-1 tables
+    // (spec docs/superpowers/specs/2026-10-03-ontology-node-type-gate-and-heal-design.md
+    // §2.9.1/§3): `entity_type_origin` (type-origin ledger),
+    // `entity_redirects` (merge loser→survivor), `ct_entity_optouts`
+    // (entity-level opt-out marker).
+    //
+    // Ungated DDL on every open, stamp gated on V22 having stamped — the
+    // V23/V24/V25 pattern exactly. Stamping 26 while a rootless open has
+    // deferred V22 would make every later rooted open read MAX(version) >= 26,
+    // skip `if version < 22`, and permanently skip V22's `documents.path`
+    // rewrite and its FATAL re-warn. (This ALSO caps a rootless open at 21:
+    // V22's stamp gate reads MAX(version), so 26 must never land before 22.)
+    rebuild_pre_r21_origin_ledger(conn)?;
+    conn.execute_batch(MIGRATION_V26)?;
+    if stamped_now >= 22 {
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (26)",
+            [],
+        )?;
+    }
+
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
         conn.execute_batch(
@@ -903,6 +925,84 @@ fn apply_v24_temporal_columns(conn: &Connection, stamp: bool) -> Result<()> {
     Ok(())
 }
 
+/// Best-effort ensure failure logging (r8-m6). The open NEVER fails when
+/// the ensure cannot run on a read-only or contended database; this just
+/// surfaces the cause so a later write failure is not a mystery.
+fn log_ensure_failure(e: &anyhow::Error) {
+    #[cfg(feature = "mcp-server")]
+    tracing::warn!(error = %e, "manifest vocabulary ensure skipped or failed at open");
+    #[cfg(not(feature = "mcp-server"))]
+    eprintln!(
+        "[curated-thoughts] WARNING: manifest vocabulary ensure skipped or failed at open: {e}"
+    );
+}
+
+/// Loud okf_migration abort logging (spec §2.5 r6-M2). The migration's
+/// failure used to be discarded by the production `let _ = run_okf_migration(...)`
+/// call in `AppDb::open_with_config`; now the cause is logged to stderr AND
+/// written into the `okf_migration_diagnostic` `llm_wiki_meta` row so the
+/// next heal pass can surface it. The line carries the spec-referenced
+/// phrases a grep-friendly tool can pick up.
+fn log_okf_migration_failure(e: &anyhow::Error) {
+    #[cfg(feature = "mcp-server")]
+    tracing::error!(
+        error = %e,
+        "okf_migration aborted at open — see `ct heal` for the diagnostic; \
+         retry after the manifest gains a `fallback_node_type` (spec §2.5 r6-M2)"
+    );
+    #[cfg(not(feature = "mcp-server"))]
+    eprintln!(
+        "[curated-thoughts] ERROR: okf_migration aborted at open: {e:#}\n  \
+         next heal run will surface the diagnostic under `ontology.okf_migration_diagnostic`;\n  \
+         retry succeeds after the manifest gains a `fallback_node_type` (spec §2.5 r6-M2)"
+    );
+}
+
+/// Drop a pre-r21 `entity_type_origin` so `MIGRATION_V26` re-creates it in
+/// the r21 shape (spec R2.4.6: nullable `original_type`, new `reason`).
+///
+/// V26 never shipped in a release and nothing wrote the ledger before the
+/// r21 revision, so a dev brain that ran the first V26 DDL holds an EMPTY
+/// table: dropping it loses nothing. A non-empty pre-r21 table means some
+/// writer existed that this code does not know about — fail the open loudly
+/// rather than guess a `reason` for its rows.
+///
+/// Same concurrency shape as `apply_v24_temporal_columns`: the unlocked
+/// pre-check keeps the steady state lock-free, and the rebuild re-inspects
+/// under BEGIN IMMEDIATE so a racing `--mcp` open cannot drop a table the
+/// winner just re-created.
+fn rebuild_pre_r21_origin_ledger(conn: &Connection) -> Result<()> {
+    // An absent table reads as no columns: nothing to rebuild.
+    let needs_rebuild = |conn: &Connection| -> Result<bool> {
+        let existing = crate::db::ddl_compat::existing_columns(conn, "entity_type_origin")?;
+        Ok(!existing.is_empty() && !existing.iter().any(|c| c == "reason"))
+    };
+    if !needs_rebuild(conn)? {
+        return Ok(());
+    }
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let rebuilt = (|| -> Result<()> {
+        if !needs_rebuild(conn)? {
+            return Ok(());
+        }
+        let rows: i64 =
+            conn.query_row("SELECT COUNT(*) FROM entity_type_origin", [], |r| r.get(0))?;
+        if rows > 0 {
+            anyhow::bail!(
+                "entity_type_origin has {rows} row(s) in the pre-r21 shape (no `reason` \
+                 column); refusing to guess a reason — inspect and clear the table by hand"
+            );
+        }
+        conn.execute_batch("DROP TABLE entity_type_origin;")?;
+        Ok(())
+    })();
+    if let Err(e) = rebuilt.and_then(|()| Ok(conn.execute_batch("COMMIT;")?)) {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Report `source_ref` values that look like JSON but will not parse.
 ///
 /// Issue #162: every evidence blob written on one brain between 2026-08-29
@@ -977,7 +1077,7 @@ impl AppDb {
     /// `CURATED_BRAIN_CONFIG` environments must use this instead of [`AppDb::open`],
     /// which derives config.json from the database's parent directory.
     pub fn open_with_config(path: &Path, config_path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 5000;")?;
         let vault_roots = VaultConfig::new(config_path.as_ref().to_path_buf())
             .vault_root()
@@ -991,10 +1091,28 @@ impl AppDb {
                 }
             });
         migrate(&conn, vault_roots.clone(), path.parent())?;
+        // Order pinned by spec plan-p10-m4:
+        //   migrate → ensure_manifest_vocabulary → run_okf_migration.
+        // ensure MUST come BEFORE okf_migration so a fresh install's
+        // `tier_fact` row gets the document/process entries + fallback
+        // written before okf_migration's gate call (Task 3) reads it —
+        // an upgraded brain with a pending conversion + pre-wave-1
+        // manifest hitting the gate without a fallback aborts at open.
+        // Best-effort (r8-m6): log and never fail the open.
+        if let Err(e) = crate::db::entity_gate::ensure_all_manifest_vocabularies(&conn) {
+            log_ensure_failure(&e);
+        }
         if let Some(root) = vault_roots.as_ref() {
             let vault_path = std::path::Path::new(&root.canonical);
             if vault_path.is_dir() {
-                let _ = crate::db::okf_migration::run_okf_migration(&conn, vault_path);
+                if let Err(e) = crate::db::okf_migration::run_okf_migration(&mut conn, vault_path) {
+                    // Spec §2.5 r6-M2: the abort is no longer silent.
+                    // `run_okf_migration` already recorded the cause into the
+                    // `okf_migration_diagnostic` `llm_wiki_meta` row; this
+                    // makes the open-time failure VISIBLE to the operator so
+                    // a later write failure is not a mystery.
+                    log_okf_migration_failure(&e);
+                }
             }
         }
         Ok(AppDb(conn))
@@ -1091,6 +1209,10 @@ mod tests {
         // V24 (core-llm-wiki 7.9.0 adoption) mirrors engine migration 13's
         // temporal/watermark columns on every open but, like V23, stamps
         // only once V22 has — so this still caps at 21.
+        // V26 (ontology node-type gate wave 1) creates the three CT-owned
+        // tables (`entity_type_origin`, `entity_redirects`,
+        // `ct_entity_optouts`) on every open but, like V23–V25, stamps only
+        // once V22 has — still capped at 21 here.
         assert_eq!(
             max_version, 21,
             "open_in_memory has no vault root, so V22 refuses to stamp and the schema caps at 21"
@@ -3158,8 +3280,8 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 25,
-            "V22 then V23 then V24 then V25 must be stamped when the migration runs"
+            version, 26,
+            "V22 then V23 then V24 then V25 then V26 must be stamped when the migration runs"
         );
 
         let rewritten_path: String = conn
@@ -3202,7 +3324,10 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 25, "V25 must stamp on a rooted open");
+        assert_eq!(
+            version, 26,
+            "rooted open stamps 25 (V25 included) and 26; MAX must be 26"
+        );
 
         let agents: String = conn
             .query_row(
@@ -3390,8 +3515,8 @@ mod tests {
         );
         assert_eq!(
             max_version(&conn),
-            25,
-            "rooted open stamps 22, then 23/24/25 (the latter gated on V22)"
+            26,
+            "rooted open stamps 22, then 23/24/25/26 (the latter gated on V22)"
         );
     }
 
@@ -3433,5 +3558,89 @@ mod tests {
             edge_index_names(&conn),
             vec!["llm_wiki_edges_entity_id_idx"]
         );
+    }
+
+    /// Spec plan-p10-m4: `open_with_config` runs the open in this exact order:
+    /// `migrate` → `ensure_manifest_vocabulary` → `run_okf_migration`.
+    /// A fresh brain with a pre-wave-1 manifest (no `fallback_node_type`) is
+    /// the matrix case that fails the open if the order is wrong (Task 3's
+    /// gate call would abort without a fallback). We can't drive
+    /// `open_with_config` end-to-end in a unit test (it needs a real
+    /// `VaultConfig`), so this pins the order by checking the post-`migrate`
+    /// state, then asserting `ensure_all_manifest_vocabularies` runs
+    /// successfully and that the ensure's memo is recorded BEFORE the
+    /// `okf_migration` call site is reached. Concretely: after migrate, an
+    /// EA-subset manifest without `fallback_node_type` exists; running
+    /// `ensure_all_manifest_vocabularies` produces an `Ensured` outcome with
+    /// `fallback_set: true` and a recorded memo, matching what
+    /// `open_with_config` will see.
+    #[test]
+    fn open_with_config_runs_migrate_then_ensure_then_okf_migration_in_order() {
+        // 1. Open an in-memory brain and run migrate().
+        let conn = open_in_memory().unwrap();
+
+        // 2. Plant a pre-wave-1 EA-subset manifest WITHOUT fallback_node_type.
+        let types: Vec<serde_json::Value> = crate::db::entity_gate::EA_SEED_TYPES
+            .iter()
+            .map(|s| serde_json::json!({"type": s}))
+            .collect();
+        let manifest = serde_json::json!({
+            "node_types": types,
+            "edge_types": [],
+        });
+        let manifest_json = serde_json::to_string(&manifest).unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES (?1, 'a', ?2, 1)",
+            rusqlite::params!["tier_fact", manifest_json],
+        )
+        .unwrap();
+
+        // 3. Run ensure_all_manifest_vocabularies — what open_with_config does
+        //    between migrate and run_okf_migration.
+        let summary = crate::db::entity_gate::ensure_all_manifest_vocabularies(&conn)
+            .expect("ensure must succeed on a fresh brain with a clean manifest");
+        assert_eq!(summary.visited, 1, "exactly one manifest row was visited");
+        assert_eq!(
+            summary.extended, 1,
+            "the document/process entries were added"
+        );
+        assert_eq!(
+            summary.fallbacks_set, 1,
+            "the fallback_node_type key was written"
+        );
+
+        // 4. Verify the post-state matches what Task 3's gate call sees.
+        let stored: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        let slugs: Vec<String> = parsed["node_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["type"].as_str().map(String::from))
+            .collect();
+        assert!(slugs.iter().any(|s| s == "document"));
+        assert!(slugs.iter().any(|s| s == "process"));
+        assert_eq!(
+            parsed["fallback_node_type"].as_str(),
+            Some("project"),
+            "ensure wrote the per-manifest fallback before run_okf_migration ran"
+        );
+
+        // 5. The memo was recorded (r11-m4: only after commit).
+        let memo_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM manifest_ensure_memo WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(memo_count, 1, "ensure must record its memo post-commit");
     }
 }

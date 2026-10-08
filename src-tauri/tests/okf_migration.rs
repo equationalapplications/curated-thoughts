@@ -4,8 +4,11 @@ mod helpers;
 
 use helpers::TestApp;
 use rusqlite::Connection;
-use tauri_app_lib::db::connection::open_in_memory;
-use tauri_app_lib::db::okf_migration::{entity_id_from_wiki_path, run_okf_migration};
+use tauri_app_lib::db::connection::{migrate_open_db, open_app_db, open_in_memory};
+use tauri_app_lib::db::okf_migration::{
+    entity_id_from_wiki_path, read_okf_migration_diagnostic, run_okf_migration,
+};
+use tauri_app_lib::db::schema::OriginReason;
 use tempfile::TempDir;
 
 fn seed_v6_wiki_page(conn: &Connection, path: &str, status: &str, source_doc_ids: &str) {
@@ -52,10 +55,10 @@ fn approved_page_with_h1_becomes_entity_and_event() {
     std::fs::create_dir_all(vault.join("wiki")).unwrap();
     std::fs::write(vault.join("wiki/foo.md"), "# My Entity\n\nFull body.").unwrap();
 
-    let conn = open_in_memory().unwrap();
+    let mut conn = open_in_memory().unwrap();
     seed_v6_wiki_page(&conn, "foo.md", "approved", "[]");
 
-    run_okf_migration(&conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
 
     let entity_id = entity_id_from_wiki_path("foo.md");
     let (name, summary): (String, String) = conn
@@ -84,10 +87,10 @@ fn approved_page_missing_file_uses_empty_summary_and_stem_name() {
     let vault = tmp.path();
     std::fs::create_dir_all(vault.join("wiki")).unwrap();
 
-    let conn = open_in_memory().unwrap();
+    let mut conn = open_in_memory().unwrap();
     seed_v6_wiki_page(&conn, "missing.md", "approved", "[]");
 
-    run_okf_migration(&conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
 
     let entity_id = entity_id_from_wiki_path("missing.md");
     let (name, summary): (String, String) = conn
@@ -109,7 +112,7 @@ fn pending_proposals_orphaned_and_sources_requeued() {
     std::fs::create_dir_all(&proposed).unwrap();
     std::fs::write(proposed.join("draft.md"), "# Draft").unwrap();
 
-    let conn = open_in_memory().unwrap();
+    let mut conn = open_in_memory().unwrap();
     conn.execute(
         "INSERT INTO documents (path, hash, tier, status) VALUES ('/v/documents/a.pdf', 'h', 'user_doc', 'indexed')",
         [],
@@ -119,7 +122,7 @@ fn pending_proposals_orphaned_and_sources_requeued() {
     let sources = format!("[{doc_id}]");
     seed_v6_wiki_page(&conn, "draft.md", "pending_review", &sources);
 
-    run_okf_migration(&conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
 
     let status: String = conn
         .query_row(
@@ -146,10 +149,10 @@ fn wiki_tier_documents_and_chunks_purged() {
     let tmp = TempDir::new().unwrap();
     let vault = tmp.path();
 
-    let conn = open_in_memory().unwrap();
+    let mut conn = open_in_memory().unwrap();
     seed_wiki_tier_document(&conn, "/vault/wiki/old-page.md");
 
-    run_okf_migration(&conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
 
     let wiki_docs: i64 = conn
         .query_row(
@@ -176,11 +179,11 @@ fn migration_idempotent_no_duplicate_entities() {
     std::fs::create_dir_all(vault.join("wiki")).unwrap();
     std::fs::write(vault.join("wiki/x.md"), "# X\n").unwrap();
 
-    let conn = open_in_memory().unwrap();
+    let mut conn = open_in_memory().unwrap();
     seed_v6_wiki_page(&conn, "x.md", "approved", "[]");
 
-    run_okf_migration(&conn, vault).unwrap();
-    run_okf_migration(&conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
+    run_okf_migration(&mut conn, vault).unwrap();
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM curated_entities", [], |r| r.get(0))
@@ -467,6 +470,207 @@ fn apply_v19(conn: &Connection) {
     .unwrap();
 }
 
+/// V26 (ontology node-type gate wave 1, spec §2.9.1/§3): the three CT-owned
+/// tables exist post-migration on a plain open, with the columns Tasks 3/5/6/9
+/// will bind to — the origin ledger carries BOTH the original label and the
+/// source directory (plan-p11-MAJOR-2: the stale-hash off-sourced mint record
+/// needs the directory, else it climbs to rung 4 and gets retyped), redirects
+/// carry loser + survivor, optouts are keyed by entity_id.
+#[test]
+fn v26_creates_the_three_ontology_gate_tables() {
+    let conn = open_in_memory().unwrap();
+
+    for table in [
+        "entity_type_origin",
+        "entity_redirects",
+        "ct_entity_optouts",
+    ] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "{table} must exist after migration");
+    }
+
+    let cols = |table: &str| -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
+    };
+
+    for expected in [
+        "entity_id",
+        "original_type",
+        "reason",
+        "source_directory",
+        "recorded_at",
+    ] {
+        assert!(
+            cols("entity_type_origin").iter().any(|c| c == expected),
+            "entity_type_origin missing column {expected}"
+        );
+    }
+    for expected in ["entity_id", "merged_into", "created_at"] {
+        assert!(
+            cols("entity_redirects").iter().any(|c| c == expected),
+            "entity_redirects missing column {expected}"
+        );
+    }
+    for expected in ["entity_id", "reason", "created_at"] {
+        assert!(
+            cols("ct_entity_optouts").iter().any(|c| c == expected),
+            "ct_entity_optouts missing column {expected}"
+        );
+    }
+
+    // Each table is live, not a stub: a row round-trips through its PK.
+    conn.execute(
+        "INSERT INTO entity_type_origin
+             (entity_id, original_type, reason, source_directory, recorded_at)
+         VALUES ('ent_a', 'character', 'gate_skipped', 'notes/agents', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+         VALUES ('ent_loser', 'ent_a', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO ct_entity_optouts (entity_id, reason, created_at)
+         VALUES ('ent_a', 'deliberate', 1)",
+        [],
+    )
+    .unwrap();
+    // NULL original_type AND NULL source_directory are legal (spec r21
+    // R2.4.6): a bundle-imported fallback landing has neither a label nor
+    // a source directory.
+    conn.execute(
+        "INSERT INTO entity_type_origin
+             (entity_id, original_type, reason, source_directory, recorded_at)
+         VALUES ('ent_b', NULL, 'unlabeled_landing', NULL, 1)",
+        [],
+    )
+    .unwrap();
+    // `reason` is NOT NULL: every row says why it exists.
+    assert!(
+        conn.execute(
+            "INSERT INTO entity_type_origin (entity_id, original_type, recorded_at)
+             VALUES ('ent_c', 'agent', 1)",
+            [],
+        )
+        .is_err(),
+        "a ledger row without a reason must be rejected"
+    );
+}
+
+/// The pre-r21 V26 ledger shape: `original_type NOT NULL`, no `reason`.
+const PRE_R21_ORIGIN_LEDGER: &str = "
+DROP TABLE entity_type_origin;
+CREATE TABLE entity_type_origin (
+    entity_id        TEXT PRIMARY KEY,
+    original_type    TEXT NOT NULL,
+    source_directory TEXT,
+    recorded_at      INTEGER NOT NULL
+);";
+
+fn origin_columns(conn: &Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(entity_type_origin)")
+        .unwrap();
+    stmt.query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect()
+}
+
+/// Spec r21 R2.4.6: a dev brain that ran the first V26 DDL holds an EMPTY
+/// pre-r21 ledger (no writer existed); the next open rebuilds it in the r21
+/// shape.
+#[test]
+fn v26_rebuilds_an_empty_pre_r21_origin_ledger() {
+    let conn = open_in_memory().unwrap();
+    conn.execute_batch(PRE_R21_ORIGIN_LEDGER).unwrap();
+    assert!(!origin_columns(&conn).iter().any(|c| c == "reason"));
+
+    migrate_open_db(&conn, None).unwrap();
+
+    assert!(
+        origin_columns(&conn).iter().any(|c| c == "reason"),
+        "the empty pre-r21 table must be rebuilt with a reason column"
+    );
+    conn.execute(
+        "INSERT INTO entity_type_origin (entity_id, original_type, reason, recorded_at)
+         VALUES ('ent_a', NULL, 'unlabeled_landing', 1)",
+        [],
+    )
+    .expect("the rebuilt table must accept a NULL original_type");
+    // Steady state: a second open leaves the r21 table and its rows alone.
+    migrate_open_db(&conn, None).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM entity_type_origin", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "an r21-shaped ledger must survive later opens");
+}
+
+/// Spec r21 R2.4.6: a NON-empty pre-r21 ledger fails the open loudly — the
+/// migration never guesses a `reason` — and leaves the rows untouched.
+#[test]
+fn v26_refuses_a_non_empty_pre_r21_origin_ledger() {
+    let conn = open_in_memory().unwrap();
+    conn.execute_batch(PRE_R21_ORIGIN_LEDGER).unwrap();
+    conn.execute(
+        "INSERT INTO entity_type_origin (entity_id, original_type, recorded_at)
+         VALUES ('ent_a', 'agent', 1)",
+        [],
+    )
+    .unwrap();
+
+    let err = migrate_open_db(&conn, None).expect_err("a non-empty pre-r21 ledger must fail");
+    assert!(
+        err.to_string().contains("pre-r21"),
+        "the error must name the cause, got: {err}"
+    );
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM entity_type_origin", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "the refused open must not drop the existing rows");
+    assert!(
+        conn.is_autocommit(),
+        "the refused rebuild must not leave a transaction open"
+    );
+}
+
+/// `OriginReason` is the single owner of the `reason` vocabulary: every
+/// variant round-trips through its stored string, and the strings are the
+/// ones spec R2.4.6 names.
+#[test]
+fn origin_reason_round_trips_the_spec_vocabulary() {
+    let stored: Vec<&str> = OriginReason::ALL.iter().map(|r| r.as_str()).collect();
+    assert_eq!(
+        stored,
+        [
+            "degraded",
+            "unlabeled_landing",
+            "gate_skipped",
+            "alias_retype",
+            "queue_retype"
+        ]
+    );
+    for r in OriginReason::ALL {
+        assert_eq!(OriginReason::parse(r.as_str()), Some(r));
+    }
+    assert_eq!(OriginReason::parse("mode:off"), None);
+}
+
 #[test]
 fn v18_creates_librarian_evidence_with_json_check() {
     let conn = open_in_memory().unwrap();
@@ -518,4 +722,196 @@ fn v18_creates_librarian_evidence_with_json_check() {
         [],
     )
     .unwrap();
+}
+
+/// Spec §2.5 r12-M2 / r6-M2 (Task 9 brief): a strict `tier_fact` manifest
+/// WITHOUT `fallback_node_type` holds the gate at rung 4 with `Held` —
+/// `run_okf_migration` aborts without setting `okf_migrated_at` (so the
+/// V7 guard makes retry safe), records the cause into the
+/// `okf_migration_diagnostic` `llm_wiki_meta` row, and the abort's
+/// message names the recovery path (gain a `fallback_node_type`).
+/// A successful retry AFTER the manifest gains a fallback clears the
+/// diagnostic and stamps `okf_migrated_at`.
+///
+/// The test bypasses `AppDb::open_with_config` (Task 2 owns that surface)
+/// and drives the migration directly: it still exercises the same code
+/// path the production caller does (`run_okf_migration` → abort → bail →
+/// record diagnostic).
+#[test]
+fn okf_migration_aborts_without_fallback_records_diagnostic_and_retries_succeeds() {
+    // The abort requires a config that does NOT short-circuit at rung 2/3
+    // with `off` — a brain-wide default. We pin the env vars the cache uses
+    // so this test is hermetic; the brain dir holds the config.json, and the
+    // gate call resolves the policy from the same path.
+    temp_env::with_vars(
+        [
+            ("CURATED_BRAIN_CONFIG", None::<&str>),
+            ("CURATED_BRAIN_DB", None::<&str>),
+            ("CURATED_BRAIN_DIR", None::<&str>),
+        ],
+        || {
+            let tmp = TempDir::new().unwrap();
+            let vault = tmp.path();
+            std::fs::create_dir_all(vault.join("wiki")).unwrap();
+            std::fs::write(vault.join("wiki/page.md"), "# Page\n\nBody.").unwrap();
+            // Brain config: empty — rungs 2/3 default to Off (climb); rung 4
+            // walks to `tier_fact`'s strict manifest below.
+            std::fs::write(
+                tmp.path().join("config.json"),
+                r#"{"vault_path":"/vault","ingest":{"folder_ontology":{}}}"#,
+            )
+            .unwrap();
+
+            let db_path = tmp.path().join("brain.db");
+            let mut conn = open_app_db(&db_path, None).unwrap();
+
+            // Pre-wave-1 strict manifest: declared types but NO fallback.
+            // Spec §2.4.4 ensures the same key on next resolution, so the
+            // abort is the EXACT pre-wave-1 shape r12-M2 names.
+            let manifest = serde_json::json!({
+                "node_types": [{"type": "person"}],
+                "edge_types": [],
+            });
+            let manifest_json = serde_json::to_string(&manifest).unwrap();
+            conn.execute(
+                "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+                 VALUES ('tier_fact', 'strict', ?1, 1)",
+                rusqlite::params![manifest_json],
+            )
+            .unwrap();
+            // Skip the AppDb-side ensure by deleting its memo: this test
+            // owns the r21 abort path, not the migration's ensure step.
+            conn.execute("DELETE FROM manifest_ensure_memo", [])
+                .unwrap();
+
+            // An approved wiki page that the migration would mint as an
+            // entity — the gate call at the insert site is the abort
+            // trigger.
+            conn.execute(
+                "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
+                 VALUES ('page.md', '[]', 'test', 'approved')",
+                [],
+            )
+            .unwrap();
+
+            // First attempt: abort.
+            let err = run_okf_migration(&mut conn, vault)
+                .expect_err("strict manifest without fallback must abort");
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("fallback_node_type"),
+                "the abort message must name the recovery action, got: {message}"
+            );
+
+            // Spec §2.5 r6-M2: the diagnostic is recorded for heal to
+            // surface.
+            let diag = read_okf_migration_diagnostic(&conn)
+                .expect("read diagnostic")
+                .expect("diagnostic must be recorded after an abort");
+            assert!(
+                diag.contains("fallback_node_type"),
+                "the diagnostic must echo the recovery action, got: {diag}"
+            );
+
+            // The V7 guard: abort WITHOUT `okf_migrated_at`.
+            let stamped: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_meta WHERE key = 'okf_migrated_at'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(stamped, 0, "the abort must NOT stamp okf_migrated_at");
+
+            // No entity row was inserted.
+            let entity_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM curated_entities", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(entity_count, 0, "aborted migration must leave no entities");
+
+            // Retry: gain a `fallback_node_type` on the same manifest.
+            let with_fallback = serde_json::json!({
+                "node_types": [{"type": "person"}],
+                "edge_types": [],
+                "fallback_node_type": "person",
+            });
+            conn.execute(
+                "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1
+                  WHERE entity_id = 'tier_fact'",
+                rusqlite::params![serde_json::to_string(&with_fallback).unwrap()],
+            )
+            .unwrap();
+
+            // Sanity: the gate reads the manifest_json column directly via
+            // `wiki_get_ontology`. Confirm the UPDATE landed before the retry
+            // so a typo or transaction-rollback regression in `run_okf_migration`
+            // doesn't masquerade as a gate failure.
+            let stored: String = conn
+                .query_row(
+                    "SELECT manifest_json FROM llm_wiki_entity_manifests
+                      WHERE entity_id = 'tier_fact'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                stored.contains("fallback_node_type"),
+                "the UPDATE must land before the retry; got {stored}"
+            );
+
+            run_okf_migration(&mut conn, vault).expect("retry must succeed after fallback");
+
+            // `okf_migrated_at` is now set; the diagnostic is cleared so a
+            // green open never shadows a stale failure.
+            let migrated: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_meta WHERE key = 'okf_migrated_at'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(migrated, 1, "the retry must stamp okf_migrated_at");
+            let diag_after =
+                read_okf_migration_diagnostic(&conn).expect("read diagnostic after retry");
+            assert!(
+                diag_after.is_none(),
+                "a successful retry must clear the diagnostic, got: {diag_after:?}"
+            );
+
+            // The wiki page landed as an entity on the retry.
+            let entity_id = entity_id_from_wiki_path("page.md");
+            let entity_type: String = conn
+                .query_row(
+                    "SELECT entity_type FROM curated_entities WHERE id = ?1",
+                    [&entity_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                entity_type, "person",
+                "the gate's degrade ladder should land the entity as the \
+                 manifest's declared fallback after the retry"
+            );
+
+            // Task 9 fix round 1, Finding 1: the migration-time UNLABELED
+            // fallback landing writes the `unlabeled_landing` origin-ledger
+            // row (same situation, same row as bundle import's
+            // DegradedToFallback arm) so a fallback landing stays
+            // distinguishable from a declared type (R2.4.6). original_type
+            // is NULL (no label was supplied — r21 contract).
+            let (reason, original_type): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT reason, original_type FROM entity_type_origin
+                      WHERE entity_id = ?1",
+                    [&entity_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .expect("the unlabeled fallback landing must record an origin row");
+            assert_eq!(reason, "unlabeled_landing");
+            assert_eq!(
+                original_type, None,
+                "an unlabeled landing has no original label — NULL, never ''"
+            );
+        },
+    );
 }
