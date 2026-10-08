@@ -948,13 +948,13 @@ fn log_okf_migration_failure(e: &anyhow::Error) {
     tracing::error!(
         error = %e,
         "okf_migration aborted at open — see `ct heal` for the diagnostic; \
-         retry after the manifest gains a `fallback_node_type` (spec §2.5 r6-M2)"
+         retry once the cause named in the error is fixed (spec §2.5 r6-M2)"
     );
     #[cfg(not(feature = "mcp-server"))]
     eprintln!(
         "[curated-thoughts] ERROR: okf_migration aborted at open: {e:#}\n  \
          next heal run will surface the diagnostic under `ontology.okf_migration_diagnostic`;\n  \
-         retry succeeds after the manifest gains a `fallback_node_type` (spec §2.5 r6-M2)"
+         retry succeeds once the cause named above is fixed (spec §2.5 r6-M2)"
     );
 }
 

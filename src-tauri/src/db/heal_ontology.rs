@@ -107,6 +107,11 @@ pub struct OntologyHealReport {
     /// `None` when the migration has never aborted, or after a successful
     /// retry cleared it.
     pub okf_migration_diagnostic: Option<String>,
+    /// Strict manifest rows (entity ids; `tier_fact` included) whose
+    /// vocabulary cannot gate — every new-entity mint on them is held
+    /// (R2.4.5). Read-only runs report what the ensure would leave
+    /// unusable; each is also printed to stderr with its cause and fix.
+    pub unusable_manifests: Vec<String>,
 }
 
 /// Run the ontology heal pass. `apply == false` is the read-only
@@ -274,7 +279,7 @@ fn run_inner(
                 if s.extended
                     + s.fallbacks_set
                     + s.foreign_no_preferred_fallback
-                    + s.unusable_vocabulary
+                    + s.unusable_vocabulary.len()
                     + s.malformed
                     + s.raced
                     > 0
@@ -287,11 +292,12 @@ fn run_inner(
                         s.extended,
                         s.fallbacks_set,
                         s.foreign_no_preferred_fallback,
-                        s.unusable_vocabulary,
+                        s.unusable_vocabulary.len(),
                         s.malformed,
                         s.raced
                     );
                 }
+                report.unusable_manifests = s.unusable_vocabulary;
             }
             Err(e) => {
                 report.error = Some(format!("manifest ensure failed: {e:#}"));
@@ -345,17 +351,24 @@ fn run_inner(
         let (pending, foreign, unusable) = if scope == PassScope::Heal {
             ensure_pending_readonly(conn)?
         } else {
-            (0, 0, 0)
+            (0, 0, Vec::new())
         };
-        if pending > 0 || foreign > 0 || unusable > 0 {
+        if pending > 0 || foreign > 0 || !unusable.is_empty() {
             eprintln!(
                 "ontology heal: ensure pending (read-only): {pending} manifest(s) would \
                  be extended/ensured, {foreign} foreign manifest(s) lack a preferred \
-                 fallback, {unusable} manifest(s) carry a vocabulary that cannot gate \
-                 (every new-entity mint held; fix with `ct ontology set --fallback \
-                 <type>`)"
+                 fallback, {} manifest(s) carry a vocabulary that cannot gate (every \
+                 new-entity mint on them is held)",
+                unusable.len()
             );
         }
+        // Each unusable row by name, with ITS cause and fix (review
+        // finding: one generic `--fallback` prescription dead-ended on an
+        // empty declared set and targeted `tier_fact` for entity rows).
+        for (entity_id, reason) in &unusable {
+            eprintln!("ontology heal: manifest `{entity_id}` cannot gate: {reason}");
+        }
+        report.unusable_manifests = unusable.into_iter().map(|(id, _)| id).collect();
         report.census = census(conn)?;
         let counts = remap_pass(conn, &ctx, true)?;
         report.retyped = counts.retyped;
@@ -723,29 +736,36 @@ fn census(conn: &Connection) -> Result<CensusReport> {
 /// Read-only "would the ensure act?" computation (R2.4.4 r12-m4) for the
 /// non-`--yes` arm — reports "ensure pending (read-only)" instead of
 /// writing. Returns `(would_write, foreign_no_preferred_fallback,
-/// unusable_vocabulary)`.
-fn ensure_pending_readonly(conn: &Connection) -> Result<(usize, usize, usize)> {
-    let rows: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT manifest_json FROM llm_wiki_entity_manifests")?;
+/// unusable rows as (entity_id, reason))`.
+type UnusableRows = Vec<(String, crate::db::entity_gate::HoldReason)>;
+fn ensure_pending_readonly(conn: &Connection) -> Result<(usize, usize, UnusableRows)> {
+    let rows: Vec<(String, String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, mode, manifest_json FROM llm_wiki_entity_manifests
+             ORDER BY entity_id",
+        )?;
         let mut rs = stmt.query([])?;
         let mut out = Vec::new();
         while let Some(row) = rs.next()? {
-            out.push(row.get(0)?);
+            out.push((row.get(0)?, row.get(1)?, row.get(2)?));
         }
         out
     };
     let mut would_write = 0;
     let mut foreign_no_choice = 0;
-    let mut unusable = 0;
-    for manifest_json in rows {
+    let mut unusable = Vec::new();
+    for (entity_id, mode, manifest_json) in rows {
         // The SAME pure planner the real ensure runs — the read-only report
         // cannot drift from what `--yes` writes.
-        match crate::db::entity_gate::plan_manifest_ensure(&manifest_json)? {
+        let strict = mode == "strict";
+        match crate::db::entity_gate::plan_manifest_ensure(&manifest_json, &entity_id, strict)? {
             crate::db::entity_gate::EnsurePlan::Edit { .. } => would_write += 1,
             crate::db::entity_gate::EnsurePlan::ForeignNoPreferredFallback => {
                 foreign_no_choice += 1
             }
-            crate::db::entity_gate::EnsurePlan::UnusableVocabulary { .. } => unusable += 1,
+            crate::db::entity_gate::EnsurePlan::UnusableVocabulary { reason } => {
+                unusable.push((entity_id, reason))
+            }
             crate::db::entity_gate::EnsurePlan::Malformed(_)
             | crate::db::entity_gate::EnsurePlan::Complete => {}
         }
@@ -1356,6 +1376,51 @@ mod tests {
         assert_eq!(r.error, None, "{r:?}");
         assert!(meta(&conn, ALIAS_REMAP_MARKER_KEY).is_some());
         assert!(meta(&conn, WATERMARK_KEY).is_some());
+    }
+
+    /// Review finding (heal surface): an unusable strict row is reported
+    /// BY NAME through the real heal pass — read-only and `--yes` agree —
+    /// even when a pre-r26 memo marked its bytes `Complete`. Non-strict
+    /// rows with the same shape hold nothing and are not reported.
+    #[test]
+    fn heal_names_unusable_strict_rows_despite_a_legacy_memo() {
+        let mut conn = open_in_memory().unwrap();
+        let unusable = json!({
+            "node_types": [{"type": "person"}],
+            "edge_types": [],
+            "fallback_node_type": "ghost",
+        })
+        .to_string();
+        for (id, mode) in [("tier_fact", "strict"), ("ent_off", "off")] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+                 VALUES (?1, ?2, ?3, 1)",
+                params![id, mode, unusable],
+            )
+            .unwrap();
+            // The pre-r26 memo key: sha256 of the bytes alone.
+            conn.execute(
+                "INSERT INTO manifest_ensure_memo (entity_id, manifest_hash, recorded_at)
+                 VALUES (?1, ?2, 1)",
+                params![id, crate::hasher::hash_bytes(unusable.as_bytes())],
+            )
+            .unwrap();
+        }
+        let preview = ontology_heal_pass(&mut conn, DriftFlag::None, false);
+        assert_eq!(preview.error, None, "{preview:?}");
+        assert_eq!(preview.unusable_manifests, vec!["tier_fact".to_string()]);
+        let applied = ontology_heal_pass(&mut conn, DriftFlag::None, true);
+        assert_eq!(applied.error, None, "{applied:?}");
+        assert_eq!(applied.unusable_manifests, vec!["tier_fact".to_string()]);
+        // Reported, never rewritten.
+        let stored: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, unusable);
     }
 
     /// Unconfirmed drift: skipped, watermark untouched.

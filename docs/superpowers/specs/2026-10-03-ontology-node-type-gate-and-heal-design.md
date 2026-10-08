@@ -68,6 +68,22 @@ type, matching the declared/alias arms). EmptyNodeTypes fix-lines route
 entity-row holds to the `ct ontology set --entity … --mode strict`
 re-copy (the wiki engine never rewrites an entity-scoped row), and
 unnamed-row `--fallback` fix-lines print a pasteable command.
+r27 (2026-10-08, `/code-review max` wave): the ensure memo key now
+carries a planner epoch and the row's mode — sha256(epoch, mode,
+`manifest_json`) — so a memo recorded by an older planner (pre-r26
+`Complete` on a row r26 repairs or reports) never short-circuits a
+newer one, and a mode flip re-plans. Only STRICT rows are judged
+unusable (the gate reads no other row). Unusable rows are reported BY
+NAME, each with its own cause and fix (heal's `unusable_manifests`,
+stderr per row), never one generic `--fallback` prescription. The
+planner reads "declared" through the gate's lenient reader (bare-string
+`node_types` included), and so does `--fallback` validation. Rung 1b
+reads the TERMINAL SURVIVOR's manifest row (R2.7.5). Every printed
+`ct ontology set` command comes from one shaper that shell-quotes the
+entity id and is parse-tested against the clap definition. Defensive
+backstops hold with an `Internal` cause instead of fabricating a
+configuration diagnosis. EmptyNodeTypes fix-lines name the whole
+repair (node types AND a declared fallback).
 **Date:** 2026-10-03 (written 2026-10-04; r21 2026-10-07)
 **Baseline:** `main` @ `9c2281b` (v3.2.0) for the design; line citations
 re-anchored (r21) to branch tip after merging `main` @ `0f7ea9f` (v3.3.0).
@@ -1070,7 +1086,8 @@ hard-coded literal). Single consolidated rule:
     one-shot-migration design): `ensure_manifest_vocabulary(conn, entity_id)` runs
     whenever the gate or heal RESOLVES a manifest (memoized per
     entity+generation, where generation = sha256 of `manifest_json`,
-    r10-MINOR-3) and — best-effort (r8-m6) — at DB open, invoked BEFORE `run_okf_migration` (the `let _ = run_okf_migration(...)` call in `AppDb::open_with_config`, `connection.rs`) and after `migrate()` (the ensure runs best-effort at DB open in the `AppDb` path — `AppDb::open_with_config` in `connection.rs` (its `migrate()` + `run_okf_migration` block), the ONLY path that also runs the OKF migration, which is the ordering that matters; `migrate_open_db`/`migrate_brain_db` wrappers noted r19-m5;
+    r10-MINOR-3; r27 adds the planner epoch and row mode to the key — see
+    "Memo key" below) and — best-effort (r8-m6) — at DB open, invoked BEFORE `run_okf_migration` (the `let _ = run_okf_migration(...)` call in `AppDb::open_with_config`, `connection.rs`) and after `migrate()` (the ensure runs best-effort at DB open in the `AppDb` path — `AppDb::open_with_config` in `connection.rs` (its `migrate()` + `run_okf_migration` block), the ONLY path that also runs the OKF migration, which is the ordering that matters; `migrate_open_db`/`migrate_brain_db` wrappers noted r19-m5;
     resolution-time is the real guarantee) — so fresh installs (whose
     `tier_fact` is
     seeded AFTER migration by `seedManifestsIfAbsent`,
@@ -1090,7 +1107,11 @@ hard-coded literal). Single consolidated rule:
     anyway; the ensure simply re-runs on the next resolution if
     clobbered). Limiting the ensure to `--yes` runs would leave fresh
     installs uncovered on first resolution. Memo key: `(entity_id,
-    sha256(manifest_json))`, recorded ONLY after the write commits
+    sha256(planner epoch, mode, manifest_json))` (r27: the epoch is
+    bumped whenever the planner's verdict for given bytes can change, so
+    an older planner's memo never short-circuits a newer one; the mode
+    is in the key because only strict rows can be unusable; one memo row
+    per entity), recorded ONLY after the write commits
     (r11-m4: an in-transaction memo + rollback would leave the row
     un-ensured but memo-marked until restart — held mints with a false
     §2.4.5 error). **The ensure carries the FULL vocabulary work (r7-MAJOR-2/3):
@@ -1128,7 +1149,8 @@ hard-coded literal). Single consolidated rule:
     type); a FOREIGN row with such a value, or with an empty declared
     set, is beyond declare-or-report — nothing is written, and the row
     is counted `unusable_vocabulary` in the ensure/heal report (never
-    memoized; re-reported until fixed via `ct ontology set --fallback`). EA/`SchemaSoftwareOrg`
+    memoized; re-reported BY NAME, with the cause-specific fix, until
+    fixed — r27; strict rows only, since the gate reads no other row). EA/`SchemaSoftwareOrg`
     17-type set → `project`; the live ThinkPad row (18 types incl.
     `concept`) → `concept`; SchemaOrg (9 types, declares `project`,
     not `concept`) → `project` — no first-party brain stalls. NOTE — this CORRECTS the frozen investigation
@@ -1462,7 +1484,12 @@ survivor must not silently win with the wrong type.
   cover the whole redirect cluster (a deliberate opt-out on ANY member
   keeps applying — D8), and the `--mode strict` reversal clears opt-outs
   across the cluster. `ct ontology set --entity <loser>` resolves to the
-  survivor before writing (and refuses an id naming no entity).
+  survivor before writing (and refuses an id naming no entity). Rung 1b
+  reads the TERMINAL SURVIVOR's manifest row likewise (r27): a mint under
+  a loser id lands on the survivor, so the survivor's row governs it —
+  the same row `ct ontology set --entity <loser>` writes — and a loser's
+  leftover row is never read. An unresolvable chain (a cycle or a read
+  fault) holds the mint (D8, `RedirectUnresolved`).
 - The loser stays live-but-redirected: a local `merged_into` redirect
   record is written (new table); the loser is NEVER returned as an entity
   by reads.
@@ -1730,15 +1757,21 @@ vocabulary check exists; report-only like its edge half unless `--yes`.
   (nothing written, opt-out kept) when the row it would write is
   unusable per R2.4.5 — e.g. the copied `tier_fact` declares no
   `fallback_node_type` — since that row would hold every mint for the
-  entity. The refusal lists the declared types and both fixes: name a
+  entity. The refusal names the cause and its fix. When a fallback
+  would repair the row (no `fallback_node_type`, or one naming no
+  declared type) it lists the declared types and both fixes: name a
   fallback on `tier_fact` (`--fallback <type>`, fixing every mint
   resolving through it) or on this entity only (`--entity <id> --mode
-  strict --fallback <type>`). CT cannot prevent the engine seeding an
+  strict --fallback <type>`). Over an EMPTY declared set no fallback can
+  be named, so neither fallback command is printed — the fix is adding
+  node types to `tier_fact` (the wiki engine owns it), and declaring a
+  fallback among them if it names none (r27). The entity id is
+  shell-quoted in every printed command. CT cannot prevent the engine seeding an
   unusable `tier_fact`; `ct heal --yes` reports that case (the ensure
   pass's `foreign_no_preferred_fallback` and `unusable_vocabulary`
   counts — the latter covers an existing fallback naming no declared
-  type and the empty-declared-set shape, r26) and every held mint
-  names it.
+  type and the empty-declared-set shape, r26; each unusable row is
+  named with its own cause and fix, r27) and every held mint names it.
 - `--fallback <type>` writes `fallback_node_type` into the target
   manifest's `manifest_json` (tier/manifest-level, unlike the
   entity-scoped `--entity`); target defaults to `tier_fact`. Declares
