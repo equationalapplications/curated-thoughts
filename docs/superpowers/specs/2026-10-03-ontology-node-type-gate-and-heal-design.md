@@ -8,6 +8,10 @@ r21 (2026-10-07, post-Task-1 code alignment): origin-ledger contract
 pinned (R2.4.6 — `reason` column, nullable `original_type`, first-origin-
 wins), R2.3.5/R2.3.6 scope + reversibility corrected, R2.7.5 archive ×
 redirect behavior pinned, R2.7.6 wording, citations re-anchored.
+**IMPLEMENTED (2026-10-07, wave 1):** all plan Tasks 0–10 complete on
+branch `spec/ontology-node-type-gate-and-heal` (PR #269); tracking
+issue #273; wave-2 boundary (§5) remains open. Revision history above
+is intact.
 **Date:** 2026-10-03 (written 2026-10-04; r21 2026-10-07)
 **Baseline:** `main` @ `9c2281b` (v3.2.0) for the design; line citations
 re-anchored (r21) to branch tip after merging `main` @ `0f7ea9f` (v3.3.0).
@@ -1588,7 +1592,9 @@ vocabulary check exists; report-only like its edge half unless `--yes`.
   seed, the live row has 18 types incl. `concept`; copying the
   17-type seed would make `concept` drift — entity-scoped
   override); the combination with `--dir` is REJECTED (one target per
-  invocation).
+  invocation). `edge_types` rides along verbatim on `--entity strict`
+  (a synthesized empty edge list on a strict entity row would hand the
+  edge gate a vocabulary that purges every declared edge).
 - `--fallback <type>` writes `fallback_node_type` into the target
   manifest's `manifest_json` (tier/manifest-level, unlike the
   entity-scoped `--entity`); target defaults to `tier_fact`. Declares

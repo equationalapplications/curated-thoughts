@@ -908,23 +908,23 @@ census report-only r8-m5; single tracking issue r18-m4/delta#2),
 §2.5 okf_migration abort/observability rules (r12-M2 ladder-outcome
 trigger, r6-M2 loud caller, r3-M2 scoped config-fail).
 
-- [ ] (plan-p3-M2: the R2.9.3 incidental-off census QUERY moved to Task 5
+- [x] (plan-p3-M2: the R2.9.3 incidental-off census QUERY moved to Task 5
       — heal's pipeline needs it and the chain is hard; this task keeps
       only the §3 migration data work. No census bullet here.)
-- [ ] okf_migration OBSERVABILITY only (plan-p2-M2: the `&mut Connection`
+- [x] okf_migration OBSERVABILITY only (plan-p2-M2: the `&mut Connection`
       signature + the `AppDb::open_with_config` `let mut conn` binding and
       `&mut conn` call-site fixes already landed in TASK 2 — plan-p13-m3
       corrects the earlier "Task 3" attribution; plan-p3-m4: the
       abort-vs-skip LADDER-OUTCOME decision lives in Task 3): loud
       caller log + diagnostic, retry-succeeds test.
-- [ ] Tests: §6 item 6 + okf_migration cases.
+- [x] Tests: §6 item 6 + okf_migration cases.
 
 ### Task 10: Docs + status flips (plan-p2-M3: sweep is Task 8's SOLE deliverable)
 
-- [ ] File THE single wave-1 tracking issue and link it from the Sept 8
+- [x] File THE single wave-1 tracking issue and link it from the Sept 8
       edge-integrity spec's §6 (r18-m4 / spec §3 bookkeeping — no second
       issue).
-- [ ] PR body documents the §3 rollback hazard + release-notes entry
+- [x] PR body documents the §3 rollback hazard + release-notes entry
       (plan-p4-MAJOR-2 wording: NO drift report is expected after
       upgrading with an unchanged config — the initial watermark is
       stamped at first gate/heal resolution and the first-run rule
@@ -932,7 +932,7 @@ trigger, r6-M2 loud caller, r3-M2 scoped config-fail).
       upgrade signals a REAL config change or a vault switch that
       restored a backup carrying an older watermark — do not
       auto-waive it. Census output attached).
-- [ ] Spec Status → implemented; this plan checked off; commit both with
+- [x] Spec Status → implemented; this plan checked off; commit both with
       the PR.
 
 ## Verification (definition of done for the whole plan)
