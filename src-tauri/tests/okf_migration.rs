@@ -4,8 +4,10 @@ mod helpers;
 
 use helpers::TestApp;
 use rusqlite::Connection;
-use tauri_app_lib::db::connection::{migrate_open_db, open_in_memory};
-use tauri_app_lib::db::okf_migration::{entity_id_from_wiki_path, run_okf_migration};
+use tauri_app_lib::db::connection::{migrate_open_db, open_app_db, open_in_memory};
+use tauri_app_lib::db::okf_migration::{
+    entity_id_from_wiki_path, read_okf_migration_diagnostic, run_okf_migration,
+};
 use tauri_app_lib::db::schema::OriginReason;
 use tempfile::TempDir;
 
@@ -720,4 +722,176 @@ fn v18_creates_librarian_evidence_with_json_check() {
         [],
     )
     .unwrap();
+}
+
+/// Spec §2.5 r12-M2 / r6-M2 (Task 9 brief): a strict `tier_fact` manifest
+/// WITHOUT `fallback_node_type` holds the gate at rung 4 with `Held` —
+/// `run_okf_migration` aborts without setting `okf_migrated_at` (so the
+/// V7 guard makes retry safe), records the cause into the
+/// `okf_migration_diagnostic` `llm_wiki_meta` row, and the abort's
+/// message names the recovery path (gain a `fallback_node_type`).
+/// A successful retry AFTER the manifest gains a fallback clears the
+/// diagnostic and stamps `okf_migrated_at`.
+///
+/// The test bypasses `AppDb::open_with_config` (Task 2 owns that surface)
+/// and drives the migration directly: it still exercises the same code
+/// path the production caller does (`run_okf_migration` → abort → bail →
+/// record diagnostic).
+#[test]
+fn okf_migration_aborts_without_fallback_records_diagnostic_and_retries_succeeds() {
+    // The abort requires a config that does NOT short-circuit at rung 2/3
+    // with `off` — a brain-wide default. We pin the env vars the cache uses
+    // so this test is hermetic; the brain dir holds the config.json, and the
+    // gate call resolves the policy from the same path.
+    temp_env::with_vars(
+        [
+            ("CURATED_BRAIN_CONFIG", None::<&str>),
+            ("CURATED_BRAIN_DB", None::<&str>),
+            ("CURATED_BRAIN_DIR", None::<&str>),
+        ],
+        || {
+            let tmp = TempDir::new().unwrap();
+            let vault = tmp.path();
+            std::fs::create_dir_all(vault.join("wiki")).unwrap();
+            std::fs::write(vault.join("wiki/page.md"), "# Page\n\nBody.").unwrap();
+            // Brain config: empty — rungs 2/3 default to Off (climb); rung 4
+            // walks to `tier_fact`'s strict manifest below.
+            std::fs::write(
+                tmp.path().join("config.json"),
+                r#"{"vault_path":"/vault","ingest":{"folder_ontology":{}}}"#,
+            )
+            .unwrap();
+
+            let db_path = tmp.path().join("brain.db");
+            let mut conn = open_app_db(&db_path, None).unwrap();
+
+            // Pre-wave-1 strict manifest: declared types but NO fallback.
+            // Spec §2.4.4 ensures the same key on next resolution, so the
+            // abort is the EXACT pre-wave-1 shape r12-M2 names.
+            let manifest = serde_json::json!({
+                "node_types": [{"type": "person"}],
+                "edge_types": [],
+            });
+            let manifest_json = serde_json::to_string(&manifest).unwrap();
+            conn.execute(
+                "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+                 VALUES ('tier_fact', 'strict', ?1, 1)",
+                rusqlite::params![manifest_json],
+            )
+            .unwrap();
+            // Skip the AppDb-side ensure by deleting its memo: this test
+            // owns the r21 abort path, not the migration's ensure step.
+            conn.execute("DELETE FROM manifest_ensure_memo", [])
+                .unwrap();
+
+            // An approved wiki page that the migration would mint as an
+            // entity — the gate call at the insert site is the abort
+            // trigger.
+            conn.execute(
+                "INSERT INTO wiki_pages (path, source_doc_ids, generated_by, status)
+                 VALUES ('page.md', '[]', 'test', 'approved')",
+                [],
+            )
+            .unwrap();
+
+            // First attempt: abort.
+            let err = run_okf_migration(&mut conn, vault)
+                .expect_err("strict manifest without fallback must abort");
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("fallback_node_type"),
+                "the abort message must name the recovery action, got: {message}"
+            );
+
+            // Spec §2.5 r6-M2: the diagnostic is recorded for heal to
+            // surface.
+            let diag = read_okf_migration_diagnostic(&conn)
+                .expect("read diagnostic")
+                .expect("diagnostic must be recorded after an abort");
+            assert!(
+                diag.contains("fallback_node_type"),
+                "the diagnostic must echo the recovery action, got: {diag}"
+            );
+
+            // The V7 guard: abort WITHOUT `okf_migrated_at`.
+            let stamped: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_meta WHERE key = 'okf_migrated_at'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(stamped, 0, "the abort must NOT stamp okf_migrated_at");
+
+            // No entity row was inserted.
+            let entity_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM curated_entities", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(entity_count, 0, "aborted migration must leave no entities");
+
+            // Retry: gain a `fallback_node_type` on the same manifest.
+            let with_fallback = serde_json::json!({
+                "node_types": [{"type": "person"}],
+                "edge_types": [],
+                "fallback_node_type": "person",
+            });
+            conn.execute(
+                "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1
+                  WHERE entity_id = 'tier_fact'",
+                rusqlite::params![serde_json::to_string(&with_fallback).unwrap()],
+            )
+            .unwrap();
+
+            // Sanity: the gate reads the manifest_json column directly via
+            // `wiki_get_ontology`. Confirm the UPDATE landed before the retry
+            // so a typo or transaction-rollback regression in `run_okf_migration`
+            // doesn't masquerade as a gate failure.
+            let stored: String = conn
+                .query_row(
+                    "SELECT manifest_json FROM llm_wiki_entity_manifests
+                      WHERE entity_id = 'tier_fact'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                stored.contains("fallback_node_type"),
+                "the UPDATE must land before the retry; got {stored}"
+            );
+
+            run_okf_migration(&mut conn, vault).expect("retry must succeed after fallback");
+
+            // `okf_migrated_at` is now set; the diagnostic is cleared so a
+            // green open never shadows a stale failure.
+            let migrated: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_meta WHERE key = 'okf_migrated_at'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(migrated, 1, "the retry must stamp okf_migrated_at");
+            let diag_after =
+                read_okf_migration_diagnostic(&conn).expect("read diagnostic after retry");
+            assert!(
+                diag_after.is_none(),
+                "a successful retry must clear the diagnostic, got: {diag_after:?}"
+            );
+
+            // The wiki page landed as an entity on the retry.
+            let entity_id = entity_id_from_wiki_path("page.md");
+            let entity_type: String = conn
+                .query_row(
+                    "SELECT entity_type FROM curated_entities WHERE id = ?1",
+                    [&entity_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                entity_type, "person",
+                "the gate's degrade ladder should land the entity as the \
+                 manifest's declared fallback after the retry"
+            );
+        },
+    );
 }

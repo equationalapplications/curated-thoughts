@@ -937,6 +937,27 @@ fn log_ensure_failure(e: &anyhow::Error) {
     );
 }
 
+/// Loud okf_migration abort logging (spec §2.5 r6-M2). The migration's
+/// failure used to be discarded by the production `let _ = run_okf_migration(...)`
+/// call in `AppDb::open_with_config`; now the cause is logged to stderr AND
+/// written into the `okf_migration_diagnostic` `llm_wiki_meta` row so the
+/// next heal pass can surface it. The line carries the spec-referenced
+/// phrases a grep-friendly tool can pick up.
+fn log_okf_migration_failure(e: &anyhow::Error) {
+    #[cfg(feature = "mcp-server")]
+    tracing::error!(
+        error = %e,
+        "okf_migration aborted at open — see `ct heal` for the diagnostic; \
+         retry after the manifest gains a `fallback_node_type` (spec §2.5 r6-M2)"
+    );
+    #[cfg(not(feature = "mcp-server"))]
+    eprintln!(
+        "[curated-thoughts] ERROR: okf_migration aborted at open: {e:#}\n  \
+         next heal run will surface the diagnostic under `ontology.okf_migration_diagnostic`;\n  \
+         retry succeeds after the manifest gains a `fallback_node_type` (spec §2.5 r6-M2)"
+    );
+}
+
 /// Drop a pre-r21 `entity_type_origin` so `MIGRATION_V26` re-creates it in
 /// the r21 shape (spec R2.4.6: nullable `original_type`, new `reason`).
 ///
@@ -1084,7 +1105,14 @@ impl AppDb {
         if let Some(root) = vault_roots.as_ref() {
             let vault_path = std::path::Path::new(&root.canonical);
             if vault_path.is_dir() {
-                let _ = crate::db::okf_migration::run_okf_migration(&mut conn, vault_path);
+                if let Err(e) = crate::db::okf_migration::run_okf_migration(&mut conn, vault_path) {
+                    // Spec §2.5 r6-M2: the abort is no longer silent.
+                    // `run_okf_migration` already recorded the cause into the
+                    // `okf_migration_diagnostic` `llm_wiki_meta` row; this
+                    // makes the open-time failure VISIBLE to the operator so
+                    // a later write failure is not a mystery.
+                    log_okf_migration_failure(&e);
+                }
             }
         }
         Ok(AppDb(conn))

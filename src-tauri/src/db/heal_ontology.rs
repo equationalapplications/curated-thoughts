@@ -102,6 +102,11 @@ pub struct OntologyHealReport {
     pub error: Option<String>,
     /// `"unconfirmed_drift"` | `"drift_waived"` | `"degraded_config"`.
     pub skipped_reason: Option<String>,
+    /// Most-recent `okf_migration` abort cause (spec §2.5 r6-M2: the
+    /// open-time caller used to discard the error; heal surfaces it).
+    /// `None` when the migration has never aborted, or after a successful
+    /// retry cleared it.
+    pub okf_migration_diagnostic: Option<String>,
 }
 
 /// Run the ontology heal pass. `apply == false` is the read-only
@@ -172,6 +177,13 @@ fn run_inner(
         );
         return Ok(());
     }
+
+    // Spec §2.5 r6-M2: surface any open-time abort's cause. The
+    // `okf_migration_diagnostic` row is written by `run_okf_migration`
+    // when the gate holds at rung 4 with no declared fallback; cleared
+    // on a successful retry so a green open never surfaces a stale note.
+    report.okf_migration_diagnostic =
+        crate::db::okf_migration::read_okf_migration_diagnostic(conn)?;
 
     let policy = crate::config::ingest_policy_for_db(conn.path());
     let degraded = policy.ontology_degraded_state();
@@ -1512,5 +1524,114 @@ mod tests {
             "climb reaches the strict tier_fact rung: {r:?}"
         );
         assert_eq!(entity_type(&conn, "e1"), "role");
+    }
+
+    // ------------------------------------------------------------------
+    // §6 item 6 (Task 9 brief) — restore-branch watermark swap
+    // ------------------------------------------------------------------
+
+    /// §6 item 6 (Task 9 brief, r4-m1): a restore-branch vault switch swaps
+    /// the brain's `llm_wiki_meta` rows wholesale — the watermark that
+    /// surfaces after the restore is the BACKUP's old watermark, not the
+    /// outgoing vault's. Heal MUST echo that old hash and refuse `--yes`
+    /// until the operator explicitly confirms the echoed pair.
+    ///
+    /// No "confirming config read" exists (r4-m1): the only authoritative
+    /// input is the row the restore just installed, and the only way past
+    /// the gate is `--confirm-drift <echoed-old-hash>`. The test pins both
+    /// the echo and the refusal.
+    #[test]
+    fn restore_branch_watermark_swap_echoes_old_hash_and_refuses_unconfirmed() {
+        let mut conn = open_in_memory().unwrap();
+        // The backup's watermark: an OLDER config hash from the vault being
+        // restored. The restore branch installs this row verbatim (r4-m1
+        // notes that no confirming config read exists — the row IS the
+        // authority).
+        let backup_watermark_hash = "old_backup_hash_42";
+        conn.execute(
+            "INSERT INTO llm_wiki_meta (key, value) VALUES ('ontology_config_watermark', ?1)",
+            params![format!(
+                r#"{{"hash":"{backup_watermark_hash}","stamped_at":42}}"#
+            )],
+        )
+        .unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+        seed_entity(&conn, "e1", "agent");
+
+        // `--yes` without the confirm flag: refuses, watermark untouched.
+        let r = ontology_heal_pass(&mut conn, DriftFlag::None, true);
+        let drift = r
+            .drift
+            .as_ref()
+            .expect("restore-branch watermark swap must echo old hash");
+        assert_eq!(drift.old_hash, backup_watermark_hash);
+        assert_eq!(drift.old_stamped_at, 42);
+        assert_eq!(
+            r.skipped_reason.as_deref(),
+            Some("unconfirmed_drift"),
+            "no --confirm-drift → unconfirmed_drift refusal: {r:?}"
+        );
+        assert_eq!(r.retyped, 0, "no retypes on unconfirmed drift");
+        let stored = meta(&conn, WATERMARK_KEY).unwrap();
+        assert!(
+            stored.contains(backup_watermark_hash),
+            "the unconfirmed run must leave the swapped-in watermark in place; got {stored}"
+        );
+        assert_eq!(
+            entity_type(&conn, "e1"),
+            "agent",
+            "no retypes on unconfirmed drift"
+        );
+
+        // A MISMATCHED confirm flag: refuses with the same echoed hash —
+        // the gate keeps insisting on the echoed pair, not on operator intent.
+        let r = ontology_heal_pass(&mut conn, DriftFlag::Confirm("wrong_hash".into()), true);
+        assert_eq!(
+            r.skipped_reason.as_deref(),
+            Some("unconfirmed_drift"),
+            "a mismatched --confirm-drift must NOT clear the gate: {r:?}"
+        );
+        let drift = r.drift.as_ref().unwrap();
+        assert_eq!(drift.old_hash, backup_watermark_hash);
+
+        // The CORRECT confirm flag — the echoed old hash itself — clears
+        // the gate and stamps the new live hash.
+        let r = ontology_heal_pass(
+            &mut conn,
+            DriftFlag::Confirm(backup_watermark_hash.into()),
+            true,
+        );
+        assert!(r.drift.as_ref().unwrap().confirmed);
+        assert_eq!(r.skipped_reason, None);
+        assert_eq!(r.retyped, 1, "the confirmed drift run proceeds: {r:?}");
+        let stored = meta(&conn, WATERMARK_KEY).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_ne!(v["hash"].as_str().unwrap(), backup_watermark_hash);
+        assert_eq!(entity_type(&conn, "e1"), "role");
+    }
+
+    /// §6 item 6 (Task 9 brief): the heal report surfaces the
+    /// `okf_migration_diagnostic` written at AppDb-open time (spec §2.5
+    /// r6-M2). This is the operator's signal that the open was wedged —
+    /// without the surfacing, the loud log would be the only hint.
+    #[test]
+    fn heal_report_surfaces_a_previously_recorded_okf_migration_diagnostic() {
+        let mut conn = open_in_memory().unwrap();
+        let planted = "okf_migration aborted: strict ontology gate held a wiki-page mint \
+                      (entity entity::abcd, path \"wiki/page.md\"): manifest is strict with \
+                      no declared `fallback_node_type`";
+        conn.execute(
+            "INSERT INTO llm_wiki_meta (key, value) VALUES ('okf_migration_diagnostic', ?1)",
+            params![planted],
+        )
+        .unwrap();
+        seed_tier_fact_manifest(&conn, &[], Some("concept"));
+
+        let r = ontology_heal_pass(&mut conn, DriftFlag::None, true);
+        assert_eq!(
+            r.okf_migration_diagnostic.as_deref(),
+            Some(planted),
+            "heal must surface the open-time abort's cause verbatim: {r:?}"
+        );
     }
 }

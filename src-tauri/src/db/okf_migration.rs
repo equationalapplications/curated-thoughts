@@ -16,6 +16,10 @@ use std::path::{Component, Path};
 use crate::db::entity_gate::ImmediateTx;
 
 pub const OKF_MIGRATED_META_KEY: &str = "okf_migrated_at";
+/// `llm_wiki_meta` key carrying the most-recent abort's cause. Cleared on
+/// a successful run (spec §2.5 r6-M2: the heal report surfaces it; a
+/// successful retry must overwrite the stale failure note).
+pub const OKF_MIGRATION_DIAG_KEY: &str = "okf_migration_diagnostic";
 
 fn normalize_wiki_relative_path(path: &str) -> String {
     let normalized = path.replace('\\', "/");
@@ -162,14 +166,27 @@ fn migrate_approved_wiki_pages(tx: &ImmediateTx<'_>, vault_root: &Path, now: i64
             }
             (AdmitOutcome::Held { .. }, _) => {
                 // §2.5 abort trigger (r12-M2/r3-M1): abort WITHOUT
-                // setting `okf_migrated_at`. The outer
+                // setting `okf_migrated_at`. The dominant trigger is the
+                // rung-4 strict vocabulary LACKING a declared
+                // `fallback_node_type` (`ModeVerdict::StrictNoVocab` →
+                // `GateDecision::Held` in
+                // `NodeGateDecision::into_gate_decision`). The outer
                 // `ImmediateTx::rollback` rolls back the entire
                 // migration, so the retry safety holds.
+                //
+                // The match stays WIDE (Task 3's shipped semantics — Task
+                // 9 owns observability, not the abort-vs-skip decision):
+                // the only other route to Held here is
+                // `GateDecision::Gate` over an EMPTY declared set (strict
+                // + `fallback_node_type` + zero `node_types`), which is
+                // the §2.4.5 configuration error — aborting is correct
+                // there too, and the diagnostic below names the recovery
+                // for the dominant case.
                 bail!(
                     "okf_migration aborted: strict ontology gate held a wiki-page mint \
                      (entity {entity_id}, path {path:?}): manifest is strict with no \
                      declared `fallback_node_type`; migration is retried after the manifest \
-                     gains a fallback (spec §2.4.5 / §2.5)"
+                     gains a fallback (spec §2.4.5 / §2.5 r12-M2)"
                 );
             }
             (AdmitOutcome::DegradedToFallback { .. }, _) => {
@@ -244,6 +261,48 @@ fn mark_okf_migrated(conn: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
+/// Record the most-recent abort's cause so a later heal pass can surface it
+/// (spec §2.5 r6-M2: "the only production caller discards the error ...
+/// change the caller to log loudly and record a diagnostic (heal report
+/// surfaces it)"). The row lives in `llm_wiki_meta` (the same table the
+/// `okf_migrated_at` and `ontology_config_watermark` keys live in) and is
+/// read back by [`read_okf_migration_diagnostic`]. Cleared on a successful
+/// run so a stale failure never shadows a green open.
+fn record_okf_migration_diagnostic(conn: &Connection, message: &str) -> Result<()> {
+    let escaped = message.replace('\0', "");
+    conn.execute(
+        "INSERT INTO llm_wiki_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![OKF_MIGRATION_DIAG_KEY, escaped],
+    )?;
+    Ok(())
+}
+
+/// Read the most-recent abort's cause (the row written by
+/// [`record_okf_migration_diagnostic`]). Returns `None` when the migration
+/// has never aborted on this brain, or after a successful retry cleared it.
+pub fn read_okf_migration_diagnostic(conn: &Connection) -> Result<Option<String>> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM llm_wiki_meta WHERE key = ?1",
+            [OKF_MIGRATION_DIAG_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(value.filter(|v| !v.is_empty()))
+}
+
+/// Clear the diagnostic row so a successful retry doesn't surface a stale
+/// failure in the next heal pass. Called inside the same transaction as
+/// `mark_okf_migrated` so the two writes commit or roll back together.
+fn clear_okf_migration_diagnostic(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM llm_wiki_meta WHERE key = ?1",
+        [OKF_MIGRATION_DIAG_KEY],
+    )?;
+    Ok(())
+}
+
 /// Run V7 data conversion when vault path is known. Safe to call repeatedly.
 ///
 /// Takes `&mut Connection` (Task 2): the body opens an IMMEDIATE transaction
@@ -266,12 +325,20 @@ pub fn run_okf_migration(conn: &mut Connection, vault_root: &Path) -> Result<()>
         drop_pending_wiki_proposals(&tx, vault_root)?;
         purge_wiki_tier_documents(&tx)?;
         mark_okf_migrated(&tx, now)?;
+        // Spec §2.5 r6-M2: clear any prior abort note so a successful
+        // retry doesn't surface a stale failure in the next heal pass.
+        clear_okf_migration_diagnostic(&tx)?;
         Ok(())
     })();
     match commit_result {
         Ok(()) => tx.commit(),
         Err(e) => {
             let _ = tx.rollback();
+            // Spec §2.5 r6-M2: record the abort's cause so heal can surface
+            // it on the next run. Best-effort: a closed transaction left the
+            // connection in a recoverable state; a failed write here would
+            // just deny the user the diagnostic, not their data.
+            let _ = record_okf_migration_diagnostic(conn, &format!("{e:#}"));
             Err(e)
         }
     }?;

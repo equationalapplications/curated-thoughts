@@ -420,8 +420,22 @@ fn run_admit_ladder(vocab: &NodeVocabulary, proposed: Option<&str>) -> AdmitInte
         return AdmitInternal::Held;
     }
     let Some(label) = proposed else {
-        // No label proposed — caller decides what to do. We return Held so
-        // the helper does not silently invent a label.
+        // No label proposed: the caller (e.g. okf_migration) has no
+        // proposed type for this mint. We must NOT silently invent a
+        // label (R2.4.4) — but the manifest's declared fallback IS a
+        // declared label, not an invention. When the caller is the
+        // gate's UNLABELED path (no proposed, no row, off, etc.) and the
+        // manifest declares a fallback, land there: the helper inserts
+        // as the fallback and the migration's abort-vs-skip decision is
+        // the caller's, not the ladder's. Only an EMPTY vocabulary
+        // without a fallback holds — that is the §2.4.5 configuration
+        // error, and the okf_migration abort handler reports it.
+        if let Some(fallback) = vocab.fallback() {
+            return AdmitInternal::DegradedToFallback {
+                original_label: String::new(),
+                landed_as: fallback.to_string(),
+            };
+        }
         return AdmitInternal::Held;
     };
     if let Some(canonical) = vocab.canonicalize(label) {
