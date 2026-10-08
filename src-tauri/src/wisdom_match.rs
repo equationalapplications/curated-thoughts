@@ -194,15 +194,21 @@ pub fn wisdom_match(
     exclude: &[String],
     now_ms: i64,
 ) -> Result<WisdomMatch> {
-    // The floor is the read scheme's tuple member for THIS model key: same
-    // `read_scheme(conn)` resolution the SELECT filter uses inside
-    // `wisdom_match_with_floor`, never an independently chosen scheme. An
-    // unregistered (model, scheme) key means abstain (floor None).
-    let floor = match temporal_columns(conn)?.scheme {
+    // ONE `temporal_columns` probe for the whole call: its single
+    // `read_scheme` resolution drives BOTH the floor (below) and the SELECT
+    // filter (inside `wisdom_match_impl`), so a concurrent
+    // `wisdom_active_scheme` flip can never pair one scheme's floor with
+    // another scheme's filter. The pre-V26 shape (scheme None) keeps the
+    // unsuffixed raw key and the filter omitted; an unregistered (model,
+    // scheme) key means abstain (floor None).
+    let temporal = temporal_columns(conn)?;
+    let floor = match temporal.scheme {
         Some(scheme) => gate_floor(&floor_key_for(gate_key, scheme)),
         None => gate_floor(gate_key),
     };
-    wisdom_match_with_floor(conn, query_vec, gate_key, floor, max, exclude, now_ms)
+    wisdom_match_impl(
+        conn, query_vec, gate_key, floor, max, exclude, now_ms, temporal,
+    )
 }
 
 /// `wisdom_match` with an explicit floor (tests and calibration). `floor =
@@ -217,8 +223,27 @@ pub fn wisdom_match_with_floor(
     exclude: &[String],
     now_ms: i64,
 ) -> Result<WisdomMatch> {
-    let max = max.min(MAX_ENTRIES);
     let temporal = temporal_columns(conn)?;
+    wisdom_match_impl(
+        conn, query_vec, gate_key, floor, max, exclude, now_ms, temporal,
+    )
+}
+
+/// Shared body: the caller passes the ONE `Temporal` (and therefore the ONE
+/// resolved scheme) that produced its floor, and that same value drives the
+/// SELECT and correction filters — floor and filter can never disagree.
+#[allow(clippy::too_many_arguments)]
+fn wisdom_match_impl(
+    conn: &Connection,
+    query_vec: &[f32],
+    gate_key: &str,
+    floor: Option<f32>,
+    max: usize,
+    exclude: &[String],
+    now_ms: i64,
+    temporal: Temporal,
+) -> Result<WisdomMatch> {
+    let max = max.min(MAX_ENTRIES);
     let corrections = if temporal.has_superseded_by {
         find_corrections(conn, exclude, now_ms, &temporal)?
     } else {
