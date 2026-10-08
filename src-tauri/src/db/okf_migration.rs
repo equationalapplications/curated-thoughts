@@ -285,7 +285,17 @@ fn migrate_approved_wiki_pages(
     Ok(count)
 }
 
-fn drop_pending_wiki_proposals(conn: &Connection, vault_root: &Path) -> Result<()> {
+/// DB mutations only: `wiki_pages` rows are orphaned and their source docs
+/// returned to `pending` INSIDE the transaction; the proposed-file removals
+/// are COLLECTED and returned for the caller to run AFTER `COMMIT` — the
+/// r21 hold-time rule (R15) forbids filesystem I/O inside the IMMEDIATE
+/// transaction, the same rule that moved the page-body reads out
+/// (`preload_approved_pages`). Best-effort either way: a failed removal
+/// leaves an orphaned row's proposed file on disk, exactly as before.
+fn drop_pending_wiki_proposals(
+    conn: &Connection,
+    vault_root: &Path,
+) -> Result<Vec<std::path::PathBuf>> {
     let mut stmt = conn.prepare(
         "SELECT id, path, source_doc_ids FROM wiki_pages WHERE status = 'pending_review'",
     )?;
@@ -293,14 +303,14 @@ fn drop_pending_wiki_proposals(conn: &Connection, vault_root: &Path) -> Result<(
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    let mut to_remove = Vec::new();
     for (page_id, path, source_doc_ids) in rows {
         conn.execute(
             "UPDATE wiki_pages SET status = 'orphaned' WHERE id = ?1",
             [page_id],
         )?;
 
-        let proposed_path = vault_root.join(".brain").join("proposed").join(&path);
-        let _ = std::fs::remove_file(&proposed_path);
+        to_remove.push(vault_root.join(".brain").join("proposed").join(&path));
 
         if let Ok(doc_ids) = serde_json::from_str::<Vec<i64>>(&source_doc_ids) {
             for doc_id in doc_ids {
@@ -311,7 +321,7 @@ fn drop_pending_wiki_proposals(conn: &Connection, vault_root: &Path) -> Result<(
             }
         }
     }
-    Ok(())
+    Ok(to_remove)
 }
 
 fn purge_wiki_tier_documents(conn: &Connection) -> Result<()> {
@@ -395,9 +405,13 @@ pub fn run_okf_migration(conn: &mut Connection, vault_root: &Path) -> Result<()>
     let pages = preload_approved_pages(conn, vault_root)?;
 
     let tx = ImmediateTx::begin(conn)?;
+    // Proposed-file removals run AFTER commit (r21 hold-time rule — no
+    // filesystem I/O inside the IMMEDIATE transaction; see
+    // `drop_pending_wiki_proposals`).
+    let mut proposed_to_remove: Vec<std::path::PathBuf> = Vec::new();
     let commit_result = (|| -> Result<()> {
         migrate_approved_wiki_pages(&tx, &policy, &pages, now)?;
-        drop_pending_wiki_proposals(&tx, vault_root)?;
+        proposed_to_remove = drop_pending_wiki_proposals(&tx, vault_root)?;
         purge_wiki_tier_documents(&tx)?;
         mark_okf_migrated(&tx, now)?;
         // Spec §2.5 r6-M2: clear any prior abort note so a successful
@@ -414,9 +428,15 @@ pub fn run_okf_migration(conn: &mut Connection, vault_root: &Path) -> Result<()>
             // connection in a recoverable state; a failed write here would
             // just deny the user the diagnostic, not their data.
             let _ = record_okf_migration_diagnostic(conn, &format!("{e:#}"));
-            Err(e)
+            return Err(e);
         }
     }?;
+    // Best-effort, post-commit: the rows are already orphaned durably; a
+    // failed removal leaves the proposed file on disk (same outcome as the
+    // previous in-transaction `let _ = remove_file`).
+    for path in &proposed_to_remove {
+        let _ = std::fs::remove_file(path);
+    }
 
     conn.execute_batch("VACUUM;")?;
     Ok(())

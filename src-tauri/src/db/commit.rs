@@ -2409,12 +2409,19 @@ fn resolve_edge_endpoint_vocabulary(
     //
     // A fact/task endpoint's opt-out lives on its OWNING entity (the same
     // mapping the ladder below walks), so check the owner as well as the
-    // raw endpoint id.
-    for eid in [source_id, target_id] {
-        let ladder_id = endpoint_ladder_id(conn, eid)?;
+    // raw endpoint id. Each endpoint's ladder id is computed ONCE here and
+    // reused by the vocabulary walk below (review finding: the loop and
+    // `endpoint_edge_vocabulary` each ran `endpoint_ladder_id` — one to
+    // three queries — per endpoint, per edge, inside the write lock).
+    let source_ladder = endpoint_ladder_id(conn, source_id)?;
+    let target_ladder = endpoint_ladder_id(conn, target_id)?;
+    for (eid, ladder_id) in [
+        (source_id, source_ladder.as_str()),
+        (target_id, target_ladder.as_str()),
+    ] {
         let mut ids = vec![eid];
         if ladder_id != eid {
-            ids.push(&ladder_id);
+            ids.push(ladder_id);
         }
         for id in ids {
             let lookup = match ctx.edge_endpoint_optout.get(id) {
@@ -2435,7 +2442,7 @@ fn resolve_edge_endpoint_vocabulary(
             }
         }
     }
-    let source = endpoint_edge_vocabulary(conn, source_id, entity_id, gate, ctx)?;
+    let source = endpoint_edge_vocabulary_for(conn, &source_ladder, entity_id, gate, ctx)?;
     if source.is_some() {
         // Strict-wins across endpoints: the strict source side gates, under
         // its own vocabulary.
@@ -2445,15 +2452,16 @@ fn resolve_edge_endpoint_vocabulary(
     // (an off directory shields its own entities from CONTRIBUTING
     // obligations but never downgrades an edge the strict side makes
     // checkable — same asymmetry as §2.3.3).
-    endpoint_edge_vocabulary(conn, target_id, entity_id, gate, ctx)
+    endpoint_edge_vocabulary_for(conn, &target_ladder, entity_id, gate, ctx)
 }
 
 /// Resolve ONE endpoint's §2.3 ladder to the edge vocabulary it contributes
 /// (`None` = not-strict / no usable vocabulary → contributes no gate), with
-/// the per-proposal memo.
-fn endpoint_edge_vocabulary(
+/// the per-proposal memo. `ladder_id` is the endpoint's precomputed
+/// [`endpoint_ladder_id`] (the owning entity for a fact/task endpoint).
+fn endpoint_edge_vocabulary_for(
     conn: &Connection,
-    endpoint_id: &str,
+    ladder_id: &str,
     proposal_entity_id: &str,
     gate: &crate::db::entity_gate::GateResolutionContext<'_>,
     ctx: &mut CommitContext,
@@ -2461,13 +2469,13 @@ fn endpoint_edge_vocabulary(
     // Memoized on the LADDER id (the owning entity for a fact/task
     // endpoint): N fact endpoints of one hub entity resolve its ladder —
     // and walk its facts' sources — once, not N times inside the write lock.
-    let ladder_id = endpoint_ladder_id(conn, endpoint_id)?;
-    if let Some(cached) = ctx.edge_endpoint_strict.get(&ladder_id) {
+    if let Some(cached) = ctx.edge_endpoint_strict.get(ladder_id) {
         return Ok(cached.clone());
     }
     let resolved =
-        resolve_endpoint_ladder(conn, &ladder_id, proposal_entity_id, gate, &ctx.proposal_id)?;
-    ctx.edge_endpoint_strict.insert(ladder_id, resolved.clone());
+        resolve_endpoint_ladder(conn, ladder_id, proposal_entity_id, gate, &ctx.proposal_id)?;
+    ctx.edge_endpoint_strict
+        .insert(ladder_id.to_string(), resolved.clone());
     Ok(resolved)
 }
 

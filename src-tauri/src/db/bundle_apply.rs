@@ -255,11 +255,24 @@ pub fn preview_import(
         } else {
             (resolved.clone(), !entity_exists)
         };
-        if mints_new
-            && crate::db::entity_gate::preview_production_gate(conn, &policy, &probe_id, &[])
-                == crate::db::entity_gate::GateDecision::Held
-        {
-            held.push(entity.entity_id.clone());
+        if mints_new {
+            let decision =
+                crate::db::entity_gate::preview_production_gate(conn, &policy, &probe_id, &[]);
+            // The apply's Held set, not just `GateDecision::Held`: the
+            // shared insert helper ALSO holds a `Gate` decision whose
+            // vocabulary is empty (§2.4.5's second trigger — a declared
+            // `fallback_node_type` over ZERO `node_types`). Preview must
+            // refuse exactly what the apply would abort on, else it reports
+            // an import the apply refuses (bundle mints are unlabeled, so
+            // no other ladder arm can turn Held inside a `Gate` decision).
+            let would_hold = match &decision {
+                crate::db::entity_gate::GateDecision::Held => true,
+                crate::db::entity_gate::GateDecision::Gate(v) => v.is_empty(),
+                crate::db::entity_gate::GateDecision::Skip => false,
+            };
+            if would_hold {
+                held.push(entity.entity_id.clone());
+            }
         }
         let local_summary: Option<String> = conn
             .query_row(
@@ -1437,6 +1450,33 @@ mod tests {
         conn.execute(
             "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
              VALUES ('tier_fact', 'strict', '{\"node_types\":[{\"type\":\"person\"}],\"edge_types\":[]}', 1)",
+            [],
+        )
+        .unwrap();
+        let preview = preview_import(&conn, &sample_bundle(), ImportMode::Merge).unwrap();
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|w| w.contains("import will abort")),
+            "{:?}",
+            preview.warnings
+        );
+        assert!(apply_import(&mut conn, &sample_bundle(), ImportMode::Merge).is_err());
+    }
+
+    /// Preview/apply parity for §2.4.5's SECOND Held trigger: a strict
+    /// tier_fact that DECLARES a fallback over ZERO node_types. The gate
+    /// decision is `Gate` (not `Held`), but the shared insert helper holds
+    /// an empty vocabulary — the preview must warn exactly as the apply
+    /// aborts (review finding: the `== GateDecision::Held` probe reported
+    /// this brain importable).
+    #[test]
+    fn preview_warns_on_declared_fallback_over_empty_node_types() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', '{\"node_types\":[],\"edge_types\":[],\"fallback_node_type\":\"person\"}', 1)",
             [],
         )
         .unwrap();
