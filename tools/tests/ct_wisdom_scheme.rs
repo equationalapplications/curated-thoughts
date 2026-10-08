@@ -80,8 +80,9 @@ fn activate_refuses_then_succeeds_and_is_idempotent() {
         );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("refusing"), "stderr: {stderr}");
+        let outstanding = "refusing: 1 live non-null row(s) not stamped 'instr1'";
         assert!(
-            stderr.contains('1'),
+            stderr.contains(outstanding),
             "outstanding count must be printed: {stderr}"
         );
         let v: String = brain_db()
