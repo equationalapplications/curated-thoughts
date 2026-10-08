@@ -239,10 +239,51 @@ fn run_inner(
         return Ok(());
     }
 
-    // 3. FINAL RULE drift gate (R2.2.8): blocks retypes/remaps only. A
+    // 3. Manifest ensure (§2.4.4, plan-p7-m2) — BEFORE the drift gate
+    //    deliberately: the gate's SKIP message and `ct ontology set`'s
+    //    warning both prescribe `ct heal --yes` as the recovery for a
+    //    missing `tier_fact` row, so an apply run must perform the ensure
+    //    even under unconfirmed drift (drift blocks retypes/remaps only,
+    //    R2.2.8 — never the ensure that unblocks the gate). The
+    //    retyping-only surface (`PassScope::RetypeOnly`) skips it — see
+    //    [`ontology_retype_pass`].
+    let mut drift_unconfirmed_apply = false;
+    if apply && scope == PassScope::Heal {
+        match crate::db::entity_gate::ensure_all_manifest_vocabularies(conn) {
+            Ok(s) => {
+                if s.extended
+                    + s.fallbacks_set
+                    + s.foreign_no_preferred_fallback
+                    + s.malformed
+                    + s.raced
+                    > 0
+                {
+                    eprintln!(
+                        "ontology ensure: visited={} extended={} fallbacks_set={} \
+                         foreign_no_preferred_fallback={} malformed={} raced={}",
+                        s.visited,
+                        s.extended,
+                        s.fallbacks_set,
+                        s.foreign_no_preferred_fallback,
+                        s.malformed,
+                        s.raced
+                    );
+                }
+            }
+            Err(e) => {
+                report.error = Some(format!("manifest ensure failed: {e:#}"));
+                return Ok(());
+            }
+        }
+    }
+
+    // 3b. FINAL RULE drift gate (R2.2.8): blocks retypes/remaps only. A
     //    read-only run (`!apply`) performs neither, so unconfirmed drift
     //    falls through to the read-only census below — the operator sees
-    //    what confirming would do instead of confirming blind.
+    //    what confirming would do instead of confirming blind. An apply
+    //    run under unconfirmed drift likewise still runs the census (the
+    //    operator sees the state the drift hides) but skips the remap pass
+    //    and the watermark below.
     match check_drift_flag(&mut report.drift, &flag, "ontology heal") {
         DriftCheck::Unconfirmed => {
             report.skipped_reason = Some("unconfirmed_drift".into());
@@ -250,9 +291,7 @@ fn run_inner(
                 "ontology heal: unconfirmed drift report — ontology retypes/remaps \
                  skipped this run"
             );
-            if apply {
-                return Ok(());
-            }
+            drift_unconfirmed_apply = apply;
         }
         DriftCheck::Waived => {
             // Waive (plan-p9-M2): no retypes, remaps, or watermark
@@ -294,47 +333,22 @@ fn run_inner(
         return Ok(());
     }
 
-    // 4. Ensure BEFORE census (plan-p7-m2). The retyping-only surface
-    //    (`PassScope::RetypeOnly`) skips it — see [`ontology_retype_pass`].
-    if scope == PassScope::Heal {
-        match crate::db::entity_gate::ensure_all_manifest_vocabularies(conn) {
-            Ok(s) => {
-                if s.extended
-                    + s.fallbacks_set
-                    + s.foreign_no_preferred_fallback
-                    + s.malformed
-                    + s.raced
-                    > 0
-                {
-                    eprintln!(
-                        "ontology ensure: visited={} extended={} fallbacks_set={} \
-                         foreign_no_preferred_fallback={} malformed={} raced={}",
-                        s.visited,
-                        s.extended,
-                        s.fallbacks_set,
-                        s.foreign_no_preferred_fallback,
-                        s.malformed,
-                        s.raced
-                    );
-                }
-            }
-            Err(e) => {
-                report.error = Some(format!("manifest ensure failed: {e:#}"));
-                return Ok(());
-            }
-        }
-    }
-
-    // 5. Incidental-off census (R2.9.3).
+    // 4. Incidental-off census (R2.9.3). Runs even under apply+unconfirmed
+    //    drift — the operator sees the state; only retypes/remaps skip.
     report.census = census(conn)?;
 
-    // 6. Remap pass.
+    // 5. Remap pass. Skipped when apply+unconfirmed drift (3b) — that run
+    //    already performed the ensure (step 3) and reports the census; it
+    //    must not retype under an unconfirmed baseline.
+    if drift_unconfirmed_apply {
+        return Ok(());
+    }
     let counts = remap_pass(conn, &ctx, false)?;
     report.retyped = counts.retyped;
     report.queued = counts.queued;
     report.report_only = counts.report_only;
 
-    // 7. Marker at the END of a successful remap pass (§2.7.1), then the
+    // 6. Marker at the END of a successful remap pass (§2.7.1), then the
     //    watermark — heal is the sole watermark writer (R2.2.8). Waive
     //    returned above, so reaching here means confirmed-or-no-drift. The
     //    retyping-only surface (`PassScope::RetypeOnly`) writes NEITHER — a
@@ -645,14 +659,19 @@ fn census(conn: &Connection) -> Result<CensusReport> {
              ct_entity_optouts rows skip the gate"
         );
     }
-    let unmarked = matches!(
-        crate::wiki_graph::wiki_get_ontology(conn, "tier_fact"),
-        Ok(o) if o.mode != "strict"
-    );
+    // Fail-closed on the diagnostic surface (mirrors the gate's
+    // tier_fact_row_state: Err → Unreadable → Held): an unreadable
+    // tier_fact row must NOT census as healthy while the gate refuses
+    // every mint.
+    let unmarked = match crate::wiki_graph::wiki_get_ontology(conn, "tier_fact") {
+        Ok(o) => o.mode != "strict",
+        Err(_) => true,
+    };
     if unmarked {
         eprintln!(
-            "ontology heal census: the tier_fact manifest row is absent or not \
-             strict — the gate SKIPs (§2.3.1); only a deliberate opt-out differs"
+            "ontology heal census: the tier_fact manifest row is absent, not \
+             strict, or unreadable — the gate SKIPs or holds (§2.3.1); only a \
+             deliberate opt-out differs"
         );
     }
     Ok(CensusReport {
@@ -1340,6 +1359,67 @@ mod tests {
             Some(r#"{"hash":"deadbeef","stamped_at":7}"#)
         );
         assert!(meta(&conn, ALIAS_REMAP_MARKER_KEY).is_none());
+    }
+
+    /// The gate's §2.4.5 Held message and `ct ontology set`'s warning both
+    /// prescribe `ct heal --yes` as the recovery — so an apply run under
+    /// unconfirmed drift must still run the §2.4.4 ensure even though it
+    /// skips the retypes/remaps and the watermark. Otherwise the two gates
+    /// point at each other in a loop (review finding): here a strict
+    /// tier_fact row with NO usable fallback holds every mint until the
+    /// ensure sets the fallback — which must happen despite the drift.
+    #[test]
+    fn unconfirmed_drift_apply_still_runs_the_ensure() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_meta (key, value) VALUES ('ontology_config_watermark', ?1)",
+            params![r#"{"hash":"deadbeef","stamped_at":7}"#],
+        )
+        .unwrap();
+        // Strict but UNUSABLE: no fallback_node_type (§2.4.5 → Held).
+        seed_tier_fact_manifest(&conn, &[], None);
+        seed_entity(&conn, "e1", "agent");
+        let r = ontology_heal_pass(&mut conn, DriftFlag::None, true);
+        assert_eq!(r.skipped_reason.as_deref(), Some("unconfirmed_drift"));
+        let row = crate::wiki_graph::wiki_get_ontology(&conn, "tier_fact")
+            .expect("tier_fact row must survive the ensure");
+        let manifest = row.manifest.as_ref().expect("manifest parses");
+        assert!(
+            serde_json::to_value(manifest)
+                .unwrap()
+                .get("fallback_node_type")
+                .is_some(),
+            "ensure must set the fallback under unconfirmed drift: {manifest:?}"
+        );
+        // ... while the destructive work and the watermark stay untouched.
+        assert_eq!(r.retyped, 0, "{r:?}");
+        assert_eq!(entity_type(&conn, "e1"), "agent");
+        assert_eq!(
+            meta(&conn, WATERMARK_KEY).as_deref(),
+            Some(r#"{"hash":"deadbeef","stamped_at":7}"#)
+        );
+        assert!(meta(&conn, ALIAS_REMAP_MARKER_KEY).is_none());
+    }
+
+    /// Census fail-closed: an UNREADABLE `tier_fact` row must census as
+    /// unmarked (mirroring the gate's Err → Unreadable → Held), never as
+    /// healthy — otherwise heal prints a clean census on exactly the state
+    /// where the gate refuses every mint (review finding).
+    #[test]
+    fn census_reports_unreadable_tier_fact_as_unmarked() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', 'not json at all', 1)",
+            [],
+        )
+        .unwrap();
+        assert!(crate::wiki_graph::wiki_get_ontology(&conn, "tier_fact").is_err());
+        let c = census(&conn).unwrap();
+        assert!(
+            c.unmarked_tier_fact,
+            "unreadable tier_fact must not census healthy: {c:?}"
+        );
     }
 
     /// Waive with the matching hash: exit-clean state, zero retypes,

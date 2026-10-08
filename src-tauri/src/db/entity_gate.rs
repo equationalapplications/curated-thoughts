@@ -1098,6 +1098,11 @@ pub fn resolve_node_gate_decision(
     let lookups = ctx.source_lookups(source_paths);
     let mut strict_found = false;
     let mut off_found = false;
+    // First source that resolved Hold (r10-MINOR-2), if no later source
+    // resolved strict — see the Hold arm below. `hold_seen` is separate
+    // from the directory: a pathless mint's Hold has no source at all.
+    let mut hold_seen = false;
+    let mut hold_source_dir: Option<String> = None;
     for (source, lookup) in lookups {
         match lookup {
             crate::config::OntologyLookup::Mode(crate::config::OntologyMode::Strict) => {
@@ -1122,18 +1127,17 @@ pub fn resolve_node_gate_decision(
                 // protect (SKIP per §2.1), so the mint succeeds. Hold only
                 // when the mint would otherwise be gated, or when the
                 // vocabulary row cannot be read (fail-closed).
-                if tier_fact_row_state(conn) == TierFactRow::NotStrict {
-                    return NodeGateDecision {
-                        verdict: ModeVerdict::Off,
-                        vocabulary: None,
-                        source_directory: None,
-                    };
+                //
+                // Like the `Off` arm, do NOT return here: a later source
+                // path may climb past rungs 2-3 to a strict rung, and
+                // strict-wins (R2.3.3). Remember this hold — if no later
+                // source resolves strict, its verdict (SKIP, or Held on a
+                // strict/unreadable `tier_fact` row) applies below.
+                if !hold_seen {
+                    hold_seen = true;
+                    hold_source_dir = source.cloned();
                 }
-                return NodeGateDecision {
-                    verdict: ModeVerdict::StrictNoVocab,
-                    vocabulary: None,
-                    source_directory: source.cloned(),
-                };
+                continue;
             }
             crate::config::OntologyLookup::Climb => {
                 // Try the next source; if all climb we fall through to rung 4.
@@ -1178,6 +1182,24 @@ pub fn resolve_node_gate_decision(
                 vocabulary: None,
                 source_directory: strict_source_dir,
             },
+        };
+    }
+    if hold_seen {
+        // No later source resolved strict, so the deferred Hold verdict
+        // from r10-MINOR-2 applies (same arms as the original in-loop
+        // return): with no strict `tier_fact` row there is nothing the
+        // hold protects — SKIP; with one, the hold protects it.
+        if tier_fact_row_state(conn) == TierFactRow::NotStrict {
+            return NodeGateDecision {
+                verdict: ModeVerdict::Off,
+                vocabulary: None,
+                source_directory: None,
+            };
+        }
+        return NodeGateDecision {
+            verdict: ModeVerdict::StrictNoVocab,
+            vocabulary: None,
+            source_directory: hold_source_dir.clone(),
         };
     }
     if off_found && !any_climb {

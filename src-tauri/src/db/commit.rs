@@ -2231,8 +2231,34 @@ fn commit_edge_add(
                 return Ok(());
             }
         },
-        // No strict vocabulary: nothing to canonicalize against, write verbatim.
-        None => edge_type,
+        // No strict vocabulary on either endpoint: nothing to canonicalize
+        // against, write verbatim — BUT the anchor-owner check below still
+        // applies. The row is anchored to the proposal entity and the read
+        // filter / off-manifest purge judge it by THAT entity's vocabulary
+        // even when no endpoint gate fired; skipping the check here would
+        // admit an edge that is hidden on read and destroyed by the next
+        // sweep — exactly what the Some-arm check prevents. Conjunctive:
+        // never loosens the gate.
+        None => {
+            let owner = ctx
+                .owner_edge_vocabulary
+                .get_or_insert_with(|| resolve_strict_edge_vocabulary(conn, &proposal_entity_id));
+            if let Some(owner) = owner {
+                if owner.canonicalize(&edge_type).is_none() {
+                    eprintln!(
+                        "[commit] edge_type {edge_type:?} is not declared by the anchoring \
+                         entity {entity}'s strict vocabulary (declared: {declared:?}); \
+                         dropping edge item {item}",
+                        entity = ctx.entity_id,
+                        declared = owner.declared_sorted(),
+                        item = item.id,
+                    );
+                    ctx.dropped_edges.push(item.id.clone());
+                    return Ok(());
+                }
+            }
+            edge_type
+        }
     };
 
     // Issue #189: the librarian's dedupe artifacts arrive as edges between

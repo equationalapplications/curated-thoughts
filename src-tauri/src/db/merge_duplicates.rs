@@ -342,7 +342,10 @@ fn find_duplicate_groups(conn: &Connection) -> Result<Vec<MergeGroup>> {
 
     let mut groups: Vec<MergeGroup> = by_key
         .into_iter()
-        .filter(|(_, v)| v.len() >= 2)
+        // Punctuation-only names normalize to "" — the same
+        // normalization-consistent empty guard the summary gate applies
+        // (r8-M3): two such entities are not a merge group, they are noise.
+        .filter(|(key, v)| !key.is_empty() && v.len() >= 2)
         .map(|(key, mut members)| {
             // Rust `str` ordering IS byte-wise (lexicographic on UTF-8
             // bytes) and the SQL above already ordered BINARY — the sort
@@ -765,6 +768,23 @@ mod tests {
         // …while "Zoë" and "Zoë" (any casing/spacing variation) must.
         assert_eq!(normalize_merge_key("Zoë"), normalize_merge_key(" zoë "));
         assert_eq!(normalize_merge_key("Zoë"), "zoë");
+    }
+
+    /// Punctuation-only names normalize to "" — the empty-key guard keeps
+    /// two such entities from auto-merging on a shared summary (review
+    /// finding: the summary gate rejects empty, the name key had no
+    /// equivalent).
+    #[test]
+    fn punctuation_only_names_never_merge() {
+        let mut conn = open_in_memory().unwrap();
+        armed(&conn);
+        seed(&conn, "e1", "!!!", "concept", "same summary");
+        seed(&conn, "e2", "???", "concept", "same summary");
+        assert_eq!(normalize_merge_key("!!!"), "");
+        let r = merge_duplicates_pass(&mut conn, DriftFlag::None, true);
+        assert_eq!(r.error, None, "{r:?}");
+        assert_eq!(r.merged_groups, 0, "{r:?}");
+        assert_eq!(redirect_count(&conn), 0);
     }
 
     /// Final-review fix-before-merge: NON-ASCII names must not collapse a
