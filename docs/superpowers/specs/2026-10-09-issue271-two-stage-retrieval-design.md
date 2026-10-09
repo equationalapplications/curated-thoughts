@@ -1,13 +1,11 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 7 — Opus spec-tier r5 REQUEST CHANGES resolved:
-M1 refusal excludes pending/error rows (failed-embed retry never
-refused); M2 fresh-brain via persistent librarian_evidence_seen marker
-(trigger + migration backfill, KEPT by clear); MINOR-1 doomed =
-classified subset + in-tx recount aborts on mismatch; MINOR-2
-IngestOutcome enum + refusal-as-skip in bulk_reindex/queue_full_
-reindex; MINOR-3 mixed-model guard defined (stamp key vs profile key);
-MINOR-4 floor-table comment + replay_two_stage composite key)
+**Date:** 2026-10-09 (rev 8 — Opus spec-tier r6 REQUEST CHANGES resolved:
+M1 refusal keys on CHUNK STATE not status (pending rows carry chunks —
+non-forced path covered too); m1 refusal-as-skip branch point = worker
+mod.rs:231; m2 superseded-existing-doc test observable reworded; m3
+recount compares pre-tx doomed id set; m4 trigger after V18 + OR
+IGNORE; m5 fresh = marker absent wording)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -353,8 +351,12 @@ are in scope:
   breaker is ALL-OR-NOTHING — `|doomed|` > remaining budget refuses the
   WHOLE batch (never a partial delete); the in-transaction recount
   RE-RUNS the classification (it needs the per-row
-  `evidence_has_live_chunk` verdicts, not a SQL COUNT) and **ABORTS on
-  any mismatch with the exported set** rather than deleting a different
+  `evidence_has_live_chunk` verdicts, not a SQL COUNT), **compares
+  against the pre-transaction `doomed` ID SET** (rev 8, Opus r6 m3 —
+  the export exists only on the backed path,
+  `evidence_regrade.rs:214-219`; the id set always exists and is a
+  superset of the exported set on the backed path) and **ABORTS on
+  any mismatch** rather than deleting a different
   set — matching the swap-race rule. **Budget window (rev 5, Opus r3 M5 — a
   24h auto-rollover only bounds TRANSIENT faults; for the persistent
   faults this breaker targets, rolling epochs with shrinking L would
@@ -398,20 +400,26 @@ are in scope:
   re-enqueue; `:73-82` is the status constant's doc comment) and
   `rechunk_for_reembed` is `force:true`
   (`src-tauri/src/pipeline/mod.rs:72-74`).
-  **Refusal scope (rev 5, Opus r3 M1; rev 7, Opus r5 MAJOR-1):** the
-  stamp check refuses only a **pure rechunk** — `force && the doc's
-  stored hash equals the file's current hash && the stored status is
-  `indexed` or `pending_reindex`` (the states that actually have
-  chunks to lose). A content edit produces a hash mismatch ⇒ normal
-  diff-swap path, no stamp check. New docs (no row) ⇒ no check.
-  **`pending`/`error` rows with matching hashes take the NORMAL path**
-  (rev 7: after a failed first embed the row has hash+`error`+zero
-  chunks — refusing its retry would permanently block that file with a
-  silent skip; the sweep never retries `error` rows, so the normal
-  path is the only way out). So routine `ct ingest --yes` never blocks
-  on the stamp — only a no-op rechunk of already-chunked unchanged
-  content does, the one operation with nothing to gain and everything
-  to lose.
+  **Refusal scope (rev 5, Opus r3 M1; rev 7, Opus r5 MAJOR-1; rev 8,
+  Opus r6 M1):** the stamp check refuses a **pure rechunk**, defined by
+  CHUNK STATE, not the status string: `the doc's stored hash equals the
+  file's current hash AND the doc has ≥1 chunk`. A pure rechunk is
+  refused whenever the stamp's CHUNKER component is not verified
+  current (missing or stale) — **whether or not `force` is set**
+  (rev 8: `pending` rows staged by non-forced overflow carry FULL
+  chunk sets — `lib.rs:2378-2391` stages with
+  `WHERE status = 'indexed'` — and the rev-7 status-string rule would
+  have let them rechunk under a stale chunker, the exact mass-rehash
+  the stamp exists to stop, via the sweep's `ingest_counted` path;
+  refusal extends to the non-forced path and the same disposition rule
+  returns those rows to `indexed`). Rows with ZERO chunks (new docs,
+  failed-first-embed `error` rows) take the NORMAL path — the sweep
+  never retries `error` rows, so the normal path is the only way out,
+  and there is nothing to lose. A content edit (hash mismatch) takes
+  the normal diff-swap path, no stamp check. So routine `ct ingest
+  --yes` never blocks on the stamp — only a no-op rechunk of
+  already-chunked unchanged content does, the one operation with
+  nothing to gain and everything to lose.
   **Scope honesty (rev 6, Opus r4 m2):** under a stale CHUNKER stamp an
   EDITED file still rechunks with the new chunker (the refusal keys on
   hash equality, and an edit breaks equality) — rehashing that doc's
@@ -485,7 +493,8 @@ are in scope:
   chunker bump + reembed ⇒ refused; grant for key B does not authorize
   swap to C; new doc + embed failure ⇒ row exists as pending/error
   (rev 5, Opus r3 M2); swap aborts on concurrent hash change (rev 5
-  m5); fresh-brain bypass requires zero rows EVER (rev 5 m6); refused
+  m5); fresh-brain bypass requires `librarian_evidence_seen` ABSENT
+  (rev 8, Opus r6 m5 — reworded from the row-count phrasing); refused
   `pending_reindex` row does NOT reappear on the next `sweep()` call
   (rev 6, Opus r4 M1 — seeds the row and asserts); unchanged file in a
   folder ingest is skipped without failing the run and still counts in
@@ -501,7 +510,9 @@ are in scope:
  facts) does not bypass the stamp guard (rev 7 MAJOR-2); regrade
  recount mismatch aborts the purge (rev 7 MINOR-1); out-of-pass edit
  after a profile change ⇒ gate falls back to v1 (mixed vectors, rev 7
- MINOR-3).
+ MINOR-3); GUI non-forced overflow → chunker bump → sweep ⇒ NO chunk
+ hash changes (rev 8, Opus r6 M1); pre-V18 fixture opens cleanly with
+ the trigger migration (rev 8, Opus r6 m4).
   **Fingerprint =
   (live-DB identity, chunker version, model key)** — the document-set
   hash is DROPPED (r9 M4: content changes are already lossless under
@@ -519,8 +530,15 @@ are in scope:
   **The marker is explicitly KEPT by the clear transaction** (NOT in
   the purge list): a cleared brain has CARRIED librarian facts — the
   guard stays armed; "fresh" means the marker is absent, which after
-  clear requires deleting the brain file. Test updated: marker present
-  + zero live facts (bug-emptied brain) does NOT bypass. `restore_in_progress` stamping remains [PROPOSED].
+  clear requires deleting the brain file.
+  **Trigger placement (rev 8, Opus r6 m4):** the `librarian_evidence_
+  seen` trigger + backfill are part of the NEW ungated migration and
+  run AFTER the V18 DDL (SQLite rejects `CREATE TRIGGER … ON
+  librarian_evidence` if the table doesn't exist yet — a pre-V18
+  replica/bundle upgrade would break); the trigger body uses
+  `INSERT OR IGNORE INTO llm_wiki_meta` (idempotent). Test: opening a
+  pre-V18 fixture succeeds and leaves the marker armed on any brain
+  that has rows. `restore_in_progress` stamping remains [PROPOSED].
 
 ### 9. Implementation order (within the ONE PR)
 
@@ -535,10 +553,12 @@ are in scope:
    `ct heal` / `ct evidence regrade`, the `librarian_evidence_seen`
    marker (trigger + migration backfill), and a named **`IngestOutcome`
    enum** returned by the ingestion funnel so every caller can branch on
-   refusal — with refusal-as-skip handling added to **`bulk_reindex`**
-   and **`queue_full_reindex`** as well as `ct ingest` (the refusal
-   outcome flows to every forced producer, not just the worker and the
-   CLI ingest loop).
+   refusal — refusal-as-skip handling is added at the **pipeline
+   worker** (`src-tauri/src/pipeline/mod.rs:231`, the
+   `match ingest_file(..)` branch point that executes
+   `queue_full_reindex`, sweep, and `rechunk_for_reembed` jobs — those
+   only `try_send` and never see the outcome), **`bulk_reindex`**
+   (synchronous), and `ct ingest`.
 3. Paired live calibration = the acceptance gate; pick rule + floor;
    flip-to-default if the letter passes.
 4. Provenance backfill only if the audit shows hop gaps (expected:
@@ -601,7 +621,12 @@ are in scope:
   --yes` of a NEW file succeeds with no stamp present.
 - Guard completion branches (GLM r1 MAJOR-4), one test each:
   snapshotted doc not indexed under the new key ⇒ completion BLOCKED;
-  superseded-job `pending` ⇒ BLOCKED; file-missing ⇒ counted in
+  **superseded job on an EXISTING doc: status stays `indexed`, no
+  pass-docs row under the new key ⇒ BLOCKED** (rev 8, Opus r6 m2 —
+  under rev 5's swap-tx upsert an existing-doc superseded return no
+  longer leaves `pending`, so the test is written against that
+  observable; a separate new-doc case covers `pending`);
+  file-missing ⇒ counted in
   `model_guard_skipped_docs`, completion proceeds.
 - Acceptance: paired live calibration on the 150-probe real-traffic set,
   both arms same run, letter numbers as pinned by Kurt; flip-to-default
