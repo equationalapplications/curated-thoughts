@@ -1,3 +1,19 @@
+## [3.5.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.4.2...v3.5.0) (2026-10-09)
+
+### Features
+
+* **wisdom:** read-path scheme filter + query prefix from one read_scheme resolution (Task 3) ([80071e9](https://github.com/equationalapplications/curated-thoughts/commit/80071e97fed08e2fec61e3e089d431e2600c4ad8)), closes [#265](https://github.com/equationalapplications/curated-thoughts/issues/265)
+* **wisdom:** scheme-filtered sweep + ct wisdom scheme admin (Task 4) ([f555e43](https://github.com/equationalapplications/curated-thoughts/commit/f555e4369682674f77d86b84ef221aec1f0ee5fb)), closes [#265](https://github.com/equationalapplications/curated-thoughts/issues/265)
+* **wisdom:** V26 embed_scheme migration + scheme module + instr1 floor (Task 1) ([817ce8a](https://github.com/equationalapplications/curated-thoughts/commit/817ce8aa128b8daf1cfeadbe24b7b2050c607199)), closes [#265](https://github.com/equationalapplications/curated-thoughts/issues/265)
+* **wisdom:** write-path embed_scheme stamping + WRITE-scheme parity (Task 2) ([526ff4d](https://github.com/equationalapplications/curated-thoughts/commit/526ff4ddcb0353ec680000b2d8eeccfde0b9f4b2)), closes [#265](https://github.com/equationalapplications/curated-thoughts/issues/265)
+
+### Bug Fixes
+
+* **tools:** wiki_search/wiki_context route queries through scheme-aware prefix ([f6c735d](https://github.com/equationalapplications/curated-thoughts/commit/f6c735d0cff4dd8ae8512f499f36b5e04ebcb1a9))
+* **wisdom:** address /code-review findings on scheme resolution ([#270](https://github.com/equationalapplications/curated-thoughts/issues/270)) ([143d554](https://github.com/equationalapplications/curated-thoughts/commit/143d554c5929b8f29c9ae8f8df5e2d54f29bd200))
+* **wisdom:** address second /code-review pass on embed-scheme cutover ([#270](https://github.com/equationalapplications/curated-thoughts/issues/270)) ([233dc1c](https://github.com/equationalapplications/curated-thoughts/commit/233dc1cfb57d56343bdb37144cc77f24f5f3ea6b))
+* **wisdom:** resolve read scheme ONCE per wisdom_match call path ([c66d239](https://github.com/equationalapplications/curated-thoughts/commit/c66d23998e278a65530b373de4cfa586db187ef7))
+
 ## [3.4.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.4.1...v3.4.2) (2026-10-09)
 
 ### Dependencies
