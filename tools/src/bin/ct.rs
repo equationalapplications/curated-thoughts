@@ -364,7 +364,7 @@ enum WisdomCmd {
         #[arg(last = true, required = true)]
         text: Vec<String>,
     },
-    /// Embed-scheme administration (issue #265 cutover): status / activate.
+    /// Embed-scheme administration (issue #265 cutover): status / sweep / activate.
     Scheme {
         #[command(subcommand)]
         cmd: SchemeCmd,
@@ -375,6 +375,15 @@ enum WisdomCmd {
 enum SchemeCmd {
     /// Per-`embed_scheme` counts over live entries + the active read scheme.
     Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-embed live rows not yet stamped `instr1` (the cutover precondition
+    /// workset). Bounded and resumable: re-run until `remaining raw` is 0.
+    Sweep {
+        /// Provider calls of up to 64 entries each, per run.
+        #[arg(long, default_value_t = 100)]
+        max_batches: usize,
         #[arg(long)]
         json: bool,
     },
@@ -706,6 +715,9 @@ fn run(cmd: Cmd) -> Result<i32> {
             }
             WisdomCmd::Scheme { cmd } => match cmd {
                 SchemeCmd::Status { json } => cli_common::wisdom_scheme_status_cmd(json),
+                SchemeCmd::Sweep { max_batches, json } => {
+                    cli_common::wisdom_scheme_sweep_cmd(max_batches, json)
+                }
                 SchemeCmd::Activate { target } => cli_common::wisdom_scheme_activate_cmd(&target),
             },
         },

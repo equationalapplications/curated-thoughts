@@ -848,15 +848,39 @@ pub fn wisdom_match_cmd(
 // `ct wisdom scheme` — issue #265 cutover admin (plan Task 4).
 // ---------------------------------------------------------------------------
 
+/// Resolve the brain for a `ct wisdom scheme` command and bring it to the V27
+/// shape first. These are the commands an operator runs DURING the upgrade
+/// window, possibly before the new desktop app ever opened the brain, so they
+/// migrate-first like the other `ct wisdom` commands (`migrate_brain_db` is
+/// best-effort and warns on a read-only or contended DB).
+fn scheme_admin_brain() -> Result<crate::write::Brain> {
+    let brain = resolve()?;
+    tauri_app_lib::db::connection::migrate_brain_db(&brain.paths.db_path);
+    Ok(brain)
+}
+
+/// The active read scheme, or an actionable error when the brain is still on
+/// the pre-V27 shape (no `embed_scheme` column) because the migrate-first
+/// step could not run — instead of a raw `no such column` from the counts.
+fn require_v27_scheme(conn: &Connection) -> Result<tauri_app_lib::embed_scheme::Scheme> {
+    tauri_app_lib::embed_scheme::reader_scheme(conn)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "brain.db predates the V27 embed-scheme migration and could not be \
+             migrated (see the warning above); make it writable or open it once \
+             with the desktop app, then retry"
+        )
+    })
+}
+
 /// `ct wisdom scheme status`: per-`embed_scheme` counts over live entries and
-/// the active read scheme. Read-only; the counts are what the operator checks
-/// before (and the remaining raw count during) the migration window.
+/// the active read scheme. The counts are what the operator checks before
+/// (and the remaining raw count during) the migration window.
 pub fn wisdom_scheme_status_cmd(json_mode: bool) -> Result<i32> {
     use tauri_app_lib::embed_sweep::{scheme_counts, SchemeCounts};
 
-    let brain = resolve()?;
+    let brain = scheme_admin_brain()?;
     let conn = open_ro(&brain)?;
-    let read_scheme = tauri_app_lib::embed_scheme::read_scheme(&conn)?;
+    let read_scheme = require_v27_scheme(&conn)?;
     let counts = scheme_counts(&conn)?;
     if json_mode {
         print_json(&json!({
@@ -889,8 +913,9 @@ pub fn wisdom_scheme_status_cmd(json_mode: bool) -> Result<i32> {
 pub fn wisdom_scheme_activate_cmd(target: &str) -> Result<i32> {
     use tauri_app_lib::embed_scheme::{activate_instr1, ActivateOutcome};
 
-    let brain = resolve()?;
+    let brain = scheme_admin_brain()?;
     let conn = open_rw(&brain)?;
+    require_v27_scheme(&conn)?;
     match activate_instr1(&conn, target)? {
         ActivateOutcome::Activated => {
             println!("active read scheme flipped to {target}");
@@ -903,11 +928,51 @@ pub fn wisdom_scheme_activate_cmd(target: &str) -> Result<i32> {
         ActivateOutcome::Refused { outstanding } => {
             eprintln!(
                 "refusing: {outstanding} live non-null row(s) not stamped '{target}' — \
-                 run the scheme sweep to re-embed them first"
+                 run `ct wisdom scheme sweep` to re-embed them first"
             );
             Ok(1)
         }
     }
+}
+
+/// `ct wisdom scheme sweep`: re-embed live rows whose blob is not stamped
+/// with the WRITE scheme (spec §Migration window semantics, mechanism 1) — the
+/// operator step that empties the cutover precondition count. Bounded by
+/// `max_batches` provider calls per run and resumable (the workset filter
+/// skips rows already re-stamped), so it can simply be re-run until
+/// `remaining_raw` is 0. Exit 1 when a batch failed to embed (provider down
+/// or mismatched response); the failed rows keep their stamp for the next run.
+pub fn wisdom_scheme_sweep_cmd(max_batches: usize, json_mode: bool) -> Result<i32> {
+    use tauri_app_lib::embed_sweep::sweep_scheme_embeddings;
+
+    let brain = scheme_admin_brain()?;
+    let conn = open_rw(&brain)?;
+    require_v27_scheme(&conn)?;
+    let profile = retrieval::load_embed_profile(&brain.paths.config_path)
+        .context("loading embed profile from vault config.json")?;
+    let report = sweep_scheme_embeddings(&conn, &profile, max_batches)?;
+    if json_mode {
+        print_json(&json!({
+            "reembedded": report.reembedded,
+            "failed": report.failed,
+            "remaining_raw": report.remaining_raw,
+        }));
+    } else {
+        println!("re-embedded:   {}", report.reembedded);
+        println!("failed:        {}", report.failed);
+        println!("remaining raw: {}", report.remaining_raw);
+        if report.remaining_raw == 0 {
+            println!("workset empty — `ct wisdom scheme activate instr1` can now run");
+        }
+    }
+    if report.failed > 0 {
+        eprintln!(
+            "scheme sweep: {} row(s) failed to embed and keep their old stamp; re-run to retry",
+            report.failed
+        );
+        return Ok(1);
+    }
+    Ok(0)
 }
 
 // The historic cli_common.rs does not carry a `mod tests` block for the

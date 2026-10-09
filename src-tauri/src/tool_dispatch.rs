@@ -16,7 +16,6 @@ use crate::wiki_graph::{
     self, TraverseDirection, WikiContextResult, WikiOntologyResult, WikiSearchHit,
     WikiTraverseResult, DEFAULT_CONTEXT_DEPTH, DEFAULT_CONTEXT_MAX_FACTS, DEFAULT_MAX_DEPTH,
 };
-use crate::wisdom_match as wm;
 
 /// Typed error for unknown tool names so callers can classify without string matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1060,10 +1059,11 @@ async fn embed_query(profile: &EmbedProfile, query: String) -> Result<Vec<f32>> 
 /// Scheme-aware query text for the wiki READ tools (spec §Decision:
 /// `wiki_search`/`wiki_context` queries are prefixed with the SAME string the
 /// gate uses). Resolves the read scheme ONCE per request against the locked
-/// connection, truncates BEFORE the prefix (the prefix never consumes the
-/// 2000-char budget), and routes through the SAME `query_text_for_scheme` the
-/// `ct wisdom match` path uses. Pre-V27 tables (no `embed_scheme` column)
-/// resolve to `None` and embed raw.
+/// connection and routes through the SAME `query_text_for_scheme` the
+/// `ct wisdom match` path uses. The query is NOT truncated: these tools
+/// embedded `p.query` verbatim before #265, and the scheme change adds only
+/// the prefix (the 2000-char budget is a `ct wisdom match` contract). Pre-V27
+/// tables (no `embed_scheme` column) resolve to `None` and embed raw.
 ///
 /// Returns the resolved scheme alongside the text: the caller MUST hand it to
 /// `dispatch_wiki_search`/`dispatch_wiki_context` so the row filter uses this
@@ -1077,7 +1077,7 @@ pub(crate) async fn wiki_query_text(
     spawn_blocking_with_conn(conn, move |conn| {
         let scheme = crate::embed_scheme::reader_scheme(conn)?;
         let text = crate::embed_scheme::query_text_for_scheme(
-            wm::truncate_text(&raw_query),
+            &raw_query,
             scheme.unwrap_or(crate::embed_scheme::Scheme::Raw),
         );
         Ok((text, scheme))
@@ -2372,18 +2372,20 @@ mod wiki_query_prefix_tests {
     }
 
     #[tokio::test]
-    async fn wiki_query_text_truncates_before_prefixing() {
+    async fn wiki_query_text_never_truncates_the_query() {
+        // wiki_search/wiki_context embedded `p.query` verbatim before #265;
+        // the scheme change adds only the prefix. The `ct wisdom match`
+        // 2000-char budget must not leak onto these MCP surfaces.
         let (_dir, ctx) = file_ctx();
-        set_active_scheme(&lock_conn(&ctx.conn).unwrap(), "instr1");
         let long = "é".repeat(crate::wisdom_match::MAX_TEXT_CHARS + 5);
+        let raw = wiki_query_text(&ctx.conn, &long).await.unwrap().0;
+        assert_eq!(raw, long, "raw scheme embeds the query verbatim");
+        set_active_scheme(&lock_conn(&ctx.conn).unwrap(), "instr1");
         let text = wiki_query_text(&ctx.conn, &long).await.unwrap().0;
-        let stripped = text
-            .strip_prefix(crate::embed_scheme::QUERY_INSTRUCTION_PREFIX)
-            .expect("prefixed under instr1");
         assert_eq!(
-            stripped.chars().count(),
-            crate::wisdom_match::MAX_TEXT_CHARS,
-            "truncation must run BEFORE the prefix (prefix never consumes the budget)"
+            text.strip_prefix(crate::embed_scheme::QUERY_INSTRUCTION_PREFIX),
+            Some(long.as_str()),
+            "instr1 adds the prefix and nothing else"
         );
     }
 

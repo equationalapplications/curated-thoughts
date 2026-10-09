@@ -104,7 +104,11 @@ Cutover = one atomic `UPDATE` executed by an admin command
    `embedding_blob IS NOT NULL AND embed_scheme != 'instr1'`
    (two-valued; no NULL class exists). Per-row stamping makes crash
    resume trivial (crash between embed and stamp = one wasted API
-   call; the row still reads its old scheme).
+   call; the row still reads its old scheme). Operator surface:
+   `ct wisdom scheme sweep [--max-batches N]` (bounded per run,
+   re-run until `remaining_raw` = 0; exit 1 if a batch failed to
+   embed). All `ct wisdom scheme` commands migrate-first, so they work
+   on a brain the new desktop app has not opened yet.
 2. **During the window:** READ scheme stays `raw` (floor 0.70, raw
    queries, raw filter). Accepted degradation, bound: NEW entries
    (written `instr1`) are invisible to BOTH the gate and
@@ -196,7 +200,7 @@ Cutover = one atomic `UPDATE` executed by an admin command
 3. `embed_text_for_entry` + both query call sites apply prefixes per
    WRITE/READ respectively; both SELECTs filter; parity rewiring.
 4. Scheme-filtered sweep mode + `ct wisdom scheme` admin command
-   (status / activate with precondition).
+   (status / sweep / activate with precondition).
 5. `WISDOM_GATE_FLOORS` new key, floor 0.64; recalibrate + commit new
    `expected.json` + `vectors.json.gz` together (calibrator
    `--query-prefix`/`--doc-prefix` flags — already prototyped on this

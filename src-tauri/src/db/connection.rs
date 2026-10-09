@@ -821,8 +821,9 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // Column-add runs on every open, ungated and PRAGMA-guarded exactly like
     // V24 (the same snapshot → BEGIN IMMEDIATE → re-inspect under lock
     // sequence guards concurrent desktop/`--mcp` opens against a duplicate
-    // `duplicate column name` failure). The meta seed and the STAMP are
-    // gated on V22 having stamped, like V23/V24/V25/V26: a rootless open
+    // `duplicate column name` failure). The backfill and meta seed ride the
+    // column-add transaction, so they run once, never on a steady-state
+    // open. The STAMP is gated on V22 having stamped, like V23/V24/V25/V26: a rootless open
     // defers V22, and stamping 27 would make every later rooted open skip
     // V22's FATAL re-warn permanently. `stamped_now` above predates this
     // block only on a fresh brain where V22 stamps 22 in this same call — it
@@ -969,6 +970,28 @@ fn apply_v27_embed_scheme(conn: &Connection) -> Result<()> {
                     "ALTER TABLE llm_wiki_entries ADD COLUMN embed_scheme TEXT NOT NULL DEFAULT 'raw'",
                     [],
                 )?;
+                // The explicit backfill the spec pins. `ADD COLUMN ... NOT
+                // NULL DEFAULT` already fills existing rows under SQLite
+                // semantics; the UPDATE keeps the invariant independent of
+                // engine behavior so the NULL class is provably empty. It
+                // runs ONLY in the call that adds the column, inside the same
+                // transaction: `embed_scheme` is unindexed, so an ungated
+                // UPDATE would full-scan the table and take the write lock
+                // on every open forever.
+                conn.execute(
+                    "UPDATE llm_wiki_entries SET embed_scheme = 'raw' WHERE embed_scheme IS NULL",
+                    [],
+                )?;
+                // Seed the read-scheme meta key in the same transaction, so
+                // the column and its seed land together. `INSERT OR IGNORE`
+                // like every default-once seed here: an operator-installed
+                // scheme is never clobbered. (A missing key still resolves
+                // to `raw` in `embed_scheme::read_scheme`.)
+                conn.execute(
+                    "INSERT OR IGNORE INTO llm_wiki_meta (key, value) \
+                     VALUES ('wisdom_active_scheme', 'raw')",
+                    [],
+                )?;
             }
             Ok(())
         })();
@@ -977,23 +1000,10 @@ fn apply_v27_embed_scheme(conn: &Connection) -> Result<()> {
             return Err(e);
         }
     }
-    // The explicit backfill the spec pins. `ADD COLUMN ... NOT NULL DEFAULT`
-    // already fills existing rows under SQLite semantics, so this is a no-op
-    // cost-wise, but it keeps the invariant independent of engine behavior
-    // and makes the NULL class provably empty.
-    conn.execute(
-        "UPDATE llm_wiki_entries SET embed_scheme = 'raw' WHERE embed_scheme IS NULL",
-        [],
-    )?;
-    // Seed the read-scheme meta key once. `INSERT OR IGNORE`, like every
-    // default-once seed here: an operator-installed scheme is never clobbered
-    // by a re-open.
-    conn.execute(
-        "INSERT OR IGNORE INTO llm_wiki_meta (key, value) VALUES ('wisdom_active_scheme', 'raw')",
-        [],
-    )?;
-    // Stamp last, gated on V22 (see the call-site comment). A crash before
-    // the stamp re-runs the body, which is fully idempotent.
+    // Stamp last, gated on V22 (see the call-site comment). The column add,
+    // backfill and seed commit atomically above, so a crash before the stamp
+    // leaves nothing half-applied; the steady state is the PRAGMA probe plus
+    // this read and one INSERT OR IGNORE.
     let stamped_now: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_version",
         [],

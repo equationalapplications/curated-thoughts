@@ -22,7 +22,7 @@ use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use crate::embed_scheme::{floor_key_for, read_scheme, Scheme};
+use crate::embed_scheme::{floor_key_for, resolve_reader_scheme, Scheme};
 use crate::embedder::{CloudProvider, EmbedProfile};
 use crate::search::{bytes_to_f32, cosine_similarity};
 use crate::wiki_graph::tier_weight;
@@ -51,8 +51,12 @@ pub const PROVENANCE_VOCAB: &[&str] = &[
 /// 7). Values come only from a `calibrate_wisdom_gate` run recorded under
 /// docs/benchmarks/. A model not listed here abstains.
 pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
-    // Test-only key: reachable only with CURATED_EMBED_STUB=constant8.
+    // Test-only keys: reachable only with CURATED_EMBED_STUB=constant8. The
+    // stub's vectors are scheme-independent, so it carries the same floor
+    // under both schemes — otherwise stub-backed tests and dev runs would
+    // silently flip to abstention at cutover.
     ("stub:constant8", 0.5),
+    ("stub:constant8:instr1", 0.5),
     // Calibrated 2026-10-07 (OpenRouter, GLM-5.3-flash probes): hit@2 0.44, FP 0.05
     // — docs/benchmarks/2026-10-07-wisdom-gate-qwen3-embedding-4b.md
     ("external:qwen/qwen3-embedding-4b", 0.70),
@@ -170,27 +174,10 @@ struct Temporal {
 /// scheme the caller already resolved (and derived its query text / floor
 /// from); `None` resolves the active `wisdom_active_scheme` here.
 fn temporal_columns(conn: &Connection, declared: Option<Scheme>) -> Result<Temporal> {
+    // The scheme rule (fail-closed on unknown values, pre-V27 degradation,
+    // declared-instr1-on-pre-V27 refusal) lives once in `embed_scheme`.
+    let scheme = resolve_reader_scheme(conn, declared)?;
     let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
-    let scheme = if cols.iter().any(|c| c == "embed_scheme") {
-        // Fail-closed on an unknown `wisdom_active_scheme` value: never fall
-        // back to `raw`.
-        Some(match declared {
-            Some(s) => s,
-            None => read_scheme(conn)?,
-        })
-    } else {
-        // Pre-V27 shape: rows are de-facto raw, the filter is omitted,
-        // mirroring how the temporal filters degrade on old tables. A caller
-        // declaring a non-raw scheme against them would score across schemes.
-        if let Some(s @ Scheme::Instr1) = declared {
-            anyhow::bail!(
-                "wisdom_match: scheme {:?} declared but llm_wiki_entries has no \
-                 embed_scheme column (pre-V27 rows are raw; fail-closed)",
-                s.as_str()
-            );
-        }
-        None
-    };
     Ok(Temporal {
         has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
         has_valid_to: cols.iter().any(|c| c == "valid_to"),
@@ -842,6 +829,15 @@ mod tests {
             gate_model_key_for_scheme(&ext, Some("constant8"), Scheme::Instr1),
             "stub:constant8:instr1"
         );
+        // The stub gate survives the cutover: its floor is registered under
+        // both schemes, so stub-backed runs never silently abstain post-flip.
+        for scheme in [Scheme::Raw, Scheme::Instr1] {
+            assert_eq!(
+                gate_floor(&gate_model_key_for_scheme(&ext, Some("constant8"), scheme)),
+                Some(0.5),
+                "{scheme:?}"
+            );
+        }
         // Both calibrated floors resolve through the scheme-aware key.
         assert_eq!(
             gate_floor(&gate_model_key_for_scheme(&ext, None, Scheme::Raw)),

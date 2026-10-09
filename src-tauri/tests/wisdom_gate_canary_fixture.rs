@@ -47,6 +47,9 @@ fn wisdom_canary_fixture_shape() {
     let raw_gate_key = tauri_app_lib::wisdom_match::WISDOM_GATE_FLOORS
         .iter()
         .map(|(k, _)| *k)
+        // Test-only `stub:` keys carry no provider model (same exclusion as
+        // the bench's snapshot-coverage check).
+        .filter(|k| !k.starts_with("stub:"))
         .find(|k| k.ends_with(&format!(":{instr1_key}")))
         .map(|k| &k[..k.len() - instr1_key.len() - 1])
         .unwrap_or_else(|| panic!("WISDOM_GATE_FLOORS must contain a `:{instr1_key}` floor key"));

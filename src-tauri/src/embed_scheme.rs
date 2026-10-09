@@ -138,15 +138,17 @@ pub fn floor_key_for(model_key: &str, scheme: Scheme) -> String {
 
 /// Query text under a read scheme: under `instr1` the byte-exact instruction
 /// is prepended (direct concatenation, IFF the read scheme is `instr1`);
-/// under `raw` the text is verbatim. The prefix lands AFTER truncation — it
-/// never consumes the 2000-char budget (`truncate_text` runs first on the
-/// caller side). This is the read-side parity of `doc_text_for_entry`: both
-/// query-prefix call sites derive their text through this one function, so a
-/// scheme drift cannot desync the gate from `wiki_search`/`wiki_context`.
-pub fn query_text_for_scheme(truncated_query: &str, scheme: Scheme) -> String {
+/// under `raw` the text is verbatim. Any truncation is the caller's contract
+/// and runs first: `ct wisdom match` cuts to its 2000-char budget before
+/// calling (so the prefix never consumes it), while `wiki_search` /
+/// `wiki_context` pass the query whole. This is the read-side parity of
+/// `doc_text_for_entry`: both query-prefix call sites derive their text
+/// through this one function, so a scheme drift cannot desync the gate from
+/// `wiki_search`/`wiki_context`.
+pub fn query_text_for_scheme(query: &str, scheme: Scheme) -> String {
     match scheme {
-        Scheme::Raw => truncated_query.to_string(),
-        Scheme::Instr1 => format!("{QUERY_INSTRUCTION_PREFIX}{truncated_query}"),
+        Scheme::Raw => query.to_string(),
+        Scheme::Instr1 => format!("{QUERY_INSTRUCTION_PREFIX}{query}"),
     }
 }
 
@@ -161,12 +163,38 @@ pub fn query_text_for_scheme(truncated_query: &str, scheme: Scheme) -> String {
 /// step (query prefix, row filter): two independent resolutions could
 /// straddle a cutover and pair one scheme's query with another's rows.
 pub fn reader_scheme(conn: &Connection) -> Result<Option<Scheme>> {
+    resolve_reader_scheme(conn, None)
+}
+
+/// [`reader_scheme`] for a caller that may already have resolved the scheme
+/// it embedded its query under (`declared`). The single owner of the
+/// table-shape degradation rule — every scoring reader resolves through here:
+///
+/// - V27+ shape: `declared` wins when given (so a cutover between the
+///   caller's resolution and its SELECT cannot pair schemes); otherwise the
+///   active [`read_scheme`] (fail-closed on unknown values).
+/// - Pre-V27 shape: `None` (rows are de-facto raw, readers omit the filter).
+///   Declaring `instr1` against that shape is a hard error — it would score
+///   an instr1 query across raw rows.
+pub fn resolve_reader_scheme(
+    conn: &Connection,
+    declared: Option<Scheme>,
+) -> Result<Option<Scheme>> {
     let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
     if cols.iter().any(|c| c == "embed_scheme") {
-        Ok(Some(read_scheme(conn)?))
-    } else {
-        Ok(None)
+        return Ok(Some(match declared {
+            Some(s) => s,
+            None => read_scheme(conn)?,
+        }));
     }
+    if let Some(s @ Scheme::Instr1) = declared {
+        anyhow::bail!(
+            "embed_scheme: scheme {:?} declared but llm_wiki_entries has no \
+             embed_scheme column (pre-V27 rows are raw; fail-closed)",
+            s.as_str()
+        );
+    }
+    Ok(None)
 }
 
 /// [`reader_scheme`] collapsed to a concrete scheme: the pre-V27 shape is
@@ -223,18 +251,16 @@ pub fn activate_instr1(conn: &Connection, target: &str) -> Result<ActivateOutcom
     // `&Connection` (callers hold shared handles), so the transaction is
     // driven by hand rather than `transaction_with_behavior(&mut self)`.
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    match activate_instr1_locked(conn) {
-        Ok(outcome) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(outcome)
-        }
-        Err(e) => {
-            // The original error is the one worth reporting; a failed
-            // rollback leaves the transaction to die with the connection.
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
+    let result = activate_instr1_locked(conn)
+        .and_then(|outcome| Ok(conn.execute_batch("COMMIT").map(|()| outcome)?));
+    if result.is_err() {
+        // Covers a failed COMMIT too, not only a failed body: the caller's
+        // shared handle must never be left inside the IMMEDIATE transaction.
+        // The original error is the one worth reporting; a failed rollback
+        // leaves the transaction to die with the connection.
+        let _ = conn.execute_batch("ROLLBACK");
     }
+    result
 }
 
 /// Body of [`activate_instr1`]; runs under the caller's write lock.
@@ -612,6 +638,28 @@ mod tests {
         assert!(QUERY_INSTRUCTION_PREFIX.ends_with("Query:"));
         assert_eq!(QUERY_INSTRUCTION_PREFIX.matches('\n').count(), 1);
         assert!(!QUERY_INSTRUCTION_PREFIX.contains("\n "));
+    }
+
+    #[test]
+    fn instr1_snapshot_prefixes_match_the_constant() {
+        // Test (a), snapshot leg (spec-tier §5): the committed instr1
+        // calibration snapshot must record exactly the production prefix on
+        // both sides. Together with the byte-exact literal above this stops a
+        // re-stamped snapshot from laundering a constant change — the slow
+        // bench replay never reads these keys, so this is the only guard.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wisdom_gate_instr1/expected.json");
+        let expected: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+        )
+        .unwrap();
+        for key in ["query_prefix", "doc_prefix"] {
+            assert_eq!(
+                expected[key].as_str(),
+                Some(QUERY_INSTRUCTION_PREFIX),
+                "expected.json `{key}` must equal QUERY_INSTRUCTION_PREFIX byte-for-byte"
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! `ct wisdom scheme status|activate` contract tests (issue #265, plan
+//! `ct wisdom scheme status|sweep|activate` contract tests (issue #265, plan
 //! Task 4). The brain is a real migrated scratch DB (the shared fixture runs
 //! the AppDb migration ladder); the cutover pre-condition rows are seeded via
 //! SQL. No network, no real embedder.
@@ -29,6 +29,18 @@ fn seed_stamped(id: &str, scheme: &str) {
         .unwrap();
 }
 
+/// Run `ct wisdom scheme sweep --json` (exit 0 expected) and parse its report.
+fn sweep_json() -> serde_json::Value {
+    let out = run_ct(&["wisdom", "scheme", "sweep", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("stdout is JSON")
+}
+
 fn assert_status_counts(raw: i64, instr1: i64) {
     let out = run_ct(&["wisdom", "scheme", "status", "--json"]);
     assert_eq!(
@@ -53,16 +65,18 @@ fn status_reflects_the_true_counts_before_and_after_the_sweep() {
         seed_stamped("fact_instr_ct", "instr1");
         assert_status_counts(1, 1);
 
-        // Scheme-sweep the raw row (the same library fn the operator run uses),
-        // then status must show the workset empty.
-        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
-            let conn = brain_db();
-            let report =
-                tauri_app_lib::embed_sweep::sweep_scheme_embeddings(&conn, &Default::default(), 10)
-                    .unwrap();
-            assert_eq!(report.reembedded, 1);
-        });
+        // Scheme-sweep the raw row through the operator command, then
+        // status must show the workset empty.
+        let report = sweep_json();
+        assert_eq!(report["reembedded"], 1);
+        assert_eq!(report["failed"], 0);
+        assert_eq!(report["remaining_raw"], 0);
         assert_status_counts(0, 2);
+
+        // Resumable/idempotent: a second run finds an empty workset.
+        let report = sweep_json();
+        assert_eq!(report["reembedded"], 0);
+        assert_eq!(report["remaining_raw"], 0);
     });
 }
 
@@ -94,12 +108,14 @@ fn activate_refuses_then_succeeds_and_is_idempotent() {
             .unwrap();
         assert_eq!(v, "raw");
 
+        // The refusal names the operator command that clears it.
+        assert!(
+            stderr.contains("ct wisdom scheme sweep"),
+            "stderr: {stderr}"
+        );
+
         // Sweep the raw row away, then activate: exit 0, meta flipped.
-        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
-            let conn = brain_db();
-            tauri_app_lib::embed_sweep::sweep_scheme_embeddings(&conn, &Default::default(), 10)
-                .unwrap();
-        });
+        assert_eq!(sweep_json()["remaining_raw"], 0);
         let out = run_ct(&["wisdom", "scheme", "activate", "instr1"]);
         assert_eq!(
             out.status.code(),
@@ -165,5 +181,29 @@ fn status_text_mode_prints_the_active_scheme_and_counts() {
         assert!(text.contains("active read scheme: raw"), "{text}");
         assert!(text.contains("raw:    1"), "{text}");
         assert!(text.contains("instr1: 0"), "{text}");
+    });
+}
+
+#[test]
+fn scheme_commands_migrate_a_pre_v27_brain_first() {
+    // A brain last written by a pre-V27 release (no `embed_scheme` column, no
+    // meta seed): the admin commands run during the upgrade window, possibly
+    // before the new app ever opened the brain, so they must migrate first
+    // rather than fail on `no such column: embed_scheme`.
+    with_seeded_brain(|| {
+        seed_stamped("fact_old", "raw");
+        let db = brain_db();
+        db.execute_batch(
+            "ALTER TABLE llm_wiki_entries DROP COLUMN embed_scheme;
+             DELETE FROM llm_wiki_meta WHERE key = 'wisdom_active_scheme';
+             DELETE FROM schema_version WHERE version >= 27;",
+        )
+        .unwrap();
+        drop(db);
+
+        // The pre-existing non-null row is backfilled `raw` by the migration.
+        assert_status_counts(1, 0);
+        assert_eq!(sweep_json()["remaining_raw"], 0);
+        assert_status_counts(0, 1);
     });
 }
