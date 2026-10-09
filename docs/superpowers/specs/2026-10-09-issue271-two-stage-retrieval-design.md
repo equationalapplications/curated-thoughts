@@ -1,7 +1,8 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 2 — GLM spec-tier r1 FIX-FIRST: all 7 items
-resolved; blocker-1 stamp-grant deadlock, MAJORS 2-4, minors 5-7)
+**Date:** 2026-10-09 (rev 3 — Opus spec-tier r1 REQUEST CHANGES resolved:
+B1 grant-path deadlock on CLI-only brains; M1-M2 breaker transaction &
+citation fixes; M3 baseline arm pinned; m1-m4)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -106,7 +107,13 @@ disagree about which facts are eligible. Parity guard for >1024 excludes.
   the hash-hop-hit set (chunk-level membership per v10 §3.1 — the 62
   hash-hop-hit chunks), then the gate opens on the facts the matched
   chunk's doc carries. (GLM r1 MAJOR-3: membership is a property of the
-  CHUNK, not of the doc — the earlier wording was circular.)
+  CHUNK, not of the doc — the earlier wording was circular.
+  **Opus r1 m3, intended scope:** the gate opens on ALL facts of the
+  chunk's doc, not just facts whose evidence hashes point at that chunk
+  — this follows Kurt's direction ("map the best-matching source FILES
+  to the curated facts") and v10's doc→facts stage-2 hop; the audit
+  line's FP therefore measures gate-OPEN decisions, not per-fact
+  injection.)
 
 The paired live calibration (acceptance, below) picks the rule and the
 floor. **Tie-break (GLM r1 minor-5):** if both rules pass the letter,
@@ -124,8 +131,16 @@ v1 floor exists → **v1 fallback** (v1 embed, v1 floors, v1 label — can
 open). When BOTH floors are missing → v1's uncalibrated behavior (gate
 `uncalibrated`, `entries = Vec::new()`, embed skipped). Embed-skip applies
 only when BOTH keys are missing. Guard failure (absent/mismatch/mixed
-model) ⇒ v1 fallback — the gate is never dark. Below-floor stage 1 ⇒
-closed (no fallback).
+model) ⇒ v1 fallback — the gate is never dark **while a v1 floor exists**.
+**The fourth cell (Opus r1 m4):** two-stage floor PRESENT, v1 floor
+missing ⇒ two-stage runs normally (it has its own floor); but a guard
+FAILURE in that state falls back to a v1 that is itself uncalibrated —
+gate `uncalibrated`, no open, embed skipped. This is the one state where
+the fallback is dark-adjacent, and it is INTENTIONAL: an uncalibrated
+fallback must not guess a floor to open on. Accepted because every
+deployed brain has v1 floors from the PR-#270 calibration; the state
+arrows only on a fresh/undercalibrated brain. Named test row below.
+Below-floor stage 1 ⇒ closed (no fallback).
 
 ### 5. Two-stage active/off + labels
 
@@ -158,6 +173,14 @@ FP ≤ single-stage FP. No absolute performance floor (the earlier
 PROPOSED ≥ 0.30 hit@2 bar is dropped). Passing flips the default;
 absolute performance tuning is deferred until the issue backlog is
 cleared (Kurt's call: throughput now, performance later).
+**Baseline arm pinned (Opus r1 M3):** "single-stage" = the CURRENTLY
+SHIPPED default configuration, named by its model/scheme key and floor
+in the calibration artifact before the run — no post-hoc arm picking
+(Cell A raw/0.70 and Cell E instr1/0.64 differ on both hit@2 and FP;
+the comparison is against whichever is live at calibration time).
+The calibration artifact also records that rule/floor/k selection and
+scoring happen on the same 150-probe set (known limitation, accepted
+under the not-worse-than-baseline bar).
 
 ### 8. Destructive-pass safety (pre-existing data-loss paths surfaced by the review ladder; fixed in this PR)
 
@@ -173,7 +196,14 @@ are in scope:
   `embeddings`, never a bare INSERT — no unique constraint on `chunk_id`,
   duplicates would double-return in `semantic_search`), delete only
   removed chunks. Empty-hash rows are treated as REMOVED (the
-  `idx_chunks_doc_hash` partial index can't match them). Read/chunk/embed
+  `idx_chunks_doc_hash` partial index can't match them).
+  **Transaction boundaries pinned (Opus r1 m2):** `upsert_document`
+  (`src-tauri/src/pipeline/mod.rs:708` — writes the new hash and
+  `pending` status before the embed) moves INSIDE the swap transaction;
+  on embed failure the doc is `mark_document_error`ed (`mod.rs:749`) —
+  the embed-failure test asserts the expected post-failure doc status
+  AND hash, so a hash-matching rerun cannot short-circuit at the
+  unchanged-hash check (`:692`). Read/chunk/embed
   happen OUTSIDE any transaction; ONE short IMMEDIATE transaction does
   upsert + delete-removed + insert-new + mark indexed (no write lock
   across the network call; 5s busy timeout).
@@ -186,20 +216,38 @@ are in scope:
   UPDATE position/`content_hash`, record old→new hash remap for evidence)
   is follow-up work and appears in the test list as a mid-document-
   insertion test only.
-- **(b) Bulk-deletion circuit breaker (cross-process).** Heal
-  (`heal.rs:85`, GUI scheduler `src-tauri/src/lib.rs:2440`) and regrade
-  (`src-tauri/src/pipeline/evidence_regrade.rs:173-200`) get a refusal
-  threshold of
-  **max(⌈0.05·L⌉, 10)**. L = heal's own selection
-  (`source_type='librarian_inferred' AND source_ref IS NOT NULL`).
-  Regrade's breaker uses its OWN denominator = live `librarian_evidence`
-  rows (r9 m1; the in-migrate path is V20-gated and dead on the live
-  V27 brain — the covered paths are the manual `ct evidence regrade`
-  command and pre-V20 replicas via `skipped_destructive=true`, which
-  holds V21+ on an upgrading brain — the safe direction). Spent budget
+- **(b) Bulk-deletion circuit breaker (cross-process).** (rev 3, Opus
+  r1 M1-M2: writers, transactions, denominators, and the file path are
+  pinned precisely.) **Three heal writers, named:** scheduler and
+  `ct heal` via `heal_invalid_sources_conn` (`src-tauri/src/db/heal.rs:46`,
+  per-row IMMEDIATE transaction at `:80`) and the GUI **"Heal Database"
+  button** via `heal_lost_librarian_inferred` (`src-tauri/src/lib.rs:2403`,
+  breaker site `:2440`) — the button path is NOT the scheduler (rev 2's
+  citation mislabeled it). **Transaction fix required on the button
+  path:** `heal_lost_librarian_inferred` currently uses
+  `unchecked_transaction()` (DEFERRED, `lib.rs:2444`) with an UPDATE
+  lacking a `deleted_at IS NULL AND source_ref = ?` guard — it moves to
+  `TransactionBehavior::Immediate` with the conditional UPDATE (matching
+  `heal_invalid_sources_conn`), so the read-then-increment budget can
+  neither race nor hit an upgrade `SQLITE_BUSY`; this also stops it
+  double-counting already-soft-deleted rows. **Regrade:** the file is
+  `src-tauri/src/db/evidence_regrade.rs` (not `pipeline/`); its
+  classification loop (`:173-200`) has no per-row write transaction —
+  the breaker is therefore a **single pre-delete check** on
+  `|doomed|` (the `unanchored=1 AND deleted_at IS NULL` population,
+  `:160-165`) against the threshold, inside the purge transaction.
+  **Denominators pinned:** heal L = heal's own selection
+  (`source_type='librarian_inferred' AND source_ref IS NOT NULL`); regrade
+  L = the SAME all-live-`librarian_evidence` denominator as heal (not the
+  doomed population — a small doomed set on a small live corpus must
+  still refuse). Threshold **max(⌈0.05·L⌉, 10)** for all. Spent budget
   is kept in `llm_wiki_meta`, incremented inside each per-row IMMEDIATE
-  transaction — GUI scheduler and `ct heal` share one budget, no TOCTOU
-  across processes.
+  transaction — scheduler, `ct heal`, GUI button share one budget, no
+  TOCTOU across processes. Regrade's migration-context path is V20-gated
+  and dead on the live brain (the covered paths are the manual
+  `ct evidence regrade` command and pre-V20 replicas via
+  `skipped_destructive=true`, which holds V21+ on an upgrading brain —
+  the safe direction).
 - **(c) Stamp enforced inside the funnel.** `ingest_file_virtual` itself
   refuses `force_rechunk=true` when the fingerprint stamp is
   missing/stale. **Every** force-rechunk path funnels through
@@ -208,15 +256,36 @@ are in scope:
   `tools/src/bin/bulk_reindex.rs:129`, `queue_full_reindex`
   `src-tauri/src/lib.rs:2324`) plus the automatic forced producers —
   the watchdog sweep re-enqueues `pending_reindex` as a *forced* rechunk
-  (`src-tauri/src/pipeline/watchdog/sweep.rs:73-82`) and
+  (`src-tauri/src/pipeline/watchdog/sweep.rs:128-136` — the actual
+  re-enqueue; `:73-82` is the status constant's doc comment) and
   `rechunk_for_reembed` is `force:true`
   (`src-tauri/src/pipeline/mod.rs:72-74`).
-  **Grant path (GLM r1 blocker-1 — the refusal path must not deadlock
-  the model guard):** the scratch-verification flow writes/refreshes the
-  stamp; specifically `run_wiki_reembed` refreshes the stamp BEFORE
-  enqueueing pass jobs, and pass jobs carry the `pass_id`, satisfying
-  the stamp check — a model-key change must be able to reach
-  `model_guard=ok`, or the §7 flip could never fire. **Fingerprint =
+  **Grant path (rev 3 — single mechanism, CLI-covered; replaces rev 2's
+  dual mechanism, which Opus r1 B1 showed still deadlocks: rev 2 granted
+  via `run_wiki_reembed`, but that is a GUI-only `#[tauri::command]`
+  (`src-tauri/src/lib.rs:2762`) so CLI-only brains get no grant, and
+  sweep re-enqueue rebuilds jobs from `(path, status)` alone
+  (`src-tauri/src/pipeline/watchdog/sweep.rs:128-136`), dropping any
+  job-carried token):** a **model-key grant record** written in
+  `llm_wiki_meta` — keyed so it authorizes ONLY the model-key component
+  of the fingerprint. A chunker-version change is NEVER covered by the
+  grant: it still requires the scratch check (a binary upgrade that
+  bumps the chunker, followed by a re-embed, must not self-grant).
+  Writers of the grant: (GUI) `run_wiki_reembed` after its own scratch
+  verification; **(CLI) the re-embed-producing commands gain the grant —
+  `bulk_reindex` gets a `--model-swap` mode and `ct ingest --force` /
+  `queue_full_reindex` check-and-write it, so a CLI-only model swap can
+  reach `model_guard=ok`**. The funnel check in `ingest_file_virtual`
+  reads: stamp fresh ⇒ pass; stamp stale only in the model-key component
+  AND the model-key grant record present ⇒ pass (and the stamp is
+  refreshed as a side effect); chunker component stale ⇒ refuse.
+  `PipelineJob` is NOT extended (no pass_id field — it would be dropped
+  by the sweep anyway); the grant lives in the DB, so it survives
+  sweep re-enqueue and channel-overflow deferral. Tests: CLI grant
+  (`bulk_reindex --model-swap`) reaches `model_guard=ok`; GUI reembed
+  with channel overflow → sweep re-enqueue → passes on the DB grant;
+  chunker version changed + reembed ⇒ refused.
+  **Fingerprint =
   (live-DB identity, chunker version, model key)** — the document-set
   hash is DROPPED (r9 M4: content changes are already lossless under
   the diff-swap; only chunker/model changes can mass-rehash). Scratch
@@ -240,6 +309,9 @@ are in scope:
 
 - Missing two-stage floor → v1 fallback (never uncalibrated while a v1
   floor exists); both missing → v1 uncalibrated semantics.
+- Two-stage floor present + v1 floor missing + guard failure →
+  uncalibrated no-open (the sole dark-adjacent cell — intentional,
+  see §4; fresh/undercalibrated brains only).
 - Guard failure (absent/mismatch/mixed) → v1 fallback (never dark — ops
   crons are DECLINED; nothing else alerts).
 - Below-floor stage 1 → gate closed, audit line still emitted.
@@ -257,7 +329,9 @@ are in scope:
   set — named by live query before implementation (r8 m4), asserted here.
 - Fallback matrix: two-stage-floor-only-missing / both-missing /
   guard-failure / below-floor / kill-switches — one test per branch of the
-  §4 single rule.
+  §4 single rule; PLUS the fourth cell (Opus r1 m4): two-stage floor
+  present + v1 floor missing + guard failure ⇒ uncalibrated no-open
+  (asserted dark-adjacent BY DESIGN).
 - Labels: pinned 5-field stderr line byte-identical under both paths;
   `wisdom_two_stage_audit` line shape.
 - Diff-swap: unchanged-hash preservation; changed-hash in-place UPDATE
@@ -267,15 +341,22 @@ are in scope:
   failure mid-run leaves prior chunks intact (the 401 scenario).
 - Breaker: threshold math max(⌈0.05·L⌉,10) on both denominators;
   cross-process budget via `llm_wiki_meta` (two connections, shared
-  refusal).
+  refusal); ALL THREE heal writers covered (scheduler/`ct heal` via
+  `heal_invalid_sources_conn`, GUI button via
+  `heal_lost_librarian_inferred` — including its IMMEDIATE-transaction +
+  conditional-UPDATE fix — and regrade's single pre-delete check on
+  `|doomed|`).
 - Stamp: missing/stale fingerprint refused inside `ingest_file_virtual`
   via each of the three manual callers PLUS the forced producers
   (watchdog sweep re-enqueue and `rechunk_for_reembed`);
   fresh-brain bypass; purge deletes guard/pass/stamp/breaker keys +
   pass-doc rows.
-- Stamp grant path (GLM r1 blocker-1): model-key change →
-  `run_wiki_reembed` refreshes the stamp → forced re-embed pass
-  completes → `model_guard=ok` (the flip dependency must be reachable).
+- Stamp grant path (rev 3 mechanism): model-key change → CLI grant
+  (`bulk_reindex --model-swap`) → forced re-embed pass completes →
+  `model_guard=ok` (the flip dependency must be reachable); GUI
+  channel-overflow → sweep re-enqueue → passes on the DB-stored grant;
+  chunker-version change + reembed ⇒ refused (grant never covers the
+  chunker component).
 - Guard completion branches (GLM r1 MAJOR-4), one test each:
   snapshotted doc not indexed under the new key ⇒ completion BLOCKED;
   superseded-job `pending` ⇒ BLOCKED; file-missing ⇒ counted in
