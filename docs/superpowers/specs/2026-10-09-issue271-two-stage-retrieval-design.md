@@ -1,16 +1,13 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 10 — Opus spec-tier r8 REQUEST CHANGES resolved:
-B1 refusal keyed to last_indexed_hash written in the swap tx (queue.rs
-pre-writes the new hash — watcher edits looked like pure rechunks);
-M1-M2 refusal-record w/ stamp fingerprint replaces leaking markers
-(sweep skips while fingerprint matches; fresh stamp lifts exemption);
-M3 stamp refresh + grant consumption deferred to pass completion
-(gate guard treats open grant/in-flight pass as mismatch → v1
-fallback); M4 tier_working path is pre-V5 only — rev 9 claim
-corrected; m1 pending counter decrement; m2 queue_full_reindex
-verification async off IPC; m3 okf_migration not reachable on V27;
-m4 duplicate test rows consolidated to Testing)
+**Date:** 2026-10-09 (rev 11 — Opus spec-tier r9 REQUEST CHANGES resolved:
+M1 last_indexed_hash backfilled by the ungated migration (indexed-only
++ pending_reindex; NULL rows would leave the guard inert on the
+upgraded brain); M2 refusal record keyed (doc_id, hash, fingerprint) +
+deleted on swap success/delete + clear purge (record could block a
+later real edit); m1 counter: post-job decrement already covers
+refusals (no double-decrement); m2 command name verify-scratch; m3
+table evaluated after the :692 short-circuit)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -439,6 +436,21 @@ are in scope:
   match and are refused (nothing to gain). Zero-chunk docs bypass
   (nothing to lose). Unforced edits also skip re-embedding unchanged
   chunks only when the stamp's model key is current (unchanged rule).
+  **Backfill (rev 11, Opus r9 MAJOR-1 — without it every pre-upgrade
+  doc has `last_indexed_hash = NULL`, nothing counts as a pure
+  rechunk, and a bumped-chunker bulk pass would rehash all 291 live
+  docs through the diff-swap path with verify-scratch never
+  consulted — the stamp guard inert exactly where it matters):**
+  `last_indexed_hash` is added by the new ungated idempotent
+  migration, backfilled as
+  `last_indexed_hash = hash WHERE status = 'indexed'` ONLY —
+  `pending` rows may already carry queue.rs's pre-written NEW hash
+  (backfilling them would recreate B1); `pending_reindex` rows were
+  staged from `indexed` with unchanged bytes, so they ARE backfilled.
+  `last_indexed_hash` is also written on the zero-chunk
+  `mark_document_indexed` path (`pipeline/mod.rs:735-738`).
+  Test: post-upgrade fixture, stamp missing, forced rechunk of a
+  pre-existing indexed doc ⇒ REFUSED.
   Test: watcher Modify event + stamp missing ⇒ doc ends up indexed
   with the new content.
   **Scope honesty (rev 6, Opus r4 m2):** under a stale CHUNKER stamp an
@@ -512,7 +524,13 @@ are in scope:
   - chunker stale or missing (any model state) ⇒ **refuse** (the
     bootstrap/override is `ct reindex verify-scratch`).
   Zero-chunk docs bypass the whole table (nothing to lose); content
-  edits bypass it (diff-swap). `PipelineJob` is NOT extended (no
+  edits bypass it (diff-swap). **Ordering (rev 11, Opus r9 MINOR-3):
+  the table is evaluated AFTER the existing non-forced short-circuit**
+  (`pipeline/mod.rs:691-694` — unchanged + `indexed` + non-forced ⇒
+  `Ok(())` as today, so `wisdom_deposit` kicks of unchanged docs
+  return early and never touch the stamp check, no refusal-record
+  churn on the normal path).
+  `PipelineJob` is NOT extended (no
   pass_id field — it would be dropped
   by the sweep anyway); grant + stamp live in the DB, so they survive
   sweep re-enqueue and channel-overflow deferral.
@@ -530,20 +548,20 @@ are in scope:
   re-sweep loop: the row no longer reads `pending_reindex`, so
   `list_sweepable_pending` cannot pick it up again.
   **Disposition for refused rows (rev 4, Opus r2 M3; rev 5-6 r3 m3 /
-  r4 M1; rev 9-10, Opus r7 MAJOR-1 / r8 M1-M2 — rev 9's
-  pre_staging_status markers are REPLACED: they leaked (never deleted
-  on job success or file deletion), a stale marker could restore the
-  wrong doc to `indexed` (llm_wiki_meta survives clear; documents.id
-  reuse is not guaranteed against), and the no-marker branch had
-  nowhere to put its refusal stamp nor any rule for lifting the
-  exemption):** a refused row records a **per-doc refusal record**
-  (meta key or column) holding **the stamp fingerprint at refusal
-  time**. The sweep skips a row ONLY while the current stamp
-  fingerprint still equals the recorded value — **a fresh stamp
-  (e.g. from `verify-sweep` bootstrap) lifts the exemption
-  automatically**, so pending rows that need a retry (including
-  queue.rs re-pends of `error`/`orphaned`) resume after bootstrap.
-  The filter is applied in BOTH `list_sweepable_pending` and
+  r4 M1; rev 9-11, Opus r7-r9 — rev 9's pre_staging_status markers
+  were replaced in rev 10 by a per-doc refusal record; rev 11 pins
+  the record's LIFETIME after r9 MAJOR-2 showed it could outlive its
+  cause and block a later real edit):** a refused row records a
+  **refusal record keyed to `(doc_id, file hash at refusal, stamp
+  fingerprint)`**. The sweep skips the row ONLY while ALL THREE still
+  match: a later content change writes a new hash ⇒ the record no
+  longer matches ⇒ the next sweep dispatches the edit normally (no
+  silent loss); a stamp refresh changes the fingerprint ⇒ exemption
+  lifted (pending rows that need a retry resume after bootstrap).
+  The record is DELETED inside the swap transaction (job succeeded)
+  and in `delete_document`, and is in the clear-transaction purge
+  list — no leaks (the r8 M1-M2 criticism, now fully answered). The
+  filter is applied in BOTH `list_sweepable_pending` and
   `sweepable_path_set` (claims must expire in step). Status handling
   on refusal: a refused `pending_reindex` maps to `indexed` (staging
   guard proves pre-staging state), ANY other status restores as it
@@ -551,10 +569,12 @@ are in scope:
   state, per r7 M1's queue.rs/connection.rs/okf_migration writers).
   No loop forms within a process even without the record
   (`InFlightClaims.retain_sweepable`, `sweep.rs:62-64`); the record
-   covers worker respawn/restart. Pending counter: the refusal
-   outcome DECREMENTS the counter (or emits a corrected `PendingCount`
-   event) — the increment at `mod.rs:206-211` happens before the
-   outcome is known.
+  covers worker respawn/restart.
+  **Pending counter: NO change needed (rev 11, Opus r9 MINOR-1 — the
+  rev-10 decrement idea would DOUBLE-decrement: the post-job
+  decrement at `pipeline/mod.rs:271-294` already runs for every
+  counted job regardless of outcome, even after a panic). Test: the
+  counter returns to baseline after a refused job.**
    **Citation correction (rev 10, Opus r8 M4):** the
    `connection.rs:248-257` tier_working re-pend is inside
    `if version < 5` (`connection.rs:235-239`) — **pre-V5 only, dead
