@@ -1,12 +1,19 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 15 — Opus spec-tier r13 REQUEST CHANGES resolved:
-M1 failed GUI jobs retry without restart (pass-docs `failed` marker
-releases the sweep claim; re-dispatch with backoff, max 3 auto-retries,
-then visible "N failed — retry" UI action); m1 skipped rows not staged;
-m2 UI counts pinned (get_indexing_status reads pass-docs; pending count
-includes pending_reindex); m3 guard-completion tests split GUI/CLI;
-m4 second open pass refused unless same key — same key resumes)
+**Date:** 2026-10-09 (rev 16 — Opus spec-tier r14 REQUEST CHANGES resolved:
+M1 retry mechanics pinned (`retrying` non-terminal state before
+try_send = claim-protected; backoff + 3-retry cap enforced in
+list_sweepable_pending's SQL via pass-docs join; sweepable_path_set
+same filter; exhausted rows leave the sweepable set); M2 pass-docs DDL
+pinned (outcome/attempts/last_attempt_at; completion = all rows
+completed|skipped — a failed row BLOCKS, no false-ok); M3
+count_pending_documents untouched (drain-watchdog canonical counter;
+pending_reindex there would false-trip DrainStall permanently) —
+progress from pass-docs instead, watchdog excludes exhausted rows;
+MINOR-1 frontend in scope (IndexingStatus + tauri.ts + StatusBar +
+5 mocks); MINOR-2 failed marker at worker Err/panic branches, NotFound
+⇒ skipped; MINOR-3 db/queries.rs vs tools/src/queries.rs paths
+disambiguated)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -212,6 +219,17 @@ A snapshotted doc not indexed under the new key (including superseded-job
 `model_guard_skipped_docs`. The `clear` transaction additionally deletes
 the guard/pass/stamp meta keys, the breaker baseline/state keys, and all
 `ct_reindex_pass_docs` rows (r9 m2 purge list).
+**Pass-docs DDL pinned (rev 16, Opus r14 M2):**
+`ct_reindex_pass_docs(pass_id, doc_id, embed_key, outcome, attempts,
+last_attempt_at)` with `outcome ∈ {snapshotted, retrying, completed,
+failed, skipped}` — the rev-11 §6 schema had no outcome/attempts
+columns and could not store what rev 15's retry design writes;
+snapshot rows and outcome rows are THE SAME TABLE (a row starts
+`snapshotted` and transitions). **Completion = every row of the pass
+has `outcome ∈ {completed, skipped}`** — a `failed` row BLOCKS
+completion (test: one `failed` row + everything else completed ⇒
+BLOCKED; the false-ok where a 401'd doc's failure row satisfied the
+old "no row missing" check is impossible under this definition).
 
 ### 7. Floors + acceptance letter
 
@@ -556,20 +574,33 @@ are in scope:
       swap pass (no double dispatch, no claims interplay). UI counts
       include `pending_reindex` in pending (or report pass progress
       from pass-docs), so the counts don't read ~0/0 mid-pass (r12
-      m4). **Failed-job retry (rev 15, Opus r13 M1 — a failed job's
-      row STAYS `pending_reindex` under the rev-9 keep-prior-state
-      rule, so its claim is never released and the sweep skips it
-      forever: one 401 hung the whole GUI pass with no signal):** a
-      failed job writes a pass-docs row with outcome `failed` (+
-      attempt count), and `retain_sweepable` also drops claims for
-      rows carrying a terminal pass-docs marker (`completed`,
-      `failed`, or `skipped`) — the sweep then re-dispatches failed
-      rows on later ticks with simple backoff (max 3 auto-retries;
-      after that the UI pass-progress line shows "N failed — retry"
-      with a retry action that re-stages those rows). This is the GUI
-      twin of the CLI resume: no restart needed. Tests: GUI pass, one
-      401, key fixed, no restart ⇒ `model_guard=ok`; persistent 401 ⇒
-      pass shows "N failed — retry", auto-retries stop at 3.
+      m4; rev 15's "or" is RESOLVED — see the M3 wiring below: pass
+      progress from pass-docs, `count_pending_documents` untouched).
+      **Failed-job retry (rev 15, Opus r13 M1; mechanics pinned
+      rev 16, Opus r14 M1-M3 — rev 15's claim-release created double
+      dispatch (a `failed` marker released the claim while attempt 2
+      was in flight, so any embed slower than the 60s
+      `SWEEP_INTERVAL` was re-sent every tick) and left backoff /
+      3-retries unenforced):** the pass-docs row carries
+      `(outcome, attempts, last_attempt_at)`; outcomes ∈
+      {snapshotted, retrying, completed, failed, skipped}. On embed
+      failure the worker writes `failed`; when the sweep re-dispatches
+      a failed row it flips the marker to non-terminal `retrying` in
+      the SAME connection BEFORE `try_send` — only `completed`,
+      `failed`, and `skipped` release claims, and a `retrying` row is
+      claim-protected, so no double dispatch. `list_sweepable_pending`
+      (ONLY there) joins pass-docs and filters
+      `outcome='failed' AND attempts < 3 AND last_attempt_at + backoff
+      <= unixepoch()` — backoff and the 3-retry cap are enforced by
+      the query itself; `sweepable_path_set` applies the same filter,
+      so exhausted rows leave the sweepable set (their claims drop and
+      they are never re-dispatched). After 3 auto-retries the UI
+      pass-progress line shows "N failed — retry" with a re-stage
+      action (re-staging resets attempts). This is the GUI twin of the
+      CLI resume: no restart needed. Tests: slow retry spanning two
+      ticks ⇒ ONE dispatch; GUI pass, one 401, key fixed, no restart
+      ⇒ `model_guard=ok`; persistent 401 ⇒ "N failed — retry",
+      auto-retries stop at 3.
     - **CLI path (`bulk_reindex --model-swap`):** synchronous — it
       cannot lose jobs, so it does NOT pre-stage. Its work list
       iterates the pass-docs snapshot table, never
@@ -591,7 +622,17 @@ are in scope:
     Tests: CLI-only, one 401 mid-pass, re-run ⇒ `model_guard=ok`
     (r12 M1's scenario); GUI pass ⇒ exactly ONE embed call per doc
     (r12 M2); worker respawn mid-GUI-pass ⇒ completes; missing file
-    in a GUI pass ⇒ skipped-recorded ⇒ `model_guard=ok`.
+    - skipped-recorded ⇒ `model_guard=ok`.
+    **M3 (r14) wiring:** leave
+    `count_pending_documents` UNTOUCHED — it is the drain
+    watchdog's canonical counter (`watchdog/mod.rs:288-291` feeds
+    `DrainTracker::observe`; adding `pending_reindex` would trip
+    `DrainStall` every window during a pass and set health to
+    `Stalled` permanently — a false stall). The drain watchdog
+    additionally EXCLUDES rows with a terminal `failed`-exhausted
+    pass-docs marker from its pending input, so an exhausted-retry
+    row never trips a stall (test: exhausted-retry row does not
+    trip a drain stall).
   - chunker current, model stale, NO grant ⇒ **refuse** — EXCEPT the
     sole sanctioned model-swap paths: `bulk_reindex --model-swap` and
     `run_wiki_reembed`, which write the grant first (after scratch
@@ -805,16 +846,32 @@ are in scope:
    Opus r4 M4; rev 7 Opus r5 MINOR-2):** `ct reindex verify-scratch`
    (bootstrap command), `bulk_reindex --model-swap <key>` (grant
    writer), the GUI reembed scratch step (reuses verify-scratch's code
-   path), `ct heal --reset-breaker`, the NEW `--allow-bulk` flags on
+   `ct heal --reset-breaker`, the NEW `--allow-bulk` flags on
    `ct heal` / `ct evidence regrade`, the `librarian_evidence_seen`
-   marker (trigger + migration backfill), and a named **`IngestOutcome`
+   marker (trigger + migration backfill), the `ct_reindex_pass_docs`
+   outcome/attempts DDL + refusal-record table (both in the ungated
+   migration), a named **`IngestOutcome`**
    enum** returned by the ingestion funnel so every caller can branch on
    refusal — refusal-as-skip handling is added at the **pipeline
    worker** (`src-tauri/src/pipeline/mod.rs:231`, the
    `match ingest_file(..)` branch point that executes
    `queue_full_reindex`, sweep, and `rechunk_for_reembed` jobs — those
    only `try_send` and never see the outcome), **`bulk_reindex`**
-   (synchronous), and `ct ingest`.
+   (synchronous), and `ct ingest`. **Frontend work is IN scope
+   (rev 16, Opus r14 MINOR-1):** `IndexingStatus` (`lib.rs:2305-2309`,
+   mirrored in `src/lib/tauri.ts:156`, consumed by `StatusBar.tsx:63`,
+   mocked `{indexed, pending}` in five frontend tests) gains pass-
+   progress fields; §9 step 2 includes the TS type update + the five
+   test mocks; MINOR-2: the pass-docs `failed` marker is written at
+   the WORKER's `Err` branch (`mod.rs:257`) and panic path (`:266`) —
+   the catch-inside-`ingest_file_virtual` site misses `fs::read`
+   (`:687`), `extract_text` (`:703`), panics, and post-snapshot file
+   deletion (a deleted file maps `NotFound` ⇒ `skipped`, so the pass
+   completes); MINOR-3: `db/queries.rs` (`src-tauri/src/db/queries.rs`
+   — mark_document_indexed `:91-103`, list_indexed_user_doc_paths
+   `:38-41`, count queries `:160-174`) is distinct from
+   `tools/src/queries.rs` (embed-skip `:791`, query_text_for_scheme
+   `:788`); full paths used throughout.
 3. Paired live calibration = the acceptance gate; pick rule + floor;
    flip-to-default if the letter passes.
 4. Provenance backfill only if the audit shows hop gaps (expected:
