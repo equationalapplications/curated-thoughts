@@ -1,14 +1,14 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 12 — Opus spec-tier r10 REQUEST CHANGES resolved:
-M1 evaluate_pass_completion pinned (bulk_reindex end + in-swap-tx +
-sweep-tick backstop; swap tx reads open (pass_id, target_key) from
-llm_wiki_meta); m1 backfill WHERE IN ('indexed','pending_reindex') as
-the single rule, error/orphaned NULL = accepted residual; m2 refusal
-record = new table + stored-stamp fingerprint NULL-safe; m3
-last_indexed_hash written in mark_document_indexed; empty-re-extraction
-branch runs the swap tx delete-all; m4 record hash = documents.hash;
-stale rev-9 test row reworded)
+**Date:** 2026-10-09 (rev 13 — Opus spec-tier r11 REQUEST CHANGES resolved:
+M1 lost-job recovery (all snapshotted rows pending_reindex at snapshot
+time; file-missing recorded as skipped pass-docs rows — pass completes
+through worker respawn/superseded/missing-file); m1 mark_document_
+indexed gains indexed_hash param (documents.hash race inherited
+otherwise); m2 --model-swap key must equal profile key at grant time +
+per-swap embed-key check; m3 async verification off the pipeline
+channel, Ok(usize) meaning kept, visible refusal UI state; n1
+superseded-job test named for sent and deferred jobs)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -448,9 +448,16 @@ are in scope:
   `pending` rows may already carry queue.rs's pre-written NEW hash
   (backfilling them would recreate B1); `pending_reindex` rows were
   staged from `indexed` with unchanged bytes, so they ARE backfilled.
-  `last_indexed_hash` is also written on the zero-chunk
-  `mark_document_indexed` path (`pipeline/mod.rs:735-738`) — and
-  **inside `mark_document_indexed` itself** (rev 12, Opus r10 m3: it
+  `last_indexed_hash` is also written **inside
+  `mark_document_indexed`** — which gains a hash parameter,
+  `mark_document_indexed(conn, doc_id, indexed_hash)` (rev 13, Opus
+  r11 m1: today it takes `(conn, doc_id)` only, `queries.rs:91-103`;
+  writing `documents.hash` would inherit the existing race —
+  `enqueue_vault_event` can overwrite the row with a newer hash
+  between the upsert of H1 and the mark, recording H2 while holding
+  H1's chunks, so the next forced run "pure-rechunks" and refuses the
+  H2 edit forever). `indexed_hash` = the hash of the bytes actually
+  chunked and embedded. (rev 12, Opus r10 m3: it
   is the only writer, which also fixes the empty-re-extraction branch:
   an existing doc re-extracting to empty runs the swap transaction
   with every chunk treated as removed — upsert + delete-all +
@@ -500,8 +507,14 @@ are in scope:
   gains a scratch-verification step that REUSES the `ct reindex
   verify-scratch` code path** (today it has none, `lib.rs:2762-2831`)
   — both write the grant only after verification succeeds.
-  **`ct ingest` is NOT a grant writer** (routine ingest, not a model
-  swap). Model-key-only swaps need NO scratch check for correctness —
+ **`--model-swap <key>`/profile agreement (rev 13, Opus r11 m2):**
+ grant time REFUSES unless `<key>` equals the profile's current
+ model key; the swap transaction writes a pass-docs row only when
+ the model it embedded with equals `target_key` — a completed pass
+ under a different model can never record a false `model_guard=ok`
+ (the guard's stamp-vs-profile fallback stays the safe backstop).
+ **`ct ingest` is NOT a grant writer** (routine ingest, not a model
+ swap). Model-key-only swaps need NO scratch check for correctness —
   the diff-swap keeps all `content_hash`es — the scratch check on these
   paths is belt-and-suspenders and identical on CLI and GUI.
   **Funnel decision table (rev 9, Opus r7 MAJOR-2 — the full table; the
@@ -531,9 +544,24 @@ are in scope:
     the sweep tick as backstop. The swap transaction reads the open
     `(pass_id, target_key)` from `llm_wiki_meta` — with no `pass_id`
     on `PipelineJob`, this DB read is how a pass-docs row gets
-    written; stated explicitly. Test: GUI full reindex, all jobs
-    succeed ⇒ stamp refreshed, grant consumed, guard `ok`, no CLI
-    step.
+    written; stated explicitly. **Lost-job recovery (rev 13, Opus r11
+    M1 — without it one lost job hangs the pass forever: sent jobs
+    stay `indexed`, a worker respawn (`pipeline/mod.rs:806-809`)
+    drops everything still queued, superseded jobs are silently
+    dropped, and the sweep only re-sends `pending`/`pending_reindex`;
+    the evaluator then has nothing to retry and the grant stays open
+    — the r12 outcome, resurrected):** the grant writers mark EVERY
+    snapshotted row `pending_reindex` inside the snapshot
+    transaction (not just channel-deferred ones) — the existing
+    sweep then re-sends any lost job as a forced rechunk (the swap
+    transaction moves the row back to `indexed` as it completes).
+    File-missing docs are recorded as skipped AT SNAPSHOT TIME (a
+    pass-docs row with a `skipped` marker — the GUI paths' silent
+    CWD-relative drop becomes a recorded skip), so
+    `evaluate_pass_completion(conn)` decides from the database alone.
+    Tests: worker respawn mid-pass ⇒ pass still completes ⇒
+    `model_guard=ok`; missing file in a GUI pass ⇒ skipped-recorded ⇒
+    `model_guard=ok`.
   - chunker current, model stale, NO grant ⇒ **refuse** — EXCEPT the
     sole sanctioned model-swap paths: `bulk_reindex --model-swap` and
     `run_wiki_reembed`, which write the grant first (after scratch
@@ -544,13 +572,21 @@ are in scope:
     queue-full-reindex after a model change would refuse every job
     with nothing shown. With the grant present, its jobs pass like any
     other granted re-embed. **Its scratch verification runs ASYNC, not
-    on the IPC thread** (rev 10, Opus r8 m2: `queue_full_reindex` is a
-    synchronous `#[tauri::command]` whose own comments warn about IPC
-    freezes, `lib.rs:2329-2332` — a full-scratch-corpus re-embed hits
-    the network per doc): the command enqueues a verification job and
-    returns immediately; the UI shows the existing pending counter
-    plus a "verifying scratch before re-embed" status line while it
-    runs.
+    on the IPC thread** (rev 10, Opus r8 m2; rev 13, Opus r11 m3 — the
+    verification does NOT go through the single pipeline channel, where
+    it would block ingest for a full scratch re-embed: it runs on its
+    own blocking task): `queue_full_reindex` enqueues the verification
+    and returns immediately — its `Ok(usize)` return keeps today's
+    meaning (docs queued for THIS reindex; the model-swap variant
+    returns after staging), the verification task itself performs the
+    scratch re-embed, writes the grant, and THEN the staging transaction
+    marks all snapshotted rows `pending_reindex` (per the lost-job
+    recovery above), from where the existing sweep drives the pass; the
+    UI shows a "verifying scratch before re-embed" status line while it
+    runs, and on a failed verification (e.g. a chunker-strategy change —
+    `lib.rs:2320-2322` documents force=true for those too) a visible
+    "refused: chunker changed — run `ct reindex verify-scratch`" state,
+    not a pending counter that just drops to zero.
   - chunker stale or missing (any model state) ⇒ **refuse** (the
     bootstrap/override is `ct reindex verify-scratch`).
   Zero-chunk docs bypass the whole table (nothing to lose); content
@@ -795,7 +831,10 @@ are in scope:
   pass-docs row under the new key ⇒ BLOCKED** (rev 8, Opus r6 m2 —
   under rev 5's swap-tx upsert an existing-doc superseded return no
   longer leaves `pending`, so the test is written against that
-  observable; a separate new-doc case covers `pending`);
+  observable; a separate new-doc case covers `pending`) — NAMED both
+  ways (rev 13, Opus r11 n1): successfully-sent jobs stay `indexed`;
+  channel-DEFERRED GUI jobs start as `pending_reindex` and stay so —
+  both must end with no pass-docs row under the new key ⇒ BLOCKED;
   file-missing ⇒ counted in
   `model_guard_skipped_docs`, completion proceeds.
 - Acceptance: paired live calibration on the 150-probe real-traffic set,
