@@ -1,14 +1,23 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 21 — Opus spec-tier r19 REQUEST CHANGES resolved:
-M1 error/orphaned chunk-bearing docs STAGED with pre_status column
-(skipped recreated the mixed-vector state; file-missing skipped rows
-excluded from stage 1 instead); M2 exhausted-flip skips in-flight rows
-(claims-filtered UPDATE — no more failing the third attempt mid-flight);
-m1 swap IN-list gains failed (no redundant re-embed); m3 quarantine
-rule wins over skip-precedence, re-stage restores pre_status; nits:
-optional clause deleted, &Connection reasoning corrected,
-pending_reindex left-as-is explicit)
+**Date:** 2026-10-09 (rev 22 — Opus spec-tier r20 REQUEST CHANGES resolved:
+M1 stage-1 exclusion made durable — per-doc `embed_key` written in the
+swap tx, stage 1 requires embed_key = current key (the open-pass-row
+`skipped` predicate stopped matching the moment the pass completed);
+M2 claim-expiry split from dispatch — `sweepable_path_set` keeps
+`retrying` rows regardless of attempts, only completed/failed/skipped
+release claims (the attempts-filter dropped attempt-3 claims one tick
+after dispatch, so the flip caught the row mid-flight a tick later);
+M3 re-stage always sets `pending_reindex`, `pre_status` column carries
+the restore memory (rev 21's "restores pre_status" self-contradicted
+rev 19 and could hang a pass silently on a status='error' doc no sweep
+query selects); m1 ONE swap IN-list stated (with `failed` included the
+swap may overwrite a watchdog `failed` — sentence corrected); m2
+`pre_status` pinned for EVERY snapshotted row + terminal-`failed`
+writers named as the restorers; m3 refused-`pending_reindex` restore
+routes through `pre_status` when an open-pass row exists; nits:
+`orphaned` is a dead documents.status (synthetic-fixture note added),
+§8(a) no-status-filter sentence updated for the embed_key exclusion)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -213,14 +222,20 @@ A snapshotted doc not indexed under the new key (including superseded-job
 `pending`) blocks completion; file-missing counts as
 `model_guard_skipped_docs`. The `clear` transaction additionally deletes
 the guard/pass/stamp meta keys, the breaker baseline/state keys, and all
-`ct_reindex_pass_docs` rows (r9 m2 purge list). **Rev 21:** the DDL
-gains `pre_status` (see snapshot staging above); the swap tx's
-pass-docs completion write INCLUDES `'failed'` in its IN-list —
-`WHERE outcome IN ('snapshotted','retrying','failed')` — so a
-non-sweep ingest (watcher edit, `ct ingest` against the GUI brain)
-of a failed/attempts<3 doc marks the row `completed` and never
-costs a redundant sweep re-embed (r19 MINOR-1; no overwrite cycle —
-the watchdog's write excludes only `completed`/`skipped`).
+`ct_reindex_pass_docs` rows (r9 m2 purge list). **ONE swap IN-list (rev 22, Opus r20 MINOR-1 — the rev-20 epoch-guard
+sentence and the rev-21 §6 list stated the IN-list two different ways;
+with `failed` included, the rev-20 "neither writer can overwrite the
+other in either order" claim was false):** the swap tx's pass-docs
+completion write is
+`WHERE outcome IN ('snapshotted','retrying','failed')` — a non-sweep
+ingest (watcher edit, `ct ingest` against the GUI brain) of a
+failed/attempts<3 doc marks the row `completed` and never
+costs a redundant sweep re-embed (r19 MINOR-1). Stated plainly: **the
+swap MAY overwrite a watchdog-written `failed`** (the doc's vectors
+really are new-model at that point — the correct outcome); the
+conditionality still protects `completed`/`skipped` in both orders,
+which is what the rev-20 race fix needed. The DDL also gains
+`pre_status` (see snapshot staging below).
 **Snapshot staging per status (rev 20, Opus r18 MAJOR-1; revised
 rev 21, Opus r19 MAJOR-1 — rev 20's "error/orphaned ⇒ skipped"
 RECREATED the mixed-vector state: a skipped doc keeps its model-A
@@ -229,25 +244,60 @@ model-B queries, completion counts skipped as done ⇒ false
 model_guard=ok; and the "natural retry later" is poisoned by the
 unforced-edit rule, which would re-embed only changed chunks —
 the unchanged A chunks stay forever):** `ct_reindex_pass_docs`
-gains a **`pre_status`** column. At snapshot time — `indexed` ⇒
+gains a **`pre_status`** column, **written for EVERY snapshotted row
+(rev 22, Opus r20 MINOR-2 — rows "left as-is" had no stated value;
+restoring from NULL would violate the CHECK constraint on
+`documents.status`, `schema.rs:38-40`)**: at snapshot time
+`pre_status = status` — no exceptions. At snapshot time — `indexed` ⇒
 staged `pending_reindex`; `pending` ⇒ left as-is (already
 sweepable); chunk-bearing `pending_reindex` (not quarantined) ⇒
 left as-is; **`error` / `orphaned` with chunks ⇒ STAGED
-`pending_reindex` like indexed docs, with `pre_status` recorded** —
+`pending_reindex` like indexed docs** —
 on refusal or exhausted
 failure the doc's REAL status is restored from `pre_status` (the
 r18 objection to staging them disappears once the row remembers
-it). **Precedence pinned (rev 21, Opus r19 MINOR-3):** the
+it). **The restoring writers are NAMED (rev 22, Opus r20 MINOR-2):
+every writer that sets a row terminally `failed` with
+`attempts = 3` performs the `pre_status` restore in the SAME
+statement — the worker's third `Err` write, the sweep's
+exhausted-flip, and the quarantine transaction.** Rows "left
+as-is" get `pre_status` = their unchanged status; if such a row
+is later flipped exhausted, the restore writes back the same
+status — a no-op by construction, never NULL.
+**Precedence pinned (rev 21, Opus r19 MINOR-3):** the
 rev-19 quarantine rule wins — a chunk-bearing doc that is BOTH
 `error` AND `quarantined_at`-set is snapshotted
-`failed`/`attempts=3` (not skipped); its re-stage restores
-`pre_status` (resolving to `error`), so no pre-status loss.
-**File-missing docs (snapshot-time `skipped`) stay skipped,
-and stage 1 EXCLUDES docs whose open-pass row is `skipped`** —
-their A chunks can't be re-embedded (file gone), so exclusion is
-the only way stage 1 never scores an A vector. Test (replaces the
-rev-20 test): "`error` doc with chunks, A→B pass completes ⇒
-stage 1 never scores an A vector for that doc."
+`failed`/`attempts=3` (not skipped); **its re-stage always sets
+doc status `pending_reindex` with `outcome='snapshotted'`,
+`attempts=0` — `pre_status` is NOT written back to
+`documents.status` at re-stage time; it is read only when the row
+ends refused or exhausted (rev 22, Opus r20 MAJOR-3: rev 21's
+"re-stage restores `pre_status`" contradicted the rev-19 re-stage
+target — status `error` is selected by NO sweep query
+(`sweep.rs:85`, `:105`) and shows in no failed counter, so the
+pass would hang silently with the grant open and the gate on v1).**
+**File-missing docs (snapshot-time `skipped`) stay skipped.
+Stage-1 exclusion made DURABLE (rev 22, Opus r20 MAJOR-1 —
+rev 21's "stage 1 EXCLUDES docs whose open-pass row is `skipped`"
+held only while the pass was open, but §4/§8(c) keep the gate on
+v1 fallback for the whole open pass, so stage 1 never ran then;
+after completion the stamp refreshes to model B, the predicate
+stops matching, and stage 1 scored the file-missing doc's model-A
+chunks — the exact mixed-vector state rev 21 claimed to prevent;
+a file deleted after the snapshot hits the same state via the
+worker's `NotFound` ⇒ `skipped`):** the pass-docs DDL carries a
+per-doc **`embed_key`**, written by the same writers that write the
+swap tx's pass-docs completion rows (and set at snapshot for
+pre-existing rows, keyed to the pass's target key); stage 1
+requires **`embed_key = current profile model key`** — a doc
+re-embedded (or snapshotted-verified) under model B passes; a doc
+whose last pass row is `skipped`, or which has never completed a
+swap under the current key, FAILS the predicate and is excluded.
+The exclusion therefore outlasts the pass and clears on the doc's
+next successful swap. Test (replaces the rev-20 test): "`error`
+doc with chunks, A→B pass completes ⇒ stage 1 never scores an A
+vector for that doc" — the test queries AFTER completion, not
+during the pass.
 **Snapshot membership PINNED (rev 19, Opus r17 MAJOR-1 — the spec
 never said which docs are snapshotted; if the snapshot reuses
 `list_indexed_user_doc_paths` (`db/queries.rs:38-41`,
@@ -267,12 +317,22 @@ with `quarantined_at` set get the rev-18 treatment immediately
 `pending_reindex` doc with chunks at snapshot time ⇒ completion
 BLOCKED, shown as failed; after re-stage (clears quarantine +
 strikes) ⇒ `model_guard=ok`.
+**Snapshot membership — every doc with ≥1 chunk, `orphaned`
+INCLUDED (rev 22, Opus r20 NIT: `orphaned` is a dead
+`documents.status` — its only writer is the `wiki_pages`
+updater at `src-tauri/src/db/okf_migration.rs:299`; no code
+path sets a `documents` row to `orphaned`, so "error/orphaned
+⇒ staged" is written for completeness with a synthetic
+fixture only. The EXISTS predicate captures it if a fixture
+ever produces one; nothing else in the mechanism treats it
+differently from `error`.)**
 **Pass-docs schema — PINNED DDL (rev 16, Opus r14 M2; made the sole
-signature rev 18, Opus r16 MINOR-5):**
+signature rev 18, Opus r16 MINOR-5; extended rev 22, Opus r20
+MAJOR-1/MINOR-2):**
 `ct_reindex_pass_docs(pass_id, doc_id, embed_key, outcome, attempts,
-last_attempt_at)` with `outcome ∈ {snapshotted, retrying, completed,
-failed, skipped}`. Snapshot rows and outcome rows are THE SAME TABLE
-(a row starts `snapshotted` and transitions). **Completion = every
+last_attempt_at, pre_status)` with `outcome ∈ {snapshotted, retrying,
+completed, failed, skipped}`. Snapshot rows and outcome rows are THE
+SAME TABLE (a row starts `snapshotted` and transitions). **Completion = every
 row of the pass has `outcome ∈ {completed, skipped}`** — a `failed`
 row BLOCKS completion (test: one `failed` row + everything else
 completed ⇒ BLOCKED; the false-ok where a 401'd doc's failure row
@@ -347,7 +407,13 @@ are in scope:
   doc status AND hash for both cases, so a hash-matching rerun cannot
   short-circuit at the unchanged-hash
   check (`:692`). The stage-1 doc set adds NO `documents.status`
-  filter beyond the shared eligibility predicate — facts stay live
+  filter beyond the shared eligibility predicate **plus the per-doc
+  `embed_key` exclusion (rev 22, Opus r20 MAJOR-1/nit: stage 1
+  requires the doc's current pass-docs `embed_key` to equal the
+  active model key, so docs still on model-A vectors — file-missing
+  `skipped`, never-swapped — are excluded; this is the ONE point
+  where stage 1 intentionally differs from `gated_entries`, which
+  has no vector-generation guarantee to enforce)** — facts stay live
   and gate-eligible regardless of their source doc's index status
   (a doc in `error` still has valid chunks until its next swap).
   **Swap race (rev 5, Opus r3 m5):** because the existing-chunk-hash
@@ -657,13 +723,28 @@ are in scope:
       a failed row it flips the marker to non-terminal `retrying` in
       the SAME connection BEFORE `try_send` — only `completed`,
       `failed`, and `skipped` release claims, and a `retrying` row is
-      claim-protected, so no double dispatch. `list_sweepable_pending`
-      (ONLY there) joins pass-docs and filters
-      `outcome='failed' AND attempts < 3 AND last_attempt_at + backoff
-      <= unixepoch()` — backoff and the 3-retry cap are enforced by
-      the query itself; `sweepable_path_set` applies the same filter,
-      so exhausted rows leave the sweepable set (their claims drop and
-      they are never re-dispatched). **The exhausted-flip SKIPS
+      claim-protected, so no double dispatch. `list_sweepable_pending` (ONLY
+there) joins pass-docs and filters
+`outcome='failed' AND attempts < 3 AND last_attempt_at + backoff
+<= unixepoch()` — backoff and the 3-retry cap are enforced by
+the query itself. **Claim expiry is split from dispatch (rev 22,
+Opus r20 MAJOR-2 — `sweepable_path_set` previously "applied the
+same filter", so a row the moment it went `retrying`/attempts=3
+left the sweepable set; `retain_sweepable` (`sweep.rs:126`) then
+dropped its claim while attempt 3 was still in flight, and the
+rev-21 claims-filtered flip caught the row one tick later — any
+attempt-3 embed slower than ~60–120 s still got a false failure,
+the r19 scenario delayed by one tick; and if the user re-staged
+on the false "N failed — retry", the doc was dispatched again
+while attempt 3 ran: a double embed and two racing swaps):**
+`sweepable_path_set` (the claim-expiry set) keeps `retrying`
+rows REGARDLESS of `attempts` — only
+`completed`/`failed`/`skipped` release a claim. The dispatch
+filter (attempts-capped) and the claim-expiry filter are now
+stated as two different predicates; the exhausted-flip remains
+the only path that turns a claimed in-flight row `failed`. Test
+(replaces the rev-21 flip test): an attempt-3 embed spanning
+three sweep ticks is never flipped and never double-dispatched. **The exhausted-flip SKIPS
       in-flight rows (rev 21, Opus r19 MAJOR-2 — rev 20's UPDATE ran
       at every sweep start, but a row is `retrying`/attempts=3 from
       the moment attempt 3 is dispatched; any embed slower than the
@@ -731,7 +812,12 @@ are in scope:
       15, Opus r13 m1 — staging them would leave a permanent
       `pending_reindex` row whose `fs::read` fails at
       `pipeline/mod.rs:687` before any status write, re-sent on every
-      restart).
+      restart). Their stage-1 exclusion is carried by `embed_key`
+      (rev 22, Opus r20 MAJOR-1), not by this row's `skipped`
+      outcome — a `skipped` row never transitions, so the outcome
+      alone would freeze the exclusion until the pass-docs rows are
+      purged, and would never have applied had stage 1 run
+      post-completion.
     Tests: CLI-only, one 401 mid-pass, re-run ⇒ `model_guard=ok`
     (r12 M1's scenario); GUI pass ⇒ exactly ONE embed call per doc
     (r12 M2); worker respawn mid-GUI-pass ⇒ completes; missing file
@@ -834,10 +920,16 @@ are in scope:
   `Ok(())` (so the worker at `pipeline/mod.rs:233-255` skips
   `generate_summary` and the linkers — an LLM call plus re-linking on a
   doc that didn't change) and writes the doc's status back by rule:
-  **pre-job status `pending_reindex` maps to `indexed`** (the staging
+  **a refused doc with an open-pass row restores from the row's
+  `pre_status` (rev 22, Opus r20 MINOR-3 — the old blanket
+  "`pending_reindex` maps to `indexed`" was safe only when staging
+  came from `indexed`; rev 21 stages `error`/`orphaned` docs
+  `pending_reindex` too); a refused doc with NO open-pass row and
+  pre-job status `pending_reindex` maps to `indexed`** (the staging
   guard `WHERE path = ?1 AND status = 'indexed'` at
   `src-tauri/src/lib.rs:2815-2821` proves the pre-staging status was
-  `indexed`), **any other pre-job status is restored as it was** (never
+  `indexed` — that staging path only ever fires on `indexed` rows),
+  **any other pre-job status is restored as it was** (never
   blindly `indexed` — that would overwrite a prior `error`). One stderr
   stderr line; NOT counted as a strike; never quarantined. This kills the
   re-sweep loop: the row no longer reads `pending_reindex`, so
@@ -866,8 +958,12 @@ are in scope:
   list — no leaks (the r8 M1-M2 criticism, now fully answered). The
   filter is applied in BOTH `list_sweepable_pending` and
   `sweepable_path_set` (claims must expire in step). Status handling
-  on refusal: a refused `pending_reindex` maps to `indexed` (staging
-  guard proves pre-staging state), ANY other status restores as it
+  on refusal: open-pass row ⇒ restore from its `pre_status`
+  (rev 22, Opus r20 MINOR-3 — the staging guard only proves
+  pre-staging state for NON-pass staging; pass-staged `error`/
+  `orphaned` docs must come back as `error`/`orphaned`); no row +
+  `pending_reindex` ⇒ `indexed` (staging guard proves pre-staging
+  state), ANY other status restores as it
   was (never blindly `indexed` — that would hide error/orphaned
   state, per r7 M1's queue.rs/connection.rs/okf_migration writers).
   No loop forms within a process even without the record
