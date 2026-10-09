@@ -1,14 +1,14 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 13 — Opus spec-tier r11 REQUEST CHANGES resolved:
-M1 lost-job recovery (all snapshotted rows pending_reindex at snapshot
-time; file-missing recorded as skipped pass-docs rows — pass completes
-through worker respawn/superseded/missing-file); m1 mark_document_
-indexed gains indexed_hash param (documents.hash race inherited
-otherwise); m2 --model-swap key must equal profile key at grant time +
-per-swap embed-key check; m3 async verification off the pipeline
-channel, Ok(usize) meaning kept, visible refusal UI state; n1
-superseded-job test named for sent and deferred jobs)
+**Date:** 2026-10-09 (rev 14 — Opus spec-tier r12 REQUEST CHANGES resolved:
+M1 CLI resume (bulk_reindex --model-swap re-run iterates the pass-docs
+snapshot, resumes an open pass, evaluates completion — sweep never
+needed on CLI); M2 sweep is the ONLY dispatcher for GUI model-swap
+passes (stage-only, no try_send — no double embed spend); m1
+guard-completion tests scoped to pending_reindex + no-sweep-tick;
+m2 writers iterate the snapshot table; m3 variant trigger (force AND
+stamp-model != profile) + Ok(0); m4 pending count includes
+pending_reindex)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -545,23 +545,38 @@ are in scope:
     `(pass_id, target_key)` from `llm_wiki_meta` — with no `pass_id`
     on `PipelineJob`, this DB read is how a pass-docs row gets
     written; stated explicitly. **Lost-job recovery (rev 13, Opus r11
-    M1 — without it one lost job hangs the pass forever: sent jobs
-    stay `indexed`, a worker respawn (`pipeline/mod.rs:806-809`)
-    drops everything still queued, superseded jobs are silently
-    dropped, and the sweep only re-sends `pending`/`pending_reindex`;
-    the evaluator then has nothing to retry and the grant stays open
-    — the r12 outcome, resurrected):** the grant writers mark EVERY
-    snapshotted row `pending_reindex` inside the snapshot
-    transaction (not just channel-deferred ones) — the existing
-    sweep then re-sends any lost job as a forced rechunk (the swap
-    transaction moves the row back to `indexed` as it completes).
-    File-missing docs are recorded as skipped AT SNAPSHOT TIME (a
-    pass-docs row with a `skipped` marker — the GUI paths' silent
-    CWD-relative drop becomes a recorded skip), so
-    `evaluate_pass_completion(conn)` decides from the database alone.
-    Tests: worker respawn mid-pass ⇒ pass still completes ⇒
-    `model_guard=ok`; missing file in a GUI pass ⇒ skipped-recorded ⇒
-    `model_guard=ok`.
+    M1; redesigned rev 14, Opus r12 M1-M2 — rev 13's
+    "mark-every-row-pending_reindex" needed the GUI sweep, which
+    doesn't exist on the CLI-only deployment (the sweep runs only
+    inside the Tauri watchdog, `watchdog/mod.rs:452-482`), and made
+    the sweep double-dispatch GUI passes (sweep claims cover only
+    sweep-sent paths, `sweep.rs:126-142`; forced passes re-embed ALL
+    chunks, so a second dispatch = double embed spend)):**
+    - **GUI paths (`run_wiki_reembed`, `queue_full_reindex` model
+      swap):** stage every snapshotted row `pending_reindex` and DO
+      NOT `try_send` — the sweep is the ONLY dispatcher for a model-
+      swap pass (no double dispatch, no claims interplay). UI counts
+      include `pending_reindex` in pending (or report pass progress
+      from pass-docs), so the counts don't read ~0/0 mid-pass (r12
+      m4).
+    - **CLI path (`bulk_reindex --model-swap`):** synchronous — it
+      cannot lose jobs, so it does NOT pre-stage. Its work list
+      iterates the pass-docs snapshot table, never
+      `list_indexed_user_doc_paths` (which filters
+      `status='indexed'` and would go blind mid-pass — `queries.rs:
+      38-41`; writers iterate the snapshot, never re-list by status,
+      r12 m2). A re-run with the same key RESUMES the open pass:
+      iterates snapshot rows lacking a completed row under
+      `target_key`, prints how many remain, runs
+      `evaluate_pass_completion` at the end.
+    - File-missing docs are recorded as skipped AT SNAPSHOT TIME (a
+      pass-docs row with a `skipped` marker), so
+      `evaluate_pass_completion(conn)` decides from the database
+      alone.
+    Tests: CLI-only, one 401 mid-pass, re-run ⇒ `model_guard=ok`
+    (r12 M1's scenario); GUI pass ⇒ exactly ONE embed call per doc
+    (r12 M2); worker respawn mid-GUI-pass ⇒ completes; missing file
+    in a GUI pass ⇒ skipped-recorded ⇒ `model_guard=ok`.
   - chunker current, model stale, NO grant ⇒ **refuse** — EXCEPT the
     sole sanctioned model-swap paths: `bulk_reindex --model-swap` and
     `run_wiki_reembed`, which write the grant first (after scratch
@@ -586,7 +601,14 @@ are in scope:
     runs, and on a failed verification (e.g. a chunker-strategy change —
     `lib.rs:2320-2322` documents force=true for those too) a visible
     "refused: chunker changed — run `ct reindex verify-scratch`" state,
-    not a pending counter that just drops to zero.
+    not a pending counter that just drops to zero. **Variant trigger +
+    return (rev 13, Opus r11 m3; r12 m3):** the model-swap variant runs
+    when `force_rechunk == true` AND the stored stamp's model key
+    differs from the profile's current key (a plain chunker change with
+    matching model key is NOT a model swap and fails verification per
+    the chunker rule). For this variant the command's `Ok(usize)`
+    returns `0` (nothing queued yet — verification is async); progress
+    is shown through the status line and pass-docs progress.
   - chunker stale or missing (any model state) ⇒ **refuse** (the
     bootstrap/override is `ct reindex verify-scratch`).
   Zero-chunk docs bypass the whole table (nothing to lose); content
@@ -831,11 +853,13 @@ are in scope:
   pass-docs row under the new key ⇒ BLOCKED** (rev 8, Opus r6 m2 —
   under rev 5's swap-tx upsert an existing-doc superseded return no
   longer leaves `pending`, so the test is written against that
-  observable; a separate new-doc case covers `pending`) — NAMED both
-  ways (rev 13, Opus r11 n1): successfully-sent jobs stay `indexed`;
-  channel-DEFERRED GUI jobs start as `pending_reindex` and stay so —
-  both must end with no pass-docs row under the new key ⇒ BLOCKED;
-  file-missing ⇒ counted in
+  observable; a separate new-doc case covers `pending`) — scoped to
+  model-swap passes (rev 14, Opus r12 m1): under the rev-14 lost-job
+  design every snapshotted row is `pending_reindex` from snapshot
+  time, so these tests assert BLOCKED against `pending_reindex` rows
+  with NO sweep tick run; a paired assertion runs one sweep tick and
+  shows the pass then completes; CLI `bulk_reindex` jobs stay
+  `indexed` (synchronous, no staging). file-missing ⇒ counted in
   `model_guard_skipped_docs`, completion proceeds.
 - Acceptance: paired live calibration on the 150-probe real-traffic set,
   both arms same run, letter numbers as pinned by Kurt; flip-to-default
