@@ -141,12 +141,13 @@ Floors are derived from the paired live calibration; **flip-to-default is
 conditional on the acceptance letter passing in the same paired run**
 (live `model_guard=ok` recorded).
 
-**Acceptance letter — [PROPOSED, Kurt pins]:** on the 150-probe paired
-live set (same paired run for both arms):
-
-- two-stage hit@2 ≥ **0.30**, AND
-- two-stage hit@2 ≥ single-stage hit@2 (same run), AND
-- FP ≤ **0.05**.
+**Acceptance letter — PINNED by Kurt (2026-10-09):** on the 150-probe
+paired live set, same paired run for both arms — **two-stage passes if it
+is not worse than single-stage**: hit@2 ≥ single-stage hit@2 AND
+FP ≤ single-stage FP. No absolute performance floor (the earlier
+PROPOSED ≥ 0.30 hit@2 bar is dropped). Passing flips the default;
+absolute performance tuning is deferred until the issue backlog is
+cleared (Kurt's call: throughput now, performance later).
 
 ### 8. Destructive-pass safety (pre-existing data-loss paths surfaced by the review ladder; fixed in this PR)
 
@@ -265,12 +266,10 @@ are in scope:
 
 ## Open questions for Kurt
 
-1. **Acceptance letter numbers** — pin or amend the PROPOSED values:
-   two-stage hit@2 ≥ 0.30 AND ≥ single-stage in the same paired run,
-   FP ≤ 0.05 (150-probe paired live set).
-2. *(Resolved in session: Opus reset spent on this spec, not a v10
-   re-review — investigation v10 stands as the design of record; spec-tier
-   review catches integration-level issues v10 cannot.)*
+*(None. Acceptance pinned 2026-10-09: pass = not worse than single-stage
+in the same paired run; absolute performance deferred until the issue
+backlog clears. Opus reset spent on this spec, not a v10 re-review —
+investigation v10 stands as the design of record.)*
 
 ## Rulings carried
 
