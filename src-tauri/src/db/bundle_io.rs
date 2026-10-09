@@ -12,26 +12,47 @@ pub fn load_export_entities(
     conn: &Connection,
     entity_ids: Option<&[String]>,
 ) -> Result<Vec<ExportEntity>> {
+    // Task 7 (R2.7.5 / r2-M8): export reads live_entities, so a merged pair
+    // exports as ONE entity — an unpatched export ships each loser with its
+    // facts and the peer re-imports both with source ids, recreating the
+    // duplicates cross-host. The loser rows' facts/tasks/events/edges are
+    // mapped onto the survivor below (a read-side projection, not a
+    // re-point), so nothing is dropped either.
     let mut stmt = conn.prepare(
-        "SELECT id, name, summary FROM curated_entities
+        "SELECT id, name, summary FROM live_entities
          WHERE deleted_at IS NULL ORDER BY name COLLATE NOCASE, id",
     )?;
     let rows: Vec<(String, String, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
+    // An explicit selection may name a merged-away LOSER (a stale id from
+    // the GUI or an MCP caller): resolve it to the survivor HTTP-style
+    // (R2.7.5) — the loser has no live_entities row, so matching the raw id
+    // would silently export nothing for it.
+    let wanted: Option<std::collections::HashSet<String>> = entity_ids
+        .map(|ids| {
+            ids.iter()
+                .map(|id| crate::db::entities::resolve_entity_id(conn, id))
+                .collect::<Result<_>>()
+        })
+        .transpose()?;
+
     let mut entities = Vec::new();
     for (id, name, summary) in rows {
-        if let Some(wanted) = entity_ids {
+        if let Some(wanted) = &wanted {
             if !wanted.contains(&id) {
                 continue;
             }
         }
+        // Transitive fact closure (r2-M8): the exported entity carries the
+        // whole cluster's children, re-keyed to the survivor.
+        let cluster = crate::db::entities::cluster_ids(conn, &id)?;
         entities.push(ExportEntity {
-            facts: load_facts(conn, &id)?,
-            tasks: load_tasks(conn, &id)?,
-            edges: load_edges(conn, &id)?,
-            events: load_events(conn, &id)?,
+            facts: load_facts(conn, &id, &cluster)?,
+            tasks: load_tasks(conn, &id, &cluster)?,
+            edges: load_edges(conn, &id, &cluster)?,
+            events: load_events(conn, &id, &cluster)?,
             summary: if summary.trim().is_empty() {
                 None
             } else {
@@ -41,21 +62,40 @@ pub fn load_export_entities(
             entity_id: id,
         });
     }
+    // An explicitly requested id that exported NOTHING (unknown, archived,
+    // or merged into an archived survivor) is reported, not silently
+    // dropped (review finding: the caller otherwise ships a valid-looking
+    // empty bundle). Still `Ok` — the pinned unknown-id contract.
+    if let Some(requested) = entity_ids {
+        let exported: std::collections::HashSet<&str> =
+            entities.iter().map(|e| e.entity_id.as_str()).collect();
+        for raw in requested {
+            let resolved = crate::db::entities::resolve_entity_id(conn, raw)?;
+            if !exported.contains(resolved.as_str()) {
+                eprintln!(
+                    "[bundle export] requested entity {raw} (resolves to {resolved}) has no \
+                     live, non-archived row — nothing exported for it"
+                );
+            }
+        }
+    }
     Ok(entities)
 }
 
-fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<WikiFact>> {
-    let mut stmt = conn.prepare(
+fn load_facts(conn: &Connection, survivor: &str, cluster: &[String]) -> Result<Vec<WikiFact>> {
+    let placeholders = crate::db::entities::in_placeholders(cluster);
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, title, body, tags, confidence, source_type, source_hash, source_ref,
                 created_at, updated_at, last_accessed_at, access_count, deleted_at, okf_type,
                 lifecycle_status, stale_after, generated_by, last_verified_at, last_verified_by,
                 okf_sources, okf_verified, okf_usage_window
-         FROM llm_wiki_entries WHERE entity_id = ?1 ORDER BY created_at, id",
-    )?;
-    let rows = stmt.query_map([entity_id], |r| {
+         FROM llm_wiki_entries WHERE entity_id IN ({placeholders}) ORDER BY created_at, id"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
         Ok(WikiFact {
             id: r.get(0)?,
-            entity_id: entity_id.to_string(),
+            // r2-M8: a loser's fact is exported UNDER the survivor id.
+            entity_id: survivor.to_string(),
             title: r.get(1)?,
             body: r.get(2)?,
             tags: serde_json::from_str::<Vec<String>>(&r.get::<_, String>(3)?).unwrap_or_default(),
@@ -91,19 +131,20 @@ fn load_facts(conn: &Connection, entity_id: &str) -> Result<Vec<WikiFact>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<WikiTask>> {
-    let mut stmt = conn.prepare(
+fn load_tasks(conn: &Connection, survivor: &str, cluster: &[String]) -> Result<Vec<WikiTask>> {
+    let placeholders = crate::db::entities::in_placeholders(cluster);
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, description, status, priority, created_at, updated_at,
                 resolved_at, deleted_at, okf_type,
                 lifecycle_status, stale_after, generated_by,
                 last_verified_at, last_verified_by,
                 okf_sources, okf_verified, okf_usage_window
-         FROM llm_wiki_tasks WHERE entity_id = ?1 ORDER BY created_at, id",
-    )?;
-    let rows = stmt.query_map([entity_id], |r| {
+         FROM llm_wiki_tasks WHERE entity_id IN ({placeholders}) ORDER BY created_at, id"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
         Ok(WikiTask {
             id: r.get(0)?,
-            entity_id: entity_id.to_string(),
+            entity_id: survivor.to_string(),
             description: r.get(1)?,
             status: r.get(2)?,
             priority: r.get(3)?,
@@ -125,17 +166,24 @@ fn load_tasks(conn: &Connection, entity_id: &str) -> Result<Vec<WikiTask>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn load_edges(conn: &Connection, entity_id: &str) -> Result<Vec<(String, String, String)>> {
+fn load_edges(
+    conn: &Connection,
+    survivor: &str,
+    cluster: &[String],
+) -> Result<Vec<(String, String, String)>> {
     // Read-side manifest filter (issue #158). Bundle export was the second
     // user-visible surface Brain Connections missed: an exported bundle
     // carried the off-manifest edge into another vault. Apply the same gate
     // `wiki_graph::fetch_neighbors` uses on the traversal path.
-    let vocab = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id);
-    let mut stmt = conn.prepare(
+    let vocab = crate::db::commit::resolve_strict_edge_vocabulary(conn, survivor);
+    let placeholders = crate::db::entities::in_placeholders(cluster);
+    let mut stmt = conn.prepare(&format!(
         "SELECT source_id, target_id, edge_type FROM llm_wiki_edges
-         WHERE entity_id = ?1 ORDER BY created_at, id",
-    )?;
-    let rows = stmt.query_map([entity_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+         WHERE entity_id IN ({placeholders}) ORDER BY created_at, id"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })?;
     let mut out = Vec::new();
     for row in rows {
         let (source_id, target_id, edge_type): (String, String, String) = row?;
@@ -144,18 +192,40 @@ fn load_edges(conn: &Connection, entity_id: &str) -> Result<Vec<(String, String,
             None => true,
         };
         if keep {
+            // Fix round 1 (Important 3, r2-M8): ENDPOINTS are re-keyed
+            // through their redirects to the survivor at export time — an
+            // endpoint shipping verbatim as a merged-away loser dangles on
+            // a fresh brain (no such id) and is silently dropped by the
+            // import's dead-endpoint rule. A cycle keeps the ORIGINAL id:
+            // export never silently drops data.
+            let source_id = rekey_endpoint(conn, &source_id)?;
+            let target_id = rekey_endpoint(conn, &target_id)?;
             out.push((source_id, target_id, edge_type));
         }
     }
     Ok(out)
 }
 
-fn load_events(conn: &Connection, entity_id: &str) -> Result<Vec<ExportEvent>> {
-    let mut stmt = conn.prepare(
+/// Map one edge endpoint id through its redirect (if any) to the final id.
+fn rekey_endpoint(conn: &Connection, id: &str) -> Result<String> {
+    Ok(
+        match crate::db::merge_duplicates::resolve_redirect_chain(conn, id)? {
+            crate::db::merge_duplicates::ChainResolution::Survivor(s) => s,
+            crate::db::merge_duplicates::ChainResolution::None => id.to_string(),
+            // Hand-crafted cycle: keep the original id verbatim rather than
+            // guess — the merge report surfaces cycles for hand repair.
+            crate::db::merge_duplicates::ChainResolution::Cycle(_) => id.to_string(),
+        },
+    )
+}
+
+fn load_events(conn: &Connection, _survivor: &str, cluster: &[String]) -> Result<Vec<ExportEvent>> {
+    let placeholders = crate::db::entities::in_placeholders(cluster);
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, event_type, summary, related_entry_id, created_at
-         FROM llm_wiki_events WHERE entity_id = ?1 ORDER BY created_at, id",
-    )?;
-    let rows = stmt.query_map([entity_id], |r| {
+         FROM llm_wiki_events WHERE entity_id IN ({placeholders}) ORDER BY created_at, id"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
         let created_at: i64 = r.get(4)?;
         Ok(ExportEvent {
             event_id: r.get(0)?,
@@ -236,6 +306,24 @@ mod tests {
         seed(&conn);
         let none = load_export_entities(&conn, Some(&["ent_missing".to_string()])).unwrap();
         assert!(none.is_empty());
+    }
+
+    /// An explicit selection naming a merged-away LOSER exports its
+    /// survivor (with the whole cluster's facts), never an empty bundle.
+    #[test]
+    fn selection_naming_a_merged_loser_exports_its_survivor() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+               VALUES ('ent_lose', 'Project X', 'project', '', 100, 100);
+             INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+               VALUES ('ent_lose', 'ent_a', 1);",
+        )
+        .unwrap();
+        let entities = load_export_entities(&conn, Some(&["ent_lose".to_string()])).unwrap();
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].entity_id, "ent_a");
     }
 
     /// Regression test for issue #158 on the bundle-export read path.

@@ -624,6 +624,9 @@ re-scoped and re-specced rather than absorbed.
 - Signature-level conformance validation (§3.5) — follow-up issue.
 - The entity-merge pass for duplicate `ent_*` rows (Tessera×6, CT×4, GLM×4).
   This wave stops duplicates from producing edges; it does not merge them.
+  Follow-up tracking issue (filed 2026-10-07 as the wave-1 implementation
+  tracking item for the ontology node-type gate / heal / merge spec):
+  #273.
 - #175 (clippy backlog / blocking CI) and #125 (TOCTOU in
   `create_parents_no_symlink`). Unrelated to the edge path; each is a
   standalone change needing no spec.

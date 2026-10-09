@@ -241,14 +241,31 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
 // Heal
 // ---------------------------------------------------------------------------
 
-/// `ct heal` body (spec 2026-09-24 §6): run the invalid-source heal core over
-/// the brain DB through the SAME `db::heal::heal_invalid_sources_conn` the GUI
-/// scheduler uses, then print the summary as a single JSON object on stdout.
+/// `ct heal` body (spec 2026-09-24 §6 + ontology spec §2.6): run the
+/// invalid-source heal core over the brain DB through the SAME
+/// `db::heal::heal_invalid_sources_conn` the GUI scheduler uses, then the
+/// ontology heal pass (Task 5), then print ONE JSON object on stdout — a
+/// flattened `HealSummary` plus the `ontology` section. Human-readable
+/// drift/census text goes to STDERR from inside the pass; a stray
+/// `println!` here would break every `ct heal --yes | jq` script.
 /// The write gate lives in the caller (bin/ct.rs), mirroring `Ingest`.
+///
+/// Returns the process exit code: 0 on success (including a waived drift
+/// report), 1 when the ontology section was refused/skipped for a reason
+/// the operator must act on (unconfirmed drift, degraded config, census
+/// fault). Source-heal errors still propagate as `Err`.
 ///
 /// Concurrency: `open_rw` sets a 5s busy timeout, matching every other
 /// concurrent-writer participant (desktop per-event connections, watchdog).
-pub fn heal_run() -> Result<()> {
+pub fn heal_run(confirm_drift: Option<String>, waive_drift: Option<String>) -> Result<i32> {
+    use tauri_app_lib::db::heal_ontology::DriftFlag;
+
+    let flag = match (confirm_drift, waive_drift) {
+        (Some(h), None) => DriftFlag::Confirm(h),
+        (None, Some(h)) => DriftFlag::Waive(h),
+        (None, None) => DriftFlag::None,
+        (Some(_), Some(_)) => bail!("--confirm-drift and --waive-drift are mutually exclusive"),
+    };
     let brain = crate::write::resolve()?;
     let mut conn = crate::write::open_rw(&brain)?;
     // `/fix-pr` PRRT_kwDOSVmXas6lvgUV: `open_rw` is migration-free by design
@@ -276,11 +293,352 @@ pub fn heal_run() -> Result<()> {
             .unwrap_or_else(|| retrieval::resolve_brain_paths().brain_dir)
     };
     let summary = tauri_app_lib::db::heal::heal_invalid_sources_conn(&mut conn, vault)?;
-    // Serialize the struct directly (m2): `HealSummary` derives `Serialize`,
-    // so the stdout contract stays tied to the struct instead of a
-    // hand-built field list that can drift from it.
-    println!("{}", serde_json::to_string(&summary)?);
+    // Ontology pass COMPOSES after the source-heal (plan-p1-M3): the drift
+    // gate and the degraded-config refusal scope to the ONTOLOGY section
+    // only, so source-heal mutations above stand either way. The pass
+    // catches its own faults into `ontology.error` (plan-p8-m1) so the
+    // single JSON object below ALWAYS prints.
+    let ontology = tauri_app_lib::db::heal_ontology::ontology_heal_pass(&mut conn, flag, true);
+    let out = CtHealOutput {
+        summary,
+        ontology: ontology.clone(),
+    };
+    println!("{}", serde_json::to_string(&out)?);
+    let exit = if ontology.error.is_some()
+        || matches!(
+            ontology.skipped_reason.as_deref(),
+            Some("unconfirmed_drift") | Some("degraded_config")
+        ) {
+        1
+    } else {
+        0
+    };
+    Ok(exit)
+}
+
+/// The `ct heal --yes` stdout shape (plan-p8-MAJOR-1): `HealSummary` stays
+/// `Copy` with three `usize` fields (the GUI/scheduler path returns it
+/// directly), so the CLI flattens it here — `evaluated`/`soft_deleted`/
+/// `edges_purged` remain top-level and the ontology section rides along
+/// as `ontology`.
+#[derive(serde::Serialize)]
+pub struct CtHealOutput {
+    #[serde(flatten)]
+    pub summary: tauri_app_lib::db::heal::HealSummary,
+    pub ontology: tauri_app_lib::db::heal_ontology::OntologyHealReport,
+}
+
+// ---------------------------------------------------------------------------
+// Ontology set (spec 2026-10-03 §2.11)
+// ---------------------------------------------------------------------------
+
+/// The `ct ontology set` stdout shape: one JSON object per invocation.
+#[derive(serde::Serialize)]
+pub struct OntologySetOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
+    /// The entity the write landed on (`--entity` resolved through any
+    /// merge redirect to its survivor).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_entity: Option<String>,
+    pub optout_written: bool,
+    pub optout_deleted: bool,
+    pub manifest_row_written: bool,
+    pub fallback_written: bool,
+    pub config_written: bool,
+    /// The §2.11 warning when the brain carries no manifest rows at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// `ct ontology set` body (spec §2.11). Config-side targets (bare `--mode`
+/// → `ingest.ontology_default`; `--dir` → the `ingest.folder_ontology` map)
+/// are edited through config like `folder_tiers`; entity-side targets go
+/// through `db::ontology_set` (D8 opt-out row / r13-MAJOR-2 strict-row
+/// reversal / the `--fallback` §2.4.4 key write).
+///
+/// Degraded-config refusal (r3-M3): the SAME detection the heal pass uses —
+/// a config whose ontology keys were dropped at load refuses the whole
+/// command (writing into a half-loaded config could persist the loss).
+///
+/// Every check that can refuse (`--dir` shape, `--fallback` target row and
+/// declared type, `--entity` existence) runs BEFORE the first write, so a
+/// refusal never leaves a partial, unreported change behind.
+pub fn ontology_set_run(
+    mode: Option<&str>,
+    entity: Option<&str>,
+    dir: Option<&str>,
+    fallback: Option<&str>,
+) -> Result<i32> {
+    use tauri_app_lib::config::OntologyMode;
+    use tauri_app_lib::db::ontology_set;
+
+    let mode = match mode {
+        None => None,
+        Some("off") => Some(OntologyMode::Off),
+        Some("strict") => Some(OntologyMode::Strict),
+        Some(other) => bail!("--mode must be `off` or `strict`, got {other:?}"),
+    };
+    if mode.is_none() && fallback.is_none() {
+        bail!("nothing to set — pass --mode, --fallback, or both");
+    }
+    if entity.is_some() && dir.is_some() {
+        bail!("--entity and --dir are mutually exclusive — one target per invocation (§2.11)");
+    }
+    if dir.is_some() && mode.is_none() {
+        bail!("--dir sets a folder's mode — pass --mode with it");
+    }
+    if entity.is_some() && mode == Some(OntologyMode::Off) && fallback.is_some() {
+        bail!(
+            "--fallback has no effect on an opted-out entity (`--mode off` skips the \
+             gate entirely) — nothing was written"
+        );
+    }
+    let dir_key = dir.map(validated_folder_key).transpose()?;
+
+    let paths = retrieval::resolve_brain_paths();
+    if !paths.db_path.exists() {
+        bail!(
+            "brain.db not found at {} — run ingest first",
+            paths.db_path.display()
+        );
+    }
+    // Degraded-config refusal (r3-M3), detected exactly as the heal pass
+    // detects it (same policy loader, same degraded-state predicate) — PLUS
+    // the tie half of the documented refuse predicate
+    // (`ontology_degraded_or_tied`): a `folder_ontology` map with two keys
+    // normalizing to the same prefix is ambiguous, and writing a THIRD key
+    // through it would persist a config the heal pass refuses to interpret.
+    let policy = tauri_app_lib::config::ingest_policy_for_db(paths.db_path.to_str());
+    let ties = tauri_app_lib::config::ontology_ties(&policy.tiers);
+    if policy.ontology_degraded_state().is_degraded() || !ties.is_empty() {
+        let detail = if policy.ontology_degraded_state().is_degraded() {
+            "the brain config loaded DEGRADED (dropped ontology keys)".to_string()
+        } else {
+            format!(
+                "folder_ontology has ambiguous (same-normalized-key) entries: {}",
+                ties.iter()
+                    .map(|(k, _)| k.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        eprintln!(
+            "refusing: {detail} — fix the config before running \
+             `ct ontology set` (r3-M3 / ontology_degraded_or_tied)"
+        );
+        return Ok(1);
+    }
+
+    let brain = crate::write::resolve()?;
+    let mut conn = crate::write::open_rw(&brain)?;
+    // Same migration-free-open caveat as heal_run: this is a one-shot CLI
+    // entry point that may be the first thing to open a bumped schema.
+    tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
+
+    let mut out = OntologySetOutput {
+        mode: mode.map(mode_str),
+        entity: entity.map(str::to_string),
+        dir: dir_key.clone(),
+        fallback: fallback.map(str::to_string),
+        resolved_entity: None,
+        optout_written: false,
+        optout_deleted: false,
+        manifest_row_written: false,
+        fallback_written: false,
+        config_written: false,
+        warning: None,
+    };
+
+    // §2.11: warn when operating on a brain with no manifest rows at all
+    // (no `tier_fact` row → SKIP for both edges and nodes; the ensure has
+    // not run yet).
+    if ontology_set::manifest_row_count(&conn)? == 0 {
+        let warning = "this brain has NO manifest rows — the gate SKIPs until \
+             the wiki engine seeds `tier_fact` (open the app once; CT cannot \
+             create it, §1.6); the write below is recorded but gates nothing yet"
+            .to_string();
+        eprintln!("warning: {warning}");
+        out.warning = Some(warning);
+    }
+
+    // Pre-write validation. `--entity X --mode strict --fallback F` is
+    // validated inside its own single transaction (the row it writes is the
+    // fallback's target); every other `--fallback` target must already
+    // exist and declare the type.
+    let entity_target = entity
+        .map(|id| ontology_set::resolve_target_entity(&conn, id))
+        .transpose()?;
+    let separate_fallback = fallback.filter(|_| !(entity.is_some() && mode.is_some()));
+    let fallback_target = entity_target
+        .clone()
+        .unwrap_or_else(|| ontology_set::TIER_FACT.to_string());
+    if let Some(fb) = separate_fallback {
+        ontology_set::validate_fallback(&conn, &fallback_target, fb)?;
+    }
+
+    match (entity, mode) {
+        (Some(id), Some(mode)) => {
+            let outcome = ontology_set::set_entity_mode(&mut conn, id, mode, fallback)?;
+            out.resolved_entity = Some(outcome.entity_id);
+            out.optout_written = outcome.optout_written;
+            out.optout_deleted = outcome.optout_deleted;
+            out.manifest_row_written = outcome.manifest_row_written;
+            out.fallback_written = fallback.is_some();
+        }
+        (Some(_), None) => out.resolved_entity = entity_target,
+        (None, Some(mode)) => {
+            // Bare `--mode` → host-wide default in config (explicitly NOT a
+            // manifest row); `--dir` → the folder map.
+            write_config_mode(&paths, dir_key.as_deref(), mode)?;
+            out.config_written = true;
+        }
+        (None, None) => {}
+    }
+    if let Some(fb) = separate_fallback {
+        ontology_set::write_fallback(&conn, &fallback_target, fb)?;
+        out.fallback_written = true;
+    }
+
+    println!("{}", serde_json::to_string(&out)?);
+    Ok(0)
+}
+
+fn mode_str(mode: tauri_app_lib::config::OntologyMode) -> String {
+    use tauri_app_lib::config::OntologyMode;
+    match mode {
+        OntologyMode::Off => "off".to_string(),
+        OntologyMode::Strict => "strict".to_string(),
+    }
+}
+
+/// Validate and normalize a `--dir` prefix into the `folder_ontology` key
+/// that will be written. An absolute path or an unmatchable key (empty,
+/// leading `./`, `.`/`..` segments) would be written INERT — the resolver
+/// skips it, so the folder the user meant to mark stays gated (the D8
+/// harm) while the command reports success.
+fn validated_folder_key(prefix: &str) -> Result<String> {
+    use tauri_app_lib::config::{key_is_matchable, normalize_key};
+    let looks_absolute = std::path::Path::new(prefix).is_absolute()
+        || prefix.starts_with('/')
+        || prefix.starts_with('\\')
+        || prefix.as_bytes().get(1) == Some(&b':');
+    if looks_absolute || !key_is_matchable(prefix) {
+        bail!(
+            "--dir {prefix:?} is not a vault-relative folder prefix (e.g. `ops` or \
+             `notes/work`; no leading `/`, `./`, `.` or `..` segments) — nothing was written"
+        );
+    }
+    Ok(normalize_key(prefix))
+}
+
+/// Write the config-side mode target: `None` → `ingest.ontology_default`,
+/// `Some(key)` → the `ingest.folder_ontology` map (spec §2.11). `key` is
+/// already normalized ([`validated_folder_key`]); any existing key that
+/// normalizes to the same prefix is REPLACED, never left beside it — two
+/// such keys are a tie the heal pass and this command refuse to interpret.
+///
+/// Loads with [`BrainConfig::load`] (not `load_lenient`): its fallback keeps
+/// generation/embedding/privacy blocks this binary cannot parse verbatim
+/// through the write, where `load_lenient` would reset them to defaults.
+fn write_config_mode(
+    paths: &retrieval::BrainPaths,
+    key: Option<&str>,
+    mode: tauri_app_lib::config::OntologyMode,
+) -> Result<()> {
+    use tauri_app_lib::config::{normalize_key, BrainConfig};
+    let mut cfg = if paths.config_path.exists() {
+        BrainConfig::load(paths).map_err(|e| {
+            anyhow::anyhow!("load brain config {}: {e}", paths.config_path.display())
+        })?
+    } else {
+        BrainConfig::default()
+    };
+    match key {
+        Some(key) => {
+            cfg.ingest
+                .folder_ontology
+                .retain(|existing, _| normalize_key(existing) != key);
+            cfg.ingest.folder_ontology.insert(key.to_string(), mode);
+        }
+        None => cfg.ingest.ontology_default = Some(mode),
+    }
+    cfg.write(paths)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Wiki merge-duplicates (spec 2026-10-03 §2.7 / R2.7.1)
+// ---------------------------------------------------------------------------
+
+/// `ct wiki merge-duplicates` body (spec R2.7.1: REPORT first, destructive
+/// pass behind `--yes`). The one-time merge command over the Task 6 library
+/// pass — the same `--confirm-drift`/`--waive-drift` FINAL-RULE flags as
+/// `ct heal`; the merge NEVER writes the watermark (heal is the sole
+/// writer). Prints ONE JSON report object on stdout; human-readable notes
+/// come from inside the library pass on STDERR.
+///
+/// Exit code: 0 on a clean destructive pass, 1 when the pass was refused
+/// (`alias_remap_not_run`, unconfirmed drift, mismatched hash) or faulted —
+/// the report arm (no `--yes`) also exits 1 after printing the read-only
+/// report, mirroring `ct heal`'s refusal contract.
+pub fn merge_duplicates_run(
+    confirm_drift: Option<String>,
+    waive_drift: Option<String>,
+    yes: bool,
+) -> Result<i32> {
+    use tauri_app_lib::db::heal_ontology::DriftFlag;
+
+    let flag = match (confirm_drift, waive_drift) {
+        (Some(h), None) => DriftFlag::Confirm(h),
+        (None, Some(h)) => DriftFlag::Waive(h),
+        (None, None) => DriftFlag::None,
+        (Some(_), Some(_)) => bail!("--confirm-drift and --waive-drift are mutually exclusive"),
+    };
+    let brain = crate::write::resolve()?;
+    if !brain.paths.db_path.exists() {
+        bail!(
+            "brain.db not found at {} — run ingest first",
+            brain.paths.db_path.display()
+        );
+    }
+    // The report arm (no `--yes`) writes NOTHING — not even a migration —
+    // so it opens read-only like `ct heal` / `ct wiki sweep`'s refusal arms
+    // (an old schema reports "schema pending (read-only)"). Only the apply
+    // arm opens read-write and brings the schema current.
+    let mut conn = if yes {
+        let conn = crate::write::open_rw(&brain)?;
+        tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
+        conn
+    } else {
+        tauri_app_lib::retrieval::open_brain_readonly(&brain.paths.db_path)?
+    };
+    // `apply == false` computes the FULL report (groups, dispositions, drift
+    // echo) and writes nothing — the report arm is the no-`--yes` behavior,
+    // so the operator can read the echoed old hash to feed `--confirm-drift`.
+    let report = tauri_app_lib::db::merge_duplicates::merge_duplicates_pass(&mut conn, flag, yes);
+    println!("{}", serde_json::to_string(&report)?);
+    if !yes {
+        eprintln!(
+            "refusing: `ct wiki merge-duplicates` without --yes is the read-only \
+             report above; pass --yes (after `ct heal --yes` has run the alias \
+             remap, and with --confirm-drift/--waive-drift if drift is echoed) \
+             to apply"
+        );
+        return Ok(1);
+    }
+    let exit = if report.error.is_some() || report.skipped_reason.is_some() {
+        1
+    } else {
+        0
+    };
+    Ok(exit)
 }
 
 // ---------------------------------------------------------------------------

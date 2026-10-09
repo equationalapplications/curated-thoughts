@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@equationalapplications/core-llm-wiki': 7.9.0
+  '@equationalapplications/core-llm-wiki': 7.11.2
   '@equationalapplications/core-okf': 7.9.0
   '@tiptap/core': 3.30.6
   '@tiptap/extension-bold': 3.30.6
@@ -42,14 +42,14 @@ importers:
         specifier: 0.55.0
         version: 0.55.0(@floating-ui/dom@1.8.0)(@types/hast@3.0.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(y-prosemirror@1.3.7(prosemirror-model@1.25.12)(prosemirror-state@1.4.4)(prosemirror-view@1.42.5)(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30))(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
       '@equationalapplications/core-llm-wiki':
-        specifier: 7.9.0
-        version: 7.9.0
+        specifier: 7.11.2
+        version: 7.11.2
       '@equationalapplications/react-llm-wiki':
-        specifier: 7.9.0
-        version: 7.9.0(react@19.3.0)
+        specifier: 7.11.2
+        version: 7.11.2(react@19.3.0)
       '@equationalapplications/schema-org-llm-wiki':
-        specifier: 7.9.0
-        version: 7.9.0
+        specifier: 7.11.2
+        version: 7.11.2
       '@equationalapplications/schema-software-org':
         specifier: 7.9.0
         version: 7.9.0
@@ -284,22 +284,22 @@ packages:
   '@emoji-mart/data@1.2.1':
     resolution: {integrity: sha512-no2pQMWiBy6gpBEiqGeU77/bFejDqUTRY7KX+0+iur13op3bqUsXdnwoZs6Xb1zbv0gAj5VvS1PWoUUckSr5Dw==}
 
-  '@equationalapplications/core-llm-wiki@7.9.0':
-    resolution: {integrity: sha512-BfTLEji4DW8OWfANMA5TiJe5/bg8rdTBcLvfXSw48hgHNcVOQUXrafc5mCzBlfRc5DSzcCMfAz7o0R4Oy9ZgSQ==}
+  '@equationalapplications/core-llm-wiki@7.11.2':
+    resolution: {integrity: sha512-pNCofyKMDL+a/1qo03g0yAcNHOVX9BcS+mBwws+25JpTqyIycUgJpj+975D20I6zNKALvHuei0rzkWlRBkZoWA==}
     engines: {node: '>=20'}
 
   '@equationalapplications/core-okf@7.9.0':
     resolution: {integrity: sha512-7dgYgythxA4yg2Y4cGb11DqYc2SiRA4JyxrAxhYUZSqgWUxxcZco1+w73mBfCtUkvEsEgGTZN5tUCthFgrpsEQ==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/react-llm-wiki@7.9.0':
-    resolution: {integrity: sha512-VGi5sOEUaOcmfBGoRJSMEe3onay5pNdv6apPX8Z6d2tmM8DuXzemvpj3lfjFPb6WzrldyaBWLp/G3TNSZV6Unw==}
+  '@equationalapplications/react-llm-wiki@7.11.2':
+    resolution: {integrity: sha512-GCUiMnBdLeUWx/mdgos9w7TsjBI7bYNTafXbzDj4BBcufXqR5YgLc2JNKqpFVRXw19oHyNsd1n5zjxqbIl9P0g==}
     engines: {node: '>=20'}
     peerDependencies:
       react: '>=17'
 
-  '@equationalapplications/schema-org-llm-wiki@7.9.0':
-    resolution: {integrity: sha512-cY7/3qQ4VLN8Mheuil7hFX2HrEUAGlt0pcVW+CprXZTLJoSCwcObZD/Jph87qyxwUpqF1dm/MWNfuS4PBNx9ng==}
+  '@equationalapplications/schema-org-llm-wiki@7.11.2':
+    resolution: {integrity: sha512-wmuA628Z4gMgjifeHmcgj+7ebqlcisvi1TYCd4t1SJrxQEZXyhof54QOTjcg49gmKV4gBPJ8rAKyCr9huBfnoQ==}
     engines: {node: '>=20'}
 
   '@equationalapplications/schema-software-org@7.9.0':
@@ -3547,25 +3547,25 @@ snapshots:
 
   '@emoji-mart/data@1.2.1': {}
 
-  '@equationalapplications/core-llm-wiki@7.9.0':
+  '@equationalapplications/core-llm-wiki@7.11.2':
     dependencies:
       '@equationalapplications/core-okf': 7.9.0
       minisearch: 7.2.0
 
   '@equationalapplications/core-okf@7.9.0': {}
 
-  '@equationalapplications/react-llm-wiki@7.9.0(react@19.3.0)':
+  '@equationalapplications/react-llm-wiki@7.11.2(react@19.3.0)':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.9.0
+      '@equationalapplications/core-llm-wiki': 7.11.2
       react: 19.3.0
 
-  '@equationalapplications/schema-org-llm-wiki@7.9.0':
+  '@equationalapplications/schema-org-llm-wiki@7.11.2':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.9.0
+      '@equationalapplications/core-llm-wiki': 7.11.2
 
   '@equationalapplications/schema-software-org@7.9.0':
     dependencies:
-      '@equationalapplications/core-llm-wiki': 7.9.0
+      '@equationalapplications/core-llm-wiki': 7.11.2
 
   '@eslint-community/eslint-utils@4.10.1(eslint@9.39.4)':
     dependencies:

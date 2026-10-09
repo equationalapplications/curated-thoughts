@@ -9,7 +9,7 @@
 //!   queries (read path) and document passages (write path, via
 //!   `doc_text_for_entry`) — the both-sides "cell E" the spec adopts.
 //!
-//! Scheme is stamped per row (`llm_wiki_entries.embed_scheme`, V26) and the
+//! Scheme is stamped per row (`llm_wiki_entries.embed_scheme`, V27) and the
 //! active read scheme in `llm_wiki_meta.wisdom_active_scheme`. Reads are
 //! fail-closed: a row written under one scheme is never scored against a
 //! query embedded under another (Task 2/3 wire the filters; this module owns
@@ -25,7 +25,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub const QUERY_INSTRUCTION_PREFIX: &str =
     "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:";
 
-/// Scheme value for verbatim (no instruction) embeddings. The V26 default on
+/// Scheme value for verbatim (no instruction) embeddings. The V27 default on
 /// `llm_wiki_entries.embed_scheme` and the seeded `wisdom_active_scheme`.
 pub const SCHEME_RAW: &str = "raw";
 
@@ -98,7 +98,7 @@ impl Scheme {
 }
 
 /// Resolve the active read scheme from `llm_wiki_meta`. A missing key is the
-/// pre-V26 state and defaults to `raw`; a present-but-unknown value is a hard
+/// pre-V27 state and defaults to `raw`; a present-but-unknown value is a hard
 /// error, never a guess.
 pub fn read_scheme(conn: &Connection) -> Result<Scheme> {
     let value: Option<String> = conn
@@ -136,10 +136,10 @@ pub fn query_text_for_scheme(truncated_query: &str, scheme: Scheme) -> String {
 }
 
 /// Read-scheme resolution for generic readers (MCP `wiki_search` /
-/// `wiki_context`): on a pre-V26 table shape (no `embed_scheme` column on
+/// `wiki_context`): on a pre-V27 table shape (no `embed_scheme` column on
 /// `llm_wiki_entries`) there is no scheme dimension at all — degrade to raw
 /// instead of probing `llm_wiki_meta`, which may not exist either. On the
-/// V26+ shape this is exactly `read_scheme` (fail-closed on unknown values).
+/// V27+ shape this is exactly `read_scheme` (fail-closed on unknown values).
 pub fn read_scheme_for_reader(conn: &Connection) -> Result<Scheme> {
     let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
     if cols.iter().any(|c| c == "embed_scheme") {
@@ -506,7 +506,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(value, "raw");
-        // V26's column and meta seed are ungated (they apply on every open,
+        // V27's column and meta seed are ungated (they apply on every open,
         // rooted or not). The STAMP is gated on V22, which defers on a
         // rootless test open — so a fresh in-memory brain caps at 21.
         let version: i64 = conn
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn reader_scheme_degrades_to_raw_on_pre_v26_shape() {
-        // A bare connection with a pre-V26 `llm_wiki_entries` (no
+        // A bare connection with a pre-V27 `llm_wiki_entries` (no
         // `embed_scheme` column) and no meta table: a generic reader must
         // degrade to raw, not fail on the missing migration artifacts.
         let conn = Connection::open_in_memory().unwrap();
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn reader_scheme_fail_closed_on_v26_shape_with_unknown_value() {
-        // V26+ shape: `read_scheme_for_reader` is exactly `read_scheme` —
+        // V27+ shape: `read_scheme_for_reader` is exactly `read_scheme` —
         // an unknown meta value is a hard error, never a raw fallback.
         let conn = open_in_memory().unwrap();
         conn.execute(

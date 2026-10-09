@@ -442,8 +442,7 @@ fn name_match_entities(
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let mut stmt =
-        conn.prepare("SELECT id, name FROM curated_entities WHERE deleted_at IS NULL")?;
+    let mut stmt = conn.prepare("SELECT id, name FROM live_entities WHERE deleted_at IS NULL")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let haystack = format!("{chunk_text}\n{stem}").to_lowercase();
     let mut matched = Vec::new();
@@ -474,7 +473,7 @@ fn load_candidate_entities(
 
     if let Some(query) = mean_embedding {
         let mut stmt = conn.prepare(
-            "SELECT id, summary_embedding FROM curated_entities
+            "SELECT id, summary_embedding FROM live_entities
              WHERE deleted_at IS NULL AND summary_embedding IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -500,7 +499,7 @@ fn load_candidate_entities(
     let mut out = Vec::new();
     for (entity_id, _) in ranked {
         let row = conn.query_row(
-            "SELECT name, entity_type, summary FROM curated_entities
+            "SELECT name, entity_type, summary FROM live_entities
              WHERE id = ?1 AND deleted_at IS NULL",
             [&entity_id],
             |r| {
@@ -513,13 +512,18 @@ fn load_candidate_entities(
         );
         if let Ok((name, entity_type, summary)) = row {
             let snippet: String = summary.chars().take(200).collect();
-            let mut fact_stmt = conn.prepare(
+            // Transitive fact closure (r13-m3): the candidate's facts cover
+            // the survivor ∪ its redirected losers, so recall on a survivor
+            // returns the losers' facts too.
+            let cluster = crate::db::entities::cluster_ids(conn, &entity_id)?;
+            let placeholders = crate::db::entities::in_placeholders(&cluster);
+            let mut fact_stmt = conn.prepare(&format!(
                 "SELECT id, body FROM llm_wiki_entries
-                 WHERE entity_id = ?1 AND deleted_at IS NULL
-                 ORDER BY updated_at DESC LIMIT ?2",
-            )?;
+                 WHERE entity_id IN ({placeholders}) AND deleted_at IS NULL
+                 ORDER BY updated_at DESC LIMIT {MAX_FACTS_PER_CANDIDATE}"
+            ))?;
             let facts = fact_stmt
-                .query_map(params![entity_id, MAX_FACTS_PER_CANDIDATE], |r| {
+                .query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
                     Ok(CandidateFact {
                         id: r.get(0)?,
                         body: r.get(1)?,
@@ -622,10 +626,17 @@ const SYNTHESIS_SYSTEM_PROMPT_BASE_SYNTHESIZE: &str =
 /// The clause is appended verbatim to whichever mode's base text applies; the
 /// caller decides whether a vocabulary is relevant at all (summarize mode
 /// emits no edges, so it passes `&[]` and an empty map).
+///
+/// `node_vocabulary` (Task 3 / R2.4.1): the closed declared set for NEW
+/// entities. Synthesize mode emits new entities (Summarize mode does NOT),
+/// so Summarize ignores the parameter. For Synthesize mode a non-empty
+/// vocabulary appends a closed-set clause mirroring the edge clause's
+/// pattern: `entity_type` must be one of the listed values verbatim.
 fn build_system_prompt(
     mode: SynthesisMode,
     edge_vocabulary: &[&str],
     edge_vocabulary_by_target: &BTreeMap<String, Vec<String>>,
+    node_vocabulary: &[&str],
 ) -> String {
     let mut prompt = String::from(match mode {
         SynthesisMode::Summarize => SYNTHESIS_SYSTEM_PROMPT_BASE_SUMMARIZE,
@@ -640,25 +651,37 @@ fn build_system_prompt(
                 edge_vocabulary.join(", ")
             ));
         }
-        return prompt;
+    } else {
+        prompt.push_str(
+            "\n\nEach candidate entity declares its own edge_type vocabulary. \
+             For a proposal targeting existing_id X, use ONLY the edge_type values \
+             listed for X (fall back to the shared list when X has none). \
+             If no listed edge_type fits a relationship, omit the edge entirely \
+             rather than inventing a new type.",
+        );
+        if !edge_vocabulary.is_empty() {
+            prompt.push_str(&format!(
+                "\nShared edge_type values (any target): {}.",
+                edge_vocabulary.join(", ")
+            ));
+        }
+        for (target, types) in edge_vocabulary_by_target {
+            prompt.push_str(&format!(
+                "\nFor {target}: use ONLY these edge_type values, exactly as written: {}.",
+                types.join(", ")
+            ));
+        }
     }
-    prompt.push_str(
-        "\n\nEach candidate entity declares its own edge_type vocabulary. \
-         For a proposal targeting existing_id X, use ONLY the edge_type values \
-         listed for X (fall back to the shared list when X has none). \
-         If no listed edge_type fits a relationship, omit the edge entirely \
-         rather than inventing a new type.",
-    );
-    if !edge_vocabulary.is_empty() {
+    // R2.4.1 closed-set clause for nodes (Task 3): Synthesize mode only —
+    // Summarize mode emits no new entities, so an empty node vocabulary
+    // there would only over-constrain the model.
+    if matches!(mode, SynthesisMode::Synthesize) && !node_vocabulary.is_empty() {
         prompt.push_str(&format!(
-            "\nShared edge_type values (any target): {}.",
-            edge_vocabulary.join(", ")
-        ));
-    }
-    for (target, types) in edge_vocabulary_by_target {
-        prompt.push_str(&format!(
-            "\nFor {target}: use ONLY these edge_type values, exactly as written: {}.",
-            types.join(", ")
+            "\n\nFor any new entity (entity_type on a new-target proposal), use ONLY the \
+             following entity_type values, exactly as written: {}. \
+             If no listed entity_type fits the entity, omit the entity entirely rather \
+             than inventing a new type.",
+            node_vocabulary.join(", ")
         ));
     }
     prompt
@@ -707,6 +730,63 @@ fn resolve_entity_edge_vocabulary(conn: &Connection, entity_id: &str) -> Vec<Str
                 eprintln!(
                     "[synthesis] ontology read failed for {lookup}: {e:#}; \
                      edge vocabulary is not constrained for this target"
+                );
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Resolve the strict NODE vocabulary for one entity id (Task 3, R2.4.1).
+///
+/// Mirrors [`resolve_entity_edge_vocabulary`] — entity id first, then
+/// `tier_fact` fallback. Used to populate the closed-set clause in
+/// `build_system_prompt` for Synthesize mode (new entities have no id
+/// pre-commit, so the prompt always rides the `tier_fact` partition's
+/// declared `node_types`).
+///
+/// Strict-only — same caveat as the edge vocabulary. Anything else returns
+/// an empty vector (no clause), preserving today's unconstrained prompt
+/// shape.
+fn resolve_entity_node_vocabulary(conn: &Connection, entity_id: &str) -> Vec<String> {
+    if entity_id.is_empty() {
+        return Vec::new();
+    }
+    for lookup in [entity_id, "tier_fact"] {
+        if lookup.is_empty() {
+            continue;
+        }
+        match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
+            Ok(o) if o.mode == "strict" => {
+                return o
+                    .manifest
+                    .map(|m| {
+                        // The prompt must advertise the manifest's own spelling
+                        // — the same rule the gate uses via
+                        // `NodeVocabulary::canonicalize` / `from_manifest`. A
+                        // casing mismatch between prompt and gate would
+                        // mismatch on the very first hint. `NodeVocabulary`
+                        // owns the normalization rule for NODE types (using
+                        // `EdgeVocabulary::key` here made a second owner that
+                        // could silently diverge).
+                        let mut seen: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        let mut out = Vec::new();
+                        for node in &m.node_types {
+                            let k = crate::db::entity_gate::NodeVocabulary::key(&node.type_name);
+                            if seen.insert(k) {
+                                out.push(node.type_name.trim().to_string());
+                            }
+                        }
+                        out
+                    })
+                    .unwrap_or_default();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "[synthesis] ontology read failed for {lookup}: {e:#}; \
+                     node vocabulary is not constrained for this target"
                 );
             }
         }
@@ -1195,7 +1275,26 @@ pub(crate) fn run_synthesis_with_completer(
         }
     };
     let vocab: Vec<&str> = vocab_owned.iter().map(String::as_str).collect();
-    let system = build_system_prompt(mode, &vocab, &vocab_by_target);
+
+    // R2.4.1 (Task 3): resolve the NODE vocabulary for new entities.
+    // Summarize mode emits no new entities, so the resolved vocabulary
+    // there is empty (the closed-set clause in `build_system_prompt` only
+    // fires for Synthesize mode). New entities have no id pre-commit, so
+    // the resolver falls back to the `tier_fact` partition's manifest —
+    // same pattern the edge vocabulary uses for new targets
+    // (`synthesis.rs:1167-1168`).
+    let node_vocab_owned: Vec<String> = match mode {
+        SynthesisMode::Summarize => Vec::new(),
+        SynthesisMode::Synthesize => resolve_entity_node_vocabulary(
+            conn,
+            source_chunks
+                .first()
+                .map(|c| c.entity_id.as_str())
+                .unwrap_or(""),
+        ),
+    };
+    let node_vocab: Vec<&str> = node_vocab_owned.iter().map(String::as_str).collect();
+    let system = build_system_prompt(mode, &vocab, &vocab_by_target, &node_vocab);
     let user = format!("Document to analyze:\n\n{truncated}");
 
     let raw = match call_llm_with_retry(completer, &system, &user) {
@@ -2058,6 +2157,7 @@ mod tests {
             SynthesisMode::Synthesize,
             &["depends_on", "owned_by"],
             &BTreeMap::new(),
+            &[],
         );
         assert!(
             prompt.contains("depends_on") && prompt.contains("owned_by"),
@@ -2071,7 +2171,7 @@ mod tests {
 
     #[test]
     fn system_prompt_without_vocabulary_is_unchanged_shape() {
-        let prompt = build_system_prompt(SynthesisMode::Synthesize, &[], &BTreeMap::new());
+        let prompt = build_system_prompt(SynthesisMode::Synthesize, &[], &BTreeMap::new(), &[]);
         assert!(
             !prompt.contains("ONLY the following edge_type"),
             "an empty vocabulary must not emit a closed-vocabulary clause"

@@ -114,6 +114,16 @@ jobs:
           CURATED_MCP_INTEGRATION_TESTS: "1"
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/outbox_test
 
+      # plan-p3-M3 (ontology spec Task 8): the tools/ manifest has its own
+      # integration suite (ct_watch_e2e, ct_watch_exit_codes, drift, the new
+      # ct_heal/ct_ontology_set/ct_merge_duplicates/ct_wiki_sweep suites)
+      # that the step above never compiles. Single-threaded like the main
+      # suite — the CLI tests own CURATED_BRAIN_DIR and the watcher tests
+      # own ports/locks. The rust-macos leg keeps its own separate "Tests"
+      # step (src-tauri only) and intentionally gets nothing extra.
+      - name: Tests (tools)
+        run: cargo test --manifest-path tools/Cargo.toml -- --test-threads=1
+
       # #186 acceptance gate (review round 5, finding 6): the test is #[ignore]d
       # for local runs because it shells out to node, so the plain test step
       # above never executes it. Run it explicitly against the pnpm-installed

@@ -33,7 +33,10 @@ impl OntologySelection {
 /// The `ontology` block of config.json.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OntologyConfigBlock {
-    /// `None` = never chosen. Unparseable values load as `None` (lenient).
-    #[serde(default)]
+    /// `None` = never chosen. An unparseable `schema` value (e.g. an unknown
+    /// variant) FAILS the whole-block deserialize — the block stays at its
+    /// default and the load sets `LoadReport.ontology_unparseable`; it does
+    /// NOT silently load as `None` (the old doc comment was wrong, r20-m4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<OntologySelection>,
 }

@@ -80,7 +80,9 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
                     ELSE e.created_at
                 END AS created_at_ms
             FROM llm_wiki_events e
-            LEFT JOIN curated_entities ce ON ce.id = e.entity_id
+            LEFT JOIN live_entities ce
+              ON ce.id = COALESCE((SELECT merged_into FROM entity_redirects r
+                                   WHERE r.entity_id = e.entity_id), e.entity_id)
 
             UNION ALL
 
@@ -96,7 +98,9 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
                 a.client,
                 a.created_at * 1000
             FROM curated_agent_log a
-            LEFT JOIN curated_entities ce ON ce.id = a.entity_id
+            LEFT JOIN live_entities ce
+              ON ce.id = COALESCE((SELECT merged_into FROM entity_redirects r
+                                   WHERE r.entity_id = a.entity_id), a.entity_id)
 
             UNION ALL
 

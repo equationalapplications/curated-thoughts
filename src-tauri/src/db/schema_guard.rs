@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use std::collections::BTreeSet;
 
 /// Pinned `package.json` dependency — keep in sync with `@equationalapplications/core-llm-wiki`.
-pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "7.9.0";
+pub const PINNED_CORE_LLM_WIKI_VERSION: &str = "7.11.2";
 
 struct TableExpectation {
     name: &'static str,
@@ -51,7 +51,7 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             "superseded_by",
             "superseded_at",
             "tier",
-            // V26 (issue #265): per-row embed-scheme stamp, CT-local (not in
+            // V27 (issue #265): per-row embed-scheme stamp, CT-local (not in
             // the upstream package schema).
             "embed_scheme",
         ],

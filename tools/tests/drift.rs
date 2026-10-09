@@ -174,12 +174,18 @@ fn drift_walk_identity_with_ingest() {
     let brain = tempfile::tempdir().unwrap();
     std::fs::write(brain.path().join("config.json"), b"{}\n").unwrap();
 
+    // Ingest stores rows under the CANONICAL root, so seed them there (on
+    // macOS the tempdir is `/var/...` but canonicalizes to `/private/var/...`;
+    // seeding raw paths made the gone row unmatchable — issue #272). The
+    // config's vault_path below stays RAW so the helper's canonicalization
+    // is still exercised.
+    let root = tmp.path().canonicalize().unwrap();
     let c = conn();
-    let a = walked(tmp.path(), "a.md", b"# aaa");
-    let b = walked(tmp.path(), "sub/b.md", b"# bbb");
+    let a = walked(&root, "a.md", b"# aaa");
+    let b = walked(&root, "sub/b.md", b"# bbb");
     seed_doc(&c, &s(&a.virtual_path), &hash_of(b"# aaa"), "user_doc", 1);
     // One row whose file is gone so the report is non-trivial.
-    let gone_path = s(&tmp.path().join("gone.md"));
+    let gone_path = s(&root.join("gone.md"));
     seed_doc(&c, &gone_path, &hash_of(b"# gone"), "user_doc", 1);
 
     // Point the config's vault_path at the temp vault so the helper walks it.
@@ -207,8 +213,7 @@ fn drift_walk_identity_with_ingest() {
     // `!starts_with("/tmp")` assertion was backwards on Linux where /tmp IS
     // canonical).
     assert_eq!(
-        root_from_helper,
-        tmp.path().canonicalize().unwrap(),
+        root_from_helper, root,
         "root must be canonicalized: {root_from_helper:?}"
     );
     assert_eq!(drift_code, 3);

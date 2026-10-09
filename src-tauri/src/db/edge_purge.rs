@@ -229,14 +229,35 @@ pub fn purge_dead_edges(conn: &Connection) -> Result<usize> {
 /// Audit semantics: the per-edge "purged" warnings are emitted by THIS
 /// wrapper only AFTER the transaction commits, so every warning describes a
 /// deletion that actually survived. The transaction-scoped helper never logs.
+///
+/// E2 resolution (controller ruling 2026-10-08, spec r24): rows the WRITE
+/// gate would produce verbatim today (both endpoints off / no-manifest, a
+/// rung-1a opt-out, or a strict manifest declaring no edge types) are
+/// SPARED, not deleted — "off means off" (D8). They stay hidden by the
+/// anchor-vocabulary read filter but remain recoverable; deletion is not.
+/// The endpoint gate resolution needs the ingest policy (a filesystem
+/// read), so it loads BEFORE the transaction opens (r21 hold-time rule).
 pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str) -> Result<usize> {
+    let policy = crate::config::ingest_policy_for_db(conn.path());
+    let degraded = policy.ontology_degraded_state();
+    let gate = crate::db::entity_gate::GateResolutionContext {
+        ingest: &policy.tiers,
+        degraded: &degraded,
+        schema: policy.ontology_selection,
+        schema_unparseable: policy.ontology_unparseable,
+        vault_root: policy.vault_root.as_deref(),
+    };
+    // ONE probe context for every doomed edge in this entity's partition:
+    // the E2 memo maps key on endpoint ladder ids, so shared endpoints
+    // (the common hub shape) resolve once, not per edge.
+    let mut probe = crate::db::commit::CommitContext::purge_probe();
     let tx = conn.unchecked_transaction()?;
-    let doomed = purge_off_manifest_edges_in_tx(&tx, entity_id)?;
+    let outcome = purge_off_manifest_edges_in_tx(&tx, entity_id, &gate, &mut probe)?;
     tx.commit()?;
-    for (id, edge_type) in &doomed {
+    for (id, edge_type) in &outcome.deleted {
         warn_purged_off_manifest_edge(entity_id, id, edge_type);
     }
-    Ok(doomed.len())
+    Ok(outcome.deleted.len())
 }
 
 /// Transaction-scoped body of [`purge_off_manifest_edges`]: performs the purge
@@ -246,48 +267,75 @@ pub fn purge_off_manifest_edges(conn: &Connection, entity_id: &str) -> Result<us
 /// keep the purge atomic with their own writes. The public wrapper owns the
 /// transaction for everyone else.
 ///
-/// Returns the `(edge_id, edge_type)` pairs deleted, so the wrapper can emit
-/// committed-deletion audit warnings only after `COMMIT`. This helper NEVER
-/// logs: inside a caller-managed transaction a later rollback revives every
-/// deleted row, and a pre-commit warning would claim purges that never
+/// Returns the deletion set and the E2-spared edge ids, so the wrapper can
+/// emit committed-deletion audit warnings only after `COMMIT`. This helper
+/// NEVER logs: inside a caller-managed transaction a later rollback revokes
+/// every deleted row, and a pre-commit warning would claim purges that never
 /// survived (CodeRabbit review, PR #171).
 ///
-/// Count semantics match the wrapper: returns an empty list and deletes
+/// E2 spare (spec r24): an off-manifest row whose endpoints the write gate
+/// would leave ungated today (both off / no-manifest, an opt-out, a strict
+/// manifest with no edge types) is NOT deleted — the write gate's SKIP is a
+/// deliberate output, and destroying it retroactively is the D8 violation.
+/// The check resolves each doomed edge's endpoint ladder through the CALLER'S
+/// shared probe context, so it costs one ladder walk per DISTINCT endpoint
+/// (never per edge, never per surviving edge) — nothing the purge mutates
+/// (`llm_wiki_edges` rows only) feeds the ladders, so the memo stays sound
+/// across the deletions.
+///
+/// Count semantics match the wrapper: returns empty lists and deletes
 /// nothing when the entity has no strict ontology or no off-manifest edges.
 fn purge_off_manifest_edges_in_tx(
     conn: &Connection,
     entity_id: &str,
-) -> Result<Vec<(String, String)>> {
+    gate: &crate::db::entity_gate::GateResolutionContext<'_>,
+    probe: &mut crate::db::commit::CommitContext,
+) -> Result<OffManifestPurge> {
     let Some(vocab) = crate::db::commit::resolve_strict_edge_vocabulary(conn, entity_id) else {
-        return Ok(Vec::new());
+        return Ok(OffManifestPurge::default());
     };
 
     // Collect first so the wrapper can audit each edge AFTER commit rather
-    // than vanishing inside one set-based DELETE.
-    let doomed: Vec<(String, String)> = {
-        let mut stmt =
-            conn.prepare("SELECT id, edge_type FROM llm_wiki_edges WHERE entity_id = ?1")?;
+    // than vanishing inside one set-based DELETE. Endpoints ride along for
+    // the E2 spare check.
+    let candidates: Vec<(String, String, String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, edge_type, source_id, target_id FROM llm_wiki_edges WHERE entity_id = ?1",
+        )?;
         let mut rows = stmt.query([entity_id])?;
         let mut v = Vec::new();
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let edge_type: String = row.get(1)?;
             if !vocab.contains(&edge_type) {
-                v.push((id, edge_type));
+                v.push((id, edge_type, row.get(2)?, row.get(3)?));
             }
         }
         v
     };
 
-    if doomed.is_empty() {
-        return Ok(Vec::new());
+    let mut outcome = OffManifestPurge::default();
+    for (id, _edge_type, source_id, target_id) in candidates {
+        if crate::db::commit::edge_write_gate_would_skip(conn, &source_id, &target_id, gate, probe)?
+        {
+            outcome.spared.push(id);
+            continue;
+        }
+        conn.execute("DELETE FROM llm_wiki_edges WHERE id = ?1", [&id])?;
+        outcome.deleted.push((id, _edge_type));
     }
 
-    for (id, _) in &doomed {
-        conn.execute("DELETE FROM llm_wiki_edges WHERE id = ?1", [id])?;
-    }
+    Ok(outcome)
+}
 
-    Ok(doomed)
+/// The transaction-scoped purge's result: what was (or would be) deleted
+/// versus what the E2 spare kept.
+#[derive(Default)]
+struct OffManifestPurge {
+    /// `(edge_id, edge_type)` pairs deleted.
+    deleted: Vec<(String, String)>,
+    /// Edge ids SPARED by the E2 rule (write-gate SKIP output).
+    spared: Vec<String>,
 }
 
 /// Sweep every off-manifest edge across every entity partition with edges.
@@ -309,6 +357,28 @@ fn purge_off_manifest_edges_in_tx(
 /// after `COMMIT`, so a rolled-back sweep never leaves warnings claiming
 /// deletions that did not survive.
 pub fn purge_off_manifest_edges_all(conn: &Connection) -> Result<usize> {
+    // E2 spare context: policy loading reads config.json from disk, so it
+    // runs BEFORE the transaction opens (r21 hold-time rule). For an
+    // in-memory / pathless connection the all-clear default policy applies
+    // (rungs 2–3 climb, `tier_fact` decides; the rung-1a opt-out is DB-only
+    // and still spares).
+    let policy = crate::config::ingest_policy_for_db(conn.path());
+    let degraded = policy.ontology_degraded_state();
+    let gate = crate::db::entity_gate::GateResolutionContext {
+        ingest: &policy.tiers,
+        degraded: &degraded,
+        schema: policy.ontology_selection,
+        schema_unparseable: policy.ontology_unparseable,
+        vault_root: policy.vault_root.as_deref(),
+    };
+    // ONE probe context for the whole sweep (review finding: a fresh
+    // context per doomed edge re-walked both endpoints' full ladders —
+    // manifest reads, cluster expansion, per-fact source resolution —
+    // inside the IMMEDIATE write transaction; the write gate memoizes per
+    // proposal for exactly this reason). The memo keys are endpoint ladder
+    // ids and nothing the sweep deletes feeds the ladders, so sharing
+    // across partitions is sound.
+    let mut probe = crate::db::commit::CommitContext::purge_probe();
     let tx = conn.unchecked_transaction()?;
 
     // Enumerate the curated `entity_id` partitions actually carrying edges.
@@ -326,11 +396,15 @@ pub fn purge_off_manifest_edges_all(conn: &Connection) -> Result<usize> {
     // warnings only after `COMMIT`. The transaction-scoped helper never logs
     // by contract; the wrapper owns the audit trail.
     let mut all_doomed: Vec<(String, String, String)> = Vec::new();
+    let mut all_spared: Vec<(String, String)> = Vec::new();
     for entity_id in &entity_ids {
-        let doomed = purge_off_manifest_edges_in_tx(&tx, entity_id)?;
-        total += doomed.len();
-        for (id, edge_type) in doomed {
+        let outcome = purge_off_manifest_edges_in_tx(&tx, entity_id, &gate, &mut probe)?;
+        total += outcome.deleted.len();
+        for (id, edge_type) in outcome.deleted {
             all_doomed.push((entity_id.clone(), id, edge_type));
+        }
+        for id in outcome.spared {
+            all_spared.push((entity_id.clone(), id));
         }
     }
 
@@ -338,6 +412,23 @@ pub fn purge_off_manifest_edges_all(conn: &Connection) -> Result<usize> {
 
     for (entity_id, id, edge_type) in &all_doomed {
         warn_purged_off_manifest_edge(entity_id, id, edge_type);
+    }
+    if !all_spared.is_empty() {
+        #[cfg(feature = "mcp-server")]
+        tracing::info!(
+            spared = all_spared.len(),
+            "off-manifest sweep spared edge(s) the write gate would SKIP today \
+             (endpoints off/opted-out — E2, spec r24; hidden by the anchor's \
+             read filter, recoverable)"
+        );
+        #[cfg(not(feature = "mcp-server"))]
+        eprintln!(
+            "[edge-purge] spared {} off-manifest edge(s) the write gate would SKIP today \
+             (endpoints off/opted-out — E2, spec r24; hidden by the anchor's read \
+             filter, recoverable): {:?}",
+            all_spared.len(),
+            all_spared
+        );
     }
 
     Ok(total)
@@ -825,12 +916,25 @@ mod tests {
         // connection from here on).
         let tx = conn.unchecked_transaction().unwrap();
 
+        // The E2 spare context: same stack-scoped construction the wrapper
+        // uses (policy load before the transaction — r21).
+        let policy = crate::config::ingest_policy_for_db(tx.path());
+        let degraded = policy.ontology_degraded_state();
+        let gate = crate::db::entity_gate::GateResolutionContext {
+            ingest: &policy.tiers,
+            degraded: &degraded,
+            schema: policy.ontology_selection,
+            schema_unparseable: policy.ontology_unparseable,
+            vault_root: policy.vault_root.as_deref(),
+        };
+
         // The helper must run against the open caller transaction without
-        // attempting a nested BEGIN. It returns the doomed pairs (the
-        // wrapper audits them post-commit); it must NOT log inside the tx.
-        let doomed = purge_off_manifest_edges_in_tx(&tx, "ent_demo").unwrap();
+        // attempting a nested BEGIN. It returns the outcome (the wrapper
+        // audits deletions post-commit); it must NOT log inside the tx.
+        let mut probe = crate::db::commit::CommitContext::purge_probe();
+        let outcome = purge_off_manifest_edges_in_tx(&tx, "ent_demo", &gate, &mut probe).unwrap();
         assert_eq!(
-            doomed.len(),
+            outcome.deleted.len(),
             1,
             "exactly the off-manifest edge is purged in-tx"
         );
@@ -877,10 +981,67 @@ mod tests {
     /// fixture can pass while the real corruption survives — the test for
     /// the `sweep_off_manifest_edges` family must anchor edges on curated
     /// entities, the way the live corruption is anchored.
+    /// E2 resolution (controller ruling 2026-10-08, spec r24): a strict
+    /// anchor's off-manifest edge whose endpoints the WRITE gate would
+    /// leave ungated (both off / no-manifest, no strict tier_fact) is
+    /// SPARED — "off means off" (D8). The row stays hidden by the anchor's
+    /// read filter but is recoverable.
+    #[test]
+    fn purge_spares_edges_the_write_gate_would_skip() {
+        let conn = open_in_memory().unwrap();
+        // Strict anchor; tier_fact deliberately ABSENT so the unmarked
+        // endpoint entities resolve off at rung 4 — the exact E2 shape.
+        seed_strict_ontology(&conn, "ent_anchor", &["depends_on"]);
+        seed_entity(&conn, "ce_a");
+        seed_entity(&conn, "ce_b");
+        seed_live_edge(&conn, "ent_anchor", "ce_a", "ce_b", "depends_on");
+        seed_live_edge(&conn, "ent_anchor", "ce_a", "ce_b", "fabricated_2026-09-09");
+
+        let removed = purge_off_manifest_edges(&conn, "ent_anchor").unwrap();
+        assert_eq!(removed, 0, "the SKIP-written off-manifest edge is spared");
+
+        let remaining: Vec<String> = conn
+            .prepare("SELECT edge_type FROM llm_wiki_edges WHERE entity_id = 'ent_anchor'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(remaining.len(), 2, "nothing destroyed: {remaining:?}");
+    }
+
+    /// E2, opt-out arm: a rung-1a `ct_entity_optouts` row on either
+    /// endpoint spares the edge even when `tier_fact` IS strict — the
+    /// opt-out is the strongest "off means off" signal (D8).
+    #[test]
+    fn purge_spares_edges_with_an_opted_out_endpoint() {
+        let conn = open_in_memory().unwrap();
+        seed_strict_ontology(&conn, "ent_anchor", &["depends_on"]);
+        seed_strict_ontology(&conn, "tier_fact", &["depends_on"]);
+        seed_entity(&conn, "ce_a");
+        seed_entity(&conn, "ce_b");
+        seed_live_edge(&conn, "ent_anchor", "ce_a", "ce_b", "fabricated_2026-09-09");
+        conn.execute(
+            "INSERT INTO ct_entity_optouts (entity_id, reason, created_at)
+             VALUES ('ce_b', 'user opt-out', 1)",
+            [],
+        )
+        .unwrap();
+
+        let removed = purge_off_manifest_edges_all(&conn).unwrap();
+        assert_eq!(removed, 0, "an opted-out endpoint spares the edge");
+        assert_eq!(edge_ids(&conn).len(), 1);
+    }
+
     #[test]
     fn purge_off_manifest_edges_removes_curated_entity_anchored_rows() {
         let conn = open_in_memory().unwrap();
         seed_strict_ontology(&conn, "ent_demo", &["depends_on"]);
+        // A strict `tier_fact` row makes the unmarked endpoint entities
+        // resolve STRICT at rung 4, so the purge still acts — without it
+        // the endpoints are ungated and the E2 spare keeps the row (see
+        // `purge_spares_edges_the_write_gate_would_skip`).
+        seed_strict_ontology(&conn, "tier_fact", &["depends_on"]);
         // Endpoints are live curated_entities, not llm_wiki_entries.
         seed_entity(&conn, "ce_a");
         seed_entity(&conn, "ce_b");
@@ -959,6 +1120,10 @@ mod tests {
         let conn = open_in_memory().unwrap();
         seed_strict_ontology(&conn, "ent_a", &["depends_on"]);
         seed_strict_ontology(&conn, "ent_b", &["related_to"]);
+        // Strict tier_fact so the unmarked endpoint entities resolve STRICT
+        // at rung 4 and the purge acts (E2 spare otherwise keeps the rows —
+        // see `purge_spares_edges_the_write_gate_would_skip`).
+        seed_strict_ontology(&conn, "tier_fact", &["depends_on", "related_to"]);
 
         // ent_a partition
         seed_entity(&conn, "cea_1");
@@ -1027,6 +1192,9 @@ mod tests {
         // must be purged. Edge in ent_b with the same type is in-manifest
         // FOR ent_b and must survive — the per-entity vocabulary resolution
         // is what guarantees this.
+        // Strict tier_fact so the unmarked endpoint entities resolve STRICT
+        // at rung 4 and the purge acts (E2 spare otherwise keeps the row).
+        seed_strict_ontology(&conn, "tier_fact", &["depends_on", "related_to"]);
         seed_entity(&conn, "ce_a1");
         seed_entity(&conn, "ce_a2");
         seed_entity(&conn, "ce_b1");

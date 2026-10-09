@@ -483,6 +483,111 @@ CREATE INDEX IF NOT EXISTS idx_curated_proposal_deleted_sources_hash
     ON curated_proposal_deleted_sources(doc_hash);
 ";
 
+/// V26 — ontology node-type gate wave-1 tables (spec
+/// `2026-10-03-ontology-node-type-gate-and-heal-design.md` §2.9.1/§3).
+///
+/// Three CT-owned tables, one per wave-1 concern:
+///
+/// * `entity_type_origin` — the degrade/import ORIGIN LEDGER (R2.4.6,
+///   plan-p6-m5 chose the ledger-table option over a column). Every degrade
+///   and every bundle-imported fallback landing records the entity's
+///   original label here so heal can surface origin-tagged rows and a
+///   stale-hash off entity never silently climbs to a strict rung and gets
+///   retyped (the D8 case). `source_directory` sits beside the original
+///   label because R2.3.5's off-sourced mint record needs the directory:
+///   without it the stale-hash climb above is undetectable. Nullable — a
+///   bundle-imported fallback has no source directory. `original_type` is
+///   nullable too (spec r21): NULL means no label was supplied (a bundle
+///   carries no graph type), never `''` or a sentinel a reader could take
+///   for a real label. `reason` says why the row exists — one of
+///   [`OriginReason`]; writers go through that enum, and there is no SQL
+///   CHECK so adding a reason never needs a table rebuild. Rows are
+///   first-origin-wins (`INSERT OR IGNORE`): later transitions never
+///   overwrite an entity's origin.
+/// * `entity_redirects` — merge-duplicates loser→survivor redirects
+///   (R2.7.5). One row per loser (`entity_id` PK; chain compression keeps
+///   it pointing at the FINAL survivor); the loser row itself stays live in
+///   `curated_entities` and is excluded by readers, never dropped.
+/// * `ct_entity_optouts` — deliberate entity-level opt-outs (r6-M5/r12-M1:
+///   a TABLE, never a manifest-row column or a `manifest_json` key — the
+///   engine UPSERTs manifest rows in place today but is versioned
+///   independently, and a future `INSERT OR REPLACE` there would silently
+///   reset any CT column). A row here is rung 1(a) of the ordered skip
+///   rule: checked FIRST, SKIP.
+/// * `manifest_ensure_memo` — `ensure_manifest_vocabulary` (Task 2)
+///   idempotency memo, keyed `(entity_id, sha256(manifest_json))` and
+///   recorded ONLY after the write commits (r11-m4: an in-transaction memo
+///   + rollback would leave the row un-ensured but memo-marked until
+///     restart).
+/// * the `live_entities` VIEW (Task 7, R2.7.5 r21) — the one shared
+///   read-side exclusion of redirected merge losers; see the DDL below.
+///
+/// Deliberately NO foreign keys to `curated_entities`: redirect losers and
+/// origin records must be insertable/deletable in any order across
+/// connections whose `PRAGMA foreign_keys` state CT does not control (the
+/// same reason `librarian_evidence` pairs every cascade with explicit
+/// deletes), and `clear_vault_tables` deletes these tables alongside —
+/// not after — their parent rows.
+///
+/// Like V23/V24/V25, this DDL runs UNGATED on every `migrate()` call and
+/// carries no version stamp: the stamp is written by the apply site in
+/// `connection.rs`, gated on V22 having stamped. All statements are
+/// idempotent (`IF NOT EXISTS`), so the every-open replay is free.
+pub const MIGRATION_V26: &str = "
+CREATE TABLE IF NOT EXISTS entity_type_origin (
+    entity_id        TEXT PRIMARY KEY,
+    original_type    TEXT,
+    reason           TEXT NOT NULL,
+    source_directory TEXT,
+    recorded_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS entity_redirects (
+    entity_id   TEXT PRIMARY KEY,
+    merged_into TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+
+-- Cluster expansion (`cluster_ids`, every cluster-closed read) walks
+-- redirects BY SURVIVOR; without this every call scans the table.
+CREATE INDEX IF NOT EXISTS idx_entity_redirects_merged_into
+    ON entity_redirects(merged_into);
+
+-- The shared source-resolution core (`resolve_source_core`) looks chunks up
+-- by content_hash alone, per evidence entry, from the heal scan and from
+-- the edge gate inside the commit write lock; `idx_chunks_doc_hash` leads
+-- with doc_id and cannot serve it.
+CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
+
+CREATE TABLE IF NOT EXISTS ct_entity_optouts (
+    entity_id  TEXT PRIMARY KEY,
+    reason     TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS manifest_ensure_memo (
+    entity_id      TEXT NOT NULL,
+    manifest_hash  TEXT NOT NULL,
+    recorded_at    INTEGER NOT NULL,
+    PRIMARY KEY (entity_id, manifest_hash)
+);
+
+-- Task 7 (spec R2.7.5 r21): the ONE shared read-side exclusion predicate.
+-- `live_entities` = curated_entities rows with no entity_redirects row; it
+-- does NOT filter deleted_at (readers keep their own archived-row rules --
+-- get_entity deliberately returns archived detail). Every READER selects
+-- from live_entities; writers and the few readers that must see redirected
+-- rows (redirect resolution, the merge sweep, clear_vault_tables, edge
+-- endpoint-liveness) keep the base table -- pinned by the source-scan test
+-- in db::redirect_scan.
+CREATE VIEW IF NOT EXISTS live_entities AS
+SELECT ce.*
+FROM curated_entities ce
+WHERE NOT EXISTS (
+    SELECT 1 FROM entity_redirects r WHERE r.entity_id = ce.id
+);
+";
+
 /// The complete stored-tier vocabulary for `llm_wiki_entries.tier`.
 ///
 /// The V16 CHECK is the database-level floor; this is the same set expressed
@@ -497,4 +602,51 @@ pub const VALID_TIERS: &[&str] = &["fact", "wisdom"];
 /// boundary rather than by a string, so it is deliberately not a member here.
 pub fn is_valid_tier(tier: &str) -> bool {
     VALID_TIERS.contains(&tier)
+}
+
+/// Why an `entity_type_origin` row exists (spec R2.4.6). The single
+/// writer-side owner of the `reason` column's vocabulary — the column has no
+/// SQL CHECK, so this enum is the only thing standing between a writer and an
+/// unknown reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginReason {
+    /// The gate degraded an undeclared label to `fallback_node_type`.
+    Degraded,
+    /// A bundle import landed a label-less entity as the fallback.
+    UnlabeledLanding,
+    /// The gate SKIPped: the mint landed ungated (its own label, or the
+    /// `'concept'` literal when it had none), or the mint's mode came from
+    /// an `off` `folder_ontology` entry.
+    GateSkipped,
+    /// Heal applied a signed alias. A reversibility record, never drift.
+    AliasRetype,
+    /// An approved queue item retyped the entity. A reversibility record,
+    /// never drift.
+    QueueRetype,
+}
+
+impl OriginReason {
+    pub const ALL: [OriginReason; 5] = [
+        OriginReason::Degraded,
+        OriginReason::UnlabeledLanding,
+        OriginReason::GateSkipped,
+        OriginReason::AliasRetype,
+        OriginReason::QueueRetype,
+    ];
+
+    /// The stored `reason` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OriginReason::Degraded => "degraded",
+            OriginReason::UnlabeledLanding => "unlabeled_landing",
+            OriginReason::GateSkipped => "gate_skipped",
+            OriginReason::AliasRetype => "alias_retype",
+            OriginReason::QueueRetype => "queue_retype",
+        }
+    }
+
+    /// Inverse of [`OriginReason::as_str`]; `None` for an unknown value.
+    pub fn parse(stored: &str) -> Option<OriginReason> {
+        Self::ALL.into_iter().find(|r| r.as_str() == stored)
+    }
 }

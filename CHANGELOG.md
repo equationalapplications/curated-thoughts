@@ -1,3 +1,53 @@
+## [3.4.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.4.0...v3.4.1) (2026-10-08)
+
+### Bug Fixes
+
+* **bundle:** preview warning names each hold's cause, not always a missing fallback ([ae07ae1](https://github.com/equationalapplications/curated-thoughts/commit/ae07ae151e0ef12d485db89d2b5faecbfd9b62ef))
+* **ontology:** /code-review max wave — memo epoch, named unusable rows, survivor rung 1b (r27) ([e477ae8](https://github.com/equationalapplications/curated-thoughts/commit/e477ae895ea40f7a0642b17b4b74afeca3400061))
+* **ontology:** ensure reports/repairs unusable vocabularies (r26) ([3fca831](https://github.com/equationalapplications/curated-thoughts/commit/3fca83103bdaa8aa386a5997929f950972c19689)), closes [#274](https://github.com/equationalapplications/curated-thoughts/issues/274)
+* **ontology:** make the no-usable-fallback hold explicit and name every hold's cause ([ad26a04](https://github.com/equationalapplications/curated-thoughts/commit/ad26a046782ecd97cdf80a8839ec67d07c12393e))
+* **ontology:** skip merged-away rows in the ensure; attach --entity with = ([63ef0e8](https://github.com/equationalapplications/curated-thoughts/commit/63ef0e8e6caf36462128ec75a1cdded5d9ee9e43))
+
+## [3.4.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.3.0...v3.4.0) (2026-10-08)
+
+### Features
+
+* **cli:** Task 8 — ct ontology set, wiki merge-duplicates wiring, sweep node-type display, MCP catalog test, tools CI step ([ade43e9](https://github.com/equationalapplications/curated-thoughts/commit/ade43e97c0e461cc5004dbbe901cbacf22b97598))
+* **config:** ontology mode config core — resolver, salvage, degraded state, watermark (plan task 1) ([f9998dc](https://github.com/equationalapplications/curated-thoughts/commit/f9998dccda70b7c18c9c22ba6365147c1bc131b9))
+* **db:** Task 2 — ImmediateTx + NodeVocabulary + ensure_manifest_vocabulary + SourceResolution core ([63127e8](https://github.com/equationalapplications/curated-thoughts/commit/63127e8525634a618d4246df0d09c5e1767ac3db))
+* **db:** Task 3 — write-time node-type gate at the four insert sites ([8c3e83b](https://github.com/equationalapplications/curated-thoughts/commit/8c3e83b42a2068e827b88d3ae3694dd15ef295d2))
+* **db:** Task 5 — ontology heal pass (R2.6, R2.2.8, §2.3 heal side) ([e26723b](https://github.com/equationalapplications/curated-thoughts/commit/e26723b99c035f8d035204afd5012dc2bbd09e3f))
+* **db:** Task 6 — duplicate merge sweep (R2.7.1-R2.7.6) ([2374df5](https://github.com/equationalapplications/curated-thoughts/commit/2374df504953846a3fa1a7d96614c8f84483c952))
+* **db:** Task 7 — read/write redirect resolution (R2.7.5) ([6053f09](https://github.com/equationalapplications/curated-thoughts/commit/6053f09400cb690401b16fc35b82281531d5295a))
+* **db:** Task 9 — okf_migration abort observability + §6 item 6 tests ([35767e0](https://github.com/equationalapplications/curated-thoughts/commit/35767e04f8cd5dcaf63d5b9dcd5b37272c9b7ae0))
+* **db:** V26 ontology-gate migration tables + tier-preserving clear (plan task 0) ([6f30e1b](https://github.com/equationalapplications/curated-thoughts/commit/6f30e1be26aba0e5373581299c9f2d0266a482ca))
+* **db:** V26 origin-ledger r21 shape — reason column, nullable original_type (plan Task 0 addendum) ([6f5ada2](https://github.com/equationalapplications/curated-thoughts/commit/6f5ada22ba5ede2e57237d778a44d9b7ae9b9447))
+
+### Bug Fixes
+
+* **config,inference:** apply opus confirming review — neither provider-save failure path writes to disk (M1), drop no-op post-write rollback (m4), belt-and-braces purge made testable (m1/m2), real-handler rollback tests (m3), comment contracts unified (m5) ([7da4603](https://github.com/equationalapplications/curated-thoughts/commit/7da4603fbf4c314db2db089bc9c1c9e7c2f64249))
+* **config,inference:** apply opus re-review — failed-save rollback keeps on-disk generation block (M1), drop redundant ontology parking (m2), x_custom unknown-key test + honest comments (m3), hash pin strengthening ([fe055aa](https://github.com/equationalapplications/curated-thoughts/commit/fe055aaee4eb6eb4730e7540b51cea9e1eafd931))
+* **config:** apply tier-2 review — trusted_links salvage order, unmatchable keys in watermark, scoped tie holds, tie-key watermark exclusion, read-error memoization (+M1-M4) ([71b6600](https://github.com/equationalapplications/curated-thoughts/commit/71b660019bbfce3fffb633794432e510d293a4ab))
+* **config:** opus tier-3 — replace_ontology preserved-keys purge, unplaceable 2b hold, rollback comment truth, test fixtures, raw-key marker, comment corrections (+M3-M6) ([9b86f94](https://github.com/equationalapplications/curated-thoughts/commit/9b86f9410f7bff5bfeda016bbccfe9dc1abf8cde))
+* **db:** code-review wave — rung-3 for pathless mints, all-off SKIP, cluster census, CAS + fail-closed ([7aa4033](https://github.com/equationalapplications/curated-thoughts/commit/7aa4033f25103be3c49422b19adeaf1a55e4672f)), closes [#269](https://github.com/equationalapplications/curated-thoughts/issues/269) [#132](https://github.com/equationalapplications/curated-thoughts/issues/132)
+* **db:** final review wave — R2.3.0 per-endpoint edge gate, hold-time I/O hoists, held-mint diagnostic ([8402d50](https://github.com/equationalapplications/curated-thoughts/commit/8402d50842df317c0b6068d8a4ed9e36784a61bd))
+* **db:** review finding — rekey loser-owned facts to survivor on update/archive ([44d8764](https://github.com/equationalapplications/curated-thoughts/commit/44d8764559430509afee4cb389469fd1aaf77bfe)), closes [#132](https://github.com/equationalapplications/curated-thoughts/issues/132)
+* **db:** review wave — endpoint ladder, fail-closed probes, cluster commits ([fe0b0f9](https://github.com/equationalapplications/curated-thoughts/commit/fe0b0f94f6c232fd9e52e7722369764f160be281))
+* **db:** rung-2 source paths span the redirect cluster ([02278d8](https://github.com/equationalapplications/curated-thoughts/commit/02278d8075b16a93a04352fac752b1530822ab9c))
+* **db:** Task 3 round 1 — wire full §2.3 ladder + watermark stamp, dedupe resolvers ([1ec104d](https://github.com/equationalapplications/curated-thoughts/commit/1ec104de9e54a1efb634c9a6984df84da599b790))
+* **db:** Task 6 round 1 — report compression rewrites in redirects_rewritten ([0fdeb9f](https://github.com/equationalapplications/curated-thoughts/commit/0fdeb9fac0bcfa4ea473b878f2c8826684f5b9a8))
+* **db:** Task 7 fix round 1 — four review findings ([aadefd3](https://github.com/equationalapplications/curated-thoughts/commit/aadefd30db0ea4daab1e39eb86efb922eb7ae463)), closes [#132](https://github.com/equationalapplications/curated-thoughts/issues/132)
+* **db:** Task 8 fix round 1 — sweep --yes routes through the retyping-only ontology pass ([8315d5d](https://github.com/equationalapplications/curated-thoughts/commit/8315d5de9952695134add9df21c36e39dd8f2946))
+* **db:** Task 9 fix round 1 — migration unlabeled landings record origin, pin GUI/LLM unlabeled arms ([5a4a443](https://github.com/equationalapplications/curated-thoughts/commit/5a4a443d144f9974238147a03e907c3fde18aadc))
+* **db:** xhigh review wave — cluster-closed Replace, rung-3 edge endpoints, dry-run drift census ([f3e602e](https://github.com/equationalapplications/curated-thoughts/commit/f3e602e17f54e89882a266faa93de68755892870))
+* **ontology:** E2 resolved — off-manifest purge spares write-gate SKIP rows (controller ruling, spec r24) ([315e3d9](https://github.com/equationalapplications/curated-thoughts/commit/315e3d919dead2ab8e9adc83daae4f366f9658b0))
+* **ontology:** review wave 1 — cluster-closed opt-out/ledger/dedupe, edge-gate anchor vocab, ontology set validation, merge error containment ([3c84d15](https://github.com/equationalapplications/curated-thoughts/commit/3c84d15ca8c9e7b8761713ead3823d50da3b9848)), closes [#272](https://github.com/equationalapplications/curated-thoughts/issues/272)
+* **ontology:** review wave 2 — r9-M1 mode-vs-vocabulary, gate-aware preview, provenance partials, DRY ([6054b3a](https://github.com/equationalapplications/curated-thoughts/commit/6054b3a8746d91a3ebb526931b733063d74db290))
+* **ontology:** review wave 3 — edge anchor-owner check on the no-endpoint-strict arm, Hold strict-wins, heal ensure under unconfirmed drift, empty merge keys, census fail-closed ([b8df21c](https://github.com/equationalapplications/curated-thoughts/commit/b8df21c6b363cd3c7fe8d587b6a6b72b16263b43))
+* **ontology:** review wave 4 — correct wave 3, close the ultra findings ([42e5c43](https://github.com/equationalapplications/curated-thoughts/commit/42e5c432f0980ac02bbff57b1ecdefde44aef137))
+* **ontology:** review wave 5 — hold-arm r4-m4 parity, shared E2 purge probe ([2e9e35c](https://github.com/equationalapplications/curated-thoughts/commit/2e9e35c0ccf868c3c628a0035426318c34ed4c83))
+* **ontology:** review wave 6 — bundle preview Held parity, post-commit file removal, one ladder-id per endpoint ([b681bed](https://github.com/equationalapplications/curated-thoughts/commit/b681bed66166d82f122252085c4d97ce89c5c167))
+
 ## [3.3.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.2.0...v3.3.0) (2026-10-07)
 
 ### Features

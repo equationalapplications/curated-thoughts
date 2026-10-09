@@ -90,6 +90,7 @@ fn wiki_get_ontology_tolerates_bare_string_manifest_entries() {
                     type_name: "supports".into(),
                     ..Default::default()
                 }],
+                fallback_node_type: None,
             }),
         }
     );
@@ -557,6 +558,16 @@ fn open_graph_db_with_entities() -> Connection {
             created_at INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL DEFAULT 0,
             deleted_at INTEGER
+        );
+        CREATE TABLE entity_redirects (
+            entity_id   TEXT PRIMARY KEY,
+            merged_into TEXT NOT NULL,
+            created_at  INTEGER NOT NULL
+        );
+        CREATE VIEW live_entities AS
+        SELECT ce.* FROM curated_entities ce
+        WHERE NOT EXISTS (
+            SELECT 1 FROM entity_redirects r WHERE r.entity_id = ce.id
         );",
     )
     .unwrap();

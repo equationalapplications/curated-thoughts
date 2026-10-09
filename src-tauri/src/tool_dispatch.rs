@@ -12,11 +12,11 @@ use serde_json::Value;
 
 use crate::embedder::EmbedProfile;
 use crate::search::SearchResult;
-use crate::wisdom_match as wm;
 use crate::wiki_graph::{
     self, TraverseDirection, WikiContextResult, WikiOntologyResult, WikiSearchHit,
     WikiTraverseResult, DEFAULT_CONTEXT_DEPTH, DEFAULT_CONTEXT_MAX_FACTS, DEFAULT_MAX_DEPTH,
 };
+use crate::wisdom_match as wm;
 
 /// Typed error for unknown tool names so callers can classify without string matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1050,7 +1050,7 @@ async fn embed_query(profile: &EmbedProfile, query: String) -> Result<Vec<f32>> 
 /// gate uses). Resolves the read scheme ONCE against the locked connection,
 /// truncates BEFORE the prefix (the prefix never consumes the 2000-char
 /// budget), and routes through the SAME `query_text_for_scheme` the
-/// `ct wisdom match` path uses. Pre-V26 tables (no `embed_scheme` column)
+/// `ct wisdom match` path uses. Pre-V27 tables (no `embed_scheme` column)
 /// degrade to raw via `read_scheme_for_reader`.
 pub(crate) async fn wiki_query_text(
     conn: &Arc<Mutex<Connection>>,
@@ -1070,7 +1070,10 @@ pub(crate) async fn wiki_query_text(
 /// Clone-out helper for call sites that must derive request values from the
 /// DB (e.g. scheme resolution) while keeping the lock short — the guard drops
 /// before the returned values are used.
-fn spawn_blocking_with_conn<T, F>(conn: &Arc<Mutex<Connection>>, f: F) -> tokio::task::JoinHandle<Result<T>>
+fn spawn_blocking_with_conn<T, F>(
+    conn: &Arc<Mutex<Connection>>,
+    f: F,
+) -> tokio::task::JoinHandle<Result<T>>
 where
     T: Send + 'static,
     F: FnOnce(&Connection) -> Result<T> + Send + 'static,
@@ -1161,7 +1164,7 @@ pub async fn dispatch_tool_call(
             let conn = ctx.conn.clone();
             // Scheme-aware query text (spec §Decision): same prefix, same
             // helper as the gate path; truncation BEFORE the prefix;
-            // pre-V26 tables degrade to raw.
+            // pre-V27 tables degrade to raw.
             let query_text = wiki_query_text(&conn, &p.query).await?;
             // Embed OUTSIDE the DB lock (blocking network call).
             let query_vec = embed_query(&ctx.profile, query_text).await?;
@@ -1177,7 +1180,7 @@ pub async fn dispatch_tool_call(
             let p: WikiContextParams = serde_json::from_value(params)?;
             let conn = ctx.conn.clone();
             // Scheme-aware query text — identical to `wiki_search` (spec
-            // §Decision): one resolution, same prefix helper, raw on pre-V26.
+            // §Decision): one resolution, same prefix helper, raw on pre-V27.
             let query_text = wiki_query_text(&conn, &p.query).await?;
             // Embed OUTSIDE the DB lock (blocking network call).
             let query_vec = embed_query(&ctx.profile, query_text).await?;
@@ -1737,6 +1740,32 @@ mod dispatch_tool_call_tests {
             .unwrap_err();
         assert!(err.to_string().contains("unknown tool"));
     }
+
+    /// Spec §2.5 / §6 item 7: the ontology writer is NOT registered in the
+    /// MCP catalog — COMPILE-TIME absence, not a runtime gate. The only
+    /// supported manifest-writer surface is the `ct ontology set` CLI
+    /// (spec §2.11); any agent-facing spelling must fall through to the
+    /// unknown-tool error.
+    #[tokio::test]
+    async fn ontology_writer_is_not_in_the_mcp_catalog() {
+        let ctx = seeded_ctx();
+        for name in [
+            "ontology_set",
+            "set_ontology",
+            "set_ontology_mode",
+            "ontology_set_mode",
+            "apply_ontology_change",
+        ] {
+            let err = dispatch_tool_call(&ctx, name, serde_json::json!({ "mode": "strict" }))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("unknown tool"),
+                "ontology writer {name} must NOT be registered in the MCP catalog; got: {err}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2227,7 +2256,7 @@ mod wiki_query_prefix_tests {
     use tempfile::TempDir;
 
     /// Full-schema migrated FILE brain (same fixture shape as
-    /// `curated_proposals_tests::file_ctx`) — has `llm_wiki_meta` and the V26
+    /// `curated_proposals_tests::file_ctx`) — has `llm_wiki_meta` and the V27
     /// `embed_scheme` column.
     fn file_ctx() -> (TempDir, ToolDispatchContext) {
         let dir = TempDir::new().unwrap();

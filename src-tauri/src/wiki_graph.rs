@@ -65,6 +65,12 @@ pub struct WikiEdgeType {
 pub struct WikiManifest {
     pub node_types: Vec<WikiNodeType>,
     pub edge_types: Vec<WikiEdgeType>,
+    /// Manifest's declared fallback node type (spec R2.4.4 / §2.4.5):
+    /// degrade ladder's final rung when an undeclared label lands. None
+    /// means "no fallback declared" — a strict manifest without a fallback
+    /// is a §2.4.5 configuration error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_node_type: Option<String>,
 }
 
 impl WikiManifest {
@@ -110,7 +116,20 @@ impl WikiManifest {
 /// degrades to a name-only entry rather than failing the whole read: a
 /// `wiki_get_ontology` that errors is indistinguishable to a caller from a
 /// brain with no ontology, which is exactly the confusion §2.1 exists to end.
-fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
+///
+/// Crate-visible so a manifest WRITER can check its row exactly as the gate
+/// will read it (`ct ontology set`'s R2.4.5 write-time refusal).
+pub(crate) fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
+    let root: serde_json::Value = serde_json::from_str(manifest_json)?;
+    Ok(parse_manifest_value(&root))
+}
+
+/// The lenient reader's body over an ALREADY-PARSED root, split out so a
+/// caller holding a `Value` (e.g. `ct ontology set`'s write-time refusal)
+/// pays no serialize→reparse round-trip. Infallible by construction —
+/// every missing or ill-typed field degrades to absent/default rather
+/// than failing the read, exactly as the string form does.
+pub(crate) fn parse_manifest_value(root: &serde_json::Value) -> WikiManifest {
     fn entries(value: Option<&serde_json::Value>) -> Vec<&serde_json::Value> {
         value
             .and_then(|v| v.as_array())
@@ -123,8 +142,6 @@ fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty())
     }
-
-    let root: serde_json::Value = serde_json::from_str(manifest_json)?;
 
     let node_types = entries(root.get("node_types"))
         .into_iter()
@@ -157,10 +174,13 @@ fn parse_manifest(manifest_json: &str) -> Result<WikiManifest> {
         })
         .collect();
 
-    Ok(WikiManifest {
+    let fallback_node_type = field(root, "fallback_node_type");
+
+    WikiManifest {
         node_types,
         edge_types,
-    })
+        fallback_node_type,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -298,7 +318,7 @@ pub fn wiki_search(
     // READ-scheme SELECT filter, tuple member of the same `wisdom_active_scheme`
     // value the gate floor and the query prefix derive from (spec §Scheme
     // architecture): rows stamped under another scheme are never candidates.
-    // The pre-V26 shape (no `embed_scheme` column) omits the filter — those
+    // The pre-V27 shape (no `embed_scheme` column) omits the filter — those
     // rows are de-facto raw — mirroring the temporal-column degradation.
     let scheme_filter = if crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?
         .iter()
@@ -412,9 +432,12 @@ fn load_live_curated_entity(
     if !table_exists(conn, "curated_entities")? {
         return Ok(None);
     }
+    // Task 7 (R2.7.5): a seed id may be a merged-away loser — resolve the
+    // redirect first (single shared helper), then read live_entities.
+    let resolved = crate::db::entities::resolve_entity_id(conn, id)?;
     let mut stmt =
-        conn.prepare("SELECT id, name FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL")?;
-    let mut rows = stmt.query(rusqlite::params![id])?;
+        conn.prepare("SELECT id, name FROM live_entities WHERE id = ?1 AND deleted_at IS NULL")?;
+    let mut rows = stmt.query(rusqlite::params![resolved])?;
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
@@ -622,12 +645,33 @@ fn fetch_entity_neighbors(
     } else {
         ("t", "e.source_id")
     };
+    // Task 7 (R2.7.5 / r3-m8): endpoint ids that are merged-away losers
+    // resolve to the survivor on read — the single-hop COALESCE through
+    // entity_redirects. A survivor→loser edge therefore appears as the
+    // survivor→survivor self-loop it resolves to, SHOWN with its original
+    // attributes (real pre-merge provenance; the merge report lists
+    // self-loops for pruning). Merge-time path compression keeps healthy
+    // redirects one hop deep, so one hop is the complete resolution.
+    //
+    // The ENDPOINTS returned are the RESOLVED ids (`s.id`, `t.id`), not the
+    // raw `e.source_id`/`e.target_id` (review finding): nodes are keyed by
+    // survivor ids, so a raw loser endpoint dangled against the node list
+    // every graph consumer builds — contradicting the self-loop rendering
+    // described above.
     let sql = format!(
-        "SELECT e.source_id, e.target_id, e.edge_type, {neighbor_alias}.id
+        "SELECT s.id, t.id, e.edge_type, {neighbor_alias}.id
          FROM llm_wiki_edges e
-         JOIN curated_entities s ON s.id = e.source_id AND s.deleted_at IS NULL
-         JOIN curated_entities t ON t.id = e.target_id AND t.deleted_at IS NULL
-         WHERE e.entity_id = ?1 AND {anchor_col} = ?2{edge_filter}"
+         JOIN live_entities s
+           ON s.id = COALESCE((SELECT merged_into FROM entity_redirects r
+                               WHERE r.entity_id = e.source_id), e.source_id)
+          AND s.deleted_at IS NULL
+         JOIN live_entities t
+           ON t.id = COALESCE((SELECT merged_into FROM entity_redirects r
+                               WHERE r.entity_id = e.target_id), e.target_id)
+          AND t.deleted_at IS NULL
+         WHERE e.entity_id = ?1
+           AND COALESCE((SELECT merged_into FROM entity_redirects r
+                         WHERE r.entity_id = {anchor_col}), {anchor_col}) = ?2{edge_filter}"
     );
     // Cached, not re-compiled: cross-partition mode calls this up to
     // MAX_CROSS_PARTITION_PARTITIONS x 2 directions per traversal with only
@@ -706,8 +750,14 @@ fn scoped_traverse(
     let mut queue: VecDeque<(String, usize)> = VecDeque::new();
 
     nodes.insert(seed.id.clone(), seed.clone());
-    visited.insert(source_id.to_string());
-    queue.push_back((source_id.to_string(), 0));
+    // Seed the walk under the RESOLVED id (review finding): in entity space
+    // `load_live_node` resolves a loser seed to its survivor, and the
+    // queue/anchor comparisons below must use that resolved id or edges
+    // anchored on the pre-merge keys are omitted. In entry space the
+    // resolved id IS `source_id` (no redirect rows name entry ids), so the
+    // scoped-mode characterization contract is unaffected.
+    visited.insert(seed.id.clone());
+    queue.push_back((seed.id.clone(), 0));
 
     let mut truncated = false;
 
@@ -814,13 +864,22 @@ fn cross_partition_traverse(
     // the visible reason. `ORDER BY` states the ordering Step 3's
     // VACUUM-stability note relies on instead of inheriting it from UNION's
     // incidental sort.
+    // Cross-partition anchors resolve through redirects too (review
+    // finding): `seed.id` is the RESOLVED survivor, so both the discovery
+    // scan and the per-partition fetches below must compare resolved
+    // endpoints — an edge stored under a pre-merge loser anchor otherwise
+    // hides the partition that owns it.
+    let resolved_seed_id = seed.id.clone();
     let mut stmt = conn.prepare(
         "SELECT DISTINCT entity_id FROM llm_wiki_edges
-         WHERE source_id = ?1 OR target_id = ?1
+         WHERE COALESCE((SELECT merged_into FROM entity_redirects r
+                         WHERE r.entity_id = source_id), source_id) = ?1
+            OR COALESCE((SELECT merged_into FROM entity_redirects r
+                         WHERE r.entity_id = target_id), target_id) = ?1
          ORDER BY entity_id",
     )?;
     let partition_ids: Vec<String> = stmt
-        .query_map(rusqlite::params![source_id], |row| row.get(0))?
+        .query_map(rusqlite::params![resolved_seed_id], |row| row.get(0))?
         .collect::<std::result::Result<_, _>>()?;
 
     // Step 2 — per-partition edge load, gated by that partition's own
@@ -875,7 +934,7 @@ fn cross_partition_traverse(
             fetch_entity_neighbors(
                 conn,
                 pid,
-                source_id,
+                &resolved_seed_id,
                 &edge_filter,
                 edge_types,
                 false,
@@ -886,7 +945,7 @@ fn cross_partition_traverse(
             fetch_entity_neighbors(
                 conn,
                 pid,
-                source_id,
+                &resolved_seed_id,
                 &edge_filter,
                 edge_types,
                 true,
@@ -1694,10 +1753,12 @@ mod unit_tests {
         );
     }
 
-    /// Pre-V26 shape (no `embed_scheme` column): the filter degrades off and
+    /// Pre-V27 shape (no `embed_scheme` column): the filter degrades off and
     /// rows are read verbatim, mirroring the temporal-column degradation.
+    /// (Originally written against V26; renumbered at merge — main's V26 is
+    /// the ontology node-type gate wave, so the scheme stamp is V27.)
     #[test]
-    fn wiki_search_pre_v26_table_reads_without_scheme_filter() {
+    fn wiki_search_pre_v27_table_reads_without_scheme_filter() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE llm_wiki_entries (
@@ -1714,6 +1775,106 @@ mod unit_tests {
         let hits = wiki_search(&conn, &[1.0f32; 8], None, None, 25).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "a");
+    }
+
+    /// Task 7 (spec R2.7.5 / §6 item 4): redirected-loser edge endpoints
+    /// resolve to the SURVIVOR on read — a survivor→loser edge surfaces as
+    /// the survivor→survivor self-loop it resolves to, shown with its
+    /// original attributes (real pre-merge provenance, r3-m8), and the
+    /// loser itself is never surfaced as a node.
+    #[test]
+    fn redirected_loser_endpoints_resolve_to_survivor_on_read() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('e_surv','Adrian','concept','s',100,100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('e_lose','Adrian','concept','s',100,100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('e_lose','e_surv',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('ed1','e_surv','e_surv','e_lose','related_to',1)",
+            [],
+        )
+        .unwrap();
+
+        // Seeding from the loser id itself: it must resolve to the survivor.
+        let result = wiki_traverse_graph(
+            &conn,
+            Some("e_surv"),
+            "e_lose",
+            2,
+            TraverseDirection::Both,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            result
+                .edges
+                .iter()
+                .any(|e| e.source_id == "e_surv" && e.target_id == "e_surv"),
+            "the survivor→loser edge is SHOWN as the survivor→survivor self-loop it \
+             resolves to (R2.7.5 r3-m8) — endpoints resolved, so the edge never \
+             dangles against the survivor-keyed node list"
+        );
+        assert!(
+            result.nodes.iter().all(|n| n.id != "e_lose"),
+            "the loser is never surfaced as a node"
+        );
+        assert!(
+            result.nodes.iter().any(|n| n.id == "e_surv"),
+            "the survivor anchors the walk"
+        );
+    }
+
+    /// `wiki_context` seeds from each fact's raw `entity_id`, which for a
+    /// pre-merge fact is the redirected LOSER. The composite walk must seed
+    /// its BFS under the resolved survivor id (the neighbor anchor compares
+    /// redirect-resolved endpoints), or the loser's edges never match.
+    #[test]
+    fn composite_walk_seeded_from_loser_reaches_its_edges() {
+        let conn = open_in_memory().unwrap();
+        for id in ["e_surv", "e_lose", "e_tgt"] {
+            conn.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES (?1, ?1, 'concept', 's', 100, 100)",
+                [id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('e_lose','e_surv',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('ed1','e_lose','e_lose','e_tgt','depends_on',1)",
+            [],
+        )
+        .unwrap();
+
+        let mut walk = CompositeWalk::default();
+        walk.walk_seed(&conn, "e_lose", "e_lose", 1, TraverseDirection::Both, &[])
+            .unwrap();
+        assert!(
+            walk.edges.iter().any(|e| e.target_id == "e_tgt"),
+            "the loser's edge must be reached from a loser seed, got: {:?}",
+            walk.edges
+        );
     }
 }
 
@@ -1815,13 +1976,18 @@ impl CompositeWalk {
             return Ok(());
         };
 
-        let seed_key = (entity_id.to_string(), seed.id.clone());
+        let seed_id = seed.id.clone();
+        let seed_key = (entity_id.to_string(), seed_id.clone());
         if self.visited.insert(seed_key.clone()) {
             self.nodes.insert(seed_key, seed);
         }
 
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-        queue.push_back((source_id.to_string(), 0));
+        // Seed under the RESOLVED id (same rule as `scoped_traverse`): the
+        // neighbor anchor compares redirect-resolved endpoints, so a merged
+        // loser's raw id would match no edge at all. In entry space
+        // `seed.id == source_id`.
+        queue.push_back((seed_id, 0));
 
         while let Some((current_id, depth)) = queue.pop_front() {
             if depth >= max_depth {

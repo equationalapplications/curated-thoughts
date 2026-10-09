@@ -61,10 +61,13 @@ fn resolve_shim_target_name(
         return Ok(proposed_name.unwrap_or("New entity").to_string());
     }
     if let Some(eid) = entity_id {
+        // Task 7 (R2.7.5): resolve a merged-away loser to its survivor so
+        // the review surface shows the live entity's name.
+        let resolved = crate::db::entities::resolve_entity_id(conn, eid)?;
         let name: Option<String> = conn
             .query_row(
-                "SELECT name FROM curated_entities WHERE id = ?1 AND deleted_at IS NULL",
-                [eid],
+                "SELECT name FROM live_entities WHERE id = ?1 AND deleted_at IS NULL",
+                [&resolved],
                 |r| r.get(0),
             )
             .optional()?;

@@ -158,7 +158,7 @@ pub fn truncate_text(text: &str) -> &str {
 struct Temporal {
     has_superseded_by: bool,
     has_valid_to: bool,
-    /// Active read scheme for the SELECT filter — `None` on the pre-V26 shape
+    /// Active read scheme for the SELECT filter — `None` on the pre-V27 shape
     /// (no `embed_scheme` column). Resolved once per call, next to the column
     /// probes, so every scheme-derived tuple member of the call path shares
     /// one `read_scheme` resolution.
@@ -174,7 +174,7 @@ fn temporal_columns(conn: &Connection) -> Result<Temporal> {
         // production path, all derive from it.
         Some(read_scheme(conn)?)
     } else {
-        // Pre-V26 shape: rows are de-facto raw, the filter is omitted,
+        // Pre-V27 shape: rows are de-facto raw, the filter is omitted,
         // mirroring how the temporal filters degrade on old tables.
         None
     };
@@ -198,7 +198,7 @@ pub fn wisdom_match(
     // `read_scheme` resolution drives BOTH the floor (below) and the SELECT
     // filter (inside `wisdom_match_impl`), so a concurrent
     // `wisdom_active_scheme` flip can never pair one scheme's floor with
-    // another scheme's filter. The pre-V26 shape (scheme None) keeps the
+    // another scheme's filter. The pre-V27 shape (scheme None) keeps the
     // unsuffixed raw key and the filter omitted; an unregistered (model,
     // scheme) key means abstain (floor None).
     let temporal = temporal_columns(conn)?;
@@ -295,7 +295,7 @@ fn gated_entries(
     );
     // READ-scheme SELECT filter (spec §Scheme architecture): rows stamped
     // under another scheme are never candidates. `as_str()` is the stored
-    // representation bound verbatim — no inline literal. `None` (pre-V26
+    // representation bound verbatim — no inline literal. `None` (pre-V27
     // shape, resolved in temporal_columns) omits the filter.
     if let Some(s) = temporal.scheme {
         sql.push_str(&format!(" AND embed_scheme = '{}'", s.as_str()));
@@ -924,7 +924,7 @@ mod tests {
         );
     }
 
-    /// Pre-V26 shape (no `embed_scheme` column): the filter degrades off and
+    /// Pre-V27 shape (no `embed_scheme` column): the filter degrades off and
     /// rows are read verbatim, mirroring the temporal-column degradation.
     #[test]
     fn pre_v26_table_reads_without_scheme_filter() {

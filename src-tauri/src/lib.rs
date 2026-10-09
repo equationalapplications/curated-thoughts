@@ -3050,7 +3050,9 @@ fn pull_model(model_id: String, app: AppHandle) -> Result<(), String> {
 // Both surfaces share `db::edge_purge::purge_off_manifest_edges_all`, which
 // enumerates curated `entity_id` partitions actually carrying edges (the
 // tier ids are not in `llm_wiki_edges.entity_id`, see the helper's doc
-// comment) and runs the per-id purge inside one transaction.
+// comment) and runs the per-id purge inside one transaction. E2 (spec
+// r24): rows whose endpoints the write gate would SKIP today (off /
+// opted-out) are spared by that sweep — "off means off", retroactively.
 
 #[tauri::command]
 fn purge_off_manifest_edges_cmd(db_state: State<DbState>) -> Result<usize, String> {
@@ -4794,8 +4796,17 @@ fn set_ontology_selection(selection: String) -> Result<(), String> {
 
     let paths = retrieval::resolve_brain_paths();
     let mut cfg = config::BrainConfig::load(&paths).map_err(|e| e.to_string())?;
-    cfg.ontology.schema = Some(parsed);
-    cfg.write(&paths).map_err(|e| e.to_string())?;
+    // Deliberate schema change (r17-MAJOR-2): goes through `replace_ontology`
+    // so an unparseable on-disk ontology block (raw_ontology set, degraded)
+    // is cleared and re-written instead of silently discarded by the
+    // leave-untouched write guard.
+    cfg.replace_ontology(
+        crate::ontology_config::OntologyConfigBlock {
+            schema: Some(parsed),
+        },
+        &paths,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
