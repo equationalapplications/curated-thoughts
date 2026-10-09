@@ -1,13 +1,15 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 18 — Opus spec-tier r16 REQUEST CHANGES resolved:
-M1 quarantine interplay (watchdog quarantine of a pass doc writes
-failed/attempts=3; re-stage clears quarantined_at + strikes); MINOR-1
-stale drain-exclusion sentence removed; MINOR-2 attempts semantics
-pinned (+1 only after Ok try_send; last_attempt_at from the failure
-write; "3" = total attempts); MINOR-3 evaluator (2) reworded to
-outcome-based check; MINOR-4 panic fresh-connection reason corrected
-+ busy_timeout; MINOR-5 §6 shows the pinned DDL once)
+**Date:** 2026-10-09 (rev 19 — Opus spec-tier r17 REQUEST CHANGES resolved:
+M1 snapshot membership pinned (every doc with ≥1 chunk, NO status/tier
+filter — status-filtered snapshots miss pending/quarantined docs and
+produce a false model_guard=ok over mixed vectors); quarantined
+chunk-bearing docs failed/attempts=3 at snapshot time; MINOR-1
+quarantine+pass-docs write atomic in one tx, keyed by path→doc_id +
+open pass; re-stage target pinned (snapshotted/attempts=0/
+pending_reindex); MINOR-2 snapshotted/retrying arms attempts-capped
+too (retrying@3 = exhausted failed); MINOR-3 epoch check immediately
+before BEGIN IMMEDIATE, superseded = distinct IngestOutcome variant)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -213,6 +215,25 @@ A snapshotted doc not indexed under the new key (including superseded-job
 `model_guard_skipped_docs`. The `clear` transaction additionally deletes
 the guard/pass/stamp meta keys, the breaker baseline/state keys, and all
 `ct_reindex_pass_docs` rows (r9 m2 purge list).
+**Snapshot membership PINNED (rev 19, Opus r17 MAJOR-1 — the spec
+never said which docs are snapshotted; if the snapshot reuses
+`list_indexed_user_doc_paths` (`db/queries.rs:38-41`,
+`tier='user_doc' AND status='indexed'`), docs that are `pending`
+(queue.rs pre-written a watcher edit) or `pending_reindex`
+(quarantined from an earlier stall) are missed — they keep
+model-A chunks, the pass completes, `model_guard=ok` fires, the
+stamp refreshes to B, and stage 1 (no status filter) then compares
+B queries against A vectors — the exact mixed-vector state the
+guard exists to prevent, silently):** the snapshot is
+**every document with at least one chunk** —
+`WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.doc_id = d.id)` —
+NO status or tier filter. At snapshot time, chunk-bearing docs
+with `quarantined_at` set get the rev-18 treatment immediately
+(`outcome='failed'`, `attempts=3`) so they show in
+"N failed — retry" instead of hiding. Test: quarantined
+`pending_reindex` doc with chunks at snapshot time ⇒ completion
+BLOCKED, shown as failed; after re-stage (clears quarantine +
+strikes) ⇒ `model_guard=ok`.
 **Pass-docs schema — PINNED DDL (rev 16, Opus r14 M2; made the sole
 signature rev 18, Opus r16 MINOR-5):**
 `ct_reindex_pass_docs(pass_id, doc_id, embed_key, outcome, attempts,
@@ -472,7 +493,18 @@ are in scope:
   an existing doc re-extracting to empty runs the swap transaction
   with every chunk treated as removed — upsert + delete-all +
   `last_indexed_hash` + mark indexed — so the hash no longer stays
-  stale and later runs hit the `:692` early return). Backfill wording
+  stale and later runs hit the `:692` early return). **Epoch guard
+  pinned (rev 19, Opus r17 MINOR-3 — without it a stage-stalled
+  worker that later unwedges would open the IMMEDIATE swap tx,
+  commit the swap, and write `completed`, overriding the
+  watchdog's rev-18 `failed`/attempts=3 AND racing the replacement
+  worker):** the heartbeat-epoch check happens IMMEDIATELY before
+  `BEGIN IMMEDIATE` (last line of defense — the existing
+  `hb.enter(Stage::Committing)` check at `:752-756` stays); the
+  superseded case returns a DISTINCT `IngestOutcome` variant (not
+  `Ok(())`). Test: bump the epoch during Embedding ⇒ no pass-docs
+  write, no chunk changes).
+  Backfill wording
   is `WHERE status IN ('indexed','pending_reindex')` (rev 12, Opus r10
   m1 — the rev-11 "indexed ONLY ... pending_reindex ARE backfilled"
   pairing was self-contradictory; the WHERE clause is the rule).
@@ -604,7 +636,14 @@ are in scope:
        OR (pd.outcome='failed' AND pd.attempts < 3
            AND pd.last_attempt_at + :backoff <= unixepoch())`
       — non-pass rows (`pd.doc_id IS NULL`) keep the sweep's existing
-      backstop behavior unchanged. `attempts += 1` ONLY after
+      backstop behavior unchanged. The `snapshotted`/`retrying` arms
+      are ALSO attempts-capped: dispatch requires
+      `pd.attempts < 3` on every arm (rev 19, Opus r17 MINOR-2 — a
+      `retrying` row at `attempts=3` caught by a restart/respawn
+      would otherwise be dispatched a 4th time, contradicting the
+      3-total cap; a `retrying` row at `attempts=3` found by the
+      sweep is treated as exhausted-failed: the query flips it to
+      `failed`). `attempts += 1` ONLY after
       `try_send` returns `Ok` (a `QueueFull` does not burn an attempt
       — `sweep.rs:145-147` releases the claim and breaks); the
       worker's failure write sets `last_attempt_at` (backoff is
@@ -693,7 +732,18 @@ are in scope:
     signal):** when the watchdog quarantines a path that has a row
     in the open pass, it writes `outcome='failed'` with
     `attempts = 3` (exhausted) — the doc then appears in
-    "N failed — retry". The re-stage action ALSO clears
+    "N failed — retry". **Atomicity + keying (rev 19, Opus r17
+    MINOR-1 — a crash between `quarantine()` and the pass-docs
+    write would leave the doc quarantined with its row stuck
+    `retrying`, the exact hang rev 18 closes):** the quarantine
+    UPDATE and the pass-docs `failed`/`attempts=3` UPDATE run in
+    ONE transaction; `doc_id` resolved via
+    `documents.path = ?` + the open `(pass_id, target_key)` read
+    from `llm_wiki_meta` (the watchdog only knows the path).
+    **Re-stage target pinned:** `outcome='snapshotted'`,
+    `attempts=0`, doc status `pending_reindex` (leaving `failed`
+    would make retry timing depend on a stale `last_attempt_at`).
+    The re-stage action ALSO clears
     `quarantined_at` and the strikes for that path (otherwise
     re-staging could never succeed). Test: two stage-stall respawns
     on one pass doc ⇒ row shown as failed ⇒ re-stage recovers it ⇒
