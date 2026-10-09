@@ -1,9 +1,9 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 4 — Opus spec-tier r2 REQUEST CHANGES resolved:
-B1 stamp-bootstrap deadlock on unconditional-force `ct ingest` (refusal
-scope + explicit bootstrap); M1 epoch budget; M2 regrade L as SQL;
-M3 refused-job disposition; M4 keyed expiring grants; m1-m5)
+**Date:** 2026-10-09 (rev 5 — Opus spec-tier r3 REQUEST CHANGES resolved:
+B1 scratch-check pass/fail rule defined; M1 edited-file refusal scope;
+M2 new-doc upsert stays pre-embed; M3 two-stage bench coverage; M4
+instr1 rule-(i) query vector; M5 tripped-epoch persistence; m1-m6)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -102,7 +102,13 @@ disagree about which facts are eligible. Parity guard for >1024 excludes.
 
 - (i) restricted-set fact-cosine floor — score the facts of matched docs
   with the existing raw cosine, open on a floor calibrated against the
-  261-chunk restricted set;
+  261-chunk restricted set. **Query vector under instr1 (rev 5, Opus r3
+  M4):** rule (i) uses a SECOND embed of the query with the scheme
+  prefix (`query_text_for_scheme`, as the v1 gate does at
+  `tools/src/queries.rs:788`) — never a raw-query-vs-instr1-blob
+  comparison (PR #270 showed those cells' floors differ: 0.70 vs 0.64).
+  The extra embed is once per gated message, only when the gate is
+  two-stage-active; its latency is recorded in the calibration artifact;
 - (ii) chunk-score floor with chunk-level membership — open when the
   message's top chunk score clears a floor AND the matched chunk is in
   the hash-hop-hit set (chunk-level membership per v10 §3.1 — the 62
@@ -117,16 +123,23 @@ disagree about which facts are eligible. Parity guard for >1024 excludes.
   injection.)
 
 The paired live calibration (acceptance, below) picks the rule and the
-floor. **Floor storage + key shape (rev 4, Opus r2 m3):** two-stage
+floor. **Floor storage + key shape (rev 5, Opus r3 m2):** two-stage
 floors live in `WISDOM_GATE_FLOORS` (`src-tauri/src/wisdom_match.rs:53`)
-under keys `{model}:{scheme}:two-stage:{rule}` (rule ∈
-`restricted-cosine` | `chunk-hop`), with the swept k recorded beside the
-rule in the same key namespace (`{model}:{scheme}:two-stage:{rule}:k`,
-default 8). **`src-tauri/tests/wisdom_gate_bench.rs:67-74` asserts every
-non-stub floor key has a committed calibration snapshot — each new key
-gets a snapshot from the paired calibration run or that test fails**;
-the acceptance run therefore freezes `expected.json + vectors.json.gz`
-for the winning rule's key before flip-to-default.
+under keys `embed_scheme::floor_key_for(model, scheme) + ":two-stage:" +
+rule` (rule ∈ `restricted-cosine` | `chunk-hop`) — matching the existing
+key shapes (raw keys carry no scheme suffix; instr1 appends `:instr1`).
+**k is NOT a floor key** (rev 5, Opus r3 M3: `WISDOM_GATE_FLOORS` is
+`&[(&str, f32)]` — an integer k would be matchable by `gate_floor`);
+k lives in its own constant `TWO_STAGE_K: &[(&str, usize)]` beside the
+floors, default 8.
+**Bench coverage (rev 5, Opus r3 M3 — the rev-4 claim was wrong):
+`src-tauri/tests/wisdom_gate_bench.rs` has hard-coded per-key tests
+(`:22-44`) and the uncovered-key assertion runs only when a freeze dir
+lacks `expected.json` (both existing fixture dirs are populated), so a
+new two-stage key would pass every existing test with no snapshot.**
+Required: a `replay_two_stage` test function + freeze directory for the
+winning key, and a real per-key coverage assertion — every non-stub key
+in `WISDOM_GATE_FLOORS` must map to a freeze dir that exists.
 **Tie-break (GLM r1 minor-5):** if both rules pass the letter,
 pick by higher hit@2, then lower FP, then rule (i) (simpler path).
 
@@ -212,13 +225,27 @@ are in scope:
   duplicates would double-return in `semantic_search`), delete only
   removed chunks. Empty-hash rows are treated as REMOVED (the
   `idx_chunks_doc_hash` partial index can't match them).
-  **Transaction boundaries pinned (Opus r1 m2):** `upsert_document`
-  (`src-tauri/src/pipeline/mod.rs:708` — writes the new hash and
-  `pending` status before the embed) moves INSIDE the swap transaction;
-  on embed failure the doc is `mark_document_error`ed (`mod.rs:749`) —
-  the embed-failure test asserts the expected post-failure doc status
-  AND hash, so a hash-matching rerun cannot short-circuit at the
-  unchanged-hash check (`:692`). Read/chunk/embed
+  **Transaction boundaries pinned (Opus r1 m2; rev 5, Opus r3 M2):**
+  `upsert_document` (`src-tauri/src/pipeline/mod.rs:708` — writes the
+  new hash and `pending` status before the embed) moves INSIDE the swap
+  transaction **for docs that already have a row**; for NEW docs the
+  pre-embed `upsert` (pending status) STAYS where it is — there are no
+  chunks to lose, and moving it would leave a failed embed with no
+  `doc_id` for `mark_document_error` (`mod.rs:749`) and no row for the
+  sweep's `pending` retry (`watchdog/sweep.rs:84-85`) to pick up.
+  On embed failure the doc is `mark_document_error`ed — the
+  embed-failure test asserts the expected post-failure doc status AND
+  hash (for new docs: the row exists as pending/error), so a
+  hash-matching rerun cannot short-circuit at the unchanged-hash
+  check (`:692`).
+  **Swap race (rev 5, Opus r3 m5):** because the existing-chunk-hash
+  read happens pre-embed, OUTSIDE any transaction, a concurrent writer
+  (GUI worker + `ct ingest`) can change hashes between the read and the
+  swap — the swap transaction RE-READS the chunk hashes under its
+  IMMEDIATE lock and ABORTS (clean error, job retryable) on any
+  mismatch with the pre-embed read, rather than corrupting state or
+  tripping the `(doc_id, content_hash)` UNIQUE constraint.
+  Read/chunk/embed
   happen OUTSIDE any transaction; ONE short IMMEDIATE transaction does
   upsert + delete-removed + insert-new + mark indexed (no write lock
   across the network call; 5s busy timeout).
@@ -273,17 +300,30 @@ are in scope:
   transaction — scheduler, `ct heal`, GUI button share one budget, no
   TOCTOU across processes; **regrade's hard-deletes spend the SAME
   shared budget** (threshold computed with regrade's own L; spending
-  against the one shared counter). **Budget window (rev 4, Opus r2
-  M1):** the budget is per-EPOCH — an epoch is keyed by its start
-  timestamp in `llm_wiki_meta` (with the baseline L snapshotted at epoch
-  start) and expires after **24 hours** (heal's normal cadence deletes
-  a handful of rows per epoch; 24h bounds damage to one epoch's budget
-  while guaranteeing heal resumes next epoch — nothing alerts, so a
-  permanent refusal would be silent). A writer starting a new epoch
-  resets spent=0 and re-snapshots L inside its IMMEDIATE transaction.
-  **Purge list keys defined:** epoch-start ts, spent counter, baseline L —
-  these are the "breaker baseline/state keys" of the clear-transaction
-  purge. Regrade's migration-context path is V20-gated
+  against the one shared counter; rev 5, Opus r3 m1: each L is
+  snapshotted under its OWN key — `breaker_L_heal` /
+  `breaker_L_regrade` — and both keys are in the clear-transaction
+  purge). **Regrade batch semantics (rev 5, Opus r3 m4):** the breaker
+  is ALL-OR-NOTHING — `|doomed|` > remaining budget refuses the WHOLE
+  batch (never a partial delete); `doomed` is RECOUNTED inside the
+  IMMEDIATE purge transaction so the count the breaker judged is the
+  count that would be deleted. **Budget window (rev 5, Opus r3 M5 — a
+  24h auto-rollover only bounds TRANSIENT faults; for the persistent
+  faults this breaker targets, rolling epochs with shrinking L would
+  let each epoch spend a full budget and feed rows to the 7-day
+  prune):** an epoch that TRIPS does not roll over — it stays tripped
+  (spent stays at threshold) until an operator resolves the cause and
+  resets the breaker keys explicitly. Healthy epochs roll over on the
+  24h cadence (start ts in `llm_wiki_meta`, baseline L re-snapshotted
+  at rollover inside the IMMEDIATE transaction). **Residual risk,
+  stated honestly:** with nothing alerting, a tripped breaker means
+  heal silently does nothing indefinitely — that is the safe failure
+  direction (no deletions at all) versus mass deletion; the 7-day
+  prune only touches rows soft-deleted BEFORE the trip, so a tripped
+  epoch cannot feed it. Those keys (epoch-start ts, spent counter,
+  `breaker_L_heal`, `breaker_L_regrade`) are the "breaker
+  baseline/state keys" of the clear-transaction purge.
+  Regrade's migration-context path is V20-gated
   and dead on the live brain (the covered paths are the manual
   `ct evidence regrade` command and pre-V20 replicas via
   `skipped_destructive=true`, which holds V21+ on an upgrading brain —
@@ -301,21 +341,28 @@ are in scope:
   re-enqueue; `:73-82` is the status constant's doc comment) and
   `rechunk_for_reembed` is `force:true`
   (`src-tauri/src/pipeline/mod.rs:72-74`).
-  **Refusal scope (rev 4, Opus r2 B1(b)) — the stamp guards data-loss,
-  so it only refuses where data could be lost:** the refusal applies to
-  a forced rechunk of a doc that ALREADY HAS CHUNKS. New docs and docs
-  with zero chunks are exempt (nothing to lose). The check therefore
-  never blocks routine ingestion of new/edited files on a
-  stamp-missing brain.
-  **Bootstrap (rev 4, Opus r2 B1(c)) — who writes the FIRST stamp on an
-  existing brain:** a new CLI command `ct reindex verify-scratch` runs
-  the scratch-verification flow against the current binary + profile
-  and writes the stamp (both components). GUI `run_wiki_reembed` runs
-  the same flow before enqueueing. Deployment of this PR on the live
-  brain ends with `ct reindex verify-scratch` as the explicit bootstrap
-  step (recorded in the PR's deploy notes). No auto-stamp-on-migration:
-  an automatic trust-on-upgrade path is exactly what the scratch check
-  exists to prevent.
+  **Refusal scope (rev 5, Opus r3 M1 — rev 4's "docs with chunks" scope
+  still refused every EDITED file, since `ct ingest` is always forced
+  and an edited indexed file has chunks):** the stamp check refuses only
+  a **pure rechunk** — `force && the doc's stored hash equals the file's
+  current hash` (nothing changed but we're about to rehash everything).
+  A content edit produces a hash mismatch ⇒ it takes the normal
+  diff-swap path, no stamp check involved. New docs (no row) ⇒ no
+  check. So routine `ct ingest --yes` never blocks on the stamp, stale
+  or missing — only a no-op rechunk of unchanged content does, and that
+  is exactly the operation with nothing to gain and everything to lose.
+  **Bootstrap (rev 5, Opus r3 B1 — the check now has a concrete
+  pass/fail rule; rev 4's `verify-scratch` had none, making the override
+  itself the bypass):** `ct reindex verify-scratch` rechunks a scratch
+  copy of the live DB under the current binary + profile, then
+  **writes the stamp ONLY IF every live `librarian_evidence` hash ref
+  still resolves on the scratch rechunk (baseline: 406/406) AND every
+  gate-eligible entry stays hop-resolvable (baseline: 365/365)**.
+  Stated plainly: **a chunker-version bump FAILS this check** (hashes
+  rehash → evidence refs orphan) until the text-match remap follow-up
+  lands — the correct response to that refusal is to NOT rechunk, not
+  to override. The refusal override remains "re-run verify-scratch",
+  which now can only succeed if the rechunk is actually lossless.
   **Grant path (rev 4 — keyed, verified, expiring; Opus r2 M4):** a
   model-key grant record in `llm_wiki_meta`, **keyed to the target
   model key** and **invalidated when the stamp refreshes to that key**
@@ -333,25 +380,39 @@ are in scope:
   `PipelineJob` is NOT extended (no pass_id field — it would be dropped
   by the sweep anyway); grant + stamp live in the DB, so they survive
   sweep re-enqueue and channel-overflow deferral.
-  **Refused-job disposition (rev 4, Opus r2 M3):** a refused forced job
-  resets its `documents` row to `indexed` (its old chunks are intact —
-  diff-swap ordering deletes only inside the swap transaction), logs
-  one stderr line, and does NOT count as a strike: a refused
+  **Refused-job disposition (rev 4, Opus r2 M3; rev 5, Opus r3 m3):** a
+  refused forced job returns a DISTINCT outcome from `Ok(())` (so the
+  worker at `pipeline/mod.rs:233-255` skips `generate_summary` and the
+  linkers — an LLM call plus re-linking on a doc that didn't change),
+  resets its `documents` row to its PRIOR status (`indexed` if that's
+  what it was — never blindly `indexed`, which would overwrite a prior
+  `error`; the pre-job status is captured before the attempt), logs one
+  stderr line, and does NOT count as a strike: a refused
   `pending_reindex` row is never re-swept into a loop and never
   quarantined.
-  Tests (rev 4 additions): post-upgrade live brain, stamp missing →
-  `ct ingest --yes` of a NEW file succeeds; `ct reindex verify-scratch`
-  → `bulk_reindex` → `model_guard=ok` reachable; refused
-  `pending_reindex` row is not re-swept or quarantined; chunker bump +
-  reembed ⇒ refused; grant for key B does not authorize swap to C.
+  Tests (rev 4/5 additions): post-upgrade live brain, stamp missing →
+  `ct ingest --yes` succeeds for BOTH a new file AND an EDITED existing
+  file (rev 5, Opus r3 M1); `ct reindex verify-scratch` on a chunker
+  bump FAILS and writes no stamp (rev 5 B1: the check's pass/fail rule
+  is the test); verify-scratch passes only when evidence refs + hop
+  resolvability hold; `bulk_reindex --model-swap` → `model_guard=ok`
+  reachable; refused `pending_reindex` row keeps its prior status, is
+  not re-swept or quarantined, and the worker skips summary/linkers;
+  chunker bump + reembed ⇒ refused; grant for key B does not authorize
+  swap to C; new doc + embed failure ⇒ row exists as pending/error
+  (rev 5, Opus r3 M2); swap aborts on concurrent hash change (rev 5
+  m5); fresh-brain bypass requires zero rows EVER (rev 5 m6).
   **Fingerprint =
   (live-DB identity, chunker version, model key)** — the document-set
   hash is DROPPED (r9 M4: content changes are already lossless under
   the diff-swap; only chunker/model changes can mass-rehash). Scratch
   verification failing ⇒ the live rechunk refuses (override: re-run
   the scratch check; no `--allow-bulk` for rechunk — that override
-  stays heal/regrade-only). Fresh brains bypass (no librarian facts to
-  protect). `restore_in_progress` stamping remains [PROPOSED].
+  stays heal/regrade-only). **"Fresh brain" defined (rev 5, Opus r3
+  m6):** a brain with NO rows EVER in `librarian_evidence` (not
+  "zero live facts" — a brain emptied by a bug must NOT qualify and
+  silently skip the guard); test: emptied-but-not-fresh brain does not
+  bypass. `restore_in_progress` stamping remains [PROPOSED].
 
 ### 9. Implementation order (within the ONE PR)
 
