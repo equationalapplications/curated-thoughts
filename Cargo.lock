@@ -1261,6 +1261,7 @@ name = "curated-thoughts-tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "curated-thoughts",
  "dirs",

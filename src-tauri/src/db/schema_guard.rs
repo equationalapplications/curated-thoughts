@@ -51,6 +51,9 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             "superseded_by",
             "superseded_at",
             "tier",
+            // V27 (issue #265): per-row embed-scheme stamp, CT-local (not in
+            // the upstream package schema).
+            "embed_scheme",
         ],
     },
     TableExpectation {

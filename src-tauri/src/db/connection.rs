@@ -807,6 +807,30 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         )?;
     }
 
+    // V27 — wisdom embed-scheme stamp (issue #265 follow-up, spec
+    // docs/superpowers/specs/2026-10-07-issue265-wisdom-instruction-prefix-design.md).
+    // RENUMBERED 26 → 27 at merge: main's V26 is the ontology node-type gate
+    // wave-1 tables above, already merged and stamped by released builds, so
+    // the scheme stamp takes the next free version. Adds
+    // `llm_wiki_entries.embed_scheme TEXT NOT NULL DEFAULT 'raw'` plus the
+    // explicit backfill UPDATE the spec pins (the ADD COLUMN default already
+    // backfills under SQLite semantics, but the UPDATE is kept so the NULL
+    // class provably never exists and `=`/`!=` filters stay two-valued), and
+    // the read-scheme seed `llm_wiki_meta.wisdom_active_scheme = 'raw'`.
+    //
+    // Column-add runs on every open, ungated and PRAGMA-guarded exactly like
+    // V24 (the same snapshot → BEGIN IMMEDIATE → re-inspect under lock
+    // sequence guards concurrent desktop/`--mcp` opens against a duplicate
+    // `duplicate column name` failure). The backfill and meta seed ride the
+    // column-add transaction, so they run once, never on a steady-state
+    // open. The STAMP is gated on V22 having stamped, like V23/V24/V25/V26: a rootless open
+    // defers V22, and stamping 27 would make every later rooted open skip
+    // V22's FATAL re-warn permanently. `stamped_now` above predates this
+    // block only on a fresh brain where V22 stamps 22 in this same call — it
+    // is re-read inside the helper after V24/V25/V26's inserts, mirroring
+    // V25's re-read.
+    apply_v27_embed_scheme(conn)?;
+
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
         conn.execute_batch(
@@ -921,6 +945,75 @@ fn apply_v24_temporal_columns(conn: &Connection, stamp: bool) -> Result<()> {
             let _ = conn.execute_batch("ROLLBACK;");
             return Err(e);
         }
+    }
+    Ok(())
+}
+
+/// V27 body (see the comment at its call site in `migrate()`): add
+/// `llm_wiki_entries.embed_scheme TEXT NOT NULL DEFAULT 'raw'` with the
+/// explicit spec-pinned backfill, seed `llm_wiki_meta.wisdom_active_scheme =
+/// 'raw'`, and stamp 27 when V22 has stamped. Renumbered from V26 at merge
+/// (main's V26 is the ontology node-type gate wave). Split out beside
+/// `apply_v24_temporal_columns` so the concurrency guard stays exercisable.
+fn apply_v27_embed_scheme(conn: &Connection) -> Result<()> {
+    // Unlocked pre-check keeps the steady state (column present) from taking
+    // the write lock on every open, exactly like V24.
+    let existing = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
+    if !existing.iter().any(|c| c == "embed_scheme") {
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let applied = (|| -> Result<()> {
+            // Re-inspect UNDER the write lock: a concurrent desktop/`--mcp`
+            // open may have added the column between the snapshot and the lock.
+            let existing = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
+            if !existing.iter().any(|c| c == "embed_scheme") {
+                conn.execute(
+                    "ALTER TABLE llm_wiki_entries ADD COLUMN embed_scheme TEXT NOT NULL DEFAULT 'raw'",
+                    [],
+                )?;
+                // The explicit backfill the spec pins. `ADD COLUMN ... NOT
+                // NULL DEFAULT` already fills existing rows under SQLite
+                // semantics; the UPDATE keeps the invariant independent of
+                // engine behavior so the NULL class is provably empty. It
+                // runs ONLY in the call that adds the column, inside the same
+                // transaction: `embed_scheme` is unindexed, so an ungated
+                // UPDATE would full-scan the table and take the write lock
+                // on every open forever.
+                conn.execute(
+                    "UPDATE llm_wiki_entries SET embed_scheme = 'raw' WHERE embed_scheme IS NULL",
+                    [],
+                )?;
+                // Seed the read-scheme meta key in the same transaction, so
+                // the column and its seed land together. `INSERT OR IGNORE`
+                // like every default-once seed here: an operator-installed
+                // scheme is never clobbered. (A missing key still resolves
+                // to `raw` in `embed_scheme::read_scheme`.)
+                conn.execute(
+                    "INSERT OR IGNORE INTO llm_wiki_meta (key, value) \
+                     VALUES ('wisdom_active_scheme', 'raw')",
+                    [],
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = applied.and_then(|()| Ok(conn.execute_batch("COMMIT;")?)) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+    }
+    // Stamp last, gated on V22 (see the call-site comment). The column add,
+    // backfill and seed commit atomically above, so a crash before the stamp
+    // leaves nothing half-applied; the steady state is the PRAGMA probe plus
+    // this read and one INSERT OR IGNORE.
+    let stamped_now: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped_now >= 22 {
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (27)",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -3280,8 +3373,9 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 26,
-            "V22 then V23 then V24 then V25 then V26 must be stamped when the migration runs"
+            version, 27,
+            "V22 then V23 then V24 then V25 then V26 then V27 must be stamped \
+             when the migration runs"
         );
 
         let rewritten_path: String = conn
@@ -3325,8 +3419,9 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 26,
-            "rooted open stamps 25 (V25 included) and 26; MAX must be 26"
+            version, 27,
+            "rooted open stamps 26 (ontology gate wave) and 27 (embed scheme); \
+             MAX must be 27"
         );
 
         let agents: String = conn
@@ -3515,8 +3610,8 @@ mod tests {
         );
         assert_eq!(
             max_version(&conn),
-            26,
-            "rooted open stamps 22, then 23/24/25/26 (the latter gated on V22)"
+            27,
+            "rooted open stamps 22, then 23/24/25/26/27 (the latter gated on V22)"
         );
     }
 

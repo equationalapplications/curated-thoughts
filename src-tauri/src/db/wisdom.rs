@@ -139,13 +139,22 @@ pub fn add_wisdom_in_tx(
     let title = fact_title_from_body(body);
 
     let entity_id = assert_entity_active(tx, entity_id)?;
+    // Issue #265: the scheme stamp rides in the same INSERT as the blob.
     tx.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type,
             source_hash, source_ref, created_at, updated_at, last_accessed_at,
-            access_count, deleted_at, embedding_blob, embedding
-         ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, NULL, ?5, ?5, NULL, 0, NULL, ?6, NULL)",
-        params![wisdom_id, entity_id, title, body, now_ms, embedding_blob],
+            access_count, deleted_at, embedding_blob, embed_scheme, embedding
+         ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, NULL, ?5, ?5, NULL, 0, NULL, ?6, ?7, NULL)",
+        params![
+            wisdom_id,
+            entity_id,
+            title,
+            body,
+            now_ms,
+            embedding_blob,
+            crate::embed_scheme::WRITE_SCHEME
+        ],
     )?;
     push_entries_outbox(
         tx,
@@ -340,7 +349,11 @@ pub fn update_wisdom_in_tx(
 
     // Write the caller's freshly computed vector, or NULL when there is none
     // so the sweep re-derives it — never leave a vector describing text the
-    // entry no longer contains. Mirrors `commit_fact_update`.
+    // entry no longer contains. Mirrors `commit_fact_update`. The scheme
+    // stamp rides in the same statement: a fresh vector re-stamps, and a
+    // NULL blob re-stamps too — the old blob is discarded with the body it
+    // described, so the row lands consistent for the sweep (which embeds
+    // under the WRITE scheme).
     //
     // The lookup above matched anywhere in the survivor's redirect cluster,
     // so a pre-merge row may still be keyed to a loser — rekey it to the
@@ -348,9 +361,18 @@ pub fn update_wisdom_in_tx(
     // #132 prisma-outbox divergence class `create_task` guards against).
     tx.execute(
         "UPDATE llm_wiki_entries
-            SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = ?4, entity_id = ?6
-          WHERE id = ?5",
-        params![title, body, now_ms, embedding_blob, wisdom_id, entity_id],
+            SET title = ?1, body = ?2, updated_at = ?3, embedding_blob = ?4,
+                embed_scheme = ?5, entity_id = ?7
+          WHERE id = ?6",
+        params![
+            title,
+            body,
+            now_ms,
+            embedding_blob,
+            crate::embed_scheme::WRITE_SCHEME,
+            wisdom_id,
+            entity_id
+        ],
     )?;
     let tags: Vec<String> = serde_json::from_str(&tags_raw).unwrap_or_default();
     push_entries_outbox(
@@ -683,6 +705,48 @@ mod tests {
             archive_wisdom(&mut conn, &entity_id, &fact.id).is_err(),
             "double archive errors"
         );
+    }
+
+    /// Issue #265 Test (c) (write path): the user-authored wisdom writers
+    /// stamp `embed_scheme = WRITE_SCHEME` on both the INSERT and the body
+    /// UPDATE, in the same statement that writes the blob.
+    #[test]
+    fn wisdom_writers_stamp_embed_scheme() {
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&mut conn);
+
+        // INSERT path (add_wisdom_with_blob, also entities_api.rs via the
+        // same function): stamped whether or not a blob is present.
+        let fact = add_wisdom(&mut conn, &entity_id, "A stamped user fact.").unwrap();
+        let (blob, scheme): (Option<Vec<u8>>, String) = conn
+            .query_row(
+                "SELECT embedding_blob, embed_scheme FROM llm_wiki_entries WHERE id = ?1",
+                [&fact.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(blob, None);
+        assert_eq!(scheme, crate::embed_scheme::WRITE_SCHEME);
+
+        // UPDATE path (update_wisdom_with_blob): a pre-#265 raw blob+stamp is
+        // replaced — blob NULLed (sweep re-embeds) AND scheme re-stamped.
+        conn.execute(
+            "UPDATE llm_wiki_entries
+                SET embedding_blob = ?1, embed_scheme = 'raw'
+              WHERE id = ?2",
+            params![vec![7u8; 32], fact.id],
+        )
+        .unwrap();
+        update_wisdom(&mut conn, &entity_id, &fact.id, "A rewritten body.").unwrap();
+        let (blob2, scheme2): (Option<Vec<u8>>, String) = conn
+            .query_row(
+                "SELECT embedding_blob, embed_scheme FROM llm_wiki_entries WHERE id = ?1",
+                [&fact.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(blob2, None);
+        assert_eq!(scheme2, crate::embed_scheme::WRITE_SCHEME);
     }
 
     #[test]

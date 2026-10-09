@@ -27,6 +27,9 @@ dirs.workspace = true
 # Direct dep for `calibrate_wisdom_gate` (sha256 over fixture files). The src-tauri
 # crate already uses 0.4; pinned here so the version is in lockstep.
 hex = "0.4"
+# chrono: gate-decision log-line timestamps (spec 2026-10-07 merge blocker 3).
+# Same 0.4 pin as the src-tauri crate so the version stays in lockstep.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # tempfile moves out of dev-deps: `calibrate_wisdom_gate` builds a scratch brain
 # in a tempdir at runtime.
 tempfile.workspace = true

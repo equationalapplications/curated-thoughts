@@ -545,7 +545,7 @@ fn heal_refusal_on_old_schema_db_reports_schema_pending_readonly() {
     let dir = brain.path().to_path_buf();
     let dir_str = dir.to_str().unwrap().to_string();
     with_vars([("CURATED_BRAIN_DIR", Some(dir_str.as_str()))], move || {
-        // Minimal pre-V26 schema: entries table only, no llm_wiki_meta /
+        // Minimal pre-V27 schema: entries table only, no llm_wiki_meta /
         // entity_type_origin.
         {
             let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();

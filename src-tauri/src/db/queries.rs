@@ -982,16 +982,19 @@ mod clear_vault_tables_tests {
             );
         }
 
-        // Keep-rows survive. The meta count is TWO: the okf marker and the
+        // Keep-rows survive. The meta count is THREE: the okf marker, the
         // drift watermark — the watermark describes the HOST's config, not
         // vault content, and wiping it would re-arm first-run suppression
-        // (plan-p4-m5). The alias_remap_completed marker is the third meta
-        // row the seed adds and is asserted GONE below: it vouches for remap
-        // rows the clear just destroyed (r19-m2).
+        // (plan-p4-m5) — and the V27 `wisdom_active_scheme` read-scheme
+        // seed (issue #265), which the reader needs to resolve its SELECT
+        // filter on the very next open. The alias_remap_completed marker is
+        // the fourth meta row the seed adds and is asserted GONE below: it
+        // vouches for remap rows the clear just destroyed (r19-m2).
         assert_eq!(
             count(&conn, "llm_wiki_meta"),
-            2,
-            "okf marker + drift watermark must survive; the remap marker must not"
+            3,
+            "okf marker + drift watermark + V27 scheme seed must survive; \
+             the remap marker must not"
         );
         let remap_marker: i64 = conn
             .query_row(
