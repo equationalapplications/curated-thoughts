@@ -1,8 +1,9 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 3 — Opus spec-tier r1 REQUEST CHANGES resolved:
-B1 grant-path deadlock on CLI-only brains; M1-M2 breaker transaction &
-citation fixes; M3 baseline arm pinned; m1-m4)
+**Date:** 2026-10-09 (rev 4 — Opus spec-tier r2 REQUEST CHANGES resolved:
+B1 stamp-bootstrap deadlock on unconditional-force `ct ingest` (refusal
+scope + explicit bootstrap); M1 epoch budget; M2 regrade L as SQL;
+M3 refused-job disposition; M4 keyed expiring grants; m1-m5)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -116,7 +117,17 @@ disagree about which facts are eligible. Parity guard for >1024 excludes.
   injection.)
 
 The paired live calibration (acceptance, below) picks the rule and the
-floor. **Tie-break (GLM r1 minor-5):** if both rules pass the letter,
+floor. **Floor storage + key shape (rev 4, Opus r2 m3):** two-stage
+floors live in `WISDOM_GATE_FLOORS` (`src-tauri/src/wisdom_match.rs:53`)
+under keys `{model}:{scheme}:two-stage:{rule}` (rule ∈
+`restricted-cosine` | `chunk-hop`), with the swept k recorded beside the
+rule in the same key namespace (`{model}:{scheme}:two-stage:{rule}:k`,
+default 8). **`src-tauri/tests/wisdom_gate_bench.rs:67-74` asserts every
+non-stub floor key has a committed calibration snapshot — each new key
+gets a snapshot from the paired calibration run or that test fails**;
+the acceptance run therefore freezes `expected.json + vectors.json.gz`
+for the winning rule's key before flip-to-default.
+**Tie-break (GLM r1 minor-5):** if both rules pass the letter,
 pick by higher hit@2, then lower FP, then rule (i) (simpler path).
 
 **Empty closed set (GLM r1 minor-6):** with two-stage active and zero
@@ -130,7 +141,11 @@ For each (model, scheme) key: when the two-stage floor is missing but the
 v1 floor exists → **v1 fallback** (v1 embed, v1 floors, v1 label — can
 open). When BOTH floors are missing → v1's uncalibrated behavior (gate
 `uncalibrated`, `entries = Vec::new()`, embed skipped). Embed-skip applies
-only when BOTH keys are missing. Guard failure (absent/mismatch/mixed
+only when BOTH keys are missing. (rev 4, Opus r2 m4: this is a code
+edit at `tools/src/queries.rs:791` too — the CLI embed-skip
+`wm::gate_floor(&scheme_key).is_none()` checks only the v1 key; it
+gains the both-keys-missing condition so the rule is implemented on the
+CLI side as well as the Tauri side.) Guard failure (absent/mismatch/mixed
 model) ⇒ v1 fallback — the gate is never dark **while a v1 floor exists**.
 **The fourth cell (Opus r1 m4):** two-stage floor PRESENT, v1 floor
 missing ⇒ two-stage runs normally (it has its own floor); but a guard
@@ -230,61 +245,105 @@ are in scope:
   `TransactionBehavior::Immediate` with the conditional UPDATE (matching
   `heal_invalid_sources_conn`), so the read-then-increment budget can
   neither race nor hit an upgrade `SQLITE_BUSY`; this also stops it
-  double-counting already-soft-deleted rows. **Regrade:** the file is
+  double-counting already-soft-deleted rows. (rev 4, Opus r2 m1: the
+  grounding check `source_ref_is_still_grounded` — currently run
+  BEFORE the transaction at `lib.rs:2440` — moves INSIDE the IMMEDIATE
+  transaction, as `heal.rs:85` already does; the function keeps its
+  `&Connection` signature and uses
+  `Transaction::new_unchecked(conn, TransactionBehavior::Immediate)`
+  rather than rippling `&mut Connection` through its callers. Citation
+  tightening, Opus r2 m5: the grounding check is at `:2440`, the
+  soft-delete at `:2445-2448`.) **Regrade:** the file is
   `src-tauri/src/db/evidence_regrade.rs` (not `pipeline/`); its
   classification loop (`:173-200`) has no per-row write transaction —
   the breaker is therefore a **single pre-delete check** on
   `|doomed|` (the `unanchored=1 AND deleted_at IS NULL` population,
-  `:160-165`) against the threshold, inside the purge transaction.
+  `:160-165`) against the threshold. (rev 4, Opus r2 m2: the purge
+  transaction itself is `unchecked_transaction()` at
+  `evidence_regrade.rs:134`, DEFERRED — it moves to IMMEDIATE so the
+  pre-delete count and budget read serialize against concurrent heal
+  writers, consistent with the heal-writer fix above.)
   **Denominators pinned:** heal L = heal's own selection
   (`source_type='librarian_inferred' AND source_ref IS NOT NULL`); regrade
-  L = the SAME all-live-`librarian_evidence` denominator as heal (not the
-  doomed population — a small doomed set on a small live corpus must
-  still refuse). Threshold **max(⌈0.05·L⌉, 10)** for all. Spent budget
+  L (rev 4, Opus r2 M2 — written as SQL, no "same as heal" ambiguity;
+  different table than heal's): `SELECT COUNT(*) FROM librarian_evidence
+  le JOIN llm_wiki_entries e ON e.id = le.entry_id WHERE e.deleted_at IS
+  NULL`. Threshold **max(⌈0.05·L⌉, 10)** for all. Spent budget
   is kept in `llm_wiki_meta`, incremented inside each per-row IMMEDIATE
   transaction — scheduler, `ct heal`, GUI button share one budget, no
-  TOCTOU across processes. Regrade's migration-context path is V20-gated
+  TOCTOU across processes; **regrade's hard-deletes spend the SAME
+  shared budget** (threshold computed with regrade's own L; spending
+  against the one shared counter). **Budget window (rev 4, Opus r2
+  M1):** the budget is per-EPOCH — an epoch is keyed by its start
+  timestamp in `llm_wiki_meta` (with the baseline L snapshotted at epoch
+  start) and expires after **24 hours** (heal's normal cadence deletes
+  a handful of rows per epoch; 24h bounds damage to one epoch's budget
+  while guaranteeing heal resumes next epoch — nothing alerts, so a
+  permanent refusal would be silent). A writer starting a new epoch
+  resets spent=0 and re-snapshots L inside its IMMEDIATE transaction.
+  **Purge list keys defined:** epoch-start ts, spent counter, baseline L —
+  these are the "breaker baseline/state keys" of the clear-transaction
+  purge. Regrade's migration-context path is V20-gated
   and dead on the live brain (the covered paths are the manual
   `ct evidence regrade` command and pre-V20 replicas via
   `skipped_destructive=true`, which holds V21+ on an upgrading brain —
   the safe direction).
 - **(c) Stamp enforced inside the funnel.** `ingest_file_virtual` itself
   refuses `force_rechunk=true` when the fingerprint stamp is
-  missing/stale. **Every** force-rechunk path funnels through
+  stale. **Every** forced-rechunk path funnels through
   `ingest_file_virtual`, so one check gates every entry point (r9 M3):
-  the three manual callers (`ct ingest` `tools/src/cmds.rs:172-178`,
+  `ct ingest` (UNCONDITIONALLY forced — `tools/src/cmds.rs:172-178`
+  hard-codes `force=true`; there is no `--force` flag in `Cmd::Ingest`),
   `tools/src/bin/bulk_reindex.rs:129`, `queue_full_reindex`
-  `src-tauri/src/lib.rs:2324`) plus the automatic forced producers —
+  (`src-tauri/src/lib.rs:2324`), and the automatic forced producers —
   the watchdog sweep re-enqueues `pending_reindex` as a *forced* rechunk
   (`src-tauri/src/pipeline/watchdog/sweep.rs:128-136` — the actual
   re-enqueue; `:73-82` is the status constant's doc comment) and
   `rechunk_for_reembed` is `force:true`
   (`src-tauri/src/pipeline/mod.rs:72-74`).
-  **Grant path (rev 3 — single mechanism, CLI-covered; replaces rev 2's
-  dual mechanism, which Opus r1 B1 showed still deadlocks: rev 2 granted
-  via `run_wiki_reembed`, but that is a GUI-only `#[tauri::command]`
-  (`src-tauri/src/lib.rs:2762`) so CLI-only brains get no grant, and
-  sweep re-enqueue rebuilds jobs from `(path, status)` alone
-  (`src-tauri/src/pipeline/watchdog/sweep.rs:128-136`), dropping any
-  job-carried token):** a **model-key grant record** written in
-  `llm_wiki_meta` — keyed so it authorizes ONLY the model-key component
-  of the fingerprint. A chunker-version change is NEVER covered by the
-  grant: it still requires the scratch check (a binary upgrade that
-  bumps the chunker, followed by a re-embed, must not self-grant).
-  Writers of the grant: (GUI) `run_wiki_reembed` after its own scratch
-  verification; **(CLI) the re-embed-producing commands gain the grant —
-  `bulk_reindex` gets a `--model-swap` mode and `ct ingest --force` /
-  `queue_full_reindex` check-and-write it, so a CLI-only model swap can
-  reach `model_guard=ok`**. The funnel check in `ingest_file_virtual`
-  reads: stamp fresh ⇒ pass; stamp stale only in the model-key component
-  AND the model-key grant record present ⇒ pass (and the stamp is
-  refreshed as a side effect); chunker component stale ⇒ refuse.
+  **Refusal scope (rev 4, Opus r2 B1(b)) — the stamp guards data-loss,
+  so it only refuses where data could be lost:** the refusal applies to
+  a forced rechunk of a doc that ALREADY HAS CHUNKS. New docs and docs
+  with zero chunks are exempt (nothing to lose). The check therefore
+  never blocks routine ingestion of new/edited files on a
+  stamp-missing brain.
+  **Bootstrap (rev 4, Opus r2 B1(c)) — who writes the FIRST stamp on an
+  existing brain:** a new CLI command `ct reindex verify-scratch` runs
+  the scratch-verification flow against the current binary + profile
+  and writes the stamp (both components). GUI `run_wiki_reembed` runs
+  the same flow before enqueueing. Deployment of this PR on the live
+  brain ends with `ct reindex verify-scratch` as the explicit bootstrap
+  step (recorded in the PR's deploy notes). No auto-stamp-on-migration:
+  an automatic trust-on-upgrade path is exactly what the scratch check
+  exists to prevent.
+  **Grant path (rev 4 — keyed, verified, expiring; Opus r2 M4):** a
+  model-key grant record in `llm_wiki_meta`, **keyed to the target
+  model key** and **invalidated when the stamp refreshes to that key**
+  (a leftover A→B grant cannot authorize a later B→C swap). Writers:
+  `bulk_reindex --model-swap` (CLI, the model-swap tool) and
+  `run_wiki_reembed` (GUI) — both AFTER their scratch verification flow;
+  **`ct ingest` is NOT a grant writer** (routine ingest, not a model
+  swap). Model-key-only swaps need NO scratch check for correctness —
+  the diff-swap keeps all `content_hash`es — the scratch check on these
+  paths is belt-and-suspenders and identical on CLI and GUI. The funnel
+  check in `ingest_file_virtual` reads: stamp fresh ⇒ pass; stamp stale
+  only in the model-key component AND a grant for the target key
+  present ⇒ pass (stamp refreshed as a side effect, grant consumed);
+  chunker component stale ⇒ refuse.
   `PipelineJob` is NOT extended (no pass_id field — it would be dropped
-  by the sweep anyway); the grant lives in the DB, so it survives
-  sweep re-enqueue and channel-overflow deferral. Tests: CLI grant
-  (`bulk_reindex --model-swap`) reaches `model_guard=ok`; GUI reembed
-  with channel overflow → sweep re-enqueue → passes on the DB grant;
-  chunker version changed + reembed ⇒ refused.
+  by the sweep anyway); grant + stamp live in the DB, so they survive
+  sweep re-enqueue and channel-overflow deferral.
+  **Refused-job disposition (rev 4, Opus r2 M3):** a refused forced job
+  resets its `documents` row to `indexed` (its old chunks are intact —
+  diff-swap ordering deletes only inside the swap transaction), logs
+  one stderr line, and does NOT count as a strike: a refused
+  `pending_reindex` row is never re-swept into a loop and never
+  quarantined.
+  Tests (rev 4 additions): post-upgrade live brain, stamp missing →
+  `ct ingest --yes` of a NEW file succeeds; `ct reindex verify-scratch`
+  → `bulk_reindex` → `model_guard=ok` reachable; refused
+  `pending_reindex` row is not re-swept or quarantined; chunker bump +
+  reembed ⇒ refused; grant for key B does not authorize swap to C.
   **Fingerprint =
   (live-DB identity, chunker version, model key)** — the document-set
   hash is DROPPED (r9 M4: content changes are already lossless under
@@ -351,12 +410,15 @@ are in scope:
   (watchdog sweep re-enqueue and `rechunk_for_reembed`);
   fresh-brain bypass; purge deletes guard/pass/stamp/breaker keys +
   pass-doc rows.
-- Stamp grant path (rev 3 mechanism): model-key change → CLI grant
-  (`bulk_reindex --model-swap`) → forced re-embed pass completes →
-  `model_guard=ok` (the flip dependency must be reachable); GUI
-  channel-overflow → sweep re-enqueue → passes on the DB-stored grant;
-  chunker-version change + reembed ⇒ refused (grant never covers the
-  chunker component).
+- Stamp grant path (rev 4 mechanism): stamp-missing brain →
+  `ct reindex verify-scratch` bootstraps the stamp →
+  `bulk_reindex --model-swap` writes the keyed grant → forced re-embed
+  pass completes → `model_guard=ok` (the flip dependency must be
+  reachable); GUI channel-overflow → sweep re-enqueue → passes on the
+  DB-stored grant; chunker-version change + reembed ⇒ refused; grant
+  for key B does not authorize swap to C; refused `pending_reindex`
+  row is reset to `indexed` and not re-swept/quarantined; `ct ingest
+  --yes` of a NEW file succeeds with no stamp present.
 - Guard completion branches (GLM r1 MAJOR-4), one test each:
   snapshotted doc not indexed under the new key ⇒ completion BLOCKED;
   superseded-job `pending` ⇒ BLOCKED; file-missing ⇒ counted in
