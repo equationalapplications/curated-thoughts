@@ -1,13 +1,14 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 11 — Opus spec-tier r9 REQUEST CHANGES resolved:
-M1 last_indexed_hash backfilled by the ungated migration (indexed-only
-+ pending_reindex; NULL rows would leave the guard inert on the
-upgraded brain); M2 refusal record keyed (doc_id, hash, fingerprint) +
-deleted on swap success/delete + clear purge (record could block a
-later real edit); m1 counter: post-job decrement already covers
-refusals (no double-decrement); m2 command name verify-scratch; m3
-table evaluated after the :692 short-circuit)
+**Date:** 2026-10-09 (rev 12 — Opus spec-tier r10 REQUEST CHANGES resolved:
+M1 evaluate_pass_completion pinned (bulk_reindex end + in-swap-tx +
+sweep-tick backstop; swap tx reads open (pass_id, target_key) from
+llm_wiki_meta); m1 backfill WHERE IN ('indexed','pending_reindex') as
+the single rule, error/orphaned NULL = accepted residual; m2 refusal
+record = new table + stored-stamp fingerprint NULL-safe; m3
+last_indexed_hash written in mark_document_indexed; empty-re-extraction
+branch runs the swap tx delete-all; m4 record hash = documents.hash;
+stale rev-9 test row reworded)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -448,9 +449,23 @@ are in scope:
   (backfilling them would recreate B1); `pending_reindex` rows were
   staged from `indexed` with unchanged bytes, so they ARE backfilled.
   `last_indexed_hash` is also written on the zero-chunk
-  `mark_document_indexed` path (`pipeline/mod.rs:735-738`).
+  `mark_document_indexed` path (`pipeline/mod.rs:735-738`) — and
+  **inside `mark_document_indexed` itself** (rev 12, Opus r10 m3: it
+  is the only writer, which also fixes the empty-re-extraction branch:
+  an existing doc re-extracting to empty runs the swap transaction
+  with every chunk treated as removed — upsert + delete-all +
+  `last_indexed_hash` + mark indexed — so the hash no longer stays
+  stale and later runs hit the `:692` early return). Backfill wording
+  is `WHERE status IN ('indexed','pending_reindex')` (rev 12, Opus r10
+  m1 — the rev-11 "indexed ONLY ... pending_reindex ARE backfilled"
+  pairing was self-contradictory; the WHERE clause is the rule).
+  `error` and `orphaned` rows deliberately stay NULL: the guard is
+  inert for them (treated as an edit) — accepted residual, noted in
+  investigation §4.
   Test: post-upgrade fixture, stamp missing, forced rechunk of a
   pre-existing indexed doc ⇒ REFUSED.
+  Test: existing doc re-extracts to empty ⇒ swap-tx delete-all +
+  `last_indexed_hash` written + indexed (rev 12, Opus r10 m3).
   Test: watcher Modify event + stamp missing ⇒ doc ends up indexed
   with the new content.
   **Scope honesty (rev 6, Opus r4 m2):** under a stale CHUNKER stamp an
@@ -503,7 +518,22 @@ are in scope:
     §4 guard would then pass on wrong scores with no fallback, and
     the unforced-edit skip rule would go true mid-pass). Until
     completion, the gate guard treats an open grant or an in-flight
-    pass as a model mismatch ⇒ v1 fallback.
+    pass as a model mismatch ⇒ v1 fallback. **Completion evaluator
+    (rev 12, Opus r10 M1 — nothing in the code signals completion
+    back to a supervisor, `sweep.rs:55-57`; without a pinned
+    evaluator a GUI model swap would leave the grant open forever,
+    the gate on v1 or uncalibrated, with no signal):** ONE
+    idempotent `evaluate_pass_completion(conn)` is pinned, run (1)
+    at the end of `bulk_reindex --model-swap` (synchronous), (2)
+    inside every successful swap transaction (cheap check: no
+    snapshotted doc still missing a pass-docs row under the target
+    key — the last job to finish completes the pass), and (3) from
+    the sweep tick as backstop. The swap transaction reads the open
+    `(pass_id, target_key)` from `llm_wiki_meta` — with no `pass_id`
+    on `PipelineJob`, this DB read is how a pass-docs row gets
+    written; stated explicitly. Test: GUI full reindex, all jobs
+    succeed ⇒ stamp refreshed, grant consumed, guard `ok`, no CLI
+    step.
   - chunker current, model stale, NO grant ⇒ **refuse** — EXCEPT the
     sole sanctioned model-swap paths: `bulk_reindex --model-swap` and
     `run_wiki_reembed`, which write the grant first (after scratch
@@ -552,13 +582,21 @@ are in scope:
   were replaced in rev 10 by a per-doc refusal record; rev 11 pins
   the record's LIFETIME after r9 MAJOR-2 showed it could outlive its
   cause and block a later real edit):** a refused row records a
-  **refusal record keyed to `(doc_id, file hash at refusal, stamp
-  fingerprint)`**. The sweep skips the row ONLY while ALL THREE still
-  match: a later content change writes a new hash ⇒ the record no
-  longer matches ⇒ the next sweep dispatches the edit normally (no
+  **refusal record keyed to `(doc_id, documents.hash at refusal, stamp
+  fingerprint)`** — the hash leg is compared against
+  `documents.hash` (which `queue.rs:172` updates on edits; the sweep
+  has no fresh file hash to compare), so a later content change
+  breaks the match ⇒ the next sweep dispatches the edit normally (no
   silent loss); a stamp refresh changes the fingerprint ⇒ exemption
   lifted (pending rows that need a retry resume after bootstrap).
-  The record is DELETED inside the swap transaction (job succeeded)
+  **Storage (rev 12, Opus r10 m2):** a NEW TABLE in the ungated
+  migration (not per-doc meta keys — both sweep queries need it as a
+  join filter). **Fingerprint = the stamp stored in `llm_wiki_meta`**
+  (the sweep has only `conn`, no profile), compared NULL-safely
+  (`IS`/`'<absent>'` sentinel) — a refusal recorded while the stamp
+  is missing must still suppress re-dispatch until the fingerprint
+  changes. The record is DELETED inside the swap transaction (job
+  succeeded)
   and in `delete_document`, and is in the clear-transaction purge
   list — no leaks (the r8 M1-M2 criticism, now fully answered). The
   filter is applied in BOTH `list_sweepable_pending` and
@@ -632,9 +670,11 @@ are in scope:
  stale + NO grant ⇒ REFUSED — the table's empty cell (rev 9, Opus r7
  MAJOR-2), and `grant for B` does not authorize a B→C swap in the
  same cell; pure-rechunk embed failure on an EXISTING doc ⇒ status
- stays `indexed`, old chunks intact (rev 9, Opus r7 MINOR-1); failed
- overflow-staged `pending` row (no-marker branch) restored to
- `pending` and does not loop (rev 9 MAJOR-1); bulk_reindex
+ stays `indexed`, old chunks intact (rev 9, Opus r7 MINOR-1); refused
+ `pending` row does not re-dispatch after worker restart while its
+ refusal record matches, and dispatches normally once its hash or
+ the stamp changes (rev 10-12 refusal-record design, supersedes the
+ rev-9 marker wording); bulk_reindex
  --model-swap: one embed failure mid-pass ⇒ BLOCKED + rest re-embed +
  non-zero exit (rev 9 MINOR-2); regrade breaker refusal leaves
  re-anchor writes committed (rev 9 MINOR-3); watcher Modify event +
