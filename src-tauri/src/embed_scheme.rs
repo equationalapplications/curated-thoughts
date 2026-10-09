@@ -35,9 +35,12 @@ pub const WRITE_SCHEME: &str = "instr1";
 /// Floor-key suffix for `instr1` (`<key>:instr1`); raw keys are unchanged.
 pub const SCHEME_SUFFIX_INSTR1: &str = ":instr1";
 
-/// The WRITE-scheme document text for an entry: under `instr1` the canonical
-/// instruction is prepended (byte-exact, direct concatenation) to the raw
-/// `title\n\nbody` prose; under `raw` the text is verbatim.
+/// The WRITE-scheme document text for an entry. The WRITE scheme is always
+/// `instr1`, so this is unconditionally the canonical instruction prepended
+/// (byte-exact, direct concatenation) to the `title\n\nbody` prose —
+/// exactly `doc_text_for_scheme(title, body, Scheme::Instr1)`. There is no
+/// raw write path; a raw document text exists only for calibration and
+/// rollback tooling, via [`doc_text_for_scheme`] with `Scheme::Raw`.
 ///
 /// This is the parity text function: the sweep, both write-time paths, and the
 /// phase-2 pre-embed all derive the embedded text through it, so a stored
@@ -45,7 +48,19 @@ pub const SCHEME_SUFFIX_INSTR1: &str = ":instr1";
 /// provider. One function, not per-site `format!`s — a scheme drift here would
 /// silently desync parity from what was actually embedded.
 pub fn doc_text_for_entry(title: &str, body: &str) -> String {
-    format!("{QUERY_INSTRUCTION_PREFIX}{title}\n\n{body}")
+    doc_text_for_scheme(title, body, Scheme::Instr1)
+}
+
+/// Document text for an entry under an explicit scheme: `raw` is the verbatim
+/// `title\n\nbody` prose, `instr1` prepends the byte-exact instruction. Only
+/// [`doc_text_for_entry`] (the WRITE scheme) feeds production writers; this
+/// scheme-parameterised form exists so calibration can build either cell
+/// without re-deriving the text by hand.
+pub fn doc_text_for_scheme(title: &str, body: &str, scheme: Scheme) -> String {
+    match scheme {
+        Scheme::Raw => format!("{title}\n\n{body}"),
+        Scheme::Instr1 => format!("{QUERY_INSTRUCTION_PREFIX}{title}\n\n{body}"),
+    }
 }
 
 /// `llm_wiki_meta` key holding the active read scheme.
@@ -136,16 +151,40 @@ pub fn query_text_for_scheme(truncated_query: &str, scheme: Scheme) -> String {
 }
 
 /// Read-scheme resolution for generic readers (MCP `wiki_search` /
-/// `wiki_context`): on a pre-V27 table shape (no `embed_scheme` column on
-/// `llm_wiki_entries`) there is no scheme dimension at all — degrade to raw
-/// instead of probing `llm_wiki_meta`, which may not exist either. On the
-/// V27+ shape this is exactly `read_scheme` (fail-closed on unknown values).
-pub fn read_scheme_for_reader(conn: &Connection) -> Result<Scheme> {
+/// `wiki_context`), keeping the table shape: `None` on a pre-V27 table (no
+/// `embed_scheme` column on `llm_wiki_entries`) — there is no scheme
+/// dimension at all, so readers omit the row filter and embed the query raw,
+/// without probing `llm_wiki_meta` (which may not exist either). On the V27+
+/// shape this is `Some(read_scheme)` (fail-closed on unknown values).
+///
+/// Resolve this ONCE per request and hand the value to every scheme-derived
+/// step (query prefix, row filter): two independent resolutions could
+/// straddle a cutover and pair one scheme's query with another's rows.
+pub fn reader_scheme(conn: &Connection) -> Result<Option<Scheme>> {
     let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
     if cols.iter().any(|c| c == "embed_scheme") {
-        read_scheme(conn)
+        Ok(Some(read_scheme(conn)?))
     } else {
-        Ok(Scheme::Raw)
+        Ok(None)
+    }
+}
+
+/// [`reader_scheme`] collapsed to a concrete scheme: the pre-V27 shape is
+/// de-facto `raw`.
+pub fn read_scheme_for_reader(conn: &Connection) -> Result<Scheme> {
+    Ok(reader_scheme(conn)?.unwrap_or(Scheme::Raw))
+}
+
+/// The READ-scheme row filter for a gate / `wiki_search` candidate SELECT:
+/// `AND embed_scheme = '<scheme>'`, or empty on the pre-V27 shape (`None`).
+/// Every candidate reader interpolates this as `{scheme_filter}` inside its
+/// SQL literal — the reader inventory test keys on that token — and binds
+/// `Scheme::as_str()` (a closed vocabulary, never user input), so the filter
+/// and the stamps cannot drift apart.
+pub fn scheme_filter_sql(scheme: Option<Scheme>) -> String {
+    match scheme {
+        Some(s) => format!(" AND embed_scheme = '{}'", s.as_str()),
+        None => String::new(),
     }
 }
 
@@ -165,8 +204,11 @@ pub enum ActivateOutcome {
 /// value (including `raw`) is a hard error, fail-closed. Precondition: zero
 /// live non-null rows unstamped `instr1` (counted via the scheme sweep's
 /// workset query); the refusal carries the outstanding count for the operator.
-/// The flip itself is a single upsert on `llm_wiki_meta` — atomic, and
-/// idempotent (an already-`instr1` DB is a no-op success).
+/// The precondition count and the flip run inside ONE `BEGIN IMMEDIATE`
+/// transaction: the write lock is held from the count through the upsert, so
+/// no writer (e.g. an older binary still stamping `raw`) can land a row
+/// between "zero outstanding" and the flip. Idempotent: an already-`instr1`
+/// DB is a no-op success.
 pub fn activate_instr1(conn: &Connection, target: &str) -> Result<ActivateOutcome> {
     // Fail closed on anything but the WRITE scheme — including `raw`: there
     // is no sanctioned rollback via this command (spec mechanism 4: rollback
@@ -178,6 +220,25 @@ pub fn activate_instr1(conn: &Connection, target: &str) -> Result<ActivateOutcom
              (fail-closed; rollback is a manual owner procedure)"
         ),
     }
+    // `&Connection` (callers hold shared handles), so the transaction is
+    // driven by hand rather than `transaction_with_behavior(&mut self)`.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    match activate_instr1_locked(conn) {
+        Ok(outcome) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(outcome)
+        }
+        Err(e) => {
+            // The original error is the one worth reporting; a failed
+            // rollback leaves the transaction to die with the connection.
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// Body of [`activate_instr1`]; runs under the caller's write lock.
+fn activate_instr1_locked(conn: &Connection) -> Result<ActivateOutcome> {
     let outstanding = crate::embed_sweep::count_unstamped_entries(conn)?;
     if outstanding > 0 {
         return Ok(ActivateOutcome::Refused { outstanding });
@@ -221,7 +282,7 @@ mod tests {
     }
 
     /// Recursively collect `*.rs` files under `dir` (std-only; the inventory
-    /// test must not depend on extra crates).
+    /// tests must not depend on extra crates).
     fn collect_rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -237,116 +298,239 @@ mod tests {
         }
     }
 
-    /// Extract every SQL statement window that starts a string literal with
-    /// `INSERT INTO llm_wiki_entries` or `UPDATE llm_wiki_entries`. A window
-    /// runs until the statement's closing `)?;` (capped at 80 lines).
-    fn sql_windows(lines: &[&str]) -> Vec<(usize, String)> {
-        let mut windows = Vec::new();
-        let mut i = 0usize;
-        while i < lines.len() {
-            let trimmed = lines[i].trim_start();
-            let is_start = trimmed.starts_with('"')
-                && (trimmed.contains("INSERT INTO llm_wiki_entries")
-                    || trimmed.contains("UPDATE llm_wiki_entries"));
-            if is_start {
-                let start = i;
-                let mut j = i;
-                while j < lines.len() && j - start < 80 {
-                    let t = lines[j].trim_end();
-                    if t.ends_with(")?;") || t.ends_with("?);") || t.ends_with("\")?;") {
-                        break;
-                    }
-                    j += 1;
+    /// One Rust string literal: the 1-based line it opens on and its text,
+    /// whitespace-collapsed (so layout and rustfmt never change what a check
+    /// sees).
+    struct Literal {
+        line: usize,
+        text: String,
+    }
+
+    /// Every string literal (`"…"`, `b"…"`, `r#"…"#`) in `src`, as whole
+    /// statements regardless of how many lines they span. A small lexer, not a
+    /// line-window heuristic: comments are skipped, char literals (`'"'`) and
+    /// lifetimes are told apart, escapes are honoured, and raw strings end only
+    /// at their own `"` + hash run. Every SQL statement in this crate is a
+    /// single literal (dynamic pieces are `{…}` interpolations inside it), so a
+    /// literal IS the statement the inventories reason about.
+    fn string_literals(src: &str) -> Vec<Literal> {
+        let c: Vec<char> = src.chars().collect();
+        let is_ident = |ch: char| ch.is_alphanumeric() || ch == '_';
+        let mut out = Vec::new();
+        let (mut i, mut line) = (0usize, 1usize);
+        while i < c.len() {
+            match c[i] {
+                '\n' => {
+                    line += 1;
+                    i += 1;
                 }
-                windows.push((start, lines[start..=j.min(lines.len() - 1)].join("\n")));
-                i = j + 1;
-            } else {
-                i += 1;
+                '/' if c.get(i + 1) == Some(&'/') => {
+                    while i < c.len() && c[i] != '\n' {
+                        i += 1;
+                    }
+                }
+                '/' if c.get(i + 1) == Some(&'*') => {
+                    let mut depth = 0usize;
+                    while i < c.len() {
+                        if c[i] == '/' && c.get(i + 1) == Some(&'*') {
+                            depth += 1;
+                            i += 2;
+                        } else if c[i] == '*' && c.get(i + 1) == Some(&'/') {
+                            depth -= 1;
+                            i += 2;
+                            if depth == 0 {
+                                break;
+                            }
+                        } else {
+                            line += usize::from(c[i] == '\n');
+                            i += 1;
+                        }
+                    }
+                }
+                '\'' => {
+                    // Char literal (`'"'`, `'\''`, `'x'`) vs lifetime (`'a`).
+                    if c.get(i + 1) == Some(&'\\') {
+                        i += 2;
+                        while i < c.len() && c[i] != '\'' {
+                            i += 1;
+                        }
+                        i += 1;
+                    } else if c.get(i + 2) == Some(&'\'') {
+                        i += 3;
+                    } else {
+                        i += 1;
+                    }
+                }
+                '"' => {
+                    // Raw string? Walk back over `#`s to an `r` that starts
+                    // a token (optionally `br`).
+                    let mut k = i;
+                    while k > 0 && c[k - 1] == '#' {
+                        k -= 1;
+                    }
+                    let hashes = i - k;
+                    let raw = k > 0 && c[k - 1] == 'r' && {
+                        let before = k.checked_sub(2).map(|j| c[j]);
+                        match before {
+                            Some('b') => k < 3 || !is_ident(c[k - 3]),
+                            Some(ch) => !is_ident(ch),
+                            None => true,
+                        }
+                    };
+                    let open_line = line;
+                    let mut text = String::new();
+                    i += 1;
+                    while i < c.len() {
+                        let ch = c[i];
+                        if raw {
+                            if ch == '"' && (1..=hashes).all(|h| c.get(i + h) == Some(&'#')) {
+                                i += 1 + hashes;
+                                break;
+                            }
+                        } else if ch == '\\' {
+                            if let Some(&next) = c.get(i + 1) {
+                                line += usize::from(next == '\n');
+                                text.push(if next == '\n' { ' ' } else { next });
+                            }
+                            i += 2;
+                            continue;
+                        } else if ch == '"' {
+                            i += 1;
+                            break;
+                        }
+                        line += usize::from(ch == '\n');
+                        text.push(ch);
+                        i += 1;
+                    }
+                    out.push(Literal {
+                        line: open_line,
+                        text: text.split_whitespace().collect::<Vec<_>>().join(" "),
+                    });
+                }
+                _ => i += 1,
             }
         }
-        windows
+        out
+    }
+
+    /// 1-based line where the file's test module starts (`#[cfg(test)]`
+    /// directly followed by a `mod` item), or `usize::MAX` when there is none.
+    /// Literals at/after it are fixtures, not production SQL; a `#[cfg(test)]`
+    /// on a lone helper fn does NOT end the production region.
+    fn test_module_line(src: &str) -> usize {
+        let lines: Vec<&str> = src.lines().collect();
+        for (i, l) in lines.iter().enumerate() {
+            if l.trim() != "#[cfg(test)]" {
+                continue;
+            }
+            let next = lines[i + 1..]
+                .iter()
+                .map(|l| l.trim())
+                .find(|l| !l.is_empty());
+            if next.is_some_and(|n| n.starts_with("mod ") || n.starts_with("pub mod ")) {
+                return i + 1;
+            }
+        }
+        usize::MAX
+    }
+
+    /// `(crate-relative path, production literals)` for every source file.
+    fn production_literals() -> Vec<(String, Vec<Literal>)> {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src, &mut files);
+        files.sort();
+        files
+            .iter()
+            .filter_map(|file| {
+                let content = std::fs::read_to_string(file).ok()?;
+                let rel = file
+                    .strip_prefix(&src)
+                    .unwrap_or(file)
+                    .to_string_lossy()
+                    .to_string();
+                let test_line = test_module_line(&content);
+                let lits = string_literals(&content)
+                    .into_iter()
+                    .filter(|l| l.line < test_line)
+                    .collect();
+                Some((rel, lits))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn string_literal_lexer_sees_whole_statements() {
+        // The lexer the inventories stand on: multi-line literals come back
+        // whole and whitespace-collapsed; comments, char literals, lifetimes
+        // and raw strings never desync it.
+        let src = concat!(
+            "fn f<'a>(x: &'a str) -> char {\n",
+            "    // \"not a literal\"\n",
+            "    /* \"nor this\" */\n",
+            "    let q = '\"';\n",
+            "    let a = \"INSERT INTO t\n",
+            "               (x, y)  VALUES (?1, \\\"q\\\")\";\n",
+            "    let b = r#\"raw \"inner\" sql\"#;\n",
+            "    q\n",
+            "}\n",
+        );
+        let lits = string_literals(src);
+        let got: Vec<(usize, &str)> = lits.iter().map(|l| (l.line, l.text.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (5, "INSERT INTO t (x, y) VALUES (?1, \"q\")"),
+                (7, "raw \"inner\" sql"),
+            ]
+        );
+        assert_eq!(
+            test_module_line("fn a() {}\n#[cfg(test)]\nfn h() {}\n"),
+            usize::MAX
+        );
+        assert_eq!(
+            test_module_line("fn a() {}\n#[cfg(test)]\n\nmod tests {}\n"),
+            2
+        );
     }
 
     #[test]
     fn writer_inventory_every_embedding_blob_write_stamps_embed_scheme() {
         // Plan-review F4 (docs/superpowers/plans/2026-10-07-issue265-wisdom-
-        // instruction-prefix.md): a grep-level inventory over the crate source.
-        // Every SQL statement that writes `embedding_blob` must also reference
-        // `embed_scheme` in the same statement — a vector may never land
-        // without its scheme stamp. Test-seed INSERTs (which stage fixture
-        // blobs for unrelated tests) are exempted explicitly by
-        // `file: first SQL line`; adding an exemption must be a conscious
-        // review decision, never an accident.
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        collect_rs_files(&src, &mut files);
-        files.sort();
-
-        let exempt_first_lines = [
-            // Test seeds that stage a fixture blob (or none) and do not test
-            // the scheme stamp itself; the stamping writers have their own
-            // dedicated tests.
-            "embed_sweep.rs: \"INSERT INTO llm_wiki_entries (",
-            "db/commit.rs: \"INSERT INTO llm_wiki_entries (",
-            "db/commit.rs:             \"INSERT INTO llm_wiki_entries (",
-            "db/commit.rs:             \"UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id IN ('fact_b', 'fact_c')\",",
-            "db/commit.rs:             \"UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'fact_a'\",",
-            "db/wisdom.rs:             \"INSERT INTO llm_wiki_entries (",
-            "wisdom_match.rs:             \"INSERT INTO llm_wiki_entries (",
-            "wisdom_match.rs: \"INSERT INTO llm_wiki_entries VALUES ('a', 'ent', 'T', 'B', 'user_stated', ?1, NULL)\",",
-            "wiki_graph.rs:             \"INSERT INTO llm_wiki_entries (",
-            "tool_dispatch.rs:                 \"INSERT INTO llm_wiki_entries (id, entity_id, title, tier, embedding_blob)",
-            // Test seeds staging fixture rows (blob NULL or dummy) for tests
-            // that do not exercise the scheme stamp; the stamping writers
-            // have dedicated tests.
-            "db/drafts.rs:             \"INSERT INTO llm_wiki_entries (",
-            "db/edge_purge.rs:             \"INSERT INTO llm_wiki_entries (",
-            "db/wiki_forget.rs:             \"INSERT INTO llm_wiki_entries (",
-            "lib.rs:             \"INSERT INTO llm_wiki_entries (",
-            "wisdom_deposit.rs:                     \"INSERT INTO llm_wiki_entries (",
-        ];
-
+        // instruction-prefix.md): an inventory over the crate's PRODUCTION
+        // SQL. Every statement that writes `embedding_blob` into
+        // `llm_wiki_entries` must reference `embed_scheme` in the same
+        // statement — a vector may never land without its scheme stamp.
+        // Statements are whole string literals (see `string_literals`), so
+        // reformatting cannot move a stamp "out of the window". Test-module
+        // fixtures are out of scope structurally; the stamping writers have
+        // dedicated behavioural tests.
         let mut offenders: Vec<String> = Vec::new();
-        let mut writer_windows = 0usize;
-        for file in &files {
-            let rel = file
-                .strip_prefix(&src)
-                .unwrap_or(file)
-                .to_string_lossy()
-                .to_string();
-            let content = match std::fs::read_to_string(file) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let lines: Vec<&str> = content.lines().collect();
-            for (start, window) in sql_windows(&lines) {
-                let writes_blob = window.contains("embedding_blob")
-                    && (window.contains("VALUES") || window.contains("SET "));
-                if !writes_blob {
+        let mut writers = 0usize;
+        for (rel, lits) in production_literals() {
+            for lit in lits {
+                let t = &lit.text;
+                let targets_entries = t.contains("INSERT INTO llm_wiki_entries")
+                    || t.contains("UPDATE llm_wiki_entries");
+                if !(targets_entries && t.contains("embedding_blob")) {
                     continue;
                 }
-                writer_windows += 1;
-                if window.contains("embed_scheme") {
-                    continue;
+                writers += 1;
+                if !t.contains("embed_scheme") {
+                    offenders.push(format!("{rel}:{}: {t}", lit.line));
                 }
-                let key = format!("{}: {}", rel, lines[start].trim_end());
-                if exempt_first_lines.contains(&key.as_str()) {
-                    continue;
-                }
-                offenders.push(format!("{rel}:{}", start + 1));
             }
         }
-
         assert!(
-            writer_windows >= 5,
-            "inventory ran cold — expected the production + seed blob writers, got {writer_windows}"
+            writers >= 3,
+            "inventory ran cold — expected the production blob writers \
+             (embed_sweep, db/commit, db/wisdom), got {writers}"
         );
         assert!(
             offenders.is_empty(),
             "embedding_blob written without an embed_scheme stamp at:\n  {}\n\
-             Either stamp the statement with embed_scheme (from \
-             crate::embed_scheme::WRITE_SCHEME) or, for a test-seed INSERT, \
-             add an explicit exemption in writer_inventory_…",
+             Stamp the statement with embed_scheme (from \
+             crate::embed_scheme::WRITE_SCHEME).",
             offenders.join("\n  ")
         );
     }
@@ -354,101 +538,47 @@ mod tests {
     #[test]
     fn reader_inventory_every_gate_or_wiki_search_select_filters_embed_scheme() {
         // Plan Task 6 test (e) — mirror of the writer inventory over the READ
-        // side: every production SQL SELECT that reads gate/wiki_search
-        // candidates out of `llm_wiki_entries` WITH `embedding_blob` must
-        // reference `embed_scheme` in the same statement — a vector may never
-        // surface through a reader that ignores its scheme stamp. Exemptions
-        // (statement-start line, `file: first SQL line`) are explicit and
-        // commented; adding one must be a conscious review decision.
+        // side: every production SELECT that reads candidate VECTORS out of
+        // `llm_wiki_entries` must, in the same statement, either reference
+        // `embed_scheme` or interpolate the shared `{scheme_filter}` (from
+        // `scheme_filter_sql`) — a vector may never surface through a reader
+        // that ignores its scheme stamp.
         //
-        // EXEMPT (scheme-sweep infrastructure — the sweep's whole job is to
-        // find rows whose state does NOT match the WRITE scheme, so pinning
-        // `embed_scheme = ?` there would make it a no-op):
-        //   embed_sweep.rs — count_unstamped_entries (`embed_scheme != ?1`).
-        //   embed_sweep.rs — pending_null_batch: rows with a NULL blob have
-        //     no stamp yet; the sweep finds and stamps them.
-        // Everything else selected is a fixture/test helper (id- or
-        // length-only lookup, no candidate set) filtered out structurally.
-        let exempt_first_lines = [
-            "embed_sweep.rs:         \"SELECT COUNT(*) FROM llm_wiki_entries",
-            "embed_sweep.rs:         \"SELECT id, title, body FROM llm_wiki_entries",
-        ];
-
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        collect_rs_files(&src, &mut files);
-        files.sort();
-
+        // A statement naming `embedding_blob` only as `embedding_blob IS
+        // NULL` (the NULL sweep's batch and remaining-count) selects rows that
+        // have NO vector and no stamp yet, so it is structurally not a
+        // candidate reader — no hand-kept exemption list.
         let mut offenders: Vec<String> = Vec::new();
-        let mut reader_windows = 0usize;
-        for file in &files {
-            let rel = file
-                .strip_prefix(&src)
-                .unwrap_or(file)
-                .to_string_lossy()
-                .to_string();
-            let content = match std::fs::read_to_string(file) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let lines: Vec<&str> = content.lines().collect();
-            // First `#[cfg(test)]` in the file: anything at/after it is test
-            // code (fixtures with id-only lookups), not a production reader.
-            let test_start = lines
-                .iter()
-                .position(|l| l.contains("#[cfg(test)]"))
-                .unwrap_or(lines.len());
-            for (i, line) in lines.iter().enumerate() {
-                if i >= test_start {
-                    break;
-                }
-                let trimmed = line.trim_start();
-                if !(trimmed.starts_with('"') && trimmed.contains("SELECT")) {
-                    continue;
-                }
-                // Two windows: the STATEMENT (literal + 11 lines) decides
-                // candidacy — `embedding_blob` must appear inside the SQL
-                // itself, not in surrounding code (function signatures name
-                // parameters `embedding_blob` too). The CONTEXT (16 lines
-                // before through 11 after) decides the embed_scheme check —
-                // both real readers assemble the scheme filter in the lines
-                // around the SQL string (wiki_graph builds it above,
-                // wisdom_match appends below).
-                let hi = (i + 12).min(lines.len());
-                let statement = lines[i..hi].join("\n");
-                let lo = i.saturating_sub(16);
-                let context = lines[lo..hi].join("\n");
-                let reads_candidates = statement.contains("FROM llm_wiki_entries")
-                    && statement.contains("embedding_blob")
-                    && statement.contains("WHERE");
+        let mut readers = 0usize;
+        for (rel, lits) in production_literals() {
+            for lit in lits {
+                let t = &lit.text;
+                let reads_candidates = t.contains("SELECT")
+                    && t.contains("FROM llm_wiki_entries")
+                    && t.replace("embedding_blob IS NULL", "")
+                        .contains("embedding_blob")
+                    && t.contains("WHERE");
                 if !reads_candidates {
                     continue;
                 }
-                reader_windows += 1;
-                if context.contains("embed_scheme") {
+                readers += 1;
+                if t.contains("embed_scheme") || t.contains("{scheme_filter}") {
                     continue;
                 }
-                let key = format!("{rel}: {}", lines[i].trim_end());
-                if exempt_first_lines.contains(&key.as_str()) {
-                    continue;
-                }
-                offenders.push(format!("{rel}:{}", i + 1));
+                offenders.push(format!("{rel}:{}: {t}", lit.line));
             }
         }
-
         assert!(
-            reader_windows >= 2,
+            readers >= 2,
             "inventory ran cold — expected the wisdom_match gate SELECT and \
-             the wiki_graph::wiki_search SELECT, got {reader_windows}"
+             the wiki_graph::wiki_search SELECT, got {readers}"
         );
         assert!(
             offenders.is_empty(),
             "gate/wiki_search SELECT reads embedding_blob without an \
              embed_scheme filter at:\n  {}\n\
-             Either add `AND embed_scheme = <read scheme>` (from \
-             crate::embed_scheme::read_scheme) to the WHERE clause or, for a \
-             statement that must not filter, add an explicit commented \
-             exemption in reader_inventory_…",
+             Interpolate `{{scheme_filter}}` (from \
+             crate::embed_scheme::scheme_filter_sql) into the statement.",
             offenders.join("\n  ")
         );
     }
@@ -548,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn reader_scheme_degrades_to_raw_on_pre_v26_shape() {
+    fn reader_scheme_degrades_to_raw_on_pre_v27_shape() {
         // A bare connection with a pre-V27 `llm_wiki_entries` (no
         // `embed_scheme` column) and no meta table: a generic reader must
         // degrade to raw, not fail on the missing migration artifacts.
@@ -561,7 +691,36 @@ mod tests {
     }
 
     #[test]
-    fn reader_scheme_fail_closed_on_v26_shape_with_unknown_value() {
+    fn reader_scheme_keeps_the_table_shape() {
+        // Pre-V27: `None` (no column → readers omit the filter, embed raw).
+        let bare = Connection::open_in_memory().unwrap();
+        bare.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT PRIMARY KEY, embedding_blob BLOB);",
+        )
+        .unwrap();
+        assert_eq!(reader_scheme(&bare).unwrap(), None);
+        assert_eq!(scheme_filter_sql(None), "");
+        // V27+: the active scheme, and the filter binds its stored form.
+        let conn = open_in_memory().unwrap();
+        assert_eq!(reader_scheme(&conn).unwrap(), Some(Scheme::Raw));
+        assert_eq!(
+            scheme_filter_sql(Some(Scheme::Instr1)),
+            " AND embed_scheme = 'instr1'"
+        );
+    }
+
+    #[test]
+    fn doc_text_for_scheme_raw_is_verbatim_and_instr1_is_the_write_text() {
+        assert_eq!(doc_text_for_scheme("T", "B", Scheme::Raw), "T\n\nB");
+        assert_eq!(
+            doc_text_for_scheme("T", "B", Scheme::Instr1),
+            doc_text_for_entry("T", "B"),
+            "the WRITE text is exactly the instr1 doc text"
+        );
+    }
+
+    #[test]
+    fn reader_scheme_fail_closed_on_v27_shape_with_unknown_value() {
         // V27+ shape: `read_scheme_for_reader` is exactly `read_scheme` —
         // an unknown meta value is a hard error, never a raw fallback.
         let conn = open_in_memory().unwrap();
@@ -576,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn reader_scheme_resolves_active_scheme_on_v26_shape() {
+    fn reader_scheme_resolves_active_scheme_on_v27_shape() {
         let conn = open_in_memory().unwrap();
         conn.execute(
             "UPDATE llm_wiki_meta SET value = 'instr1' \
@@ -635,6 +794,11 @@ mod tests {
             activate_instr1(&conn, WRITE_SCHEME).unwrap(),
             ActivateOutcome::Refused { outstanding: 1 }
         );
+        // The IMMEDIATE transaction is closed on the refusal path too.
+        assert!(
+            conn.is_autocommit(),
+            "refusal must not leave a transaction open"
+        );
         // Refusal must not touch the meta value.
         assert_eq!(active_scheme_value(&conn), SCHEME_RAW);
         assert_eq!(read_scheme(&conn).unwrap(), Scheme::Raw);
@@ -676,7 +840,36 @@ mod tests {
             activate_instr1(&conn, WRITE_SCHEME).unwrap(),
             ActivateOutcome::AlreadyActive
         );
+        assert!(conn.is_autocommit());
         assert_eq!(active_scheme_value(&conn), WRITE_SCHEME);
+    }
+
+    #[test]
+    fn activate_holds_the_write_lock_from_count_through_flip() {
+        // The precondition and the flip are one IMMEDIATE transaction: while
+        // another connection holds the write lock (a writer mid-insert),
+        // activate cannot even start — it never sees a stale "zero
+        // outstanding" and then flips over a freshly landed raw row.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("brain.db");
+        let conn = crate::db::connection::open_app_db(&path, None).unwrap();
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        seed_with_blob(&writer, "fact_raw_inflight", SCHEME_RAW);
+        conn.busy_timeout(std::time::Duration::from_millis(0))
+            .unwrap();
+        assert!(
+            activate_instr1(&conn, WRITE_SCHEME).is_err(),
+            "activate must block on the writer's lock, not race it"
+        );
+        assert!(conn.is_autocommit());
+        writer.execute_batch("COMMIT").unwrap();
+        // Once the writer commits, its raw row is counted and refuses.
+        assert_eq!(
+            activate_instr1(&conn, WRITE_SCHEME).unwrap(),
+            ActivateOutcome::Refused { outstanding: 1 }
+        );
+        assert_eq!(read_scheme(&conn).unwrap(), Scheme::Raw);
     }
 
     #[test]

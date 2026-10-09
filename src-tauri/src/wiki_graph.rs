@@ -295,12 +295,33 @@ pub fn wiki_get_ontology(conn: &Connection, entity_id: &str) -> Result<WikiOntol
 ///
 /// Ranking is unaffected: `tier_weight` is applied per row either way, so a
 /// `tier_fact` entry keeps its 1.5x bonus wherever tier namespaces exist.
+///
+/// Resolves the active read scheme itself. A caller that already embedded the
+/// query under a resolved scheme must use [`wiki_search_in_scheme`] so the row
+/// filter follows that same resolution.
 pub fn wiki_search(
     conn: &Connection,
     query_vec: &[f32],
     entity_ids: Option<&[&str]>,
     tier: Option<&str>,
     limit: usize,
+) -> Result<Vec<WikiSearchHit>> {
+    let scheme = crate::embed_scheme::reader_scheme(conn)?;
+    wiki_search_in_scheme(conn, query_vec, entity_ids, tier, limit, scheme)
+}
+
+/// [`wiki_search`] under a read scheme the caller resolved ONCE (via
+/// `embed_scheme::reader_scheme`) and embedded the query under: the row
+/// filter follows `scheme`, never a second resolution, so a concurrent
+/// cutover cannot pair a prefixed query with raw rows (or vice versa).
+/// `None` is the pre-V27 shape — no filter.
+pub fn wiki_search_in_scheme(
+    conn: &Connection,
+    query_vec: &[f32],
+    entity_ids: Option<&[&str]>,
+    tier: Option<&str>,
+    limit: usize,
+    scheme: Option<crate::embed_scheme::Scheme>,
 ) -> Result<Vec<WikiSearchHit>> {
     if entity_ids.is_some_and(|ids| ids.is_empty()) {
         return Ok(Vec::new());
@@ -315,26 +336,16 @@ pub fn wiki_search(
         None => String::new(),
     };
     let tier_filter = if tier.is_some() { "tier = ? AND " } else { "" };
-    // READ-scheme SELECT filter, tuple member of the same `wisdom_active_scheme`
-    // value the gate floor and the query prefix derive from (spec §Scheme
-    // architecture): rows stamped under another scheme are never candidates.
-    // The pre-V27 shape (no `embed_scheme` column) omits the filter — those
-    // rows are de-facto raw — mirroring the temporal-column degradation.
-    let scheme_filter = if crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?
-        .iter()
-        .any(|c| c == "embed_scheme")
-    {
-        format!(
-            "AND embed_scheme = '{}'",
-            crate::embed_scheme::read_scheme(conn)?.as_str()
-        )
-    } else {
-        String::new()
-    };
+    // READ-scheme SELECT filter, tuple member of the same resolved scheme the
+    // query prefix derives from (spec §Scheme architecture): rows stamped
+    // under another scheme are never candidates. The pre-V27 shape (`None`)
+    // omits the filter — those rows are de-facto raw — mirroring the
+    // temporal-column degradation.
+    let scheme_filter = crate::embed_scheme::scheme_filter_sql(scheme);
     let sql = format!(
         "SELECT id, entity_id, title, embedding_blob, tier
          FROM llm_wiki_entries
-         WHERE {entity_filter}{tier_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL {scheme_filter}"
+         WHERE {entity_filter}{tier_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL{scheme_filter}"
     );
     let mut stmt = conn.prepare(&sql)?;
     // Bind order matches the clause order built above: entity ids, then tier.
@@ -1739,6 +1750,33 @@ mod unit_tests {
         assert_eq!(got, vec!["instr_row"]);
     }
 
+    /// Single-resolution leg: `wiki_search_in_scheme` filters on the scheme the
+    /// caller resolved (and embedded its query under), NOT on whatever the
+    /// meta says by the time the SELECT runs — a cutover landing between the
+    /// two can never pair a raw query with instr1 rows.
+    #[test]
+    fn wiki_search_in_scheme_follows_the_callers_resolution_not_the_meta() {
+        use crate::embed_scheme::Scheme;
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "ent_scheme", "raw_row");
+        seed_entry(&conn, "ent_scheme", "instr_row");
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embed_scheme = 'instr1' WHERE id = 'instr_row'",
+            [],
+        )
+        .unwrap();
+
+        let qv = [1.0f32; 8];
+        // Caller resolved raw, then the meta flipped to instr1 mid-request.
+        set_active_scheme(&conn, "instr1");
+        let hits = wiki_search_in_scheme(&conn, &qv, None, None, 25, Some(Scheme::Raw)).unwrap();
+        let got: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(got, vec!["raw_row"]);
+        let ctx = wiki_context_in_scheme(&conn, &qv, None, 1, 25, Some(Scheme::Raw)).unwrap();
+        let got: Vec<&str> = ctx.facts.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(got, vec!["raw_row"]);
+    }
+
     /// Fail-closed leg for the wiki_search reader: an unknown
     /// `wisdom_active_scheme` value is a hard error, never a silent fallback.
     #[test]
@@ -2109,12 +2147,27 @@ pub fn wiki_context(
     depth: usize,
     max_facts: usize,
 ) -> Result<WikiContextResult> {
+    let scheme = crate::embed_scheme::reader_scheme(conn)?;
+    wiki_context_in_scheme(conn, query_vec, tier, depth, max_facts, scheme)
+}
+
+/// [`wiki_context`] under a caller-resolved read scheme (see
+/// [`wiki_search_in_scheme`]): the fact leg filters on `scheme`, the one the
+/// query was embedded under.
+pub fn wiki_context_in_scheme(
+    conn: &Connection,
+    query_vec: &[f32],
+    tier: Option<&str>,
+    depth: usize,
+    max_facts: usize,
+    scheme: Option<crate::embed_scheme::Scheme>,
+) -> Result<WikiContextResult> {
     let max_facts = max_facts.clamp(1, MAX_CONTEXT_FACTS);
     let clamped_depth = clamp_max_depth(depth);
 
     // The default all-live-entries contract from #133 is preserved: entity_ids
     // stays `None`, and `tier` narrows only when the caller asked it to.
-    let facts = wiki_search(conn, query_vec, None, tier, max_facts)?;
+    let facts = wiki_search_in_scheme(conn, query_vec, None, tier, max_facts, scheme)?;
 
     let mut walk = CompositeWalk {
         // `truncated` means the walk is **narrower** than the caller asked

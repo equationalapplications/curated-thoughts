@@ -202,6 +202,7 @@ pub fn dispatch_wiki_search(
     entity_ids: Option<Vec<String>>,
     tier: Option<String>,
     limit: Option<usize>,
+    scheme: Option<crate::embed_scheme::Scheme>,
 ) -> Result<Vec<WikiSearchHit>> {
     if let Some(t) = tier.as_deref() {
         // Validate at the boundary so the caller gets a diagnostic rather than
@@ -221,7 +222,16 @@ pub fn dispatch_wiki_search(
     let refs: Option<Vec<&str>> = entity_ids
         .as_ref()
         .map(|ids| ids.iter().map(|s| s.as_str()).collect());
-    wiki_graph::wiki_search(conn, query_vec, refs.as_deref(), tier.as_deref(), limit)
+    // `scheme` is the request's ONE read-scheme resolution — the same value
+    // the query text was prefixed under (`wiki_query_text`).
+    wiki_graph::wiki_search_in_scheme(
+        conn,
+        query_vec,
+        refs.as_deref(),
+        tier.as_deref(),
+        limit,
+        scheme,
+    )
 }
 
 /// One-call retrieval: search plus the neighborhood around what was found.
@@ -236,6 +246,7 @@ pub fn dispatch_wiki_context(
     tier: Option<String>,
     depth: Option<usize>,
     max_facts: Option<usize>,
+    scheme: Option<crate::embed_scheme::Scheme>,
 ) -> Result<WikiContextResult> {
     if let Some(t) = tier.as_deref() {
         if !crate::db::schema::is_valid_tier(t) {
@@ -245,12 +256,13 @@ pub fn dispatch_wiki_context(
             );
         }
     }
-    wiki_graph::wiki_context(
+    wiki_graph::wiki_context_in_scheme(
         conn,
         query_vec,
         tier.as_deref(),
         depth.unwrap_or(DEFAULT_CONTEXT_DEPTH),
         max_facts.unwrap_or(DEFAULT_CONTEXT_MAX_FACTS),
+        scheme,
     )
 }
 
@@ -1047,22 +1059,28 @@ async fn embed_query(profile: &EmbedProfile, query: String) -> Result<Vec<f32>> 
 
 /// Scheme-aware query text for the wiki READ tools (spec §Decision:
 /// `wiki_search`/`wiki_context` queries are prefixed with the SAME string the
-/// gate uses). Resolves the read scheme ONCE against the locked connection,
-/// truncates BEFORE the prefix (the prefix never consumes the 2000-char
-/// budget), and routes through the SAME `query_text_for_scheme` the
+/// gate uses). Resolves the read scheme ONCE per request against the locked
+/// connection, truncates BEFORE the prefix (the prefix never consumes the
+/// 2000-char budget), and routes through the SAME `query_text_for_scheme` the
 /// `ct wisdom match` path uses. Pre-V27 tables (no `embed_scheme` column)
-/// degrade to raw via `read_scheme_for_reader`.
+/// resolve to `None` and embed raw.
+///
+/// Returns the resolved scheme alongside the text: the caller MUST hand it to
+/// `dispatch_wiki_search`/`dispatch_wiki_context` so the row filter uses this
+/// same resolution — re-resolving there could straddle a cutover and score a
+/// query embedded under one scheme against the other scheme's rows.
 pub(crate) async fn wiki_query_text(
     conn: &Arc<Mutex<Connection>>,
     raw_query: &str,
-) -> Result<String> {
+) -> Result<(String, Option<crate::embed_scheme::Scheme>)> {
     let raw_query = raw_query.to_string();
     spawn_blocking_with_conn(conn, move |conn| {
-        let scheme = crate::embed_scheme::read_scheme_for_reader(conn)?;
-        Ok(crate::embed_scheme::query_text_for_scheme(
+        let scheme = crate::embed_scheme::reader_scheme(conn)?;
+        let text = crate::embed_scheme::query_text_for_scheme(
             wm::truncate_text(&raw_query),
-            scheme,
-        ))
+            scheme.unwrap_or(crate::embed_scheme::Scheme::Raw),
+        );
+        Ok((text, scheme))
     })
     .await?
 }
@@ -1165,13 +1183,13 @@ pub async fn dispatch_tool_call(
             // Scheme-aware query text (spec §Decision): same prefix, same
             // helper as the gate path; truncation BEFORE the prefix;
             // pre-V27 tables degrade to raw.
-            let query_text = wiki_query_text(&conn, &p.query).await?;
+            let (query_text, scheme) = wiki_query_text(&conn, &p.query).await?;
             // Embed OUTSIDE the DB lock (blocking network call).
             let query_vec = embed_query(&ctx.profile, query_text).await?;
             let (entity_ids, tier, limit) = (p.entity_ids, p.tier, p.limit);
             let hits = tokio::task::spawn_blocking(move || {
                 let conn_guard = lock_conn(&conn)?;
-                dispatch_wiki_search(&conn_guard, &query_vec, entity_ids, tier, limit)
+                dispatch_wiki_search(&conn_guard, &query_vec, entity_ids, tier, limit, scheme)
             })
             .await??;
             Ok(serde_json::to_value(hits)?)
@@ -1181,13 +1199,13 @@ pub async fn dispatch_tool_call(
             let conn = ctx.conn.clone();
             // Scheme-aware query text — identical to `wiki_search` (spec
             // §Decision): one resolution, same prefix helper, raw on pre-V27.
-            let query_text = wiki_query_text(&conn, &p.query).await?;
+            let (query_text, scheme) = wiki_query_text(&conn, &p.query).await?;
             // Embed OUTSIDE the DB lock (blocking network call).
             let query_vec = embed_query(&ctx.profile, query_text).await?;
             let (tier, depth, max_facts) = (p.tier, p.depth, p.max_facts);
             let result = tokio::task::spawn_blocking(move || {
                 let conn_guard = lock_conn(&conn)?;
-                dispatch_wiki_context(&conn_guard, &query_vec, tier, depth, max_facts)
+                dispatch_wiki_context(&conn_guard, &query_vec, tier, depth, max_facts, scheme)
             })
             .await??;
             Ok(serde_json::to_value(result)?)
@@ -1425,7 +1443,15 @@ mod dispatch_tests {
     fn wiki_search_returns_tier_on_every_hit() {
         let conn = test_conn();
         seed_tiered_entries(&conn);
-        let hits = dispatch_wiki_search(&conn, &[1.0], None, None, None).unwrap();
+        let hits = dispatch_wiki_search(
+            &conn,
+            &[1.0],
+            None,
+            None,
+            None,
+            crate::embed_scheme::reader_scheme(&conn).unwrap(),
+        )
+        .unwrap();
         let mut got: Vec<_> = hits
             .iter()
             .map(|h| (h.id.as_str(), h.tier.as_deref()))
@@ -1441,7 +1467,15 @@ mod dispatch_tests {
     fn wiki_search_tier_filter_returns_only_matching_entries() {
         let conn = test_conn();
         seed_tiered_entries(&conn);
-        let hits = dispatch_wiki_search(&conn, &[1.0], None, Some("wisdom".into()), None).unwrap();
+        let hits = dispatch_wiki_search(
+            &conn,
+            &[1.0],
+            None,
+            Some("wisdom".into()),
+            None,
+            crate::embed_scheme::reader_scheme(&conn).unwrap(),
+        )
+        .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "w1");
     }
@@ -1451,7 +1485,15 @@ mod dispatch_tests {
         // The #133 contract: omitting the filter must not narrow anything.
         let conn = test_conn();
         seed_tiered_entries(&conn);
-        let hits = dispatch_wiki_search(&conn, &[1.0], None, None, None).unwrap();
+        let hits = dispatch_wiki_search(
+            &conn,
+            &[1.0],
+            None,
+            None,
+            None,
+            crate::embed_scheme::reader_scheme(&conn).unwrap(),
+        )
+        .unwrap();
         assert_eq!(hits.len(), 3);
     }
 
@@ -1460,7 +1502,7 @@ mod dispatch_tests {
         // Same vocabulary as wiki_search — both boundaries read the set that
         // the V16 CHECK enforces, so they cannot drift apart.
         let conn = test_conn();
-        let err = dispatch_wiki_context(&conn, &[1.0], Some("anchor".into()), None, None)
+        let err = dispatch_wiki_context(&conn, &[1.0], Some("anchor".into()), None, None, None)
             .unwrap_err()
             .to_string();
         assert!(
@@ -1480,6 +1522,7 @@ mod dispatch_tests {
             Some(vec!["ent_1".into()]),
             Some("fact".into()),
             None,
+            crate::embed_scheme::reader_scheme(&conn).unwrap(),
         )
         .unwrap();
         assert_eq!(hits.len(), 1);
@@ -1491,6 +1534,7 @@ mod dispatch_tests {
             Some(vec!["ent_absent".into()]),
             Some("fact".into()),
             None,
+            crate::embed_scheme::reader_scheme(&conn).unwrap(),
         )
         .unwrap();
         assert!(none.is_empty());
@@ -1511,7 +1555,15 @@ mod dispatch_tests {
         )
         .unwrap();
 
-        let hits = dispatch_wiki_search(&conn, &[1.0], None, None, None).unwrap();
+        let hits = dispatch_wiki_search(
+            &conn,
+            &[1.0],
+            None,
+            None,
+            None,
+            crate::embed_scheme::reader_scheme(&conn).unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(hits.len(), 1, "the default path must reach ent_* rows");
         assert_eq!(hits[0].entity_id, "ent_448a");
@@ -2285,7 +2337,10 @@ mod wiki_query_prefix_tests {
     #[tokio::test]
     async fn wiki_query_text_is_raw_by_default() {
         let (_dir, ctx) = file_ctx();
-        let text = wiki_query_text(&ctx.conn, "vault documents").await.unwrap();
+        let text = wiki_query_text(&ctx.conn, "vault documents")
+            .await
+            .unwrap()
+            .0;
         assert_eq!(text, "vault documents");
     }
 
@@ -2293,7 +2348,10 @@ mod wiki_query_prefix_tests {
     async fn wiki_query_text_is_prefixed_under_active_instr1() {
         let (_dir, ctx) = file_ctx();
         set_active_scheme(&lock_conn(&ctx.conn).unwrap(), "instr1");
-        let text = wiki_query_text(&ctx.conn, "vault documents").await.unwrap();
+        let text = wiki_query_text(&ctx.conn, "vault documents")
+            .await
+            .unwrap()
+            .0;
         assert_eq!(
             text,
             format!(
@@ -2318,7 +2376,7 @@ mod wiki_query_prefix_tests {
         let (_dir, ctx) = file_ctx();
         set_active_scheme(&lock_conn(&ctx.conn).unwrap(), "instr1");
         let long = "é".repeat(crate::wisdom_match::MAX_TEXT_CHARS + 5);
-        let text = wiki_query_text(&ctx.conn, &long).await.unwrap();
+        let text = wiki_query_text(&ctx.conn, &long).await.unwrap().0;
         let stripped = text
             .strip_prefix(crate::embed_scheme::QUERY_INSTRUCTION_PREFIX)
             .expect("prefixed under instr1");

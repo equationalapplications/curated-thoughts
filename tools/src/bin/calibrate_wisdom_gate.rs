@@ -6,6 +6,13 @@
 //! `wisdom_match_with_floor` itself, and picks the floor that maximises
 //! hit@2 subject to FP rate <= 0.05 (ties -> higher floor). Never touches the
 //! live brain. Refuses to run with CURATED_EMBED_STUB set.
+//!
+//! `--scheme` selects the cell: BOTH sides are built through the production
+//! text functions for that scheme (`embed_scheme::doc_text_for_scheme` for
+//! facts, `embed_scheme::query_text_for_scheme` for probes), the scratch rows
+//! are stamped with it, and the sweep declares it to `wisdom_match_with_floor`
+//! — so a raw re-freeze is genuinely raw on both sides and an instr1 freeze
+//! applies the instruction exactly once per side.
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -15,7 +22,9 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::PathBuf;
 
-use tauri_app_lib::embed_sweep::embed_text_for_entry;
+use tauri_app_lib::embed_scheme::{
+    doc_text_for_scheme, floor_key_for, query_text_for_scheme, Scheme, QUERY_INSTRUCTION_PREFIX,
+};
 use tauri_app_lib::embedder::{embed_batch, EmbedProfile};
 use tauri_app_lib::wisdom_match::{gate_model_key, wisdom_match_with_floor};
 
@@ -40,22 +49,18 @@ struct Args {
     /// Write vectors.json.gz + expected.json here (the regression fixture).
     #[arg(long)]
     freeze: Option<PathBuf>,
-    /// Qwen3-style query instruction prepended to each PROBE text before
-    /// embedding. Documents (facts) are always embedded raw, matching Qwen3
-    /// guidance that only the query side takes an instruction. Empty
-    /// (default) = the historical raw-query behavior. Diagnostic for the
-    /// 2026-10-07 handoff: adopting a prefix in production additionally
-    /// requires the gate's query-embed path (tools/src/queries.rs) to apply
-    /// the same string — the flag alone changes calibration only.
-    #[arg(long, default_value = "")]
-    query_prefix: String,
-    /// Optional instruction prepended to each FACT (document-side) text
-    /// before embedding. Diagnostic only for the 2026-10-07 2x2: Qwen3
-    /// guidance is that documents do NOT take an instruction, so production
-    /// adoption is expected to be query-side only. Recorded in expected.json
-    /// as `doc_prefix` when non-empty.
-    #[arg(long, default_value = "")]
-    doc_prefix: String,
+    /// Embed scheme to calibrate: `raw` (both sides verbatim — the
+    /// `tests/fixtures/wisdom_gate` snapshot) or `instr1` (the byte-exact
+    /// instruction on BOTH facts and probes, spec-rev2 cell E — the
+    /// `tests/fixtures/wisdom_gate_instr1` snapshot). Freeze each into its
+    /// own directory; the resulting floor registers under
+    /// `floor_key_for(model_key, scheme)`.
+    #[arg(long, default_value = "raw", value_parser = parse_scheme)]
+    scheme: Scheme,
+}
+
+fn parse_scheme(s: &str) -> Result<Scheme, String> {
+    Scheme::parse(s).map_err(|e| e.to_string())
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -110,6 +115,7 @@ fn main() -> Result<()> {
     }
     let profile: EmbedProfile = serde_json::from_str(&args.profile).context("--profile")?;
     let key = gate_model_key(&profile, None);
+    let scheme = args.scheme;
     let (mut facts, facts_sha) = read_jsonl::<Fact>(&args.facts)?;
     let (mut probes, probes_sha) = read_jsonl::<Probe>(&args.probes)?;
     let n_rel = probes.iter().filter(|p| !p.expect.is_empty()).count();
@@ -125,27 +131,14 @@ fn main() -> Result<()> {
         &profile,
         facts
             .iter()
-            .map(|f| {
-                let text = embed_text_for_entry(&f.title, &f.body);
-                if args.doc_prefix.is_empty() {
-                    text
-                } else {
-                    format!("{}{}", args.doc_prefix, text)
-                }
-            })
+            .map(|f| doc_text_for_scheme(&f.title, &f.body, scheme))
             .collect(),
     )?;
     let probe_vecs = embed_all(
         &profile,
         probes
             .iter()
-            .map(|p| {
-                if args.query_prefix.is_empty() {
-                    p.text.clone()
-                } else {
-                    format!("{}{}", args.query_prefix, p.text)
-                }
-            })
+            .map(|p| query_text_for_scheme(&p.text, scheme))
             .collect(),
     )?;
     for (f, v) in facts.iter_mut().zip(fact_vecs) {
@@ -163,10 +156,10 @@ fn main() -> Result<()> {
             "INSERT INTO llm_wiki_entries (
                 id, entity_id, title, body, tags, confidence, source_type,
                 source_hash, source_ref, created_at, updated_at, last_accessed_at,
-                access_count, deleted_at, embedding_blob, embedding
+                access_count, deleted_at, embedding_blob, embed_scheme, embedding
              ) VALUES (?1, 'ent_calibration', ?2, ?3, '[]', 'inferred', ?4,
-                       NULL, NULL, 100, 100, NULL, 0, NULL, ?5, NULL)",
-            params![f.id, f.title, f.body, f.source_type, blob],
+                       NULL, NULL, 100, 100, NULL, 0, NULL, ?5, ?6, NULL)",
+            params![f.id, f.title, f.body, f.source_type, blob, scheme.as_str()],
         )?;
     }
 
@@ -176,7 +169,16 @@ fn main() -> Result<()> {
         let floor = pct as f32 / 100.0;
         let (mut hits, mut fps) = (0usize, 0usize);
         for p in &probes {
-            let m = wisdom_match_with_floor(&conn, &p.vector, &key, Some(floor), 2, &[], NOW_MS)?;
+            let m = wisdom_match_with_floor(
+                &conn,
+                &p.vector,
+                &key,
+                scheme,
+                Some(floor),
+                2,
+                &[],
+                NOW_MS,
+            )?;
             if p.expect.is_empty() {
                 fps += usize::from(!m.entries.is_empty());
             } else {
@@ -198,15 +200,19 @@ fn main() -> Result<()> {
         "n_relevant": n_rel, "n_irrelevant": n_irr,
         "facts_sha256": facts_sha, "probes_sha256": probes_sha,
     });
-    if !args.query_prefix.is_empty() {
-        // Recorded so the bench reader and future sessions can tell a
-        // prefix-calibrated snapshot from a raw-query one at a glance.
-        expected["query_prefix"] = serde_json::json!(args.query_prefix);
-    }
-    if !args.doc_prefix.is_empty() {
-        expected["doc_prefix"] = serde_json::json!(args.doc_prefix);
+    if scheme == Scheme::Instr1 {
+        // Recorded so the bench reader and future sessions can tell an
+        // instr1 snapshot from a raw one at a glance (same shape the
+        // committed `wisdom_gate_instr1/expected.json` carries).
+        expected["query_prefix"] = serde_json::json!(QUERY_INSTRUCTION_PREFIX);
+        expected["doc_prefix"] = serde_json::json!(QUERY_INSTRUCTION_PREFIX);
     }
     println!("{}", serde_json::to_string_pretty(&expected)?);
+    eprintln!(
+        "register as WISDOM_GATE_FLOORS[{:?}] (scheme {})",
+        floor_key_for(&key, scheme),
+        scheme.as_str()
+    );
 
     if let Some(dir) = args.freeze {
         std::fs::create_dir_all(&dir)?;

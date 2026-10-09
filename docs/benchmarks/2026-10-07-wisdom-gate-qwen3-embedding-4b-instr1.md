@@ -8,6 +8,13 @@ probe (query) side and the fact (document) side — direct concatenation).
 
 ## What ran
 
+> **Re-running today:** the free-form `--query-prefix`/`--doc-prefix` flags
+> below were replaced by `--scheme raw|instr1`, which builds BOTH sides through
+> the production text functions and stamps/declares the scheme. The
+> equivalent of this run is `--scheme instr1`; a raw re-freeze is
+> `--scheme raw` (the default) into `tests/fixtures/wisdom_gate`. The command
+> is kept verbatim as the record of what produced the committed snapshot.
+
 ```bash
 cargo build --release --manifest-path tools/Cargo.toml --bin calibrate_wisdom_gate
 ./target/release/calibrate_wisdom_gate \

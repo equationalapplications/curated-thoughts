@@ -11,6 +11,7 @@
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 use std::io::Read;
+use tauri_app_lib::embed_scheme::Scheme;
 
 const RAW_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wisdom_gate");
 const INSTR1_DIR: &str = concat!(
@@ -20,7 +21,12 @@ const INSTR1_DIR: &str = concat!(
 
 #[test]
 fn wisdom_gate_floor_still_holds_raw() {
-    replay(RAW_DIR, RAW_DIR, "external:qwen/qwen3-embedding-4b");
+    replay(
+        RAW_DIR,
+        RAW_DIR,
+        "external:qwen/qwen3-embedding-4b",
+        Scheme::Raw,
+    );
 }
 
 #[test]
@@ -33,6 +39,7 @@ fn wisdom_gate_floor_still_holds_instr1() {
         INSTR1_DIR,
         RAW_DIR,
         "external:qwen/qwen3-embedding-4b:instr1",
+        Scheme::Instr1,
     );
 }
 
@@ -40,8 +47,10 @@ fn wisdom_gate_floor_still_holds_instr1() {
 /// expected.json; `fixtures_dir` holds facts.jsonl/probes.jsonl. `gate_key` is
 /// the `WISDOM_GATE_FLOORS` key the snapshot was calibrated under — raw keys
 /// are the bare model key, instr1 keys carry the `:instr1` suffix
-/// (`embed_scheme::floor_key_for`).
-fn replay(freeze_dir: &str, fixtures_dir: &str, gate_key: &str) {
+/// (`embed_scheme::floor_key_for`). `scheme` is the cell the vectors were
+/// frozen under: rows are stamped with it and the replay declares it, exactly
+/// as `calibrate_wisdom_gate --scheme` did.
+fn replay(freeze_dir: &str, fixtures_dir: &str, gate_key: &str, scheme: Scheme) {
     // The freeze files are produced by `calibrate_wisdom_gate --freeze <dir>`
     // against the real embedder (spec § "Calibration").
     // Until they land there is nothing to replay, but the skip stays fail-closed:
@@ -118,15 +127,16 @@ fn replay(freeze_dir: &str, fixtures_dir: &str, gate_key: &str) {
             "INSERT INTO llm_wiki_entries (
                 id, entity_id, title, body, tags, confidence, source_type,
                 source_hash, source_ref, created_at, updated_at, last_accessed_at,
-                access_count, deleted_at, embedding_blob, embedding
+                access_count, deleted_at, embedding_blob, embed_scheme, embedding
              ) VALUES (?1, 'ent_calibration', ?2, ?3, '[]', 'inferred', ?4,
-                       NULL, NULL, 100, 100, NULL, 0, NULL, ?5, NULL)",
+                       NULL, NULL, 100, 100, NULL, 0, NULL, ?5, ?6, NULL)",
             params![
                 f["id"].as_str().unwrap(),
                 f["title"].as_str().unwrap(),
                 f["body"].as_str().unwrap(),
                 f["source_type"].as_str().unwrap(),
-                blob
+                blob,
+                scheme.as_str()
             ],
         )
         .unwrap();
@@ -143,6 +153,7 @@ fn replay(freeze_dir: &str, fixtures_dir: &str, gate_key: &str) {
             &conn,
             &vec_of(&p["vector"]),
             key,
+            scheme,
             Some(floor),
             2,
             &[],

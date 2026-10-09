@@ -783,7 +783,7 @@ pub fn wisdom_match_cmd(
     // prefix are both tuple members of this one value (spec §Scheme
     // architecture). The prefix lands AFTER truncation — it never consumes
     // the 2000-char budget — and only under `instr1`.
-    let read_scheme = tauri_app_lib::embed_scheme::read_scheme(&conn)?;
+    let read_scheme = tauri_app_lib::embed_scheme::read_scheme_for_reader(&conn)?;
     let scheme_key = wm::gate_model_key_for_scheme(&profile, stub.as_deref(), read_scheme);
     let query_text = tauri_app_lib::embed_scheme::query_text_for_scheme(text, read_scheme);
     // Embed only when entries can actually be produced: an uncalibrated
@@ -797,11 +797,13 @@ pub fn wisdom_match_cmd(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    // The gate derives its own floor from the same stored
-    // `wisdom_active_scheme` value (unsuffixed key in, `floor_key_for` inside),
-    // so caller and library can never disagree about the active scheme.
+    // The gate takes the SAME resolved scheme the query was prefixed under
+    // (unsuffixed key in, `floor_key_for` inside) instead of re-reading the
+    // meta: a cutover landing during the embed round-trip can never pair
+    // this query with the other scheme's floor or rows.
     let key = wm::gate_model_key(&profile, stub.as_deref());
-    let result = wm::wisdom_match(&conn, &query_vec, &key, max, exclude, now_ms)?;
+    let result =
+        wm::wisdom_match_in_scheme(&conn, &query_vec, &key, read_scheme, max, exclude, now_ms)?;
     // Gate-decision log line (spec 2026-10-07 merge blocker 3, form pinned):
     // exactly one line per `ct wisdom match` call, on STDERR so stdout stays
     // pure JSON. Machine-parseable for the tripwire cron — stable grep token

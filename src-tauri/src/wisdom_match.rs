@@ -158,24 +158,37 @@ pub fn truncate_text(text: &str) -> &str {
 struct Temporal {
     has_superseded_by: bool,
     has_valid_to: bool,
-    /// Active read scheme for the SELECT filter — `None` on the pre-V27 shape
-    /// (no `embed_scheme` column). Resolved once per call, next to the column
-    /// probes, so every scheme-derived tuple member of the call path shares
-    /// one `read_scheme` resolution.
+    /// Read scheme for the SELECT filter — `None` on the pre-V27 shape (no
+    /// `embed_scheme` column). Resolved once per call, next to the column
+    /// probes, so every scheme-derived tuple member of the call path (floor,
+    /// row filter, and — on the production path — the query prefix) shares
+    /// one resolution.
     scheme: Option<Scheme>,
 }
 
-fn temporal_columns(conn: &Connection) -> Result<Temporal> {
+/// Column probes plus the call's ONE scheme resolution. `declared` is a
+/// scheme the caller already resolved (and derived its query text / floor
+/// from); `None` resolves the active `wisdom_active_scheme` here.
+fn temporal_columns(conn: &Connection, declared: Option<Scheme>) -> Result<Temporal> {
     let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
     let scheme = if cols.iter().any(|c| c == "embed_scheme") {
         // Fail-closed on an unknown `wisdom_active_scheme` value: never fall
-        // back to `raw`. This is the ONE read_scheme resolution per call —
-        // the SELECT filter here, and the floor + query prefix on the
-        // production path, all derive from it.
-        Some(read_scheme(conn)?)
+        // back to `raw`.
+        Some(match declared {
+            Some(s) => s,
+            None => read_scheme(conn)?,
+        })
     } else {
         // Pre-V27 shape: rows are de-facto raw, the filter is omitted,
-        // mirroring how the temporal filters degrade on old tables.
+        // mirroring how the temporal filters degrade on old tables. A caller
+        // declaring a non-raw scheme against them would score across schemes.
+        if let Some(s @ Scheme::Instr1) = declared {
+            anyhow::bail!(
+                "wisdom_match: scheme {:?} declared but llm_wiki_entries has no \
+                 embed_scheme column (pre-V27 rows are raw; fail-closed)",
+                s.as_str()
+            );
+        }
         None
     };
     Ok(Temporal {
@@ -185,7 +198,9 @@ fn temporal_columns(conn: &Connection) -> Result<Temporal> {
     })
 }
 
-/// Match with the calibrated floor for `gate_key` (none → abstain).
+/// Match with the calibrated floor for `gate_key` (none → abstain), under the
+/// ACTIVE read scheme resolved here. Use [`wisdom_match_in_scheme`] instead
+/// when the caller already resolved the scheme to build its query text.
 pub fn wisdom_match(
     conn: &Connection,
     query_vec: &[f32],
@@ -194,14 +209,42 @@ pub fn wisdom_match(
     exclude: &[String],
     now_ms: i64,
 ) -> Result<WisdomMatch> {
-    // ONE `temporal_columns` probe for the whole call: its single
-    // `read_scheme` resolution drives BOTH the floor (below) and the SELECT
-    // filter (inside `wisdom_match_impl`), so a concurrent
-    // `wisdom_active_scheme` flip can never pair one scheme's floor with
-    // another scheme's filter. The pre-V27 shape (scheme None) keeps the
-    // unsuffixed raw key and the filter omitted; an unregistered (model,
-    // scheme) key means abstain (floor None).
-    let temporal = temporal_columns(conn)?;
+    let temporal = temporal_columns(conn, None)?;
+    match_with_resolved_floor(conn, query_vec, gate_key, max, exclude, now_ms, temporal)
+}
+
+/// [`wisdom_match`] under a scheme the CALLER resolved — the one it derived
+/// its query text from (`embed_scheme::query_text_for_scheme`). The floor and
+/// the SELECT filter both follow `scheme`, so a `wisdom_active_scheme` flip
+/// between the caller's resolution and this call can never pair the query
+/// embedded under one scheme with another scheme's rows or floor. `scheme`
+/// comes from `embed_scheme::read_scheme_for_reader` (raw on pre-V27).
+pub fn wisdom_match_in_scheme(
+    conn: &Connection,
+    query_vec: &[f32],
+    gate_key: &str,
+    scheme: Scheme,
+    max: usize,
+    exclude: &[String],
+    now_ms: i64,
+) -> Result<WisdomMatch> {
+    let temporal = temporal_columns(conn, Some(scheme))?;
+    match_with_resolved_floor(conn, query_vec, gate_key, max, exclude, now_ms, temporal)
+}
+
+/// ONE `Temporal` for the whole call: its single scheme drives BOTH the floor
+/// (here) and the SELECT filter (inside `wisdom_match_impl`). The pre-V27
+/// shape (scheme None) keeps the unsuffixed raw key and the filter omitted;
+/// an unregistered (model, scheme) key means abstain (floor None).
+fn match_with_resolved_floor(
+    conn: &Connection,
+    query_vec: &[f32],
+    gate_key: &str,
+    max: usize,
+    exclude: &[String],
+    now_ms: i64,
+    temporal: Temporal,
+) -> Result<WisdomMatch> {
     let floor = match temporal.scheme {
         Some(scheme) => gate_floor(&floor_key_for(gate_key, scheme)),
         None => gate_floor(gate_key),
@@ -211,19 +254,24 @@ pub fn wisdom_match(
     )
 }
 
-/// `wisdom_match` with an explicit floor (tests and calibration). `floor =
-/// None` abstains exactly like an uncalibrated model. An empty `query_vec`
-/// yields no entries (corrections still flow).
+/// `wisdom_match` with an explicit floor (tests and calibration). The caller
+/// controls the floor AND declares the `scheme` its floor and `query_vec`
+/// belong to; the SELECT filter follows that declared scheme — never the
+/// active meta value — so floor, query and candidate rows always share one
+/// scheme. `floor = None` abstains exactly like an uncalibrated model. An
+/// empty `query_vec` yields no entries (corrections still flow).
+#[allow(clippy::too_many_arguments)]
 pub fn wisdom_match_with_floor(
     conn: &Connection,
     query_vec: &[f32],
     gate_key: &str,
+    scheme: Scheme,
     floor: Option<f32>,
     max: usize,
     exclude: &[String],
     now_ms: i64,
 ) -> Result<WisdomMatch> {
-    let temporal = temporal_columns(conn)?;
+    let temporal = temporal_columns(conn, Some(scheme))?;
     wisdom_match_impl(
         conn, query_vec, gate_key, floor, max, exclude, now_ms, temporal,
     )
@@ -288,18 +336,15 @@ fn gated_entries(
     now_ms: i64,
     temporal: &Temporal,
 ) -> Result<Vec<WisdomItem>> {
-    let mut sql = String::from(
+    // READ-scheme SELECT filter (spec §Scheme architecture): rows stamped
+    // under another scheme are never candidates. `None` (pre-V27 shape,
+    // resolved in temporal_columns) omits the filter.
+    let scheme_filter = crate::embed_scheme::scheme_filter_sql(temporal.scheme);
+    let mut sql = format!(
         "SELECT id, entity_id, title, body, source_type, embedding_blob
          FROM llm_wiki_entries
-         WHERE deleted_at IS NULL AND embedding_blob IS NOT NULL",
+         WHERE deleted_at IS NULL AND embedding_blob IS NOT NULL{scheme_filter}"
     );
-    // READ-scheme SELECT filter (spec §Scheme architecture): rows stamped
-    // under another scheme are never candidates. `as_str()` is the stored
-    // representation bound verbatim — no inline literal. `None` (pre-V27
-    // shape, resolved in temporal_columns) omits the filter.
-    if let Some(s) = temporal.scheme {
-        sql.push_str(&format!(" AND embed_scheme = '{}'", s.as_str()));
-    }
     if temporal.has_superseded_by {
         sql.push_str(" AND superseded_by IS NULL");
     }
@@ -527,7 +572,7 @@ mod tests {
 
     fn run(conn: &Connection, floor: Option<f32>, max: usize, exclude: &[&str]) -> WisdomMatch {
         let exclude: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
-        wisdom_match_with_floor(conn, &Q, KEY, floor, max, &exclude, NOW).unwrap()
+        wisdom_match_with_floor(conn, &Q, KEY, Scheme::Raw, floor, max, &exclude, NOW).unwrap()
     }
 
     fn ids(items: &[WisdomItem]) -> Vec<&str> {
@@ -731,7 +776,8 @@ mod tests {
     fn empty_query_vec_yields_no_entries() {
         let conn = open_in_memory().unwrap();
         seed(&conn, "a", "ent", &Q);
-        let m = wisdom_match_with_floor(&conn, &[], KEY, Some(0.1), 5, &[], NOW).unwrap();
+        let m =
+            wisdom_match_with_floor(&conn, &[], KEY, Scheme::Raw, Some(0.1), 5, &[], NOW).unwrap();
         assert!(m.entries.is_empty());
     }
 
@@ -909,6 +955,52 @@ mod tests {
         );
     }
 
+    /// Single-resolution legs: a caller-resolved scheme (`_in_scheme`) or a
+    /// caller-declared one (`_with_floor`) drives the row filter — never the
+    /// meta value as it stands when the SELECT runs. A cutover landing
+    /// between the caller's resolution and the gate cannot pair the caller's
+    /// query/floor with the other scheme's rows.
+    #[test]
+    fn caller_resolved_scheme_drives_the_filter_not_the_meta() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "raw_row", "ent", &Q);
+        seed(&conn, "instr_row", "ent", &Q);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embed_scheme = 'instr1' WHERE id = 'instr_row'",
+            [],
+        )
+        .unwrap();
+        // The caller resolved raw; the meta has since flipped to instr1.
+        set_active_scheme(&conn, "instr1");
+        let m = wisdom_match_in_scheme(&conn, &Q, KEY_EXT, Scheme::Raw, 5, &[], NOW).unwrap();
+        assert_eq!(ids(&m.entries), vec!["raw_row"]);
+        assert_eq!(m.gate, format!("semantic-v1:{KEY_EXT}"));
+        let m =
+            wisdom_match_with_floor(&conn, &Q, KEY, Scheme::Raw, Some(0.5), 5, &[], NOW).unwrap();
+        assert_eq!(ids(&m.entries), vec!["raw_row"]);
+        // And the reverse: declared instr1 under a raw meta.
+        set_active_scheme(&conn, "raw");
+        let m = wisdom_match_with_floor(&conn, &Q, KEY, Scheme::Instr1, Some(0.5), 5, &[], NOW)
+            .unwrap();
+        assert_eq!(ids(&m.entries), vec!["instr_row"]);
+    }
+
+    /// Declaring `instr1` against a pre-V27 table (rows are de-facto raw) is
+    /// a hard error, never a silent cross-scheme score.
+    #[test]
+    fn declared_instr1_on_pre_v27_table_fails_closed() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_wiki_entries (
+                id TEXT PRIMARY KEY, entity_id TEXT NOT NULL, title TEXT, body TEXT,
+                source_type TEXT, embedding_blob BLOB, deleted_at INTEGER)",
+        )
+        .unwrap();
+        let err = wisdom_match_with_floor(&conn, &Q, KEY, Scheme::Instr1, Some(0.5), 5, &[], NOW)
+            .unwrap_err();
+        assert!(err.to_string().contains("fail-closed"), "{err}");
+    }
+
     /// Test (d), fail-closed leg: an unknown `wisdom_active_scheme` value is a
     /// hard error on the gate path — never a fallback to another scheme's
     /// floor or filter.
@@ -927,7 +1019,7 @@ mod tests {
     /// Pre-V27 shape (no `embed_scheme` column): the filter degrades off and
     /// rows are read verbatim, mirroring the temporal-column degradation.
     #[test]
-    fn pre_v26_table_reads_without_scheme_filter() {
+    fn pre_v27_table_reads_without_scheme_filter() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE llm_wiki_entries (
