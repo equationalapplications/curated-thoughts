@@ -1,3 +1,9 @@
+## [3.4.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.4.1...v3.4.2) (2026-10-09)
+
+### Dependencies
+
+* **deps:** bump @equationalapplications/*-llm-wiki 7.9.0 → 7.11.2 ([7647da1](https://github.com/equationalapplications/curated-thoughts/commit/7647da15b6332905d43b460b54a09baa8edf48a4))
+
 ## [3.4.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.4.0...v3.4.1) (2026-10-08)
 
 ### Bug Fixes
