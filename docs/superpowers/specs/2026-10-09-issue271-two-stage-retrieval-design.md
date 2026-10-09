@@ -1,15 +1,14 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 19 — Opus spec-tier r17 REQUEST CHANGES resolved:
-M1 snapshot membership pinned (every doc with ≥1 chunk, NO status/tier
-filter — status-filtered snapshots miss pending/quarantined docs and
-produce a false model_guard=ok over mixed vectors); quarantined
-chunk-bearing docs failed/attempts=3 at snapshot time; MINOR-1
-quarantine+pass-docs write atomic in one tx, keyed by path→doc_id +
-open pass; re-stage target pinned (snapshotted/attempts=0/
-pending_reindex); MINOR-2 snapshotted/retrying arms attempts-capped
-too (retrying@3 = exhausted failed); MINOR-3 epoch check immediately
-before BEGIN IMMEDIATE, superseded = distinct IngestOutcome variant)
+**Date:** 2026-10-09 (rev 20 — Opus spec-tier r18 REQUEST CHANGES resolved:
+M1 snapshot staging pinned per status (indexed→pending_reindex;
+pending left as-is; error/orphaned-with-chunks recorded skipped —
+never staged, never hung); M2 watchdog pass-docs write conditional on
+outcome (never touches completed/skipped — a post-commit
+Summarizing stall can't flip a completed row); MINOR-1 swap tx
+pass-docs write also conditional (epoch check-then-act closed);
+MINOR-2 exhausted-flip = explicit UPDATE at sweep() start, not the
+SELECT)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -215,6 +214,19 @@ A snapshotted doc not indexed under the new key (including superseded-job
 `model_guard_skipped_docs`. The `clear` transaction additionally deletes
 the guard/pass/stamp meta keys, the breaker baseline/state keys, and all
 `ct_reindex_pass_docs` rows (r9 m2 purge list).
+**Snapshot staging per status (rev 20, Opus r18 MAJOR-1 — rev 19
+snapshotted every chunk-bearing doc, but staging's
+`WHERE status='indexed'` guard would leave `error`/`orphaned` docs
+unswept and unsnapped ⇒ completion blocked forever with no signal;
+and dropping the guard would overwrite a real `error` and break the
+refusal rule's pre-status invariant):** at snapshot time, per doc —
+`indexed` ⇒ staged `pending_reindex`; `pending` ⇒ left as-is
+(already sweepable); **`error`/`orphaned` with chunks ⇒ recorded as
+`skipped` at snapshot time and shown in "N skipped"** (NOT staged —
+a refusal would have to restore a status the staging doesn't know;
+the doc's chunks stay valid and the next content edit or model swap
+retries it naturally). Test: GUI pass with one `error` chunk-bearing
+doc ⇒ pass completes, doc shown as skipped — never hangs.
 **Snapshot membership PINNED (rev 19, Opus r17 MAJOR-1 — the spec
 never said which docs are snapshotted; if the snapshot reuses
 `list_indexed_user_doc_paths` (`db/queries.rs:38-41`,
@@ -502,7 +514,13 @@ are in scope:
   `BEGIN IMMEDIATE` (last line of defense — the existing
   `hb.enter(Stage::Committing)` check at `:752-756` stays); the
   superseded case returns a DISTINCT `IngestOutcome` variant (not
-  `Ok(())`). Test: bump the epoch during Embedding ⇒ no pass-docs
+  `Ok(())`). **The swap tx's pass-docs write is ALSO conditional —
+  `WHERE outcome IN ('snapshotted','retrying')` (rev 20, Opus r18
+  MINOR-1: the rev-19 point-in-time epoch check is check-then-act;
+  the watchdog can bump the epoch during the 5s busy timeout inside
+  `BEGIN IMMEDIATE` — with both writes conditional, neither writer
+  can overwrite the other in either order).** Test: bump the epoch
+  during Embedding ⇒ no pass-docs
   write, no chunk changes).
   Backfill wording
   is `WHERE status IN ('indexed','pending_reindex')` (rev 12, Opus r10
@@ -624,7 +642,14 @@ are in scope:
       <= unixepoch()` — backoff and the 3-retry cap are enforced by
       the query itself; `sweepable_path_set` applies the same filter,
       so exhausted rows leave the sweepable set (their claims drop and
-      they are never re-dispatched). **Full sweep predicate (rev 17,
+      they are never re-dispatched). **The exhausted-flip is an
+      explicit UPDATE, not the SELECT (rev 20, Opus r18 MINOR-2 — the
+      sweep helpers are read-only, `&Connection`):** at the start of
+      `sweep()`, before `retain_sweepable`:
+      `UPDATE ct_reindex_pass_docs SET outcome='failed'
+       WHERE outcome='retrying' AND attempts>=3 AND pass_id=:open`
+      — the row leaves the sweepable set in the same tick and its
+      claim expires. **Full sweep predicate (rev 17,
       Opus r15 M2 — rev 16's failed-only filter would have prevented
       passes from EVER starting (`snapshotted` rows excluded) and
       never re-dispatched a `retrying` row after a restart (claims
@@ -732,7 +757,17 @@ are in scope:
     signal):** when the watchdog quarantines a path that has a row
     in the open pass, it writes `outcome='failed'` with
     `attempts = 3` (exhausted) — the doc then appears in
-    "N failed — retry". **Atomicity + keying (rev 19, Opus r17
+    "N failed — retry". **Conditional write (rev 20, Opus r18
+    MAJOR-2 — a Summarizing/Linking stall AFTER the swap committed
+    would otherwise overwrite a `completed` row with `failed`,
+    blocking completion despite every chunk carrying new-model
+    vectors, and re-staging would re-embed + re-run the same
+    stalling summary — a loop):** the pass-docs UPDATE is
+    conditional — `... AND outcome IN ('snapshotted','retrying',
+    'failed')` — it never touches `completed`/`skipped`. (Optionally
+    gated further on stall stage ≤ Committing.) Test: Summarizing
+    stalls twice on a completed pass doc ⇒ row stays `completed`,
+    pass completes. **Atomicity + keying (rev 19, Opus r17
     MINOR-1 — a crash between `quarantine()` and the pass-docs
     write would leave the doc quarantined with its row stuck
     `retrying`, the exact hang rev 18 closes):** the quarantine
