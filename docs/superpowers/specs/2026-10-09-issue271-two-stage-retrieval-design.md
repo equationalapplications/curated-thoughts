@@ -1,12 +1,16 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 9 — Opus spec-tier r7 REQUEST CHANGES resolved:
-M1 refused-pending disposition keyed to staging source (pre_staging_
-status marker; no re-sweep loop without hiding error/orphaned state);
-M2 full funnel decision table incl. the model-stale-no-grant cell
-(queue_full_reindex force=true added as third grant writer); m1
-existing-doc embed failure keeps indexed state; m2 bulk_reindex loop
-continues on per-doc failure; m3 re-anchor commits stated)
+**Date:** 2026-10-09 (rev 10 — Opus spec-tier r8 REQUEST CHANGES resolved:
+B1 refusal keyed to last_indexed_hash written in the swap tx (queue.rs
+pre-writes the new hash — watcher edits looked like pure rechunks);
+M1-M2 refusal-record w/ stamp fingerprint replaces leaking markers
+(sweep skips while fingerprint matches; fresh stamp lifts exemption);
+M3 stamp refresh + grant consumption deferred to pass completion
+(gate guard treats open grant/in-flight pass as mismatch → v1
+fallback); M4 tier_working path is pre-V5 only — rev 9 claim
+corrected; m1 pending counter decrement; m2 queue_full_reindex
+verification async off IPC; m3 okf_migration not reachable on V27;
+m4 duplicate test rows consolidated to Testing)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -417,26 +421,26 @@ are in scope:
   re-enqueue; `:73-82` is the status constant's doc comment) and
   `rechunk_for_reembed` is `force:true`
   (`src-tauri/src/pipeline/mod.rs:72-74`).
-  **Refusal scope (rev 5, Opus r3 M1; rev 7, Opus r5 MAJOR-1; rev 8,
-  Opus r6 M1):** the stamp check refuses a **pure rechunk**, defined by
-  CHUNK STATE, not the status string: `the doc's stored hash equals the
-  file's current hash AND the doc has ≥1 chunk`. A pure rechunk is
+  **Refusal scope (rev 5, Opus r3 M1; rev 7 r5 M1; rev 8 r6 M1;
+  rev 10, Opus r8 B1 — the documents.hash comparison was BROKEN for
+  watcher edits: `enqueue_vault_event` (`db/queue.rs:168-175`) writes
+  the NEW file hash into `documents.hash` BEFORE ingest, so by the
+  worker every watcher-staged edit matched its (old) chunks and looked
+  like a pure rechunk — the edit would be silently refused and the
+  gate would keep scoring stale chunks):** the stamp check compares
+  against **`last_indexed_hash`** — a per-doc value written ONLY
+  inside the swap transaction (option (a) of the review; a new column
+  or `llm_wiki_meta` key). A **pure rechunk** = `last_indexed_hash ==
+  the file's current hash AND the doc has ≥1 chunk`. A pure rechunk is
   refused whenever the stamp's CHUNKER component is not verified
-  current (missing or stale) — **whether or not `force` is set**
-  (rev 8: `pending` rows staged by non-forced overflow carry FULL
-  chunk sets — `lib.rs:2378-2391` stages with
-  `WHERE status = 'indexed'` — and the rev-7 status-string rule would
-  have let them rechunk under a stale chunker, the exact mass-rehash
-  the stamp exists to stop, via the sweep's `ingest_counted` path;
-  refusal extends to the non-forced path and the same disposition rule
-  returns those rows to `indexed`). Rows with ZERO chunks (new docs,
-  failed-first-embed `error` rows) take the NORMAL path — the sweep
-  never retries `error` rows, so the normal path is the only way out,
-  and there is nothing to lose. A content edit (hash mismatch) takes
-  the normal diff-swap path, no stamp check. So routine `ct ingest
-  --yes` never blocks on the stamp — only a no-op rechunk of
-  already-chunked unchanged content does, the one operation with
-  nothing to gain and everything to lose.
+  current, forced or not. A watcher/`queue.rs` edit has
+  `last_indexed_hash` = the OLD hash ⇒ mismatch ⇒ normal diff-swap
+  path — indexed with the new content, never refused. Unchanged files
+  match and are refused (nothing to gain). Zero-chunk docs bypass
+  (nothing to lose). Unforced edits also skip re-embedding unchanged
+  chunks only when the stamp's model key is current (unchanged rule).
+  Test: watcher Modify event + stamp missing ⇒ doc ends up indexed
+  with the new content.
   **Scope honesty (rev 6, Opus r4 m2):** under a stale CHUNKER stamp an
   EDITED file still rechunks with the new chunker (the refusal keys on
   hash equality, and an edit breaks equality) — rehashing that doc's
@@ -480,7 +484,14 @@ are in scope:
   identically:
   - chunker current, model current ⇒ **pass**.
   - chunker current, model stale, grant for the target key present ⇒
-    **pass** (stamp refreshed as a side effect, grant consumed).
+    **pass**. The stamp is NOT refreshed and the grant NOT consumed
+    per job — both happen only when the pass COMPLETES with
+    `model_guard=ok` (rev 10, Opus r8 M3: a mid-pass refresh would
+    report model B while ~290 docs still carry model-A vectors — the
+    §4 guard would then pass on wrong scores with no fallback, and
+    the unforced-edit skip rule would go true mid-pass). Until
+    completion, the gate guard treats an open grant or an in-flight
+    pass as a model mismatch ⇒ v1 fallback.
   - chunker current, model stale, NO grant ⇒ **refuse** — EXCEPT the
     sole sanctioned model-swap paths: `bulk_reindex --model-swap` and
     `run_wiki_reembed`, which write the grant first (after scratch
@@ -490,7 +501,14 @@ are in scope:
     path like `run_wiki_reembed`; without this the GUI's
     queue-full-reindex after a model change would refuse every job
     with nothing shown. With the grant present, its jobs pass like any
-    other granted re-embed.
+    other granted re-embed. **Its scratch verification runs ASYNC, not
+    on the IPC thread** (rev 10, Opus r8 m2: `queue_full_reindex` is a
+    synchronous `#[tauri::command]` whose own comments warn about IPC
+    freezes, `lib.rs:2329-2332` — a full-scratch-corpus re-embed hits
+    the network per doc): the command enqueues a verification job and
+    returns immediately; the UI shows the existing pending counter
+    plus a "verifying scratch before re-embed" status line while it
+    runs.
   - chunker stale or missing (any model state) ⇒ **refuse** (the
     bootstrap/override is `ct reindex verify-scratch`).
   Zero-chunk docs bypass the whole table (nothing to lose); content
@@ -511,28 +529,43 @@ are in scope:
   stderr line; NOT counted as a strike; never quarantined. This kills the
   re-sweep loop: the row no longer reads `pending_reindex`, so
   `list_sweepable_pending` cannot pick it up again.
-  **Disposition for refused `pending` rows (rev 9, Opus r7 MAJOR-1 —
-  the status string is NOT a safe restore key: `db/queue.rs:168-175`
-  re-pends `error`/`orphaned` rows, `db/connection.rs:248-257`
-  tier_working repair re-pens chunked docs [LIVE on V27, not gated],
-  `db/okf_migration.rs:308` pends by id — restoring any of those to
-  `indexed` would hide real state):** disposition keys on the STAGING
-  SOURCE (option (a) of the review): `queue_full_reindex` overflow
-  staging (`lib.rs:2378-2391`) gains a `pre_staging_status` marker in
-  `llm_wiki_meta` keyed by doc id (written in the same critical
-  section as the staging UPDATE). A refused row whose marker says
-  `indexed` is restored to `indexed` AND its marker deleted; a refused
-  row with no marker (pending from any other writer) is restored to
-  `pending` BUT exempted from re-sweep — the sweep skips rows whose
-  refusal is recorded within their current staging epoch (refusal
-  stamp in the marker row), so no loop forms; the pending counter
-  (`mod.rs:206-211`) is not incremented on a refusal-skip. Every other
-  refused status (error, orphaned) restores as-is. Tests: refused
-  overflow-staged `pending` row does NOT reappear on the next
-  `sweep()` call (twin of the `pending_reindex` test); refused
-  queue.rs-pended row is restored to `pending` and also does not
-  loop; the `connection.rs:248` tier_working path (LIVE, no version
-  gate — verified) is covered by the no-marker branch.
+  **Disposition for refused rows (rev 4, Opus r2 M3; rev 5-6 r3 m3 /
+  r4 M1; rev 9-10, Opus r7 MAJOR-1 / r8 M1-M2 — rev 9's
+  pre_staging_status markers are REPLACED: they leaked (never deleted
+  on job success or file deletion), a stale marker could restore the
+  wrong doc to `indexed` (llm_wiki_meta survives clear; documents.id
+  reuse is not guaranteed against), and the no-marker branch had
+  nowhere to put its refusal stamp nor any rule for lifting the
+  exemption):** a refused row records a **per-doc refusal record**
+  (meta key or column) holding **the stamp fingerprint at refusal
+  time**. The sweep skips a row ONLY while the current stamp
+  fingerprint still equals the recorded value — **a fresh stamp
+  (e.g. from `verify-sweep` bootstrap) lifts the exemption
+  automatically**, so pending rows that need a retry (including
+  queue.rs re-pends of `error`/`orphaned`) resume after bootstrap.
+  The filter is applied in BOTH `list_sweepable_pending` and
+  `sweepable_path_set` (claims must expire in step). Status handling
+  on refusal: a refused `pending_reindex` maps to `indexed` (staging
+  guard proves pre-staging state), ANY other status restores as it
+  was (never blindly `indexed` — that would hide error/orphaned
+  state, per r7 M1's queue.rs/connection.rs/okf_migration writers).
+  No loop forms within a process even without the record
+  (`InFlightClaims.retain_sweepable`, `sweep.rs:62-64`); the record
+   covers worker respawn/restart. Pending counter: the refusal
+   outcome DECREMENTS the counter (or emits a corrected `PendingCount`
+   event) — the increment at `mod.rs:206-211` happens before the
+   outcome is known.
+   **Citation correction (rev 10, Opus r8 M4):** the
+   `connection.rs:248-257` tier_working re-pend is inside
+   `if version < 5` (`connection.rs:235-239`) — **pre-V5 only, dead
+   on V27**; rev 9's "LIVE on V27" claim was wrong. The r7-M1
+   conclusion (status string is not a safe restore key) still holds
+   via `queue.rs:175` and `okf_migration.rs:308`; the tier_working
+   test is labeled a pre-V5 fixture case. **Reachability note (rev
+   10, Opus r8 m3):** `okf_migration.rs:308` runs only in the V7
+   one-shot conversion (`run_okf_migration`, skipped once complete) —
+   not reachable on a V27 brain post-migration; listed for
+   restore-path completeness only.
   **`ct ingest` loop accounting (rev 6, Opus r4 m1):** the refusal
   outcome is treated as a SKIP in the per-file loop at
   `tools/src/cmds.rs:180` — no `failed += 1`, no non-zero exit, and the
@@ -584,7 +617,12 @@ are in scope:
  `pending` and does not loop (rev 9 MAJOR-1); bulk_reindex
  --model-swap: one embed failure mid-pass ⇒ BLOCKED + rest re-embed +
  non-zero exit (rev 9 MINOR-2); regrade breaker refusal leaves
- re-anchor writes committed (rev 9 MINOR-3).
+ re-anchor writes committed (rev 9 MINOR-3); watcher Modify event +
+ stamp missing ⇒ doc indexed with the NEW content (rev 10, Opus r8
+ B1 — the queue.rs hash pre-write case); refused row's exemption
+ lifts automatically after a fresh stamp bootstrap (rev 10, Opus r8
+ M1); gate guard falls back to v1 while a grant is open or a pass
+ is in flight (rev 10, Opus r8 M3).
   **Fingerprint =
   (live-DB identity, chunker version, model key)** — the document-set
   hash is DROPPED (r9 M4: content changes are already lossless under
