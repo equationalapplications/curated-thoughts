@@ -1,11 +1,13 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 6 — Opus spec-tier r4 REQUEST CHANGES resolved:
-M1 pending_reindex refusal maps to indexed (staging-guard rule, no
-re-sweep loop); M2 forced pass re-embeds EVERY chunk (model swap is not
-a no-op); M3 breaker reset surface + --allow-bulk marked NEW + tripped
-stderr line; M4 new tooling marked NEW with §9 step-2 build items;
-m1-m4)
+**Date:** 2026-10-09 (rev 7 — Opus spec-tier r5 REQUEST CHANGES resolved:
+M1 refusal excludes pending/error rows (failed-embed retry never
+refused); M2 fresh-brain via persistent librarian_evidence_seen marker
+(trigger + migration backfill, KEPT by clear); MINOR-1 doomed =
+classified subset + in-tx recount aborts on mismatch; MINOR-2
+IngestOutcome enum + refusal-as-skip in bulk_reindex/queue_full_
+reindex; MINOR-3 mixed-model guard defined (stamp key vs profile key);
+MINOR-4 floor-table comment + replay_two_stage composite key)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -147,6 +149,14 @@ new two-stage key would pass every existing test with no snapshot.**
 Required: a `replay_two_stage` test function + freeze directory for the
 winning key, and a real per-key coverage assertion — every non-stub key
 in `WISDOM_GATE_FLOORS` must map to a freeze dir that exists.
+**Comment + replay updates (rev 7, Opus r5 MINOR-4):** the
+`WISDOM_GATE_FLOORS` doc comment (`wisdom_match.rs:50-52`, currently
+"Abstention floor on RAW cosine") is updated — a `chunk-hop` floor
+abstains on a chunk score, not raw cosine; `replay_two_stage` passes
+the composite key `floor_key_for(model, scheme) + ":two-stage:" +
+rule` to `gate_floor` so the existing
+`gate_floor(gate_key) == expected.floor` assertion
+(`wisdom_gate_bench.rs:107-111`) holds unchanged.
 **Tie-break (GLM r1 minor-5):** if both rules pass the letter,
 pick by higher hit@2, then lower FP, then rule (i) (simpler path).
 
@@ -165,7 +175,16 @@ only when BOTH keys are missing. (rev 4, Opus r2 m4: this is a code
 edit at `tools/src/queries.rs:791` too — the CLI embed-skip
 `wm::gate_floor(&scheme_key).is_none()` checks only the v1 key; it
 gains the both-keys-missing condition so the rule is implemented on the
-CLI side as well as the Tauri side.) Guard failure (absent/mismatch/mixed
+CLI side as well as the Tauri side.) **Guard-failure "mixed" defined
+(rev 7, Opus r5 MINOR-3):** the guard checks the STAMP's model key
+against the profile's current key — mismatch ⇒ v1 fallback. Stated
+plainly: an out-of-pass forced edit after a profile change (an edit
+bypasses the stamp check by design and writes new-model vectors) is
+what produces a genuinely mixed-vector doc; the guard's mismatch
+fallback covers the GATE (it never reads with the wrong-scheme floor);
+the mixed vectors themselves are inherent to no-model-stamping on
+chunks (investigation §2) and are repaired by the next model-swap
+pass, which re-embeds every chunk. Guard failure (absent/mismatch/mixed
 model) ⇒ v1 fallback — the gate is never dark **while a v1 floor exists**.
 **The fourth cell (Opus r1 m4):** two-stage floor PRESENT, v1 floor
 missing ⇒ two-stage runs normally (it has its own floor); but a guard
@@ -326,11 +345,17 @@ are in scope:
   against the one shared counter; rev 5, Opus r3 m1: each L is
   snapshotted under its OWN key — `breaker_L_heal` /
   `breaker_L_regrade` — and both keys are in the clear-transaction
-  purge). **Regrade batch semantics (rev 5, Opus r3 m4):** the breaker
-  is ALL-OR-NOTHING — `|doomed|` > remaining budget refuses the WHOLE
-  batch (never a partial delete); `doomed` is RECOUNTED inside the
-  IMMEDIATE purge transaction so the count the breaker judged is the
-  count that would be deleted. **Budget window (rev 5, Opus r3 M5 — a
+  purge). **Regrade batch semantics (rev 5, Opus r3 m4; rev 7, Opus r5
+  MINOR-1):** `|doomed|` counts the rows the CLASSIFICATION flagged as
+  doomed (the subset of `unanchored=1 AND deleted_at IS NULL` flagged
+  rows that FAIL `evidence_has_live_chunk` at `:173-200` — the others
+  are re-anchored, not deleted), not the raw flagged population. The
+  breaker is ALL-OR-NOTHING — `|doomed|` > remaining budget refuses the
+  WHOLE batch (never a partial delete); the in-transaction recount
+  RE-RUNS the classification (it needs the per-row
+  `evidence_has_live_chunk` verdicts, not a SQL COUNT) and **ABORTS on
+  any mismatch with the exported set** rather than deleting a different
+  set — matching the swap-race rule. **Budget window (rev 5, Opus r3 M5 — a
   24h auto-rollover only bounds TRANSIENT faults; for the persistent
   faults this breaker targets, rolling epochs with shrinking L would
   let each epoch spend a full budget and feed rows to the 7-day
@@ -373,16 +398,20 @@ are in scope:
   re-enqueue; `:73-82` is the status constant's doc comment) and
   `rechunk_for_reembed` is `force:true`
   (`src-tauri/src/pipeline/mod.rs:72-74`).
-  **Refusal scope (rev 5, Opus r3 M1 — rev 4's "docs with chunks" scope
-  still refused every EDITED file, since `ct ingest` is always forced
-  and an edited indexed file has chunks):** the stamp check refuses only
-  a **pure rechunk** — `force && the doc's stored hash equals the file's
-  current hash` (nothing changed but we're about to rehash everything).
-  A content edit produces a hash mismatch ⇒ it takes the normal
-  diff-swap path, no stamp check involved. New docs (no row) ⇒ no
-  check. So routine `ct ingest --yes` never blocks on the stamp, stale
-  or missing — only a no-op rechunk of unchanged content does, and that
-  is exactly the operation with nothing to gain and everything to lose.
+  **Refusal scope (rev 5, Opus r3 M1; rev 7, Opus r5 MAJOR-1):** the
+  stamp check refuses only a **pure rechunk** — `force && the doc's
+  stored hash equals the file's current hash && the stored status is
+  `indexed` or `pending_reindex`` (the states that actually have
+  chunks to lose). A content edit produces a hash mismatch ⇒ normal
+  diff-swap path, no stamp check. New docs (no row) ⇒ no check.
+  **`pending`/`error` rows with matching hashes take the NORMAL path**
+  (rev 7: after a failed first embed the row has hash+`error`+zero
+  chunks — refusing its retry would permanently block that file with a
+  silent skip; the sweep never retries `error` rows, so the normal
+  path is the only way out). So routine `ct ingest --yes` never blocks
+  on the stamp — only a no-op rechunk of already-chunked unchanged
+  content does, the one operation with nothing to gain and everything
+  to lose.
   **Scope honesty (rev 6, Opus r4 m2):** under a stale CHUNKER stamp an
   EDITED file still rechunks with the new chunker (the refusal keys on
   hash equality, and an edit breaks equality) — rehashing that doc's
@@ -465,18 +494,33 @@ are in scope:
   (rev 6, Opus r4 M2); breaker trip → stderr line on every heal/regrade
   run → `ct heal --reset-breaker` clears it → heal proceeds (rev 6,
   Opus r4 M3); `--allow-bulk` bypasses the breaker for one run (rev 6
-  M3); v1-fallback gate costs exactly one embed (rev 6, Opus r4 m4).
+ M3); v1-fallback gate costs exactly one embed (rev 6, Opus r4 m4);
+ new file, embed fails, key fixed, `ct ingest --yes` with no stamp ⇒
+ doc ENDS UP INDEXED (rev 7, Opus r5 MAJOR-1 — the error-row retry
+ must not be refused); bug-emptied brain (marker present, zero live
+ facts) does not bypass the stamp guard (rev 7 MAJOR-2); regrade
+ recount mismatch aborts the purge (rev 7 MINOR-1); out-of-pass edit
+ after a profile change ⇒ gate falls back to v1 (mixed vectors, rev 7
+ MINOR-3).
   **Fingerprint =
   (live-DB identity, chunker version, model key)** — the document-set
   hash is DROPPED (r9 M4: content changes are already lossless under
   the diff-swap; only chunker/model changes can mass-rehash). Scratch
   verification failing ⇒ the live rechunk refuses (override: re-run
   the scratch check; no `--allow-bulk` for rechunk — that override
-  stays heal/regrade-only). **"Fresh brain" defined (rev 5, Opus r3
-  m6):** a brain with NO rows EVER in `librarian_evidence` (not
-  "zero live facts" — a brain emptied by a bug must NOT qualify and
-  silently skip the guard); test: emptied-but-not-fresh brain does not
-  bypass. `restore_in_progress` stamping remains [PROPOSED].
+  stays heal/regrade-only). **"Fresh brain" defined (rev 5 Opus r3 m6;
+  rev 7 Opus r5 MAJOR-2 — a COUNT(*)=0 check cannot implement "no rows
+  EVER": `librarian_evidence` has no high-water mark
+  (`schema.rs:393-399`, `entry_id TEXT PRIMARY KEY`, no AUTOINCREMENT)
+  and rows leave via regrade/prune/clear hard deletes):** a persistent
+  marker `librarian_evidence_seen` in `llm_wiki_meta`, set by an
+  `AFTER INSERT` trigger on `librarian_evidence` and backfilled by the
+  new ungated migration for any brain that has rows today.
+  **The marker is explicitly KEPT by the clear transaction** (NOT in
+  the purge list): a cleared brain has CARRIED librarian facts — the
+  guard stays armed; "fresh" means the marker is absent, which after
+  clear requires deleting the brain file. Test updated: marker present
+  + zero live facts (bug-emptied brain) does NOT bypass. `restore_in_progress` stamping remains [PROPOSED].
 
 ### 9. Implementation order (within the ONE PR)
 
@@ -484,11 +528,17 @@ are in scope:
    opt-in (`--two-stage`).
 2. Safety: diff-swap + funnel stamp + cross-process breaker + pass-doc
    storage + clear-transaction purge. **NEW tooling in this step (rev 6,
-   Opus r4 M4):** `ct reindex verify-scratch` (bootstrap command),
-   `bulk_reindex --model-swap <key>` (grant writer), the GUI reembed
-   scratch step (reuses verify-scratch's code path), `ct heal
-   --reset-breaker`, and the NEW `--allow-bulk` flags on `ct heal` /
-   `ct evidence regrade`.
+   Opus r4 M4; rev 7 Opus r5 MINOR-2):** `ct reindex verify-scratch`
+   (bootstrap command), `bulk_reindex --model-swap <key>` (grant
+   writer), the GUI reembed scratch step (reuses verify-scratch's code
+   path), `ct heal --reset-breaker`, the NEW `--allow-bulk` flags on
+   `ct heal` / `ct evidence regrade`, the `librarian_evidence_seen`
+   marker (trigger + migration backfill), and a named **`IngestOutcome`
+   enum** returned by the ingestion funnel so every caller can branch on
+   refusal — with refusal-as-skip handling added to **`bulk_reindex`**
+   and **`queue_full_reindex`** as well as `ct ingest` (the refusal
+   outcome flows to every forced producer, not just the worker and the
+   CLI ingest loop).
 3. Paired live calibration = the acceptance gate; pick rule + floor;
    flip-to-default if the letter passes.
 4. Provenance backfill only if the audit shows hop gaps (expected:
