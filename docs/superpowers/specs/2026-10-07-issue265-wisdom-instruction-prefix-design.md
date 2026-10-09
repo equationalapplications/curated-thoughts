@@ -1,7 +1,7 @@
 # Wisdom-gate instruction prefix: both-side Qwen3 conditioning + scheme cutover (issue #265 follow-up)
 
 **Date:** 2026-10-07 (rev 2 — post GLM-5.3 spec-tier FIX_FIRST round; all 8 required fixes applied)
-**Status:** PROPOSED
+**Status:** IMPLEMENTED (merged to main as PR #270, 2026-10-09)
 **Branch:** `feat/issue265-query-prefix-test`
 **PR:** #270
 **Parent spec:** `docs/superpowers/specs/2026-10-06-issue265-wisdom-match-design.md`
