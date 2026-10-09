@@ -1,17 +1,13 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 17 — Opus spec-tier r15 REQUEST CHANGES resolved:
-M1 stale count_pending_documents paragraph deleted (drain counter
-UNTOUCHED; pass rows outside drain input by status — r15 m1's no-op
-exclusion dropped); M2 full sweep predicate pinned (LEFT JOIN on open
-pass: dispatch iff doc_id IS NULL OR snapshotted/retrying OR failed
-with attempts<3 + backoff elapsed; attempts+=1 every dispatch;
-PASS_RETRY_BACKOFF_SECS=300; restart-with-retrying test); m1 watchdog
-exclusion dropped as no-op; m2 frontend sites corrected (7 mock files,
-ReviewMode.tsx second consumer, useIndexingStatus default) — new TS
-fields OPTIONAL so mocks stay valid; m3 failed/skipped markers gated
-on open-pass row (worker reads (pass_id, target_key) from
-llm_wiki_meta), panic path uses a fresh connection)
+**Date:** 2026-10-09 (rev 18 — Opus spec-tier r16 REQUEST CHANGES resolved:
+M1 quarantine interplay (watchdog quarantine of a pass doc writes
+failed/attempts=3; re-stage clears quarantined_at + strikes); MINOR-1
+stale drain-exclusion sentence removed; MINOR-2 attempts semantics
+pinned (+1 only after Ok try_send; last_attempt_at from the failure
+write; "3" = total attempts); MINOR-3 evaluator (2) reworded to
+outcome-based check; MINOR-4 panic fresh-connection reason corrected
++ busy_timeout; MINOR-5 §6 shows the pinned DDL once)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -217,17 +213,17 @@ A snapshotted doc not indexed under the new key (including superseded-job
 `model_guard_skipped_docs`. The `clear` transaction additionally deletes
 the guard/pass/stamp meta keys, the breaker baseline/state keys, and all
 `ct_reindex_pass_docs` rows (r9 m2 purge list).
-**Pass-docs DDL pinned (rev 16, Opus r14 M2):**
+**Pass-docs schema — PINNED DDL (rev 16, Opus r14 M2; made the sole
+signature rev 18, Opus r16 MINOR-5):**
 `ct_reindex_pass_docs(pass_id, doc_id, embed_key, outcome, attempts,
 last_attempt_at)` with `outcome ∈ {snapshotted, retrying, completed,
-failed, skipped}` — the rev-11 §6 schema had no outcome/attempts
-columns and could not store what rev 15's retry design writes;
-snapshot rows and outcome rows are THE SAME TABLE (a row starts
-`snapshotted` and transitions). **Completion = every row of the pass
-has `outcome ∈ {completed, skipped}`** — a `failed` row BLOCKS
-completion (test: one `failed` row + everything else completed ⇒
-BLOCKED; the false-ok where a 401'd doc's failure row satisfied the
-old "no row missing" check is impossible under this definition).
+failed, skipped}`. Snapshot rows and outcome rows are THE SAME TABLE
+(a row starts `snapshotted` and transitions). **Completion = every
+row of the pass has `outcome ∈ {completed, skipped}`** — a `failed`
+row BLOCKS completion (test: one `failed` row + everything else
+completed ⇒ BLOCKED; the false-ok where a 401'd doc's failure row
+satisfied the old "no row missing" check is impossible under this
+definition).
 
 ### 7. Floors + acceptance letter
 
@@ -552,9 +548,10 @@ are in scope:
     the gate on v1 or uncalibrated, with no signal):** ONE
     idempotent `evaluate_pass_completion(conn)` is pinned, run (1)
     at the end of `bulk_reindex --model-swap` (synchronous), (2)
-    inside every successful swap transaction (cheap check: no
-    snapshotted doc still missing a pass-docs row under the target
-    key — the last job to finish completes the pass), and (3) from
+    inside every successful swap transaction (cheap check: no row of
+    the open pass has `outcome NOT IN ('completed','skipped')` —
+    rev 17, Opus r15 MINOR-3 wording; the snapshotted doc always has
+    a row under the same-table model), and (3) from
     the sweep tick as backstop. The swap transaction reads the open
     `(pass_id, target_key)` from `llm_wiki_meta` — with no `pass_id`
     on `PipelineJob`, this DB read is how a pass-docs row gets
@@ -574,6 +571,9 @@ are in scope:
       from pass-docs), so the counts don't read ~0/0 mid-pass (r12
       m4; rev 15's "or" is RESOLVED — see the M3 wiring below: pass
       progress from pass-docs, `count_pending_documents` untouched).
+      The r16 MINOR-1 note: pass rows are outside the drain input by
+      status — no exclusion code is needed; the regression test stays
+      as a guard.
       **Failed-job retry (rev 15, Opus r13 M1; mechanics pinned
       rev 16, Opus r14 M1-M3 — rev 15's claim-release created double
       dispatch (a `failed` marker released the claim while attempt 2
@@ -604,9 +604,13 @@ are in scope:
        OR (pd.outcome='failed' AND pd.attempts < 3
            AND pd.last_attempt_at + :backoff <= unixepoch())`
       — non-pass rows (`pd.doc_id IS NULL`) keep the sweep's existing
-      backstop behavior unchanged. `attempts += 1` on EVERY dispatch
-      (first dispatch included — the `failed→retrying` flip does not
-      increment). Backoff = named constant `PASS_RETRY_BACKOFF_SECS`
+      backstop behavior unchanged. `attempts += 1` ONLY after
+      `try_send` returns `Ok` (a `QueueFull` does not burn an attempt
+      — `sweep.rs:145-147` releases the claim and breaks); the
+      worker's failure write sets `last_attempt_at` (backoff is
+      measured from the FAILURE, not the dispatch). "3" means 3 TOTAL
+      attempts (1 initial + 2 retries) — predicate `attempts < 3`
+      matches. Backoff = named constant `PASS_RETRY_BACKOFF_SECS`
       (300). Test: restart with a `retrying` row ⇒ re-dispatched once
       ⇒ completes. After 3 auto-retries the UI
       pass-progress line shows "N failed — retry" with a re-stage
@@ -642,11 +646,10 @@ are in scope:
     watchdog's canonical counter (`watchdog/mod.rs:288-291` feeds
     `DrainTracker::observe`; adding `pending_reindex` would trip
     `DrainStall` every window during a pass and set health to
-    `Stalled` permanently — a false stall). The drain watchdog
-    additionally EXCLUDES rows with a terminal `failed`-exhausted
-    pass-docs marker from its pending input, so an exhausted-retry
-    row never trips a stall (test: exhausted-retry row does not
-    trip a drain stall).
+    `Stalled` permanently — a false stall). Pass rows are outside
+    the drain input BY STATUS — no exclusion code is needed or
+    written; the regression test (exhausted-retry row does not trip
+    a drain stall) stays as a guard only.
   - chunker current, model stale, NO grant ⇒ **refuse** — EXCEPT the
     sole sanctioned model-swap paths: `bulk_reindex --model-swap` and
     `run_wiki_reembed`, which write the grant first (after scratch
@@ -679,6 +682,22 @@ are in scope:
     the chunker rule). For this variant the command's `Ok(usize)`
     returns `0` (nothing queued yet — verification is async); progress
     is shown through the status line and pass-docs progress.
+    **Quarantine interplay (rev 18, Opus r16 MAJOR-1 — a worker that
+    HANGS mid-stage never reaches the Err/panic branches, so no
+    `failed` marker is written; the watchdog replaces the worker and
+    records a strike (`watchdog/mod.rs:354-452`),
+    `QUARANTINE_THRESHOLD = 2` (`recovery.rs:10`), and both sweep
+    queries filter `quarantined_at IS NULL` (`sweep.rs:85, :105`) —
+    two hangs on one large doc = quarantined + pass row stuck
+    `retrying` = pass incomplete forever, grant open, gate on v1, no
+    signal):** when the watchdog quarantines a path that has a row
+    in the open pass, it writes `outcome='failed'` with
+    `attempts = 3` (exhausted) — the doc then appears in
+    "N failed — retry". The re-stage action ALSO clears
+    `quarantined_at` and the strikes for that path (otherwise
+    re-staging could never succeed). Test: two stage-stall respawns
+    on one pass doc ⇒ row shown as failed ⇒ re-stage recovers it ⇒
+    pass completes.
   - chunker stale or missing (any model state) ⇒ **refuse** (the
     bootstrap/override is `ct reindex verify-scratch`).
   Zero-chunk docs bypass the whole table (nothing to lose); content
@@ -896,9 +915,13 @@ are in scope:
    "the open pass has a row for this doc" (the worker reads the open
    `(pass_id, target_key)` from `llm_wiki_meta` exactly as the swap
    transaction does; an ordinary forced job writes no marker). The
-   panic path runs OUTSIDE the `catch_unwind` closure and uses a
-   FRESH short-lived connection (the caught panic may hold or have
-   poisoned the worker's lock). `fs::read` (`:687`), `extract_text`
+   panic path runs OUTSIDE the `catch_unwind` closure on a FRESH
+   short-lived connection WITH ITS OWN `busy_timeout` — reason
+   corrected per r16 MINOR-4: the worker's `Connection` is a local
+   owned value (`pipeline/mod.rs:175`), not behind a `Mutex`, so
+   there is no lock to poison; unwinding already rolls back any open
+   transaction. The fresh connection is for cleanliness (the old one
+   may be mid-statement), not necessity. `fs::read` (`:687`), `extract_text`
    (`:703`), and post-snapshot deletion all surface as worker `Err`s
    and are covered; `NotFound` ⇒ `skipped` so deletion completes the
    pass. MINOR-3: `db/queries.rs` (`src-tauri/src/db/queries.rs`
