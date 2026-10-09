@@ -1,6 +1,7 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09
+**Date:** 2026-10-09 (rev 2 — GLM spec-tier r1 FIX-FIRST: all 7 items
+resolved; blocker-1 stamp-grant deadlock, MAJORS 2-4, minors 5-7)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -101,11 +102,20 @@ disagree about which facts are eligible. Parity guard for >1024 excludes.
   with the existing raw cosine, open on a floor calibrated against the
   261-chunk restricted set;
 - (ii) chunk-score floor with chunk-level membership — open when the
-  message's top chunk score clears a floor AND the matched doc's facts
-  include the fact(s) the doc carries.
+  message's top chunk score clears a floor AND the matched chunk is in
+  the hash-hop-hit set (chunk-level membership per v10 §3.1 — the 62
+  hash-hop-hit chunks), then the gate opens on the facts the matched
+  chunk's doc carries. (GLM r1 MAJOR-3: membership is a property of the
+  CHUNK, not of the doc — the earlier wording was circular.)
 
 The paired live calibration (acceptance, below) picks the rule and the
-floor.
+floor. **Tie-break (GLM r1 minor-5):** if both rules pass the letter,
+pick by higher hit@2, then lower FP, then rule (i) (simpler path).
+
+**Empty closed set (GLM r1 minor-6):** with two-stage active and zero
+eligible fact-bearing docs (fresh or emptied brain), the gate is closed
+and the audit line is still emitted — the empty set is "below floor,"
+not an error.
 
 ### 4. Floor-missing semantics — ONE rule (r9 M1)
 
@@ -177,8 +187,9 @@ are in scope:
   is follow-up work and appears in the test list as a mid-document-
   insertion test only.
 - **(b) Bulk-deletion circuit breaker (cross-process).** Heal
-  (`heal.rs:85`, GUI scheduler `lib.rs:2440`) and regrade
-  (`evidence_regrade.rs:173-200`) get a refusal threshold of
+  (`heal.rs:85`, GUI scheduler `src-tauri/src/lib.rs:2440`) and regrade
+  (`src-tauri/src/pipeline/evidence_regrade.rs:173-200`) get a refusal
+  threshold of
   **max(⌈0.05·L⌉, 10)**. L = heal's own selection
   (`source_type='librarian_inferred' AND source_ref IS NOT NULL`).
   Regrade's breaker uses its OWN denominator = live `librarian_evidence`
@@ -191,17 +202,28 @@ are in scope:
   across processes.
 - **(c) Stamp enforced inside the funnel.** `ingest_file_virtual` itself
   refuses `force_rechunk=true` when the fingerprint stamp is
-  missing/stale — all three force-rechunk callers (`ct ingest`
-  `cmds.rs:172-178`, `bulk_reindex.rs:129`, `queue_full_reindex`
-  `lib.rs:2324`) funnel through it, so one check gates every entry point
-  (r9 M3). **Fingerprint = (live-DB identity, chunker version, model
-  key)** — the document-set hash is DROPPED (r9 M4: content changes are
-  already lossless under the diff-swap; only chunker/model changes can
-  mass-rehash). Scratch verification failing ⇒ the live rechunk refuses
-  (override: re-run the scratch check; no `--allow-bulk` for rechunk —
-  that override stays heal/regrade-only). Fresh brains bypass (no
-  librarian facts to protect). `restore_in_progress` stamping remains
-  [PROPOSED].
+  missing/stale. **Every** force-rechunk path funnels through
+  `ingest_file_virtual`, so one check gates every entry point (r9 M3):
+  the three manual callers (`ct ingest` `tools/src/cmds.rs:172-178`,
+  `tools/src/bin/bulk_reindex.rs:129`, `queue_full_reindex`
+  `src-tauri/src/lib.rs:2324`) plus the automatic forced producers —
+  the watchdog sweep re-enqueues `pending_reindex` as a *forced* rechunk
+  (`src-tauri/src/pipeline/watchdog/sweep.rs:73-82`) and
+  `rechunk_for_reembed` is `force:true`
+  (`src-tauri/src/pipeline/mod.rs:72-74`).
+  **Grant path (GLM r1 blocker-1 — the refusal path must not deadlock
+  the model guard):** the scratch-verification flow writes/refreshes the
+  stamp; specifically `run_wiki_reembed` refreshes the stamp BEFORE
+  enqueueing pass jobs, and pass jobs carry the `pass_id`, satisfying
+  the stamp check — a model-key change must be able to reach
+  `model_guard=ok`, or the §7 flip could never fire. **Fingerprint =
+  (live-DB identity, chunker version, model key)** — the document-set
+  hash is DROPPED (r9 M4: content changes are already lossless under
+  the diff-swap; only chunker/model changes can mass-rehash). Scratch
+  verification failing ⇒ the live rechunk refuses (override: re-run
+  the scratch check; no `--allow-bulk` for rechunk — that override
+  stays heal/regrade-only). Fresh brains bypass (no librarian facts to
+  protect). `restore_in_progress` stamping remains [PROPOSED].
 
 ### 9. Implementation order (within the ONE PR)
 
@@ -247,8 +269,17 @@ are in scope:
   cross-process budget via `llm_wiki_meta` (two connections, shared
   refusal).
 - Stamp: missing/stale fingerprint refused inside `ingest_file_virtual`
-  via each of the three callers; fresh-brain bypass; purge deletes
-  guard/pass/stamp/breaker keys + pass-doc rows.
+  via each of the three manual callers PLUS the forced producers
+  (watchdog sweep re-enqueue and `rechunk_for_reembed`);
+  fresh-brain bypass; purge deletes guard/pass/stamp/breaker keys +
+  pass-doc rows.
+- Stamp grant path (GLM r1 blocker-1): model-key change →
+  `run_wiki_reembed` refreshes the stamp → forced re-embed pass
+  completes → `model_guard=ok` (the flip dependency must be reachable).
+- Guard completion branches (GLM r1 MAJOR-4), one test each:
+  snapshotted doc not indexed under the new key ⇒ completion BLOCKED;
+  superseded-job `pending` ⇒ BLOCKED; file-missing ⇒ counted in
+  `model_guard_skipped_docs`, completion proceeds.
 - Acceptance: paired live calibration on the 150-probe real-traffic set,
   both arms same run, letter numbers as pinned by Kurt; flip-to-default
   lands in this PR only on a passing letter.
