@@ -1,19 +1,17 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 16 — Opus spec-tier r14 REQUEST CHANGES resolved:
-M1 retry mechanics pinned (`retrying` non-terminal state before
-try_send = claim-protected; backoff + 3-retry cap enforced in
-list_sweepable_pending's SQL via pass-docs join; sweepable_path_set
-same filter; exhausted rows leave the sweepable set); M2 pass-docs DDL
-pinned (outcome/attempts/last_attempt_at; completion = all rows
-completed|skipped — a failed row BLOCKS, no false-ok); M3
-count_pending_documents untouched (drain-watchdog canonical counter;
-pending_reindex there would false-trip DrainStall permanently) —
-progress from pass-docs instead, watchdog excludes exhausted rows;
-MINOR-1 frontend in scope (IndexingStatus + tauri.ts + StatusBar +
-5 mocks); MINOR-2 failed marker at worker Err/panic branches, NotFound
-⇒ skipped; MINOR-3 db/queries.rs vs tools/src/queries.rs paths
-disambiguated)
+**Date:** 2026-10-09 (rev 17 — Opus spec-tier r15 REQUEST CHANGES resolved:
+M1 stale count_pending_documents paragraph deleted (drain counter
+UNTOUCHED; pass rows outside drain input by status — r15 m1's no-op
+exclusion dropped); M2 full sweep predicate pinned (LEFT JOIN on open
+pass: dispatch iff doc_id IS NULL OR snapshotted/retrying OR failed
+with attempts<3 + backoff elapsed; attempts+=1 every dispatch;
+PASS_RETRY_BACKOFF_SECS=300; restart-with-retrying test); m1 watchdog
+exclusion dropped as no-op; m2 frontend sites corrected (7 mock files,
+ReviewMode.tsx second consumer, useIndexingStatus default) — new TS
+fields OPTIONAL so mocks stay valid; m3 failed/skipped markers gated
+on open-pass row (worker reads (pass_id, target_key) from
+llm_wiki_meta), panic path uses a fresh connection)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -594,7 +592,23 @@ are in scope:
       <= unixepoch()` — backoff and the 3-retry cap are enforced by
       the query itself; `sweepable_path_set` applies the same filter,
       so exhausted rows leave the sweepable set (their claims drop and
-      they are never re-dispatched). After 3 auto-retries the UI
+      they are never re-dispatched). **Full sweep predicate (rev 17,
+      Opus r15 M2 — rev 16's failed-only filter would have prevented
+      passes from EVER starting (`snapshotted` rows excluded) and
+      never re-dispatched a `retrying` row after a restart (claims
+      cleared, `sweep.rs:48`), hanging the pass with the grant open):**
+      the sweep queries LEFT JOIN pass-docs scoped to the OPEN
+      `(pass_id, target_key)` (leftover rows from earlier passes never
+      filter later sweeps) and dispatch a row iff:
+      `pd.doc_id IS NULL OR pd.outcome IN ('snapshotted','retrying')
+       OR (pd.outcome='failed' AND pd.attempts < 3
+           AND pd.last_attempt_at + :backoff <= unixepoch())`
+      — non-pass rows (`pd.doc_id IS NULL`) keep the sweep's existing
+      backstop behavior unchanged. `attempts += 1` on EVERY dispatch
+      (first dispatch included — the `failed→retrying` flip does not
+      increment). Backoff = named constant `PASS_RETRY_BACKOFF_SECS`
+      (300). Test: restart with a `retrying` row ⇒ re-dispatched once
+      ⇒ completes. After 3 auto-retries the UI
       pass-progress line shows "N failed — retry" with a re-stage
       action (re-staging resets attempts). This is the GUI twin of the
       CLI resume: no restart needed. Tests: slow retry spanning two
@@ -743,13 +757,20 @@ are in scope:
   `tools/src/cmds.rs:180` — no `failed += 1`, no non-zero exit, and the
   file still counts in the linker's entity set (an unchanged file has
   valid chunks; a refused rechunk changes nothing).
-  **UI counts during a pass (rev 15, Opus r13 m2 — choice pinned):**
+  **UI counts during a pass (rev 15, Opus r13 m2; corrected rev 17,
+  Opus r15 M1 — this paragraph previously said count_pending_documents
+  "gains pending_reindex", which contradicted rev 16's M3 and would
+  false-trip DrainStall every window; also cited the wrong file):
   `get_indexing_status` (`src-tauri/src/lib.rs:2312-2318`) reports
   pass progress FROM THE PASS-DOCS TABLE (completed/skipped/failed
-  counts + total), while `count_pending_documents`
-  (`tools/src/queries.rs:168-173`) gains `pending_reindex` so the
-  pending figure doesn't read 0 mid-pass; `count_indexed_documents`
-  is left untouched (its dip is real — those docs are mid-pass).
+  counts + total). `count_pending_documents` (`src-tauri/src/db/
+  queries.rs:168-174`) is UNTOUCHED — it is the drain watchdog's
+  canonical counter; `count_indexed_documents` is also untouched (its
+  dip is real — those docs are mid-pass). Pass rows are outside the
+  drain input BY STATUS (`pending_reindex` is not in the counter's
+  WHERE clause and never will be — r15 m1: the rev-16 "watchdog
+  excludes exhausted rows" clause is dropped as a no-op; the
+  regression test stays as a guard).
   Test: mid-pass `get_indexing_status` shows non-zero progress.
   **Two open passes (rev 15, Opus r13 m4):** a second grant/snapshot
   is REFUSED while a pass is open, unless it targets the SAME key —
@@ -858,16 +879,29 @@ are in scope:
    `queue_full_reindex`, sweep, and `rechunk_for_reembed` jobs — those
    only `try_send` and never see the outcome), **`bulk_reindex`**
    (synchronous), and `ct ingest`. **Frontend work is IN scope
-   (rev 16, Opus r14 MINOR-1):** `IndexingStatus` (`lib.rs:2305-2309`,
-   mirrored in `src/lib/tauri.ts:156`, consumed by `StatusBar.tsx:63`,
-   mocked `{indexed, pending}` in five frontend tests) gains pass-
-   progress fields; §9 step 2 includes the TS type update + the five
-   test mocks; MINOR-2: the pass-docs `failed` marker is written at
-   the WORKER's `Err` branch (`mod.rs:257`) and panic path (`:266`) —
-   the catch-inside-`ingest_file_virtual` site misses `fs::read`
-   (`:687`), `extract_text` (`:703`), panics, and post-snapshot file
-   deletion (a deleted file maps `NotFound` ⇒ `skipped`, so the pass
-   completes); MINOR-3: `db/queries.rs` (`src-tauri/src/db/queries.rs`
+   (rev 16, Opus r14 MINOR-1; sites corrected rev 17, Opus r15 m2):**
+   `IndexingStatus` (`lib.rs:2305-2309`; consumers `StatusBar.tsx:63`
+   AND `ReviewMode.tsx:84`; mirrored in `src/lib/tauri.ts:156`;
+   DEFAULT STATE in `useIndexingStatus.ts:7`) gains pass-
+   progress fields — the new fields are OPTIONAL in the TypeScript
+   type, so existing mocks stay valid; the seven files with
+   `{indexed, pending}` mocks (`StatusBar.test.tsx` ×2,
+   `EntityList.test.tsx`, `BrainMode.test.tsx` ×3,
+   `AppShell.dragdrop.test.tsx`, `ReviewMode.test.tsx` ×2,
+   `test-setup.ts`) need NO changes (that is the point of optional
+   fields); pass-progress UI added in `StatusBar.tsx` only. §9 step 2
+   includes the TS type update. **Pass-docs `failed`/`skipped` markers
+   (MINOR-2, refined rev 17, Opus r15 m3):** written at the WORKER's
+   `Err` branch (`mod.rs:257`) and panic path (`:266`) — GATED on
+   "the open pass has a row for this doc" (the worker reads the open
+   `(pass_id, target_key)` from `llm_wiki_meta` exactly as the swap
+   transaction does; an ordinary forced job writes no marker). The
+   panic path runs OUTSIDE the `catch_unwind` closure and uses a
+   FRESH short-lived connection (the caught panic may hold or have
+   poisoned the worker's lock). `fs::read` (`:687`), `extract_text`
+   (`:703`), and post-snapshot deletion all surface as worker `Err`s
+   and are covered; `NotFound` ⇒ `skipped` so deletion completes the
+   pass. MINOR-3: `db/queries.rs` (`src-tauri/src/db/queries.rs`
    — mark_document_indexed `:91-103`, list_indexed_user_doc_paths
    `:38-41`, count queries `:160-174`) is distinct from
    `tools/src/queries.rs` (embed-skip `:791`, query_text_for_scheme
