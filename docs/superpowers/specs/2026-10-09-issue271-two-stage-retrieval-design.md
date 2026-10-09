@@ -1,14 +1,12 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 14 — Opus spec-tier r12 REQUEST CHANGES resolved:
-M1 CLI resume (bulk_reindex --model-swap re-run iterates the pass-docs
-snapshot, resumes an open pass, evaluates completion — sweep never
-needed on CLI); M2 sweep is the ONLY dispatcher for GUI model-swap
-passes (stage-only, no try_send — no double embed spend); m1
-guard-completion tests scoped to pending_reindex + no-sweep-tick;
-m2 writers iterate the snapshot table; m3 variant trigger (force AND
-stamp-model != profile) + Ok(0); m4 pending count includes
-pending_reindex)
+**Date:** 2026-10-09 (rev 15 — Opus spec-tier r13 REQUEST CHANGES resolved:
+M1 failed GUI jobs retry without restart (pass-docs `failed` marker
+releases the sweep claim; re-dispatch with backoff, max 3 auto-retries,
+then visible "N failed — retry" UI action); m1 skipped rows not staged;
+m2 UI counts pinned (get_indexing_status reads pass-docs; pending count
+includes pending_reindex); m3 guard-completion tests split GUI/CLI;
+m4 second open pass refused unless same key — same key resumes)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -558,7 +556,20 @@ are in scope:
       swap pass (no double dispatch, no claims interplay). UI counts
       include `pending_reindex` in pending (or report pass progress
       from pass-docs), so the counts don't read ~0/0 mid-pass (r12
-      m4).
+      m4). **Failed-job retry (rev 15, Opus r13 M1 — a failed job's
+      row STAYS `pending_reindex` under the rev-9 keep-prior-state
+      rule, so its claim is never released and the sweep skips it
+      forever: one 401 hung the whole GUI pass with no signal):** a
+      failed job writes a pass-docs row with outcome `failed` (+
+      attempt count), and `retain_sweepable` also drops claims for
+      rows carrying a terminal pass-docs marker (`completed`,
+      `failed`, or `skipped`) — the sweep then re-dispatches failed
+      rows on later ticks with simple backoff (max 3 auto-retries;
+      after that the UI pass-progress line shows "N failed — retry"
+      with a retry action that re-stages those rows). This is the GUI
+      twin of the CLI resume: no restart needed. Tests: GUI pass, one
+      401, key fixed, no restart ⇒ `model_guard=ok`; persistent 401 ⇒
+      pass shows "N failed — retry", auto-retries stop at 3.
     - **CLI path (`bulk_reindex --model-swap`):** synchronous — it
       cannot lose jobs, so it does NOT pre-stage. Its work list
       iterates the pass-docs snapshot table, never
@@ -572,7 +583,11 @@ are in scope:
     - File-missing docs are recorded as skipped AT SNAPSHOT TIME (a
       pass-docs row with a `skipped` marker), so
       `evaluate_pass_completion(conn)` decides from the database
-      alone.
+      alone; **skipped rows are NOT staged `pending_reindex`** (rev
+      15, Opus r13 m1 — staging them would leave a permanent
+      `pending_reindex` row whose `fs::read` fails at
+      `pipeline/mod.rs:687` before any status write, re-sent on every
+      restart).
     Tests: CLI-only, one 401 mid-pass, re-run ⇒ `model_guard=ok`
     (r12 M1's scenario); GUI pass ⇒ exactly ONE embed call per doc
     (r12 M2); worker respawn mid-GUI-pass ⇒ completes; missing file
@@ -687,6 +702,19 @@ are in scope:
   `tools/src/cmds.rs:180` — no `failed += 1`, no non-zero exit, and the
   file still counts in the linker's entity set (an unchanged file has
   valid chunks; a refused rechunk changes nothing).
+  **UI counts during a pass (rev 15, Opus r13 m2 — choice pinned):**
+  `get_indexing_status` (`src-tauri/src/lib.rs:2312-2318`) reports
+  pass progress FROM THE PASS-DOCS TABLE (completed/skipped/failed
+  counts + total), while `count_pending_documents`
+  (`tools/src/queries.rs:168-173`) gains `pending_reindex` so the
+  pending figure doesn't read 0 mid-pass; `count_indexed_documents`
+  is left untouched (its dip is real — those docs are mid-pass).
+  Test: mid-pass `get_indexing_status` shows non-zero progress.
+  **Two open passes (rev 15, Opus r13 m4):** a second grant/snapshot
+  is REFUSED while a pass is open, unless it targets the SAME key —
+  same-key re-entry resumes (as `bulk_reindex` already does); the
+  refusal names the open pass. Test: second pass, different key ⇒
+  refused naming the open pass; second pass, same key ⇒ resumes.
   **`bulk_reindex --model-swap` loop semantics (rev 9, Opus r7
   MINOR-2):** per-doc embed failure is COUNTED, the loop CONTINUES
   (remaining docs still re-embed — one 401 on doc k of 291 must not
@@ -853,13 +881,15 @@ are in scope:
   pass-docs row under the new key ⇒ BLOCKED** (rev 8, Opus r6 m2 —
   under rev 5's swap-tx upsert an existing-doc superseded return no
   longer leaves `pending`, so the test is written against that
-  observable; a separate new-doc case covers `pending`) — scoped to
-  model-swap passes (rev 14, Opus r12 m1): under the rev-14 lost-job
-  design every snapshotted row is `pending_reindex` from snapshot
-  time, so these tests assert BLOCKED against `pending_reindex` rows
-  with NO sweep tick run; a paired assertion runs one sweep tick and
-  shows the pass then completes; CLI `bulk_reindex` jobs stay
-  `indexed` (synchronous, no staging). file-missing ⇒ counted in
+  observable; a separate new-doc case covers `pending`) — SPLIT into
+  GUI and CLI cases (rev 15, Opus r13 m3 — the rev-14 single bullet
+  self-contradicted): **GUI** rows are `pending_reindex` from
+  snapshot; assert BLOCKED with NO sweep tick, then "sweep tick +
+  worker drain ⇒ pass completes" (one `sweep()` call only `try_send`s
+  — completion needs the worker to drain and the swap tx to evaluate).
+  **CLI** rows stay `indexed` (bulk_reindex is synchronous, no
+  staging) and assert BLOCKED before the run's own final
+  `evaluate_pass_completion`. file-missing ⇒ counted in
   `model_guard_skipped_docs`, completion proceeds.
 - Acceptance: paired live calibration on the 150-probe real-traffic set,
   both arms same run, letter numbers as pinned by Kurt; flip-to-default
