@@ -1,7 +1,21 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-10 (rev 28 — Opus r26 REQUEST CHANGES resolved:
-**r26-M1** closes the never-dark hole for source-less facts (fix (b)):
+**Date:** 2026-10-10 (rev 29 — Opus r27 REQUEST CHANGES resolved:
+**r27-M1** redefines the v1-merge population as the STRUCTURAL COMPLEMENT
+of the stage-1-reachable set (anti-join inside the same stage-1 query),
+not a provenance list — four gap classes (zero-chunk docs, all-skip-class
+docs, dangling source edges, other/NULL provenance) fall between a
+provenance-defined merge and the true complement, and any of them leaves
+live facts dark on a 100%-coverage brain (§3); **r27-M2** rewrites the
+funnel decision table as FOUR rows keyed on (forced?, chunker current?) —
+the old table contradicted r26-M3 and was ambiguous for the
+non-forced/stamp-current cell (§8(c)); **r27-M3** adds the hash restore
+(`hash=last_indexed_hash`) to both the no-op and the refusal reset —
+without it a reset row silently drops out of the hash-hop candidate set
+while coverage still reads 100% (§8(c)); the reset lives inside
+`ingest_file_virtual` (m3); m1–m6 folded (audit-field order fixed m1;
+kick caller marked unreachable m2; mixed-open audit semantics pinned m5;
+step-reference fix m6). Rev 28's summary: **r26-M1** closes the never-dark hole for source-less facts (fix (b)):
 gate-eligible entries with NO candidate doc — `user_stated`/`user_confirmed`,
 which have no `curated_proposal_sources` hop (`wisdom_match.rs:44-48`) — are
 ALSO scored by the v1 path in the same call (raw cosine vs the current key's
@@ -9,19 +23,26 @@ v1 floor) and merged into the two-stage results under ONE ranked list, so an
 empty candidate set can never close the gate while a v1 floor exists (§3);
 fix (a) — empty-set v1 fallback — is REJECTED as strictly weaker (it
 abandons two-stage on no-librarian brains entirely); the audit line is
-RESTRUCTURED ONCE to SEVEN fields (`rule floor open top v1merged k
-stale_embed_key`), superseding rev 27's six-field pin (§6); **r26-M2**
+RESTRUCTURED ONCE to SEVEN fields (`rule open top v1merged floor k
+stale_embed_key`), superseding rev 27's six-field pin (§6); **r27** adds
+the STRUCTURAL complement definition of the v1-merge population (r27-M1),
+the four-row funnel decision table (r27-M2), and the hash-restoring
+refusal reset inside `ingest_file_virtual` (r27-M3); **r26-M2**
 defines the coverage population as candidate docs with ≥1 chunk — a
 zero-chunk doc contributes no stage-1 vectors so its `embed_key` is
 irrelevant (§6); **r26-M3** makes a NON-FORCED pure rechunk a no-op SUCCESS
-(marks `indexed`, returns `Ok` — same as the `:692` short-circuit; the
-chunks are by definition the current bytes) while a FORCED pure rechunk
+(marks `indexed`, restores `hash=last_indexed_hash`, returns `Ok` — same
+as the `:692` short-circuit; the chunks are by definition the current
+bytes, and the pre-written `hash` from `enqueue_vault_event` must be
+rolled back or the doc silently drops out of the hash-hop candidate set,
+r27-M3) while a FORCED pure rechunk
 stays refused, with the refusal reset extended to BOTH
 `pending`/`pending_reindex` (§8(c)); **r26-M4** pins the
 `Err(IngestRefused)` downcast at ALL FOUR callers — `ct ingest` and the
 `wisdom_deposit` kick (already pinned), `bulk_reindex` (refusal = SKIP +
 continue), and the pipeline worker (ONE informational stderr line, NOT
-`write_error_log`, plus the M3 status reset) (§8(c)); m1
+`write_error_log`; the row reset lives inside `ingest_file_virtual`,
+r27 m3) (§8(c)); m1
 (`repair-embed-key --stale` added to §9 step 2; its write pinned to ONE
 IMMEDIATE transaction covering the embeddings UPDATE + `embed_key`, with
 the chunk-id set re-checked under the lock), m2 (rule (ii) BYPASSES the
@@ -98,7 +119,7 @@ superseded twice over — the table itself is deleted under Option A (M4), so
   m3 migration V28 on the V24 pattern (§9); m4 `Err(IngestRefused)`
   signaling (§8(c)); m5 model-swap scope note (§4); 8 experiments recorded
   under EXPERIMENTS REQUESTED (r25).
-- **r26 → rev 28 (this rev):** M1 — never-dark restored by construction:
+- **r26 → rev 28:** M1 — never-dark restored by construction:
   source-less facts (`user_stated`/`user_confirmed`, no
   `curated_proposal_sources` hop) are scored via the v1 path IN the same
   call and merged into the two-stage list (§3); fix (a) empty-set fallback
@@ -109,6 +130,15 @@ superseded twice over — the table itself is deleted under Option A (M4), so
   at all FOUR callers (§8(c)); m1–m7 folded in (§6, §9 step 2, §3, §9
   step 1, §8(c), experiments); 5 experiments recorded under EXPERIMENTS
   REQUESTED (r26).
+- **r27 → rev 29 (this rev):** M1 — v1-merge population redefined as the
+  STRUCTURAL COMPLEMENT of the stage-1-reachable set (anti-join, not
+  provenance; four gap classes named; §3); M2 — funnel decision table
+  rewritten as four rows on (forced?, chunker current?) (§8(c)); M3 —
+  refusal reset + no-op restore `hash=last_indexed_hash`, reset pinned
+  inside `ingest_file_virtual` (§8(c)); m1–m6 folded (header audit-field
+  order fixed; kick caller unreachable; §10 reset predicate widened +
+  hash; mixed-open audit semantics pinned; step-reference fix); 5
+  experiments recorded under EXPERIMENTS REQUESTED (r27).
 
 ## 1. Problem
 
@@ -278,16 +308,34 @@ disagree about which facts are eligible. Parity guard for >1024 excludes.
   floor-drop (r26 m2). Injection volume per open is
   recorded in the calibration artifact (r24 E7).
 
-**Source-less facts — the v1-merge (r26-M1, fix (b), PINNED):** the
+**Source-less facts — the v1-merge (r26-M1, fix (b), PINNED; population
+redefined STRUCTURALLY r27-M1):** the
 candidate set is built only through the `curated_proposal_sources →
 documents` hop, so gate-eligible entries with NO proposal-source edge —
-the `user_stated`/`user_confirmed` provenances (`wisdom_match.rs:44-48`;
-today's live brain: 3 such entries) — are carried by NO candidate doc and
+today: the `user_stated`/`user_confirmed` provenances
+(`wisdom_match.rs:44-48`;
+3 such entries on the live brain) — are carried by NO candidate doc and
 would never be scored under two-stage. An all-source-less brain would then
 be permanently dark (empty set ⇒ "below floor" on every message) while v1
 would have opened — a violation of the never-dark invariant. Fix, pinned:
-whenever the gate runs two-stage, eligible facts with NO source doc are
-ALSO scored via the v1 path in the SAME call — raw cosine of the message
+whenever the gate runs two-stage, the gate-eligible facts in the
+**STRUCTURAL COMPLEMENT of the stage-1-reachable set** are ALSO scored via
+the v1 path in the SAME call — that is, gate-eligible entries NOT reachable
+through any candidate doc that has ≥1 stage-1-scorable chunk (≥1 chunk
+outside the skip-set classes). This complement is computed inside the same
+stage-1 query (an anti-join over the candidate-chunk set), NOT by
+provenance: provenance naming (`user_stated`/`user_confirmed`) is an
+EXAMPLE of the complement, not its definition — four gap classes fall
+between a provenance-defined merge and the true complement (r27-M1):
+(1) zero-chunk docs' facts are sourced but unscored; (2) docs whose chunks
+are ALL in skip-set classes; (3) dangling `curated_proposal_sources`
+edges (deleted doc, or the hash-dedupe loser row); (4) other provenance
+values — `immutable_document` is in `PROVENANCE_VOCAB`
+(`wisdom_match.rs:47`) and `source_type` can be NULL — either kind can
+lack an edge. A re-extraction to empty (§8(c)'s swap deletes all chunks,
+facts stay live until heal) produces class (1) TODAY: a provenance merge
+leaves those facts dark on a 100%-coverage brain. The complement's facts
+are scored via the v1 path — raw cosine of the message
 against `llm_wiki_entries.embedding_blob` (`gated_entries`' path, floor =
 the current key's v1 floor) — and the results are MERGED with the
 two-stage opens into ONE ranked list (weighted-cosine ordering, then
@@ -297,7 +345,10 @@ floor exists, and a `user_stated` fact can open on a mixed brain. Reviewer
 fix (a) — an empty candidate set falls back to v1 wholesale — is
 REJECTED: it is strictly weaker, abandoning two-stage entirely on
 no-librarian brains instead of merging. Test rows: an all-`user_stated`
-brain stays openable; a `user_stated` fact opens on a mixed brain (§10).
+brain stays openable; a `user_stated` fact opens on a mixed brain; a
+zero-chunk doc's facts open via the merge; an all-skip-class doc's facts
+open via the merge; §10's unreachable-entries assertion asserts the
+COMPLEMENT SIZE, not a provenance count (r27-M1).
 
 The paired live calibration (acceptance, below) picks the rule and the
 floor. **Floor storage + key shape (rev 5, Opus r3 m2):** two-stage
@@ -577,7 +628,10 @@ paths" invariant, (b) send every unchanged-doc deposit kick
 §8(c) decision table as a pure rechunk — refused whenever the stamp's
 chunker fingerprint is stale or missing (with no verify-scratch bootstrap
 run yet), writing a
-refusal record + stderr line on EVERY kick, and (c) make
+refusal record + stderr line on EVERY kick — **this rationale is STALE
+(r27 m2): refusal records are DELETED (§8(c)) and the kick calls ingest
+with `force=false` (`wisdom_deposit.rs:384`), so a kick can never be
+refused under the r26-M3 rules**, and (c) make
 `wisdom_deposit`'s kick caller record `chunked` and then run the
 librarian on a doc whose ingest was refused. The `pipeline/mod.rs:692`
 early return is therefore restored, unmodified, and the §4/§6 fallback
@@ -598,12 +652,22 @@ gate-eligible candidate-set docs (≥1 chunk, r26-M2) with NULL/stale
 counts vs the FULL candidate set (so a v1 fallback under low coverage
 still reports HOW stale the set is — the number is actionable after the
 fact, r24 M2), and `v1merged=<n>` counts facts admitted by the §3
-v1-merge (source-less facts scored via the v1 path in the same call; 0
-whenever the merge admits nothing). **Field semantics pinned (r26 m4):**
+v1-merge (facts in the structural complement scored via the v1 path in
+the same call; 0
+whenever the merge admits nothing). **Field semantics pinned (r26 m4;
+mixed opens pinned r27 m5):**
 `rule=none` is RESERVED for opens that no two-stage rule produced — the
 §4 no-librarian merge-only v1 open, any §4 fallback/uncalibrated open,
 and §4's fourth cell; a two-stage gate that CLOSES below its own floor
-reports `rule=i` or `rule=ii` with `open=0`, never `rule=none`. Hit/FP
+reports `rule=i` or `rule=ii` with `open=0`, never `rule=none`.
+**Mixed opens (r27 m5, pinned):** when the two-stage arm closes below
+its floor but the v1-merge opens on complement facts, the line reports
+`rule` = the two-stage rule that was EVALUATED, `open=1` = the FINAL
+gate state (the merged list opened the gate), and `top` = the STAGE-1
+top score (the two-stage arm's own best, not the merged best) — so the
+harness computes the two-stage arm's FP from `open`/`top` without
+v1-path opens contaminating the arm's score, and a v1-merged-only open
+is derivable as `v1merged>0 ∧ two-stage-closed`. Hit/FP
 remain harness-derived: the calibration harness derives hit and FP from
 the probe labels plus the pinned `open`/`top` fields; the gate itself
 cannot compute them (r25 m1, unchanged). The field COUNT stays pinned at
@@ -963,18 +1027,34 @@ are in scope:
   no-op-by-definition job), there is no loop to suppress and no record
   is written.
   **Refusal row-state PINNED (r25-M2; reset widened to BOTH statuses
-  r26-M3):** a refused forced rechunk leaves the doc's
+  r26-M3; hash restored r27-M3):** a refused forced rechunk leaves the doc's
   status untouched **EXCEPT one reset**: when the refused row's status
   is `pending` OR `pending_reindex`, the refusal path RESETS it to
-  `indexed` with a conditional
-  `UPDATE documents SET status='indexed' WHERE status IN
-  ('pending','pending_reindex') AND id=?` — the data is intact (a refusal
+  `indexed` and RESTORES the pre-written hash, with a conditional
+  `UPDATE documents SET status='indexed',
+  hash=last_indexed_hash WHERE status IN
+  ('pending','pending_reindex') AND id=? AND last_indexed_hash IS NOT
+  NULL` — the data is intact (a refusal
   changes nothing), so the reset is sound, and without it the row
   would sit `pending_reindex` forever: the sweep claim is kept while
   the row stays sweepable (`retain_sweepable`, `sweep.rs:62-64`), each
   restart re-enqueues and refuses it again, and
   `list_indexed_user_doc_paths` (`db/queries.rs:38-41`) excludes it
-  from every later reindex pass. (`pending` joined the reset at r26-M3
+  from every later reindex pass. **The hash restore is load-bearing
+  (r27-M3):** `enqueue_vault_event` (`db/queue.rs:168-175`) writes the
+  new hash BEFORE ingest, so a pure-rechunk refusal fires exactly when
+  `documents.hash` holds a stale pre-written value (enqueue read H2,
+  the file was reverted to H1, the worker read H1); resetting only the
+  status would leave the row `indexed` with `hash=H2` while its chunks
+  hold H1 — the doc then silently drops out of the hash-hop candidate
+  set (`documents.hash = curated_proposal_sources.source_hash`), the
+  coverage check still reads 100% (the doc left the measured set), and
+  the v1-merge doesn't carry its facts (they are sourced) — the r24-M2
+  silent-set-shrink bug, reintroduced through the reset. The reset is
+  specified INSIDE `ingest_file_virtual` (r27 m3) — all refusal paths
+  funnel through it, so a forced `ct ingest` refusal on a `pending`
+  row is covered without any worker-side reset; the pipeline worker
+  only logs. (`pending` joined the reset at r26-M3
   for the same reason `pending_reindex` needed it at r25-M2 — a refused
   row left `pending` is equally sweep-stuck; the reset remains a single
   conditional UPDATE, one statement.) An `indexed` row, by contrast, stays
@@ -991,33 +1071,41 @@ are in scope:
   queued with a full channel and a missing stamp ⇒ every deferred row
   ends `indexed` and outside the sweep claim set. **r26-M3 non-forced
   fixture: a NON-FORCED pure rechunk (unchanged hash + ≥1 chunk + stale
-  stamp) is a no-op SUCCESS — row marked `indexed`, `Ok(())`, no refusal
+  stamp) is a no-op SUCCESS — row marked `indexed`, `hash` restored to
+  `last_indexed_hash` (r27-M3), `Ok(())`, no refusal
   record, no stderr refusal line; only a FORCED pure rechunk is
   refused.** **r26-M4 refusal-storm rows (both new caller sites): a
   `bulk_reindex` pass over a set containing refused paths does NOT abort
   — the refusal is counted as a SKIP, the pass continues, and the linker
   still runs over the processed entity_ids; a pipeline-worker refusal
   produces exactly ONE informational stderr line, ZERO
-  `write_error_log` entries, and the M3 status reset applied.**
+  `write_error_log` entries, and the row reset has already been applied
+  inside `ingest_file_virtual` (r27 m3 — the worker logs only).**
 
-  **Funnel decision table (Option A — three rows; the rev-9 four-row
+  **Funnel decision table (Option A — FOUR rows keyed on
+  (forced?, chunker current?); the rev-9 four-row
   table died with the grant; r25-M3: the stamp is CHUNKER-ONLY, so the
   rev-26 "stamp read = (chunker component, model component)" phrasing
   is withdrawn — the stamp read is the CHUNKER fingerprint vs current
-  chunker, and the MODEL component is not read anywhere):** FORCED and
-  NON-FORCED paths behave
-  identically — and the table is evaluated AFTER the existing
+  chunker, and the MODEL component is not read anywhere; r27-M2: the
+  table is rewritten so it agrees with r26-M3 — the two paths do NOT
+  behave identically):** the table is evaluated AFTER the existing
   non-forced short-circuit (`pipeline/mod.rs:691-694` — unchanged +
   `indexed` + non-forced ⇒ `Ok(())` as today, so `wisdom_deposit` kicks
   of unchanged docs return early and never touch the stamp check, no
   refusal churn on the normal path; rev-25 m1's `embed_key` leg on
   this short-circuit is REMOVED, §6):
-  - chunker current ⇒ **pass** (the stamp carries no model component —
-    r25-M3 — and
+  - FORCED + chunker current ⇒ **pass** (the stamp carries no model
+    component — r25-M3 — and
     the coverage check owns model staleness; a forced job re-embeds all
     chunks and writes `embed_key` itself, §8(a));
-  - chunker stale or missing ⇒ **refuse** (the bootstrap/override is
-    `ct reindex verify-scratch`).
+  - FORCED + chunker stale or missing ⇒ **refuse** (the
+    bootstrap/override is `ct reindex verify-scratch`);
+  - NON-FORCED + chunker current ⇒ **no-op success** (r27-M2: pinned so
+    behavior never depends on the stamp — a non-forced pure rechunk is
+    a no-op by definition whether or not the stamp is current; the row
+    is marked `indexed` with `hash=last_indexed_hash` restored, r27-M3);
+  - NON-FORCED + chunker stale or missing ⇒ **no-op success** (r26-M3).
   Zero-chunk docs bypass the whole table (nothing to lose); content
   edits bypass it (diff-swap).
   **Refusal signaling (r25 m4; ALL FOUR callers pinned r26-M4):** the
@@ -1027,9 +1115,16 @@ are in scope:
   1. `ct ingest` downcasts it in `cmds.rs` and treats it as success (exit
      0, §8(c)'s loop accounting below);
   2. `wisdom_deposit`'s kick
-     (`wisdom_deposit.rs:379-388`) likewise treats `IngestRefused` as
+     (`wisdom_deposit.rs:379-388`) treats `IngestRefused` as
      success and still records `chunked` — an unchanged file's chunks are
-     valid, so the downstream state is identical;
+     valid, so the downstream state is identical. **UNREACHABLE today
+     (r27 m2):** the kick calls ingest with `force=false`
+     (`wisdom_deposit.rs:384`), and only FORCED pure rechunks are
+     refused, so this caller can never receive `IngestRefused` under
+     the r26-M3 rules; keep a DEFENSIVE downcast placed BEFORE the
+     `map_err(|e| anyhow!(...))` at `:387` (after it the error is a
+     string and no downcast can succeed), and treat this item as
+     belt-and-suspenders rather than a live path;
   3. **`bulk_reindex` (r26-M4):** a refusal is counted as a SKIP for
      that path — one informational stderr line, no `?` propagation, the
      pass CONTINUES to the remaining paths, and the linker loop still
@@ -1042,8 +1137,9 @@ are in scope:
      `write_error_log` — an `IngestRefused` must NEVER reach that arm
      un-downcast. The worker downcasts FIRST: on `IngestRefused` it logs
      ONE informational stderr line (NOT `write_error_log` — a refusal is
-     not an error) and applies the §8(c) M3 status reset
-     (`pending`/`pending_reindex` ⇒ `indexed`), then continues the loop.
+     not an error) and then continues the loop — the row-state reset
+     itself happens inside `ingest_file_virtual` (r27 m3, above), not in
+     the worker, so `ct ingest` refusals get identical reset behavior.
   This is a SINGLE typed
   error, not an enum: §9's "no `IngestOutcome` enum" language stands.
   **`ct ingest` loop accounting (rev 6, Opus r4 m1):** the refusal
@@ -1190,8 +1286,11 @@ short-circuit is restored as-is, §6).
   (incl. the >1024 excludes parity guard); deterministic row choice under
   `documents.hash` dedupe.
 - Hop: 365/365 resolvability on the live brain as a fixture-backed test;
-  3 non-librarian gate-eligible entries are unreachable under the closed
-  set — named by live query before implementation (r8 m4), asserted here.
+  the §3 v1-merge's complement size is asserted (structurally computed —
+  expected 3 on the live brain, all `user_stated`/`user_confirmed`;
+  r27-M1 replaces the r8-m4 provenance-count assertion with a
+  complement-size assertion so the test tracks the actual merge
+  population).
 - Fallback matrix, one test per branch of the §4 single rule:
   two-stage-floor-only-missing / both-missing / below-floor /
   kill-switches / **coverage-check branches (Option A): coverage = 100%
@@ -1205,10 +1304,14 @@ short-circuit is restored as-is, §6).
   dark-adjacent BY DESIGN).
 - **r26-M1 v1-merge tests:** an ALL-`user_stated` brain (no candidate
   docs at all, v1 floor present) STAYS OPENABLE — the v1-merge scores the
-  source-less facts and the gate opens when one clears the v1 floor,
+  complement facts and the gate opens when one clears the v1 floor,
   audit `v1merged ≥ 1`; a `user_stated` fact OPENS on a MIXED brain (it
   appears in the merged list alongside two-stage opens, one ranked list,
-  truncate to `max` respected).
+  truncate to `max` respected). **r27-M1 complement tests:** a
+  ZERO-CHUNK doc's facts (sourced, but no stage-1-scorable chunk) open
+  via the merge; an ALL-SKIP-CLASS doc's facts open via the merge —
+  both are in the structural complement by definition, and a
+  provenance-based implementation would miss them.
 - **r26-M2 zero-chunk test:** a candidate doc with 0 chunks is excluded
   from the coverage population — its NULL/stale `embed_key` neither
   lowers coverage nor appears in `stale_embed_key` (§6).
@@ -1256,10 +1359,15 @@ short-circuit is restored as-is, §6).
   chunks from the DB with no file read**; **refusal row-state, BOTH
   cases (r25-M2): a refused unchanged-file forced rechunk on an
   `indexed` row leaves it `indexed`, pending counter at baseline, and
-  NO refusal record; a refused forced job on a `pending_reindex` row
-  is reset to `indexed` via the conditional
-  `UPDATE … WHERE status='pending_reindex' AND id=?` and is not
-  re-swept**; **reviewer fixture (r25-M2): GUI reembed queued with a
+  NO refusal record; a refused forced job on a `pending` or
+  `pending_reindex` row
+  is reset to `indexed` WITH `hash=last_indexed_hash` restored via the
+  conditional
+  `UPDATE … SET status='indexed', hash=last_indexed_hash
+  WHERE status IN ('pending','pending_reindex') AND id=? AND
+  last_indexed_hash IS NOT NULL` and is not
+  re-swept; the edit-then-revert fixture (r27-M3) additionally asserts
+  the doc is still IN the stage-1 candidate set afterwards**; **reviewer fixture (r25-M2): GUI reembed queued with a
   full channel and a missing stamp ⇒ every deferred row returns to
   `indexed` and leaves the sweep claim set**; `ct ingest --yes` of a
   NEW file succeeds with no stamp present; watcher Modify event +
@@ -1308,7 +1416,7 @@ letter (§7) stays exactly as Kurt pinned it.
    candidate coverage. **This experiment is PRINT-ONLY (r26 m6): it
    writes NOTHING to either DB — the scratch copy is discarded and the
    live DB is not touched; the real bootstrap (stamp + backfill to the
-   live DB) is the §9 step 1 run, not this dry run.** Expected: 47/47.
+   live DB) is the §9 step 3a run, not this dry run.** Expected: 47/47.
    Bad result: below 100% with no
    repair path available (see 1; the r25-M1 repair command is the fix).
 4. **Stuck-`pending_reindex` fixture** (r25-M2). One-slot channel,
@@ -1381,6 +1489,37 @@ pinned it.
    `query_text_for_scheme` returns the query unchanged,
    `src-tauri/src/embed_scheme.rs:149-150`; r26 m3), TWO under `instr1`.
    The r25 E6 "second embed" p50/p95 measurement applies to instr1 only.
+
+## EXPERIMENTS REQUESTED (r27)
+
+Same status as the r25/r26 lists: requests, not acceptance gates; the
+acceptance letter (§7) stays exactly as Kurt pinned it.
+
+1. **Complement census** (r27-M1; read-only SQL on a scratch copy).
+   Count gate-eligible entries NOT reachable via any candidate doc with
+   ≥1 non-skip-class chunk, grouped by `source_type`. Expected: exactly
+   3, all `user_stated`/`user_confirmed`. Bad: >3, or any
+   `librarian_inferred`/`immutable_document`/NULL — that means the
+   provenance-defined merge would leave live facts dark today (the
+   structural complement is the fix; this census measures the gap it
+   closes).
+2. **Hash-drift census** (r27-M3). On a scratch copy, count `documents`
+   rows where `hash` ≠ sha256 of the file on disk, split by status.
+   Expected: 0 outside `pending`. Bad: non-zero `indexed` drift — those
+   docs are already missing from the hash-hop candidate set.
+3. **Edit-then-revert candidate-membership fixture** (r27-M3; extends
+   r26 E3). After the no-op, assert BOTH `documents.hash =
+   last_indexed_hash` AND that the doc is in the stage-1 candidate set.
+4. **Merge attribution during calibration.** Report how many
+   two-stage-arm opens and hits came only from `v1merged`. Bad: a large
+   share — then "not worse" is measuring v1 on complement facts, not
+   two-stage retrieval.
+5. **Mixed-brain ranking check.** A fixture with one `user_stated` fact
+   and one rule-(ii) doc opening several facts at `max=2`. Assert the
+   merged list is ordered by weighted cosine across both sources, and
+   that rule-(ii) facts (no floor) can't systematically push out
+   v1-merged facts that cleared the v1 floor. Record how often the
+   displacement happens in calibration.
 
 ## Out of scope
 
