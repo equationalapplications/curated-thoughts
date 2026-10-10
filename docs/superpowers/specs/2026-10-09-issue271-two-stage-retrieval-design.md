@@ -1,34 +1,40 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-09 (rev 24 — Opus spec-tier r22 REQUEST CHANGES resolved:
-B1 the rev-23 SQL block is now the CANONICAL sweep predicate — it
-had dropped the `snapshotted`/`retrying` dispatch arms, so
-GUI-snapshotted rows would never dispatch and no GUI pass could
-ever start (r15 M2 again); the rev-17 prose predicate at L~829
-became a pointer to it;
-M1 both sweep queries scope the pass-docs join to the OPEN
-`(pass_id, target_key)` (unscoped `completed` rows from old
-passes hid every edited doc from the sweep forever) + NEW arm:
-a watcher re-pend on an exhausted row dispatches as a normal
-ingest (new work, not a 4th retry) + test;
-M2 the unforced-edit partial re-embed skip now keys on
-`documents.embed_key = current key` (NULL or stale ⇒ full
-re-embed) — the global stamp let a returned missing-file doc
-re-embed only changed chunks and carry mixed A/B vectors into
-stage 1 + test;
-M3 bootstrap backfill is no longer unconditional: verify-scratch
-compares live vectors against sample re-embeds per doc and
-backfills `embed_key` only where they match, leaving the rest
-NULL until a pass (vectors were never verified before);
-M4 §9 gains step 3a — run verify-scratch on the live brain
-(stamp + backfill, `model_guard=ok`) BEFORE the calibration;
-test 2 reworded "bootstrapped, no pass ever run";
-m1 §4 mixed-vector paragraph restated (guard covers stamp/
-profile mismatch; per-doc staleness handled by `embed_key`);
-m2 SQL binds `:backoff` (the named constant) instead of `300`;
-m3 dispatch SQL carries `ORDER BY d.id LIMIT :batch_limit`;
-nit: `skipped`/refused docs PRESERVE their existing embed_key
-(never NULLed))
+**Date:** 2026-10-09 (rev 25 — Opus spec-tier r23 REQUEST CHANGES resolved:
+M1 arm 4 now requires `documents.hash != pd.dispatch_hash` (the real
+new-content test — `queue.rs:168-175` re-pends unchanged
+`pending`/`error`/`orphaned` rows too, so a bare re-pend is NOT
+proof of new content) and the sweep RESETS the matched row in the
+same connection before `try_send` (`outcome='snapshotted'`,
+`attempts=0`, `dispatch_hash=d.hash`), so a long arm-4 job is
+never re-dispatched by a later tick and the 3-attempt cap
+survives; pass-docs DDL gains `dispatch_hash`; + tests;
+M2 NEW fifth dispatch arm `status='pending' AND outcome IN
+('completed','skipped')` — edits to already-completed/skipped
+docs during an open pass dispatch as a normal ingest (same row
+reset, so the pass waits for the new vectors) + test;
+M3 verify-scratch writes the stamp's MODEL component only when the
+sampled backfill confirms ≥90% of chunk-bearing docs match the
+profile key; below that the model component is OMITTED ⇒ guard
+mismatch ⇒ v1 fallback — the gate can no longer go dark while a
+v1 floor exists; `wisdom_two_stage_audit` gains a
+stale-`embed_key` doc count; + test (stamp present, every
+`embed_key` NULL ⇒ v1 fallback, not closed);
+m1 the `pipeline/mod.rs:692` unforced short-circuit also requires
+`embed_key = current key` — a NULL/stale doc falls through to a
+full re-embed (which stamps it current), so any watcher or kick
+event revives it without waiting for a swap;
+m2 sampled backfill pinned: first + last chunk per doc,
+match = cosine ≥ 1−1e-3; a failed sampled re-embed (e.g. 401)
+leaves the doc NULL and is counted in the printed output and
+against the M3 match ratio;
+m3 the arm-4 rationale now states the full `queue.rs` re-pend
+behavior (unchanged rows too).
+Rev 24 (r22): the SQL block became the CANONICAL sweep predicate
+(previously the `snapshotted`/`retrying` dispatch arms were
+dropped — GUI passes could never start), open-`(pass_id,
+target_key)` join scoping, per-doc `embed_key` unforced-edit skip
+rule, sampled bootstrap backfill, §9 step 3a.)
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -214,7 +220,13 @@ the pass it triggers repairs vector staleness globally. It cannot
 see PER-DOC staleness (a doc whose vectors predate a swap that ran
 while its file was missing); that case is handled by
 `documents.embed_key` (§8(c)): NULL/stale ⇒ the doc is excluded
-from stage 1 until a swap or a full re-embed stamps it current.
+from stage 1 until a swap or a full re-embed stamps it current
+(rev 25, r23 m1: in practice the revival trigger needs no swap —
+the `pipeline/mod.rs:692` unforced short-circuit now ALSO requires
+`documents.embed_key = profile's current key`; a NULL/stale doc
+falls through to a full re-embed, which stamps it current — so any
+watcher event or `ct ingest` kick on the file repairs it, and the
+exclusion is self-healing rather than swap-gated).
 The r5 mixed-vector mechanism paragraph below (out-of-pass forced
 edits, "repaired by the next pass") is unchanged and complementary.
 **The fourth cell (Opus r1 m4):** two-stage floor PRESENT, v1 floor
@@ -337,11 +349,32 @@ M1 hole):**
   unconditional backfill was FALSE: "all vectors current by
   definition" is backwards, these are pre-existing vectors
   that nothing has ever verified):** `verify-scratch` samples
-  each chunk-bearing doc (re-embed one chunk, compare) and
-  backfills `embed_key` ONLY on docs whose live vectors match;
-  the rest stay NULL until a model-swap pass re-embeds and
-  stamps them. Scale: one re-embed per doc, one-time, ~291
-  live docs.
+  each chunk-bearing doc — first AND last chunk (rev 25, r23 m2;
+  one sample cannot catch a doc with mixed-model vectors, which
+  L201-208 says out-of-pass forced edits produce), re-embeds,
+  and matches by **cosine ≥ 1−1e-3** (pinned tolerance; exact
+  float equality is over-brittle across embedder runs).
+  Backfill `embed_key` ONLY on docs whose samples match. A
+  sampled re-embed that FAILS (e.g. a 401) leaves the doc NULL,
+  is counted in the printed output, and counts AGAINST the
+  match ratio below. Scale: two re-embeds per doc, one-time,
+  ~291 live docs.
+- **Stamp-model gate on the backfill (rev 25, r23 M3 — the
+  never-dark rule needs the stamp to REFLECT vector reality,
+  not just evidence resolvability):** verify-scratch writes the
+  stamp's MODEL component ONLY IF ≥90% of chunk-bearing docs
+  matched (the ratio above). Below 90%, the stamp is written
+  with its CHUNKER component only (model component omitted) ⇒
+  the §4 guard reads the stamp's model as MISMATCHED vs. the
+  profile ⇒ v1 fallback — the gate can never sit closed with an
+  empty stage-1 set while a v1 floor exists. (The pre-r23
+  failure mode: profile key B ≠ stored model-A vectors ⇒ every
+  backfill misses ⇒ all `embed_key` NULL ⇒ stage 1 empty ⇒
+  closed, dark, nothing alerts. This gate closes it.) The
+  `wisdom_two_stage_audit` stderr line gains a
+  `stale_embed_key=<n>` field counting gate-eligible docs with
+  NULL/stale `embed_key`. Test: stamp present, every
+  `embed_key` NULL ⇒ v1 fallback, not closed.
 - **Stage-1 predicate:** `d.embed_key = :current profile model
   key`. Multi-pass ambiguity cannot arise — the column lives
   on `documents`, one row per doc, last writer wins. Rev 22's
@@ -391,8 +424,12 @@ differently from `error`.)**
 signature rev 18, Opus r16 MINOR-5; pre_status added rev 22, Opus
 r20 MINOR-2):**
 `ct_reindex_pass_docs(pass_id, doc_id, embed_key, outcome, attempts,
-last_attempt_at, pre_status)` with `outcome ∈ {snapshotted, retrying,
-completed, failed, skipped}`. `embed_key` here is v10's PASS-TARGET
+last_attempt_at, pre_status, dispatch_hash)` with `outcome ∈
+{snapshotted, retrying, completed, failed, skipped}`. `dispatch_hash`
+(rev 25, r23 M1) records the `documents.hash` at the row's last
+dispatch (written by the sweep on EVERY dispatch; migration backfills
+it from `documents.hash`); it gates the fourth dispatch arm's
+new-content test. `embed_key` here is v10's PASS-TARGET
 key (which key the pass drives toward) — rev 22 briefly redefined it
 as a vector-generation stamp; rev 23 (Opus r21 BLOCKER-1) reverted
 that: the vector-generation stamp is `documents.embed_key`, and this
@@ -716,7 +753,10 @@ are in scope:
   copy of the live DB under the current binary + profile, then
   **writes the stamp ONLY IF every live `librarian_evidence` hash ref
   still resolves on the scratch rechunk (baseline: 406/406) AND every
-  gate-eligible entry stays hop-resolvable (baseline: 365/365)**.
+  gate-eligible entry stays hop-resolvable (baseline: 365/365) AND —
+  model component (rev 25, r23 M3) — the sampled backfill's match
+  ratio is ≥90% (otherwise the stamp carries its CHUNKER component
+  only; see the stamp-model gate in §8(c))**.
   Stated plainly: **a chunker-version bump FAILS this check** (hashes
   rehash → evidence refs orphan) until the text-match remap follow-up
   lands — the correct response to that refusal is to NOT rechunk, not
@@ -841,9 +881,31 @@ SELECT d.path, d.status FROM documents d
         OR (pd.outcome = 'failed' AND pd.attempts < 3
             AND pd.last_attempt_at + :backoff <= unixepoch())  -- :backoff = PASS_RETRY_BACKOFF_SECS
         OR (d.status = 'pending' AND pd.outcome = 'failed'
-            AND pd.attempts >= 3))                 -- watcher re-pend = NEW work, normal ingest
+            AND pd.attempts >= 3
+            AND d.hash != pd.dispatch_hash)        -- watcher re-pend WITH NEW HASH = new work (rev 25, r23 M1)
+        OR (d.status = 'pending'
+            AND pd.outcome IN ('completed','skipped')) -- edit to an already-resolved row while the pass is open (rev 25, r23 M2)
  ORDER BY d.id LIMIT :batch_limit;
 
+-- Arm-4/arm-5 row reset (rev 25, r23 M1/M2 — run on the SAME
+-- connection, BEFORE try_send, one UPDATE per dispatched row):
+--   UPDATE ct_reindex_pass_docs
+--      SET outcome='snapshotted', attempts=0, dispatch_hash=:hash
+--    WHERE pass_id=:open_pass_id AND doc_id=:doc_id;
+-- The reset removes the row from arm 4/5 on later ticks (outcome is no
+-- longer 'failed'/'completed'/'skipped'), so a job slower than
+-- SWEEP_INTERVAL is never double-dispatched, and a reset exhausted row
+-- gets a fresh 3-attempt budget AS NEW WORK while every still-exhausted
+-- row (hash unchanged) keeps its cap and backoff.
+-- `dispatch_hash` is recorded on EVERY dispatch of a row (arms 1-5
+-- alike — the sweep writes it alongside the dispatch), not only on
+-- arm-4/5 resets: the arm-4 gate `d.hash != pd.dispatch_hash` must
+-- compare against the hash of the LAST dispatch, else the row cannot
+-- distinguish "exhausted, unchanged" from "exhausted, re-pended with
+-- new content". Migration backfills `dispatch_hash = documents.hash`
+-- for rows existing at upgrade time (NULL never matches the gate —
+-- conservative; a NULL-hash row is only invisible to arm 4 until its
+-- next dispatch records the hash).
 -- CANONICAL claim-expiry set (sweepable_path_set)
 SELECT d.path FROM documents d
   LEFT JOIN ct_reindex_pass_docs pd
@@ -856,11 +918,27 @@ SELECT d.path FROM documents d
 No pass open ⇒ `:open_pass_id` NULL ⇒ join yields `pd.doc_id IS
 NULL` for every row (pure legacy backstop behavior). The fourth
 dispatch arm exists because `queue.rs:168-175` writes
-`status='pending'` on a watcher edit regardless of the pass row —
-a re-pend on an exhausted row is new content, not a 4th retry;
-it dispatches as the normal ingest its `d.status='pending'`
-already selects. Test: completed pass, then an edit, then a
-sweep dispatches the doc (rev 24, Opus r22 MAJOR-1).
+`status='pending'` on a watcher edit **or on any write touching an
+existing row whose status is `pending`/`error`/`orphaned` even when
+the hash is UNCHANGED (rev 25, r23 m3 — a bare re-pend is therefore
+NOT proof of new content)**; a re-pend on an exhausted row is new
+work only when the content actually changed, so the arm matches on
+`documents.hash != pd.dispatch_hash` (rev 25, r23 M1) and the sweep
+resets the matched row (`outcome='snapshotted'`, `attempts=0`,
+`dispatch_hash=d.hash`) in the same connection before `try_send` —
+no double dispatch across ticks, and the fresh attempt budget is
+granted by the reset, not by ignoring the cap. The fifth arm (rev
+25, r23 M2) covers a watcher edit to a doc whose row already
+resolved (`completed`/`skipped`) while the pass is open — it
+dispatches as a normal ingest and the SAME reset re-arms the row
+`snapshotted`, so the pass waits for the new vectors before it can
+complete. Tests (rev 25): completed pass, then an edit, then a
+sweep dispatches the doc (r22 MAJOR-1, still standing); an arm-4
+job spanning three ticks is dispatched exactly once (r23 M1); a
+doc that was `pending` at snapshot and keeps 401ing stops after 3
+attempts — no 60s embed loop (r23 M1); an edit to a `completed`
+row while the pass is open dispatches once and re-arms the row
+(r23 M2).
 The refusal-record fingerprint filter (§8(c) below) is applied to
 BOTH queries identically — a refused row isn't in flight, so
 claim-expiry in step holds. A `failed` row WITHIN its backoff
