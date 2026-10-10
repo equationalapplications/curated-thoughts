@@ -1,84 +1,6 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-10 (rev 29 — Opus r27 REQUEST CHANGES resolved:
-**r27-M1** redefines the v1-merge population as the STRUCTURAL COMPLEMENT
-of the stage-1-reachable set (anti-join inside the same stage-1 query),
-not a provenance list — four gap classes (zero-chunk docs, all-skip-class
-docs, dangling source edges, other/NULL provenance) fall between a
-provenance-defined merge and the true complement, and any of them leaves
-live facts dark on a 100%-coverage brain (§3); **r27-M2** rewrites the
-funnel decision table as FOUR rows keyed on (forced?, chunker current?) —
-the old table contradicted r26-M3 and was ambiguous for the
-non-forced/stamp-current cell (§8(c)); **r27-M3** adds the hash restore
-(`hash=last_indexed_hash`) to both the no-op and the refusal reset —
-without it a reset row silently drops out of the hash-hop candidate set
-while coverage still reads 100% (§8(c)); the reset lives inside
-`ingest_file_virtual` (m3); m1–m6 folded (audit-field order fixed m1;
-kick caller marked unreachable m2; mixed-open audit semantics pinned m5;
-step-reference fix m6). Rev 28's summary: **r26-M1** closes the never-dark hole for source-less facts (fix (b)):
-gate-eligible entries with NO candidate doc — `user_stated`/`user_confirmed`,
-which have no `curated_proposal_sources` hop (`wisdom_match.rs:44-48`) — are
-ALSO scored by the v1 path in the same call (raw cosine vs the current key's
-v1 floor) and merged into the two-stage results under ONE ranked list, so an
-empty candidate set can never close the gate while a v1 floor exists (§3);
-fix (a) — empty-set v1 fallback — is REJECTED as strictly weaker (it
-abandons two-stage on no-librarian brains entirely); the audit line is
-RESTRUCTURED ONCE to SEVEN fields (`rule open top v1merged floor k
-stale_embed_key`), superseding rev 27's six-field pin (§6); **r27** adds
-the STRUCTURAL complement definition of the v1-merge population (r27-M1),
-the four-row funnel decision table (r27-M2), and the hash-restoring
-refusal reset inside `ingest_file_virtual` (r27-M3); **r26-M2**
-defines the coverage population as candidate docs with ≥1 chunk — a
-zero-chunk doc contributes no stage-1 vectors so its `embed_key` is
-irrelevant (§6); **r26-M3** makes a NON-FORCED pure rechunk a no-op SUCCESS
-(marks `indexed`, restores `hash=last_indexed_hash`, returns `Ok` — same
-as the `:692` short-circuit; the chunks are by definition the current
-bytes, and the pre-written `hash` from `enqueue_vault_event` must be
-rolled back or the doc silently drops out of the hash-hop candidate set,
-r27-M3) while a FORCED pure rechunk
-stays refused, with the refusal reset extended to BOTH
-`pending`/`pending_reindex` (§8(c)); **r26-M4** pins the
-`Err(IngestRefused)` downcast at ALL FOUR callers — `ct ingest` and the
-`wisdom_deposit` kick (already pinned), `bulk_reindex` (refusal = SKIP +
-continue), and the pipeline worker (ONE informational stderr line, NOT
-`write_error_log`; the row reset lives inside `ingest_file_virtual`,
-r27 m3) (§8(c)); m1
-(`repair-embed-key --stale` added to §9 step 2; its write pinned to ONE
-IMMEDIATE transaction covering the embeddings UPDATE + `embed_key`, with
-the chunk-id set re-checked under the lock), m2 (rule (ii) BYPASSES the
-`wisdom_match.rs:379-381` floor test), m3 (NO second embed under
-`Scheme::Raw` — the stage-1 vector IS the fact vector; only instr1 embeds
-twice), m4 (`rule=none` reserved for fallback/uncalibrated/merge-only
-opens), m5 (V28 backfill ONE-SHOT, V27 precedent), m6 (verify-scratch
-rechunks the SCRATCH copy but writes the backfill + stamp to the LIVE DB;
-the experiments' dry run is print-only), m7 (drifted citations corrected:
-sweep re-enqueue `sweep.rs:134-139`, worker error arm
-`pipeline/mod.rs:257-261`) folded in; the reviewer's 5 experiments are
-recorded under **EXPERIMENTS REQUESTED (r26)**. Rev 27 had resolved the r25
-REQUEST CHANGES (repair path `ct reindex repair-embed-key --stale`;
-`pending_reindex` refusal reset; CHUNKER-ONLY stamp; rule-(ii) NO
-fact-level floor; audit fields `open`/`top`; V28 migration; typed
-`Err(IngestRefused)`; 8 experiments recorded as calibration-time requests,
-not acceptance gates). Rev 26 had resolved the r24 REQUEST CHANGES under
-Kurt's OPTION A — SIMPLIFY ruling of 2026-10-10: the grant/pass-docs/
-model-guard machinery is DELETED from this spec; in its place the gate runs a
-QUERY-TIME COVERAGE CHECK over the stage-1 candidate doc set (§6). M1 fixed
-(§9 step 1 dependencies + supremacy statement); M2 resolved by the coverage
-check (measured over the ~47-doc candidate set at query time, not 291 docs at
-stamp time); M3 and its arm-reset race machinery die wholesale with the pass
-machinery (noted at §8(c)); M5 resolved by REMOVING the rev-25 m1
-`embed_key` requirement from the `pipeline/mod.rs:692` short-circuit —
-stale docs are excluded at query time and repaired by the next forced
-re-embed, so kicks never hit a refusal storm (§6, §8(c)); m1–m8 folded in
-(audit-field list pinned once at §6; `embed_key = gate_model_key(profile,
-stub)` pinned at §6; refusal-test split disposed at §10 — the refusal record
-is deleted, so its test is deleted with it and the residual behavior gets a
-replacement test; rule-(ii) output pinned at §3; verify-scratch pinned
-chunk-only at §8(c); DDL-after-V15 ordering pinned at §9; same-probe
-overfit note + held-out set recorded as information at §7; editorial batch
-applied throughout). Rev history for rounds r1–r23 is compressed into the
-**Revision history** block below; per-finding tags appear in the body only
-where a resolution needs justification.)
+**Date:** 2026-10-10 (rev 30 — Opus r28 REQUEST CHANGES resolved: stage-1 candidate SQL re-pinned to real columns (M1); non-forced no-op narrowed to `pending` + key-currency (M2); pre-V28 RO column-probe fallback (M3); m1–m8 folded). Full per-round changelog: **Revision history** block below.
 **Status:** Draft
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -130,7 +52,7 @@ superseded twice over — the table itself is deleted under Option A (M4), so
   at all FOUR callers (§8(c)); m1–m7 folded in (§6, §9 step 2, §3, §9
   step 1, §8(c), experiments); 5 experiments recorded under EXPERIMENTS
   REQUESTED (r26).
-- **r27 → rev 29 (this rev):** M1 — v1-merge population redefined as the
+- **r27 → rev 29:** M1 — v1-merge population redefined as the
   STRUCTURAL COMPLEMENT of the stage-1-reachable set (anti-join, not
   provenance; four gap classes named; §3); M2 — funnel decision table
   rewritten as four rows on (forced?, chunker current?) (§8(c)); M3 —
@@ -139,6 +61,27 @@ superseded twice over — the table itself is deleted under Option A (M4), so
   order fixed; kick caller unreachable; §10 reset predicate widened +
   hash; mixed-open audit semantics pinned; step-reference fix); 5
   experiments recorded under EXPERIMENTS REQUESTED (r27).
+- **r28 → rev 30 (this rev):** M1 — stage-1 candidate SQL re-pinned to
+  REAL columns: the evidence hash hop (`librarian_evidence` evidence_json
+  `content_hash` → `chunks` → `doc_id`) ∪ the proposal chain
+  (`curated_proposal_sources.doc_id`); the old
+  `curated_proposal_sources.source_hash` column does not exist —
+  `documents.hash` demoted to dedupe/row-identity only; gap class (3)
+  restated (evidence-hash leg dangles, proposal chain cannot — CASCADE);
+  r27-M3's hash restore kept as hygiene, membership argument withdrawn;
+  M2 — non-forced no-op narrowed to `pending` rows only (`pending_reindex`
+  keeps status+hash so the sweep's forced job still runs — the model-swap
+  silent-drop hole) + key-currency condition (stale key ⇒ re-embed stored
+  chunks in place); M3 — pre-V28/RO brains: `documents` column probe ⇒
+  missing column = coverage 0 ⇒ v1 fallback, never an error; m1 coverage
+  population harmonized to ≥1 stage-1-scorable chunk; m2 merge vector
+  scheme-pinned (prefixed, floor per scheme, bit-parity with
+  `wisdom_match_in_scheme`); m3 audit `top` = the evaluated rule's own
+  decision variable; m4 `rule=none` narrowed to the coverage-below
+  sub-case of the fourth cell; m5 stale "three-row" reference fixed;
+  m6 verify-scratch live write guarded per-doc; m7 one-shot rule extended
+  to the `last_indexed_hash` backfill; m8 header changelog collapsed;
+  5 experiments recorded under EXPERIMENTS REQUESTED (r28).
 
 ## 1. Problem
 
@@ -221,11 +164,26 @@ underlying every choice below. Summary of the load-bearing points:
 
 ### 1. Stage 1 — closed-set chunk search (NEW SQL)
 
-Top-k chunk search restricted to fact-bearing documents: the candidate doc
-set is (hash hop PRIMARY: `documents.hash` matching
-`curated_proposal_sources.source_hash` ∪ proposal chain) deduped by
-`documents.hash` with a deterministic row choice, filtered to live
-gate-eligible facts. On the live brain this is 261 chunks / 47 docs under
+Top-k chunk search restricted to fact-bearing documents. The candidate doc
+set is the UNION of two real edges, pinned by actual columns (r28-M1 — the
+rev-26/28 phrasing "`documents.hash` matching
+`curated_proposal_sources.source_hash`" joined a column that DOES NOT
+EXIST: `curated_proposal_sources` is `(proposal_id, doc_id, role)` with
+`doc_id REFERENCES documents(id) ON DELETE CASCADE` (`db/okf_ddl.rs:197-202`),
+and `source_hash` exists only on `llm_wiki_entries` where it is NULL on
+365/365 live rows — investigation v10 line 9):
+1. the EVIDENCE HASH HOP: `librarian_evidence.evidence_json` entries'
+   `content_hash` → `chunks.content_hash` → `chunks.doc_id` (the
+   resolution `evidence_has_live_chunk` performs at `db/commit.rs:666-690`;
+   v10's "406/406 hash refs live" counts these refs);
+2. the PROPOSAL CHAIN: `librarian_evidence.proposal_id` →
+   `curated_proposal_sources.doc_id` (the reverse join
+   `wisdom_deposit.rs:183-193` already uses).
+The union is deduped by `documents.hash` with a deterministic row choice
+(the dedupe only picks the ROW IDENTITY — `documents.hash` is not a
+membership predicate; it pre-writes via `enqueue_vault_event` and is
+maintained by the diff-swap), filtered to live gate-eligible facts. On
+the live brain this is 261 chunks / 47 docs under
 rule (i), 62 hash-hop-hit chunks under rule (ii) (chunk-level membership).
 Query embed is raw (no prefix). k starts at 8, swept with the floor.
 Skip-aware: chunks from skip-set classes are excluded. Stage 1 needs NEW
@@ -328,8 +286,12 @@ provenance: provenance naming (`user_stated`/`user_confirmed`) is an
 EXAMPLE of the complement, not its definition — four gap classes fall
 between a provenance-defined merge and the true complement (r27-M1):
 (1) zero-chunk docs' facts are sourced but unscored; (2) docs whose chunks
-are ALL in skip-set classes; (3) dangling `curated_proposal_sources`
-edges (deleted doc, or the hash-dedupe loser row); (4) other provenance
+are ALL in skip-set classes; (3) evidence hash refs pointing at a
+REMOVED OR REHASHED chunk with no proposal-chain edge (`content_hash`
+matches nothing live — the CASCADE on `curated_proposal_sources.doc_id`
+(`db/okf_ddl.rs:198-200`) means a deleted doc takes its edges with it, so
+the proposal chain cannot dangle; the evidence-hash leg can — r28-M1
+corrects this class); (4) other provenance
 values — `immutable_document` is in `PROVENANCE_VOCAB`
 (`wisdom_match.rs:47`) and `source_type` can be NULL — either kind can
 lack an edge. A re-extraction to empty (§8(c)'s swap deletes all chunks,
@@ -337,7 +299,15 @@ facts stay live until heal) produces class (1) TODAY: a provenance merge
 leaves those facts dark on a 100%-coverage brain. The complement's facts
 are scored via the v1 path — raw cosine of the message
 against `llm_wiki_entries.embedding_blob` (`gated_entries`' path, floor =
-the current key's v1 floor) — and the results are MERGED with the
+the current key's v1 floor). **The merge vector is SCHEME-PINNED
+(r28-m2):** it is the SCHEME-PREFIXED query vector — the same vector
+rule (i) scores facts with — NOT the raw stage-1 vector; under `instr1`
+the blobs are prefixed, and scoring raw-against-prefixed would be the
+cross-scheme comparison rev 3's M4 forbids. The floor is
+`gate_floor(floor_key_for(key, scheme))` (the same floor rule (i)
+resolves). Parity: for a complement fact, the merge's score must equal
+`wisdom_match_in_scheme`'s score for the same fact, bit-identical (§10,
+r28 E5). The results are MERGED with the
 two-stage opens into ONE ranked list (weighted-cosine ordering, then
 truncate to `max`). Never-dark is therefore restored BY CONSTRUCTION: the
 gate can never be closed by an empty-or-dark candidate set while a v1
@@ -506,10 +476,17 @@ per doc, one-time, ~291 live docs.
 **The stamp is CHUNKER-ONLY (r25-M3):** verify-scratch writes the stamp
 iff the chunker fingerprint it computes on the scratch rechunk is
 current; the stamp has NO model component and there is NO ≥90% rule.
-**Scratch/live split (r26 m6, pinned):** verify-scratch rechunks on the
+**Scratch/live split (r26 m6, pinned; per-doc guarded write r28-m6):**
+verify-scratch rechunks on the
 SCRATCH copy (the copy the comparison runs against), but the two writes —
 the `embed_key` backfill and the chunker stamp — go to the LIVE DB; a
 sample verdict is computed on scratch and applied live, never the reverse.
+**The live write is GUARDED (r28-m6):** the sample verdict is computed on
+scratch after minutes of embedding, so the live apply must not trust it
+blindly — each doc's write is ONE IMMEDIATE transaction that re-checks
+the doc's chunk-id set and current `embed_key` against the scratch
+snapshot (the §8(a) swap-race rule) and SKIPS the doc on mismatch, same
+rule as `repair-embed-key`.
 Rev 26's model component and threshold are DELETED: under Option A
 nothing read them (the funnel refuses on the CHUNKER component only,
 §8(c), and the coverage SQL reads only `documents.embed_key`), so the
@@ -524,9 +501,14 @@ PRINTED by verify-scratch as artifact evidence; it gates no write.
 mechanism:**
 
 At gate time (whenever two-stage would run), the gate computes over the
-stage-1 CANDIDATE doc set — **defined (r26-M2, pinned) as candidate docs
-with AT LEAST ONE CHUNK** (hash-hop deduped, gate-eligible, BEFORE the
-`embed_key` exclusion):
+stage-1 CANDIDATE doc set — **defined (r26-M2, pinned; population
+harmonized with the complement r28-m1) as candidate docs
+with AT LEAST ONE STAGE-1-SCORABLE CHUNK, i.e. ≥1 chunk outside the
+skip-set classes** (hash-hop deduped, gate-eligible, BEFORE the
+`embed_key` exclusion) — the SAME population the §3 v1-merge complement
+is computed against, so an all-skip-class doc with a stale key can
+neither force a pointless v1 fallback (it has no scorable vectors) nor
+sit outside the coverage count while its facts sit outside the merge:
 
 ```sql
 SELECT COUNT(*),
@@ -552,9 +534,21 @@ set is EMPTY = vacuously covered (the empty-closed-set rule of §3).
 The check runs BEFORE any embed — a v1 fallback must never pay for a
 wasted stage-1 raw embed (this keeps the one-embed-on-fallback promise,
 §3's embed-skip paragraph, which by r25-M4 covers both rules). The check
-is implemented on BOTH sides: the CLI (`tools/src/queries.rs:786-806` —
-the `open_ro` connection there is fine for this read) and the Tauri
-side, so the two implementations cannot disagree about falling back.
+is implemented on BOTH sides: the CLI (`tools/src/queries.rs:786-806`)
+and the Tauri side, so the two implementations cannot disagree about
+falling back. **Pre-V28 / read-only brains (r28-M3, pinned):** `open_ro`
+→ `open_brain_readonly` (`retrieval/mod.rs:156-165`) is a bare
+`SQLITE_OPEN_READ_ONLY` open with NO migration — a brain that has not
+had a read-write open since the binary was upgraded has no
+`documents.embed_key` (and possibly no `last_indexed_hash`) column, and
+an unguarded coverage query would fail with "no such column", error the
+whole `ct wisdom match` call (exit 1 on every message ⇒ dark, breaking
+never-dark). Therefore BOTH sides pin a `documents` COLUMN PROBE first
+(the `ddl_compat::existing_columns` pattern, `db/ddl_compat.rs:128`, the
+same probe style `wisdom_match.rs:162-186` uses for V24/V27 skew): a
+missing `embed_key` or `last_indexed_hash` column counts as COVERAGE 0
+⇒ the §4 v1 fallback, with `stale_embed_key=<candidate count>` on the
+audit line. The gate never errors on schema skew; it degrades to v1.
 
 Why 100% and not a lower fraction: (1) the set is tiny (~47 docs), so
 the check is cheap at any threshold and strictness costs nothing; (2)
@@ -658,14 +652,26 @@ whenever the merge admits nothing). **Field semantics pinned (r26 m4;
 mixed opens pinned r27 m5):**
 `rule=none` is RESERVED for opens that no two-stage rule produced — the
 §4 no-librarian merge-only v1 open, any §4 fallback/uncalibrated open,
-and §4's fourth cell; a two-stage gate that CLOSES below its own floor
+and the coverage-below-100% sub-case of §4's fourth cell (r28-m4:
+at 100% coverage the fourth cell's two-stage floor is PRESENT and
+two-stage runs normally, so its opens are labeled `rule=i`/`rule=ii`
+like any other two-stage open; only the coverage-below sub-case falls
+back with no two-stage rule evaluated, and that case has no open to
+label); a two-stage gate that CLOSES below its own floor
 reports `rule=i` or `rule=ii` with `open=0`, never `rule=none`.
-**Mixed opens (r27 m5, pinned):** when the two-stage arm closes below
+**Mixed opens (r27 m5, pinned; `top` defined per rule r28-m3):** when the
+two-stage arm closes below
 its floor but the v1-merge opens on complement facts, the line reports
 `rule` = the two-stage rule that was EVALUATED, `open=1` = the FINAL
-gate state (the merged list opened the gate), and `top` = the STAGE-1
-top score (the two-stage arm's own best, not the merged best) — so the
-harness computes the two-stage arm's FP from `open`/`top` without
+gate state (the merged list opened the gate), and `top` = **that rule's
+own decision variable** (r28-m3): rule (i) opens on the restricted-set
+FACT cosine, so `top` = the best restricted fact cosine; rule (ii)
+opens on the member-chunk score, so `top` = the best member-chunk
+score — NOT always the stage-1 chunk score (that would make rule-(i)
+decisions unreconstructable from the audit line, since rule (i)'s
+`open` is the final merged state while its decision variable is a fact
+cosine). With per-rule `top`, the harness computes the two-stage arm's
+FP from `open`/`top` without
 v1-path opens contaminating the arm's score, and a v1-merged-only open
 is derivable as `v1merged>0 ∧ two-stage-closed`. Hit/FP
 remain harness-derived: the calibration harness derives hit and FP from
@@ -1040,17 +1046,22 @@ are in scope:
   the row stays sweepable (`retain_sweepable`, `sweep.rs:62-64`), each
   restart re-enqueues and refuses it again, and
   `list_indexed_user_doc_paths` (`db/queries.rs:38-41`) excludes it
-  from every later reindex pass. **The hash restore is load-bearing
-  (r27-M3):** `enqueue_vault_event` (`db/queue.rs:168-175`) writes the
+  from every later reindex pass. **The hash restore (r27-M3; rationale
+  corrected r28-M1):** `enqueue_vault_event` (`db/queue.rs:168-175`) writes the
   new hash BEFORE ingest, so a pure-rechunk refusal fires exactly when
   `documents.hash` holds a stale pre-written value (enqueue read H2,
   the file was reverted to H1, the worker read H1); resetting only the
   status would leave the row `indexed` with `hash=H2` while its chunks
-  hold H1 — the doc then silently drops out of the hash-hop candidate
-  set (`documents.hash = curated_proposal_sources.source_hash`), the
-  coverage check still reads 100% (the doc left the measured set), and
-  the v1-merge doesn't carry its facts (they are sourced) — the r24-M2
-  silent-set-shrink bug, reintroduced through the reset. The reset is
+  hold H1 — the doc then risks falling out of hash-hop bookkeeping: the
+  row's `hash` no longer matches its chunks, so the r27-M3 r24-M2-style
+  "drops out of the hash-hop candidate set" argument was OVERTURNED at
+  r28-M1 — with the real hop (evidence `content_hash` → `chunks` →
+  `doc_id` ∪ proposal `doc_id`), `documents.hash` is NOT a membership
+  predicate, only the dedupe/row-identity key — but the restore is kept
+  as HYGIENE: it keeps `:692`'s unchanged-hash check and the dedupe
+  consistent with the on-disk bytes and prevents the stale pre-write
+  from masking a future content change. Coverage still reads 100% in
+  either case (the doc's membership is unaffected). The reset is
   specified INSIDE `ingest_file_virtual` (r27 m3) — all refusal paths
   funnel through it, so a forced `ct ingest` refusal on a `pending`
   row is covered without any worker-side reset; the pipeline worker
@@ -1070,10 +1081,13 @@ are in scope:
   GUI reembed
   queued with a full channel and a missing stamp ⇒ every deferred row
   ends `indexed` and outside the sweep claim set. **r26-M3 non-forced
-  fixture: a NON-FORCED pure rechunk (unchanged hash + ≥1 chunk + stale
-  stamp) is a no-op SUCCESS — row marked `indexed`, `hash` restored to
+  fixture (narrowed r28-M2): a NON-FORCED pure rechunk (unchanged hash +
+  ≥1 chunk + stale stamp) on a `pending` ROW is a no-op SUCCESS — row
+  marked `indexed`, `hash` restored to
   `last_indexed_hash` (r27-M3), `Ok(())`, no refusal
-  record, no stderr refusal line; only a FORCED pure rechunk is
+  record, no stderr refusal line; on a `pending_reindex` row the no-op
+  does NOT fire (status+hash untouched, row stays sweepable for the
+  sweep's forced job); only a FORCED pure rechunk is
   refused.** **r26-M4 refusal-storm rows (both new caller sites): a
   `bulk_reindex` pass over a set containing refused paths does NOT abort
   — the refusal is counted as a SKIP, the pass continues, and the linker
@@ -1101,11 +1115,33 @@ are in scope:
     chunks and writes `embed_key` itself, §8(a));
   - FORCED + chunker stale or missing ⇒ **refuse** (the
     bootstrap/override is `ct reindex verify-scratch`);
-  - NON-FORCED + chunker current ⇒ **no-op success** (r27-M2: pinned so
+  - NON-FORCED + chunker current ⇒ **no-op success, `pending` ROWS ONLY**
+    (r27-M2: pinned so
     behavior never depends on the stamp — a non-forced pure rechunk is
     a no-op by definition whether or not the stamp is current; the row
-    is marked `indexed` with `hash=last_indexed_hash` restored, r27-M3);
-  - NON-FORCED + chunker stale or missing ⇒ **no-op success** (r26-M3).
+    is marked `indexed` with `hash=last_indexed_hash` restored, r27-M3).
+    **`pending_reindex` rows are EXCLUDED from this no-op (r28-M2):** a
+    `pending_reindex` row was staged by `queue_full_reindex`/`run_wiki_reembed`
+    precisely BECAUSE its re-embed must be forced — `sweep.rs:76-81`
+    documents the hazard ("re-enqueueing them as a plain ingest would
+    let `ingest_file`'s unchanged-hash check short-circuit and silently
+    drop the chunk-strategy or embedding-model upgrade"). A non-forced
+    job on a `pending_reindex` pure rechunk returns `Ok(())` with STATUS
+    AND HASH UNTOUCHED — the row stays sweepable so the sweep's forced
+    job still runs. (Failure this prevents: model swap A→B, channel
+    full, D staged `pending_reindex`, a wisdom-deposit kick ingests D
+    non-forced before the sweep; an unconditional no-op would mark D
+    `indexed` with model-A vectors and key — out of the sweepable set,
+    below coverage forever, nothing alerts.)
+    **Key-currency condition (r28-M2):** additionally, the no-op only
+    fires when the doc's `embed_key` already equals
+    `gate_model_key(profile, stub)`; if the key is stale/NULL, the
+    non-forced job RE-EMBEDS THE STORED CHUNKS IN PLACE (the
+    `repair-embed-key` mechanics — no rechunk, no file read) and updates
+    the key, so a non-forced touch repairs instead of ignoring model
+    drift;
+  - NON-FORCED + chunker stale or missing ⇒ **no-op success, same
+    `pending`-only + key-currency conditions** (r26-M3, narrowed r28-M2).
   Zero-chunk docs bypass the whole table (nothing to lose); content
   edits bypass it (diff-swap).
   **Refusal signaling (r25 m4; ALL FOUR callers pinned r26-M4):** the
@@ -1198,16 +1234,22 @@ short-circuit is restored as-is, §6).
    last (the V21 non-idempotent ALTER precedent and its fix are at
    `db/connection.rs:902-948`). Its STAMP is gated on V22 having stamped,
    like V23–V27, so a rootless open cannot mask a deferred V22.**
-   **The V28 backfill is ONE-SHOT (r26 m5, pinned):** if V28 carries an
+   **The V28 backfill is ONE-SHOT (r26 m5, pinned; extended to BOTH
+   backfills r28-m7):** if V28 carries an
    `embed_key` backfill statement (e.g. seeding the key for docs whose
-   chunks provably carry the current model's vectors), it executes ONLY
-   in the migration call that adds the column, inside the same
+   chunks provably carry the current model's vectors) OR the
+   `last_indexed_hash` backfill
+   (`WHERE status IN ('indexed','pending_reindex')`), EACH executes ONLY
+   in the migration call that adds its column, inside the same
    transaction — the V27 precedent
    (`db/connection.rs:973-980`: the `embed_scheme` UPDATE runs only in
    the `ALTER TABLE` call, because `embed_scheme` is unindexed and an
    ungated UPDATE would full-scan `llm_wiki_entries` and take the write
-   lock on EVERY open forever). Repeating the backfill on every open is
-   therefore FORBIDDEN: the migration's work is guarded by the
+   lock on EVERY open forever). Repeating either backfill on every open
+   is FORBIDDEN: re-running the `last_indexed_hash` backfill per open
+   would re-stamp `pending_reindex` rows created after the upgrade —
+   rows whose staged hash may itself have been race-written — bringing
+   back the r11-m1 hazard; the migration's work is guarded by the
    column-existence check, never re-run. Then: stage-1 search + hop + decision rules +
    labels/fallbacks + the coverage check, opt-in (`--two-stage`). This
    step is testable against a live-brain fixture ONLY after step 2's
@@ -1217,7 +1259,7 @@ short-circuit is restored as-is, §6).
 2. Safety + bootstrap: diff-swap (§8(a), including `embed_key` and
    `last_indexed_hash` writes in the swap transaction and the
    `mark_document_indexed(conn, doc_id, indexed_hash)` hash param) +
-   funnel stamp + three-row decision table (§8(c)) + cross-process
+   funnel stamp + FOUR-row decision table (§8(c)) + cross-process
    breaker + `ct heal --reset-breaker` / `--allow-bulk` flags + the
    `librarian_evidence_seen` marker (trigger + migration backfill) +
    `ct reindex verify-scratch` (bootstrap command: stamp write, sampled
@@ -1311,10 +1353,23 @@ short-circuit is restored as-is, §6).
   ZERO-CHUNK doc's facts (sourced, but no stage-1-scorable chunk) open
   via the merge; an ALL-SKIP-CLASS doc's facts open via the merge —
   both are in the structural complement by definition, and a
-  provenance-based implementation would miss them.
+  provenance-based implementation would miss them. **r28-m2 parity
+  test:** under `instr1`, a complement fact's merge score equals
+  `wisdom_match_in_scheme`'s score for it, bit-identical.
 - **r26-M2 zero-chunk test:** a candidate doc with 0 chunks is excluded
   from the coverage population — its NULL/stale `embed_key` neither
-  lowers coverage nor appears in `stale_embed_key` (§6).
+  lowers coverage nor appears in `stale_embed_key` (§6); population
+  harmonized r28-m1: an ALL-SKIP-CLASS doc is likewise excluded (≥1
+  stage-1-scorable chunk is the test on both sides).
+- **r28-M2 test:** a `pending_reindex` row + a non-forced kick ⇒ the
+  row STAYS `pending_reindex` (status+hash untouched), remains
+  sweepable, the sweep's forced job runs, and `embed_key` ends CURRENT
+  — the no-op must not fire on it. A non-forced touch on a `pending`
+  row with a STALE `embed_key` re-embeds stored chunks in place and
+  updates the key (key-currency condition).
+- **r28-M3 test:** a pre-V28 fixture brain (no `embed_key` column)
+  opened READ-ONLY with `--two-stage` ⇒ v1 label, exit 0,
+  `stale_embed_key=<candidate count>` — never a "no such column" error.
 - Labels: pinned 5-field stderr line byte-identical under both paths;
   `wisdom_two_stage_audit` line shape asserts ALL SEVEN pinned fields
   (§6) in pinned order — `rule`, `open`, `top`, `v1merged`, `floor`,
@@ -1503,12 +1558,16 @@ acceptance letter (§7) stays exactly as Kurt pinned it.
    provenance-defined merge would leave live facts dark today (the
    structural complement is the fix; this census measures the gap it
    closes).
-2. **Hash-drift census** (r27-M3). On a scratch copy, count `documents`
+2. **Hash-drift census** (r27-M3; premise corrected r28-M1). On a
+   scratch copy, count `documents`
    rows where `hash` ≠ sha256 of the file on disk, split by status.
    Expected: 0 outside `pending`. Bad: non-zero `indexed` drift — those
-   docs are already missing from the hash-hop candidate set.
+   docs' rows are inconsistent with the dedupe key (hygiene signal; with
+   the real hop, membership is unaffected — see r28-M1).
 3. **Edit-then-revert candidate-membership fixture** (r27-M3; extends
-   r26 E3). After the no-op, assert BOTH `documents.hash =
+   r26 E3; membership premise retained — the doc's facts are hop-resolvable
+   via the evidence/proposal edges regardless of the `hash` restore).
+   After the no-op, assert BOTH `documents.hash =
    last_indexed_hash` AND that the doc is in the stage-1 candidate set.
 4. **Merge attribution during calibration.** Report how many
    two-stage-arm opens and hits came only from `v1merged`. Bad: a large
@@ -1520,6 +1579,35 @@ acceptance letter (§7) stays exactly as Kurt pinned it.
    that rule-(ii) facts (no floor) can't systematically push out
    v1-merged facts that cleared the v1 floor. Record how often the
    displacement happens in calibration.
+
+## EXPERIMENTS REQUESTED (r28)
+
+Same status as the r25/r26/r27 lists: requests, not acceptance gates; the
+acceptance letter (§7) stays exactly as Kurt pinned it.
+
+1. **Real hop SQL dry run** (r28-M1). On a scratch copy, run the
+   corrected candidate SQL (evidence `content_hash` → chunks ∪ proposal
+   `doc_id`). Expected: 47 docs, 261 chunks, 62 hash-hop chunks —
+   matching investigation v10 line 17. Bad: any other number means the
+   v10 measurements came from a query the spec didn't describe;
+   re-measure before calibrating.
+2. **`pending_reindex` + kick fixture** (r28-M2). One-slot channel,
+   stamp current, profile changed to stub key B, `queue_full_reindex(true)`,
+   then a non-forced `ingest_document_virtual` on a deferred row.
+   Expected: the row stays `pending_reindex`, the sweep's forced job
+   runs, `embed_key = B`. Bad: the row is `indexed` with key A (the
+   regression this fix prevents).
+3. **Pre-V28 RO gate** (r28-M3). A V27 fixture brain, `ct wisdom match
+   --two-stage` without ever opening RW. Expected: exit 0, v1 label,
+   audit `stale_embed_key = candidate count`. Bad: exit 1.
+4. **All-skip-class census** (r28-m1). Count candidate docs whose
+   chunks are all skip-class, split by `embed_key` state. Expected: 0.
+   Non-zero with a stale key means the gate currently falls back for no
+   scoring reason.
+5. **Instr1 merge parity** (r28-m2). Same probe under instr1: the
+   v1-merge score for a `user_stated` fact must equal
+   `wisdom_match_in_scheme`'s score for it, bit-identical. A mismatch
+   means the merge is scoring raw against instr1 blobs.
 
 ## Out of scope
 
