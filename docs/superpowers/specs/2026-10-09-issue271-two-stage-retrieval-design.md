@@ -1,20 +1,44 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-10 (rev 27 — Opus spec-tier r25 REQUEST CHANGES resolved:
-**r25-M1** adds the unreachable-doc repair path — bootstrap backfill re-embeds
-from stored chunk text regardless of file existence/status, plus the per-doc
-command `ct reindex repair-embed-key --stale` (§6, §9 step 3a); **r25-M2**
-corrects the `pending_reindex` rationale (those rows are created by TODAY's
-`queue_full_reindex(force_rechunk=true)` and `run_wiki_reembed` channel
-deferral) and adds the refusal reset `pending_reindex → indexed` (§8(c));
-**r25-M3** deletes the stamp's model component and the ≥90% rule — the stamp
-is CHUNKER-ONLY (§6, §8(c)); **r25-M4** pins rule (ii) to NO fact-level floor
-(§3); m1–m5 folded in (audit fields `open`/`top` replace `hit@2_open`/`fp_open`;
-COALESCE + check-before-embed + both-sides implementation; migration **V28**
-following the V24 pattern; typed `Err(IngestRefused)` signaling; §4 model-swap
-scope note); the reviewer's 8 experiments are recorded under
-**EXPERIMENTS REQUESTED (r25)** as calibration-time requests, not acceptance
-gates. Rev 26 had resolved the r24 REQUEST CHANGES under
+**Date:** 2026-10-10 (rev 28 — Opus r26 REQUEST CHANGES resolved:
+**r26-M1** closes the never-dark hole for source-less facts (fix (b)):
+gate-eligible entries with NO candidate doc — `user_stated`/`user_confirmed`,
+which have no `curated_proposal_sources` hop (`wisdom_match.rs:44-48`) — are
+ALSO scored by the v1 path in the same call (raw cosine vs the current key's
+v1 floor) and merged into the two-stage results under ONE ranked list, so an
+empty candidate set can never close the gate while a v1 floor exists (§3);
+fix (a) — empty-set v1 fallback — is REJECTED as strictly weaker (it
+abandons two-stage on no-librarian brains entirely); the audit line is
+RESTRUCTURED ONCE to SEVEN fields (`rule floor open top v1merged k
+stale_embed_key`), superseding rev 27's six-field pin (§6); **r26-M2**
+defines the coverage population as candidate docs with ≥1 chunk — a
+zero-chunk doc contributes no stage-1 vectors so its `embed_key` is
+irrelevant (§6); **r26-M3** makes a NON-FORCED pure rechunk a no-op SUCCESS
+(marks `indexed`, returns `Ok` — same as the `:692` short-circuit; the
+chunks are by definition the current bytes) while a FORCED pure rechunk
+stays refused, with the refusal reset extended to BOTH
+`pending`/`pending_reindex` (§8(c)); **r26-M4** pins the
+`Err(IngestRefused)` downcast at ALL FOUR callers — `ct ingest` and the
+`wisdom_deposit` kick (already pinned), `bulk_reindex` (refusal = SKIP +
+continue), and the pipeline worker (ONE informational stderr line, NOT
+`write_error_log`, plus the M3 status reset) (§8(c)); m1
+(`repair-embed-key --stale` added to §9 step 2; its write pinned to ONE
+IMMEDIATE transaction covering the embeddings UPDATE + `embed_key`, with
+the chunk-id set re-checked under the lock), m2 (rule (ii) BYPASSES the
+`wisdom_match.rs:379-381` floor test), m3 (NO second embed under
+`Scheme::Raw` — the stage-1 vector IS the fact vector; only instr1 embeds
+twice), m4 (`rule=none` reserved for fallback/uncalibrated/merge-only
+opens), m5 (V28 backfill ONE-SHOT, V27 precedent), m6 (verify-scratch
+rechunks the SCRATCH copy but writes the backfill + stamp to the LIVE DB;
+the experiments' dry run is print-only), m7 (drifted citations corrected:
+sweep re-enqueue `sweep.rs:134-139`, worker error arm
+`pipeline/mod.rs:257-261`) folded in; the reviewer's 5 experiments are
+recorded under **EXPERIMENTS REQUESTED (r26)**. Rev 27 had resolved the r25
+REQUEST CHANGES (repair path `ct reindex repair-embed-key --stale`;
+`pending_reindex` refusal reset; CHUNKER-ONLY stamp; rule-(ii) NO
+fact-level floor; audit fields `open`/`top`; V28 migration; typed
+`Err(IngestRefused)`; 8 experiments recorded as calibration-time requests,
+not acceptance gates). Rev 26 had resolved the r24 REQUEST CHANGES under
 Kurt's OPTION A — SIMPLIFY ruling of 2026-10-10: the grant/pass-docs/
 model-guard machinery is DELETED from this spec; in its place the gate runs a
 QUERY-TIME COVERAGE CHECK over the stage-1 candidate doc set (§6). M1 fixed
@@ -64,7 +88,7 @@ superseded twice over — the table itself is deleted under Option A (M4), so
   doc-level open (r1 m3, carried).
 - **r24 → rev 26:** M1–M5 + m1–m8 resolved as dated in the header; Option A
   deletes the pass machinery and installs the coverage check (§6).
-- **r25 → rev 27 (this rev):** M1 — repair path for candidate docs no
+- **r25 → rev 27:** M1 — repair path for candidate docs no
   existing tool can reach: `ct reindex repair-embed-key --stale` re-embeds
   stored chunks from the DB, no file read (§6); M2 — refusal of a forced job
   on a `pending_reindex` row RESETS it to `indexed` (§8(c)); M3 — stamp is
@@ -74,6 +98,17 @@ superseded twice over — the table itself is deleted under Option A (M4), so
   m3 migration V28 on the V24 pattern (§9); m4 `Err(IngestRefused)`
   signaling (§8(c)); m5 model-swap scope note (§4); 8 experiments recorded
   under EXPERIMENTS REQUESTED (r25).
+- **r26 → rev 28 (this rev):** M1 — never-dark restored by construction:
+  source-less facts (`user_stated`/`user_confirmed`, no
+  `curated_proposal_sources` hop) are scored via the v1 path IN the same
+  call and merged into the two-stage list (§3); fix (a) empty-set fallback
+  REJECTED; audit line restructured ONCE to seven fields, superseding the
+  six-field pin (§6); M2 — coverage population = candidate docs with ≥1
+  chunk (§6); M3 — non-forced pure rechunk = no-op success; refusal reset
+  extended to BOTH statuses (§8(c)); M4 — `IngestRefused` downcast pinned
+  at all FOUR callers (§8(c)); m1–m7 folded in (§6, §9 step 2, §3, §9
+  step 1, §8(c), experiments); 5 experiments recorded under EXPERIMENTS
+  REQUESTED (r26).
 
 ## 1. Problem
 
@@ -180,20 +215,27 @@ disagree about which facts are eligible. Parity guard for >1024 excludes.
 - (i) restricted-set fact-cosine floor — score the facts of matched docs
   with the existing raw cosine, open on a floor calibrated against the
   261-chunk restricted set. **Query vector under instr1 (rev 5, Opus r3
-  M4):** rule (i) uses a SECOND embed of the query with the scheme
-  prefix (`query_text_for_scheme`, as the v1 gate does at
+  M4; r26 m3):** rule (i) uses the scheme-prefixed query embed
+  (`query_text_for_scheme`, as the v1 gate does at
   `tools/src/queries.rs:788`) — never a raw-query-vs-instr1-blob
   comparison (PR #270 showed those cells' floors differ: 0.70 vs 0.64).
-  The extra embed is once per gated message, only when the gate is
-  two-stage-active; its latency is recorded in the calibration artifact.
+  **Embed count under each scheme (r26 m3, pinned):** when the read
+  scheme is `raw`, `query_text_for_scheme` returns the query UNCHANGED
+  (`src-tauri/src/embed_scheme.rs:149-150`), so the "second" embed would
+  be an identical network call — the stage-1 raw query vector IS the
+  fact-vector embed and is REUSED; raw does ONE embed per gated message.
+  Only `instr1` embeds twice (raw stage-1 embed + prefixed fact-vector
+  embed). The embed-skip paragraph below covers both; the per-message
+  embed count and latency are recorded in the calibration artifact.
   **Embed-skip covers BOTH embeds (rev 6, Opus r4 m4; r25-M4 extends to
   rule (ii)):** the CLI
   embed-skip at `tools/src/queries.rs:791`, once it gains the
   both-keys-missing condition (§4), must skip the stage-1 raw embed
   when the TWO-STAGE floor is missing as well as the v1 embed when the
   v1 floor is missing — a v1 fallback then costs one embed, not two.
-  **r25-M4 (pinned):** rule (ii) ALSO needs the scheme-prefixed second
-  embed — its entry scores are the rule-(i) restricted-set fact cosine —
+  **r25-M4 (pinned):** rule (ii) ALSO needs the scheme-prefixed
+  fact-vector embed (raw: the same single embed, reused per r26 m3) —
+  its entry scores are the rule-(i) restricted-set fact cosine —
   so this embed-skip paragraph covers rule (ii) exactly as it covers
   rule (i);
 - (ii) chunk-score floor with chunk-level membership — open when the
@@ -208,21 +250,54 @@ disagree about which facts are eligible. Parity guard for >1024 excludes.
   to the curated facts") and v10's doc→facts stage-2 hop; the audit
   line's FP therefore measures gate-OPEN decisions, not per-fact
   injection.)
-  **Rule-(ii) fact selection — NO fact-level floor (r25-M4, pinned):**
+  **Rule-(ii) fact selection — NO fact-level floor (r25-M4, pinned;
+  r26 m2 implementation pin):**
   the chunk-score floor is the ONLY abstention test under rule (ii); no
-  per-fact floor is applied to the entries the opened doc carries. The
+  per-fact floor is applied to the entries the opened doc carries.
+  **r26 m2: rule (ii) therefore BYPASSES the `raw < floor` test at
+  `wisdom_match.rs:379-381`** — the implementer CANNOT reuse
+  `gated_entries` as-is for the rule-(ii) entry selection, because that
+  loop drops `raw < floor` entries before the sort/truncate, which would
+  silently apply the v1 floor and contradict r25-M4. The selection passes
+  NO floor into the loop (e.g. a `floor = None` parameter) so the
+  floor-drop branch is skipped while the weighted-cosine sort and
+  truncate-to-`max` are reused.
+  The
   facts are ranked by WEIGHTED fact cosine — the same weighted-cosine
   path `gated_entries` already uses (`wisdom_match.rs:391-400`), which
-  requires the scheme-prefixed SECOND query embed (the raw cosine in
+  requires the scheme-prefixed query embed (the raw cosine in
   that path compares a prefixed query vector against scheme-prefixed
-  fact blobs) — and truncated to `max`. The chunk score selects WHICH
+  fact blobs; raw reuses the single stage-1 embed, r26 m3) — and
+  truncated to `max`. The chunk score selects WHICH
   docs open; it is never reported as an entry score
   (`WisdomItem.score` is documented "Raw cosine for entries",
   `wisdom_match.rs:74-75`, and corrections carry `null`). Ordering and
   capping are `gated_entries`'s
   existing sort-by-weighted-cosine then truncate-to-`max`
-  (`wisdom_match.rs:391-400`) — unchanged. Injection volume per open is
+  (`wisdom_match.rs:391-400`) — unchanged, minus the `:379-381`
+  floor-drop (r26 m2). Injection volume per open is
   recorded in the calibration artifact (r24 E7).
+
+**Source-less facts — the v1-merge (r26-M1, fix (b), PINNED):** the
+candidate set is built only through the `curated_proposal_sources →
+documents` hop, so gate-eligible entries with NO proposal-source edge —
+the `user_stated`/`user_confirmed` provenances (`wisdom_match.rs:44-48`;
+today's live brain: 3 such entries) — are carried by NO candidate doc and
+would never be scored under two-stage. An all-source-less brain would then
+be permanently dark (empty set ⇒ "below floor" on every message) while v1
+would have opened — a violation of the never-dark invariant. Fix, pinned:
+whenever the gate runs two-stage, eligible facts with NO source doc are
+ALSO scored via the v1 path in the SAME call — raw cosine of the message
+against `llm_wiki_entries.embedding_blob` (`gated_entries`' path, floor =
+the current key's v1 floor) — and the results are MERGED with the
+two-stage opens into ONE ranked list (weighted-cosine ordering, then
+truncate to `max`). Never-dark is therefore restored BY CONSTRUCTION: the
+gate can never be closed by an empty-or-dark candidate set while a v1
+floor exists, and a `user_stated` fact can open on a mixed brain. Reviewer
+fix (a) — an empty candidate set falls back to v1 wholesale — is
+REJECTED: it is strictly weaker, abandoning two-stage entirely on
+no-librarian brains instead of merging. Test rows: an all-`user_stated`
+brain stays openable; a `user_stated` fact opens on a mixed brain (§10).
 
 The paired live calibration (acceptance, below) picks the rule and the
 floor. **Floor storage + key shape (rev 5, Opus r3 m2):** two-stage
@@ -253,10 +328,15 @@ to `gate_floor` so the existing
 **Tie-break (GLM r1 minor-5):** if both rules pass the letter,
 pick by higher hit@2, then lower FP, then rule (i) (simpler path).
 
-**Empty closed set (GLM r1 minor-6):** with two-stage active and zero
-eligible fact-bearing docs (fresh or emptied brain), the gate is closed
-and the audit line is still emitted — the empty set is "below floor,"
-not an error. (Coverage over an empty candidate set is vacuously
+**Empty closed set (GLM r1 minor-6; r26-M1 amends the consequence):**
+with two-stage active and zero eligible fact-bearing docs (fresh or
+emptied brain), the candidate set is empty and the gate is CLOSED only if
+the v1-merge also yields nothing — with a v1 floor present the §3
+v1-merge still scores source-less facts, so an empty candidate set no
+longer implies a closed gate; when the merge too yields nothing (no
+eligible entries at all), the gate is closed and the audit line is still
+emitted — the empty set is "below floor," not an error. (Coverage over an
+empty candidate set is vacuously
 complete; the floor-missing rules of §4 still govern.)
 
 ## 4. Floor-missing semantics — ONE rule (r9 M1)
@@ -375,6 +455,10 @@ per doc, one-time, ~291 live docs.
 **The stamp is CHUNKER-ONLY (r25-M3):** verify-scratch writes the stamp
 iff the chunker fingerprint it computes on the scratch rechunk is
 current; the stamp has NO model component and there is NO ≥90% rule.
+**Scratch/live split (r26 m6, pinned):** verify-scratch rechunks on the
+SCRATCH copy (the copy the comparison runs against), but the two writes —
+the `embed_key` backfill and the chunker stamp — go to the LIVE DB; a
+sample verdict is computed on scratch and applied live, never the reverse.
 Rev 26's model component and threshold are DELETED: under Option A
 nothing read them (the funnel refuses on the CHUNKER component only,
 §8(c), and the coverage SQL reads only `documents.embed_key`), so the
@@ -384,11 +468,13 @@ invariant. What does the work instead: the per-doc sampled backfill
 operate per doc. The backfill match ratio is still computed and
 PRINTED by verify-scratch as artifact evidence; it gates no write.
 
-**THE COVERAGE CHECK (Option A; r24 M2/M4 resolution) — replaces the
-grant/in-flight-pass guard of rev 25 §6 as the primary mechanism:**
+**THE COVERAGE CHECK (Option A; r24 M2/M4 resolution; population r26-M2)
+— replaces the grant/in-flight-pass guard of rev 25 §6 as the primary
+mechanism:**
 
 At gate time (whenever two-stage would run), the gate computes over the
-stage-1 CANDIDATE doc set (hash-hop deduped, gate-eligible, BEFORE the
+stage-1 CANDIDATE doc set — **defined (r26-M2, pinned) as candidate docs
+with AT LEAST ONE CHUNK** (hash-hop deduped, gate-eligible, BEFORE the
 `embed_key` exclusion):
 
 ```sql
@@ -400,6 +486,15 @@ SELECT COUNT(*),
 a cheap two-aggregate query over ~47 rows. **Pinned threshold:
 coverage must be 100% — every candidate doc must carry the current
 profile key — or the gate falls back to v1 (§4's one rule).**
+**Zero-chunk candidate docs (r26-M2, pinned):** a doc with ZERO chunks
+contributes no stage-1 vectors, so its `embed_key` is irrelevant to the
+gate's scoring and it is NOT part of the coverage population — coverage
+is computed over candidate docs with ≥1 chunk (the definition above),
+never over all candidate docs. A vacuous `embed_key` write for zero-chunk
+docs was considered and REJECTED (it writes a value nothing reads and
+implies vectors the doc does not have). A census experiment
+(`EXPERIMENTS REQUESTED (r26)`, E1) verifies the live brain has 0
+zero-chunk candidate docs.
 **Edge cases pinned (r25 m2):** `SUM` over an empty set is NULL, so the
 covered count is pinned to `COALESCE(…, 0)` and COUNT 0 = the candidate
 set is EMPTY = vacuously covered (the empty-closed-set rule of §3).
@@ -493,23 +588,27 @@ is no watcher/kick revival path under Option A — that is accepted, and
 is why the pinned threshold is enforced at query time rather than
 trusted to ingest-time revival.
 
-**Audit line (r24 m1 — full field list pinned ONCE, here; r25 m1 swaps
-two fields):**
-`wisdom_two_stage_audit` carries EXACTLY SIX fields, in this order:
-`rule=<i|ii|none> floor=<key> open=<0|1> top=<score>
+**Audit line (r24 m1; r25 m1 swapped two fields; r26-M1 + r26 m4
+RESTRUCTURE the line ONCE — this supersedes the six-field pin):**
+`wisdom_two_stage_audit` carries EXACTLY SEVEN fields, in this order:
+`rule=<i|ii|none> open=<0|1> top=<score> v1merged=<n> floor=<key>
 k=<k> stale_embed_key=<n>` — where `stale_embed_key` counts
-gate-eligible candidate-set docs with NULL/stale `embed_key`
-(i.e. 47 − covered count on the live brain today), `rule=none` for a
-closed or fallen-back gate, and `<n>` counts vs the FULL candidate set
-(so a v1 fallback under low coverage still reports HOW stale the set
-is — the number is actionable after the fact, r24 M2). **r25 m1: the
-rev-26 fields `hit@2_open`/`fp_open` are REPLACED by the runtime facts
-`open=<0|1>` and `top=<score>` — hit/FP depend on probe labels only
-the calibration harness has, so the harness derives hit and FP from
-the probe labels and the pinned `open`/`top` fields; the gate itself
-cannot compute them.** The field COUNT stays pinned at six. The pinned
-5-field wisdom stderr line is untouched. The line-shape test asserts
-all six fields (§10).
+gate-eligible candidate-set docs (≥1 chunk, r26-M2) with NULL/stale
+`embed_key` (i.e. 47 − covered count on the live brain today), `<n>`
+counts vs the FULL candidate set (so a v1 fallback under low coverage
+still reports HOW stale the set is — the number is actionable after the
+fact, r24 M2), and `v1merged=<n>` counts facts admitted by the §3
+v1-merge (source-less facts scored via the v1 path in the same call; 0
+whenever the merge admits nothing). **Field semantics pinned (r26 m4):**
+`rule=none` is RESERVED for opens that no two-stage rule produced — the
+§4 no-librarian merge-only v1 open, any §4 fallback/uncalibrated open,
+and §4's fourth cell; a two-stage gate that CLOSES below its own floor
+reports `rule=i` or `rule=ii` with `open=0`, never `rule=none`. Hit/FP
+remain harness-derived: the calibration harness derives hit and FP from
+the probe labels plus the pinned `open`/`top` fields; the gate itself
+cannot compute them (r25 m1, unchanged). The field COUNT stays pinned at
+seven. The pinned 5-field wisdom stderr line is untouched. The line-shape
+test asserts ALL SEVEN fields, including the new `v1merged` (§10).
 
 ## 7. Floors + acceptance letter
 
@@ -737,9 +836,10 @@ are in scope:
   hard-codes `force=true`; there is no `--force` flag in `Cmd::Ingest`),
   `tools/src/bin/bulk_reindex.rs:129`, `queue_full_reindex`
   (`src-tauri/src/lib.rs:2324`), and the automatic forced producers —
-  the watchdog sweep re-enqueues `pending_reindex` as a *forced* rechunk
-  (`src-tauri/src/pipeline/watchdog/sweep.rs:128-136` — the actual
-  re-enqueue; `:73-82` is the status constant's doc comment) and
+ the watchdog sweep re-enqueues `pending_reindex` as a *forced* rechunk
+ (`src-tauri/src/pipeline/watchdog/sweep.rs:134-139` — the actual
+ re-enqueue decision; r26 m7 corrects the drifted `:128-136`;
+ `:73-82` is the status constant's doc comment) and
   `rechunk_for_reembed` is `force:true`
   (`src-tauri/src/pipeline/mod.rs:72-74`).
   **Refusal scope (rev 5, Opus r3 M1; rev 7 r5 M1; rev 8 r6 M1;
@@ -753,7 +853,16 @@ are in scope:
   inside the swap transaction (a new column on `documents`). A **pure
   rechunk** = `last_indexed_hash == the file's current hash AND the doc
   has ≥1 chunk`. A pure rechunk is refused whenever the stamp's
-  CHUNKER component is not verified current, forced or not. A
+  CHUNKER component is not verified current. **Forced vs non-forced
+  (r26-M3, pinned):** a pure rechunk arriving on a FORCED job (the only
+  kind today's forced producers send for unchanged bytes) is REFUSED —
+  that is the destructive-write protection. A pure rechunk on a
+  NON-FORCED job is NOT refused at all: the chunks are by definition
+  the current bytes (nothing destructive to protect), so the job is a
+  NO-OP SUCCESS — it marks the row `indexed` and returns `Ok(())`,
+  exactly like the `pipeline/mod.rs:692` short-circuit it sits beside.
+  Refusals therefore arise only on the forced path, and every refusal
+  site below is a forced caller. A
   watcher/`queue.rs` edit has `last_indexed_hash` = the OLD hash ⇒
   mismatch ⇒ normal diff-swap path — indexed with the new content,
   never refused. Unchanged files match and are refused (nothing to
@@ -846,33 +955,51 @@ are in scope:
   `queue_full_reindex(force_rechunk=true)` stages them when the
   channel is full (`lib.rs:2378-2391`) and `run_wiki_reembed` does the
   same (`lib.rs:2815-2825`); the sweep then re-enqueues them as forced
-  rechunks (`sweep.rs:133-137`) — and the spec's own backfill clause
+  rechunks (`sweep.rs:134-139`; r26 m7 corrects the drifted
+  `:133-137`) — and the spec's own backfill clause
   (`WHERE status IN ('indexed','pending_reindex')`, above) already
   assumed they exist.** With the funnel refusal now applying only to
   genuine unchanged-file forced rechunks (a
   no-op-by-definition job), there is no loop to suppress and no record
   is written.
-  **Refusal row-state PINNED (r25-M2, replaces rev 26's "status
-  ENTIRELY untouched"):** a refused forced rechunk leaves the doc's
+  **Refusal row-state PINNED (r25-M2; reset widened to BOTH statuses
+  r26-M3):** a refused forced rechunk leaves the doc's
   status untouched **EXCEPT one reset**: when the refused row's status
-  is `pending_reindex`, the refusal path RESETS it to `indexed` with a
-  conditional `UPDATE documents SET status='indexed' WHERE
-  status='pending_reindex' AND id=?` — the data is intact (a refusal
+  is `pending` OR `pending_reindex`, the refusal path RESETS it to
+  `indexed` with a conditional
+  `UPDATE documents SET status='indexed' WHERE status IN
+  ('pending','pending_reindex') AND id=?` — the data is intact (a refusal
   changes nothing), so the reset is sound, and without it the row
   would sit `pending_reindex` forever: the sweep claim is kept while
   the row stays sweepable (`retain_sweepable`, `sweep.rs:62-64`), each
   restart re-enqueues and refuses it again, and
   `list_indexed_user_doc_paths` (`db/queries.rs:38-41`) excludes it
-  from every later reindex pass. An `indexed` row, by contrast, stays
+  from every later reindex pass. (`pending` joined the reset at r26-M3
+  for the same reason `pending_reindex` needed it at r25-M2 — a refused
+  row left `pending` is equally sweep-stuck; the reset remains a single
+  conditional UPDATE, one statement.) An `indexed` row, by contrast, stays
   `indexed` — nothing changes. **r24 m3 disposition (carried, now on
   corrected grounds):** no refusal-record table, no re-sweep loop.
   The replacement tests in §10 assert BOTH cases: a refused forced
   rechunk on an `indexed` row leaves it `indexed` (pending counter at
   baseline, no refusal record anywhere), and a refused forced job on a
   `pending_reindex` row resets it to `indexed` and it is not
-  re-swept. §10 also carries the reviewer's fixture: GUI reembed
+  re-swept. **r26-M3: the reset also fires on a `pending` row —
+  edit-then-revert with the stamp missing on a `pending` row leaves it
+  `indexed` after the refusal**. §10 also carries the reviewer's fixture:
+  GUI reembed
   queued with a full channel and a missing stamp ⇒ every deferred row
-  ends `indexed` and outside the sweep claim set.
+  ends `indexed` and outside the sweep claim set. **r26-M3 non-forced
+  fixture: a NON-FORCED pure rechunk (unchanged hash + ≥1 chunk + stale
+  stamp) is a no-op SUCCESS — row marked `indexed`, `Ok(())`, no refusal
+  record, no stderr refusal line; only a FORCED pure rechunk is
+  refused.** **r26-M4 refusal-storm rows (both new caller sites): a
+  `bulk_reindex` pass over a set containing refused paths does NOT abort
+  — the refusal is counted as a SKIP, the pass continues, and the linker
+  still runs over the processed entity_ids; a pipeline-worker refusal
+  produces exactly ONE informational stderr line, ZERO
+  `write_error_log` entries, and the M3 status reset applied.**
+
   **Funnel decision table (Option A — three rows; the rev-9 four-row
   table died with the grant; r25-M3: the stamp is CHUNKER-ONLY, so the
   rev-26 "stamp read = (chunker component, model component)" phrasing
@@ -893,13 +1020,31 @@ are in scope:
     `ct reindex verify-scratch`).
   Zero-chunk docs bypass the whole table (nothing to lose); content
   edits bypass it (diff-swap).
-  **Refusal signaling (r25 m4, pinned):** the forced path signals a
+  **Refusal signaling (r25 m4; ALL FOUR callers pinned r26-M4):** the
+  forced path signals a
   refusal with a TYPED ERROR, `Err(IngestRefused)` — not `Ok(())`.
-  `ct ingest` downcasts it in `cmds.rs` and treats it as success (exit
-  0, §8(c)'s loop accounting below); `wisdom_deposit`'s kick
-  (`wisdom_deposit.rs:379-388`) likewise treats `IngestRefused` as
-  success and still records `chunked` — an unchanged file's chunks are
-  valid, so the downstream state is identical. This is a SINGLE typed
+  Every caller downcasts it; a refusal is never a generic `Err`:
+  1. `ct ingest` downcasts it in `cmds.rs` and treats it as success (exit
+     0, §8(c)'s loop accounting below);
+  2. `wisdom_deposit`'s kick
+     (`wisdom_deposit.rs:379-388`) likewise treats `IngestRefused` as
+     success and still records `chunked` — an unchanged file's chunks are
+     valid, so the downstream state is identical;
+  3. **`bulk_reindex` (r26-M4):** a refusal is counted as a SKIP for
+     that path — one informational stderr line, no `?` propagation, the
+     pass CONTINUES to the remaining paths, and the linker loop still
+     runs over the processed entity_ids (today `bulk_reindex.rs:129-141`
+     aborts the whole pass on the first `Err` via `?`; the downcast
+     replaces that abort for `IngestRefused` only — genuine errors still
+     abort);
+  4. **the pipeline worker (r26-M4):** the worker's generic `Err` arm
+     (`pipeline/mod.rs:257-261`) writes "ingest error" to stderr AND
+     `write_error_log` — an `IngestRefused` must NEVER reach that arm
+     un-downcast. The worker downcasts FIRST: on `IngestRefused` it logs
+     ONE informational stderr line (NOT `write_error_log` — a refusal is
+     not an error) and applies the §8(c) M3 status reset
+     (`pending`/`pending_reindex` ⇒ `indexed`), then continues the loop.
+  This is a SINGLE typed
   error, not an enum: §9's "no `IngestOutcome` enum" language stands.
   **`ct ingest` loop accounting (rev 6, Opus r4 m1):** the refusal
   outcome is treated as a SKIP in the per-file loop at
@@ -956,7 +1101,18 @@ short-circuit is restored as-is, §6).
    column-existence pre-check, re-inspect UNDER `BEGIN IMMEDIATE`, stamp
    last (the V21 non-idempotent ALTER precedent and its fix are at
    `db/connection.rs:902-948`). Its STAMP is gated on V22 having stamped,
-   like V23–V27, so a rootless open cannot mask a deferred V22.** Then: stage-1 search + hop + decision rules +
+   like V23–V27, so a rootless open cannot mask a deferred V22.**
+   **The V28 backfill is ONE-SHOT (r26 m5, pinned):** if V28 carries an
+   `embed_key` backfill statement (e.g. seeding the key for docs whose
+   chunks provably carry the current model's vectors), it executes ONLY
+   in the migration call that adds the column, inside the same
+   transaction — the V27 precedent
+   (`db/connection.rs:973-980`: the `embed_scheme` UPDATE runs only in
+   the `ALTER TABLE` call, because `embed_scheme` is unindexed and an
+   ungated UPDATE would full-scan `llm_wiki_entries` and take the write
+   lock on EVERY open forever). Repeating the backfill on every open is
+   therefore FORBIDDEN: the migration's work is guarded by the
+   column-existence check, never re-run. Then: stage-1 search + hop + decision rules +
    labels/fallbacks + the coverage check, opt-in (`--two-stage`). This
    step is testable against a live-brain fixture ONLY after step 2's
    bootstrap has run on that fixture (dependency: coverage must be
@@ -969,7 +1125,10 @@ short-circuit is restored as-is, §6).
    breaker + `ct heal --reset-breaker` / `--allow-bulk` flags + the
    `librarian_evidence_seen` marker (trigger + migration backfill) +
    `ct reindex verify-scratch` (bootstrap command: stamp write, sampled
-   backfill, chunk-only scope). NO pass-docs storage, NO grants, NO
+   backfill, chunk-only scope)
+   **+ `ct reindex repair-embed-key --stale` (r26 m1: the §6 r25-M1
+   repair command joins the step 2 build list — it is part of the same
+   ONE PR, not a follow-up)**. NO pass-docs storage, NO grants, NO
    refusal-record table, NO frontend work, NO `IngestOutcome` enum (no
    caller branches on a refusal outcome anymore — `ct ingest`'s loop
    treats the refusal as a skip internally, §8(c)). Note
@@ -977,6 +1136,16 @@ short-circuit is restored as-is, §6).
    `list_indexed_user_doc_paths` `:38-41`) is distinct from
    `tools/src/queries.rs` (embed-skip `:791`, query_text_for_scheme
    `:788`); full paths used throughout.
+   **repair-embed-key write shape PINNED (r26 m1):** the repair
+   command's write is ONE IMMEDIATE transaction covering, together, (a)
+   the in-place embeddings UPDATE (the doc's chunks' vectors, from
+   stored chunk text) and (b) `documents.embed_key =
+   gate_model_key(profile, stub-as-used)` — and it RE-CHECKS the doc's
+   chunk-id set UNDER THE LOCK (the §8(a) swap-race rule: if the chunk
+   set changed between the read and the transaction, retry the re-embed
+   rather than writing vectors for stale chunk ids). No partial write
+   ever lands: vectors without the key, or the key without matching
+   vectors.
 3. Paired live calibration = the acceptance gate; pick rule + floor;
    flip-to-default if the letter passes.
    **3a (r22 MAJOR-4) runs BEFORE step 3's calibration:
@@ -1029,16 +1198,28 @@ short-circuit is restored as-is, §6).
   ⇒ two-stage runs; one stale doc in the candidate set ⇒ v1 fallback +
   `stale_embed_key=1` on the audit line; ALL candidate `embed_key` NULL
   (stamp present, no backfill) ⇒ v1 fallback, never closed; empty
-  candidate set ⇒ closed (vacuous coverage, §3) with audit line
+  candidate set with the v1-merge admitting nothing ⇒ closed (vacuous
+  coverage, §3) with audit line
   emitted** / fourth cell: two-stage floor present + v1 floor missing +
   coverage below threshold ⇒ uncalibrated no-open (asserted
   dark-adjacent BY DESIGN).
+- **r26-M1 v1-merge tests:** an ALL-`user_stated` brain (no candidate
+  docs at all, v1 floor present) STAYS OPENABLE — the v1-merge scores the
+  source-less facts and the gate opens when one clears the v1 floor,
+  audit `v1merged ≥ 1`; a `user_stated` fact OPENS on a MIXED brain (it
+  appears in the merged list alongside two-stage opens, one ranked list,
+  truncate to `max` respected).
+- **r26-M2 zero-chunk test:** a candidate doc with 0 chunks is excluded
+  from the coverage population — its NULL/stale `embed_key` neither
+  lowers coverage nor appears in `stale_embed_key` (§6).
 - Labels: pinned 5-field stderr line byte-identical under both paths;
-  `wisdom_two_stage_audit` line shape asserts ALL SIX pinned fields
-  (§6) in pinned order — `rule`, `floor`, `open`, `top`, `k`,
-  `stale_embed_key` (r25 m1: `hit@2_open`/`fp_open` are gone; the
+  `wisdom_two_stage_audit` line shape asserts ALL SEVEN pinned fields
+  (§6) in pinned order — `rule`, `open`, `top`, `v1merged`, `floor`,
+  `k`, `stale_embed_key` (r26-M1 restructure supersedes the six-field
+  pin; r25 m1: `hit@2_open`/`fp_open` are gone; the
   harness derives hit/FP from probe labels plus the `open`/`top`
-  runtime facts) incl. `stale_embed_key=<n>` (r24 m1).
+  runtime facts) incl. `stale_embed_key=<n>` (r24 m1); `rule=none`
+  never on a two-stage close (r26 m4).
 - Diff-swap: unchanged-hash preservation; changed-hash in-place UPDATE
   (no duplicate embeddings — `semantic_search` returns the chunk once);
   empty-hash rows removed; mid-document-insertion behavior (documents the
@@ -1091,8 +1272,10 @@ short-circuit is restored as-is, §6).
   **r25 m2: `COALESCE(…,0)` pinned — the SQL's covered count over an
   empty candidate set returns 0 with COUNT 0 (vacuously covered), not
   NULL; the coverage query runs BEFORE any embed in the gate path**.
-- Audit line: six fields, order, and `stale_embed_key` arithmetic
-  (47-doc fixture with 2 stale ⇒ `stale_embed_key=2`).
+- Audit line: seven fields, order, and `stale_embed_key` arithmetic
+  (47-doc fixture with 2 stale ⇒ `stale_embed_key=2`); `v1merged` present
+  and an integer, `=0` when the v1-merge admits nothing (r26-M1);
+  `rule=none` never appears on a two-stage close (r26 m4).
 - Acceptance: paired live calibration on the 150-probe real-traffic set,
   both arms same run, letter numbers as pinned by Kurt; artifact records
   grid size + held-out splits (informational, r24 m7/E5) and the
@@ -1122,7 +1305,11 @@ letter (§7) stays exactly as Kurt pinned it.
    valid docs and coverage would never reach 100%.
 3. **Dry run of bootstrap + coverage on a scratch brain.** Run
    `ct reindex verify-scratch`; print per-doc sample verdicts and final
-   candidate coverage. Expected: 47/47. Bad result: below 100% with no
+   candidate coverage. **This experiment is PRINT-ONLY (r26 m6): it
+   writes NOTHING to either DB — the scratch copy is discarded and the
+   live DB is not touched; the real bootstrap (stamp + backfill to the
+   live DB) is the §9 step 1 run, not this dry run.** Expected: 47/47.
+   Bad result: below 100% with no
    repair path available (see 1; the r25-M1 repair command is the fix).
 4. **Stuck-`pending_reindex` fixture** (r25-M2). One-slot channel,
    missing stamp, `run_wiki_reembed`; assert the deferred rows' final
@@ -1136,7 +1323,9 @@ letter (§7) stays exactly as Kurt pinned it.
    worse" passes.
 6. **Stage-1 SQL latency.** Time stage-1 plus coverage on the live brain
    (261 chunks; time the full ~291-doc scan as a worst case) and the
-   second embed's p50/p95 per gated message. Bad result: more than
+   fact-vector embed's p50/p95 per gated message (r26 m3: this is a
+   SECOND embed only under `instr1`; under `raw` the stage-1 vector is
+   reused and there is no second embed). Bad result: more than
    300 ms added to the gate path.
 7. **Calibration robustness** (informational; §7's held-out splits).
    Besides the five held-out splits, report hit@2 with a bootstrap 95%
@@ -1148,6 +1337,50 @@ letter (§7) stays exactly as Kurt pinned it.
    (NULL out one doc on a scratch copy). Assert the stdout label falls
    back to v1, `stale_embed_key=1` appears, and the v1 numbers match the
    baseline arm — the fallback must be exactly the v1 path.
+
+## EXPERIMENTS REQUESTED (r26)
+
+The r26 reviewer requested five experiments. Same status as the r25
+list: requests to run during implementation and calibration, NOT new
+acceptance gates; the acceptance letter (§7) stays exactly as Kurt
+pinned it.
+
+1. **Expanded census of the candidate set** (read-only SQL on a scratch
+   copy; extends the r25 E1 census). Count, in addition to the r25 E1
+   columns: (a) ZERO-CHUNK candidate docs (r26-M2's coverage population
+   excludes them; expected 0); (b) gate-eligible entries that are
+   `user_stated` or `user_confirmed` — the source-less facts the §3
+   v1-merge exists to carry (expected 3 on the live brain); (c)
+   `documents` rows with `status = 'pending'` AND
+   `hash = last_indexed_hash` — rows the §8(c) refusal reset (r26-M3)
+   would have left stuck pre-fix (expected 0). Bad result on any:
+   (a)/(c) non-zero means live data already hits the fixed edges — run
+   the repair/reset paths first; (b) ≠3 means the v1-merge test counts
+   change, not the design.
+2. **No-librarian brain fixture.** A brain with
+   `librarian_evidence_seen` ABSENT and no candidate docs: the gate
+   opens as v1 would (the §4 no-librarian branch) and reports
+   `rule=none` (r26 m4) — the v1-merge and the branch must be
+   indistinguishable from today's v1 behavior except for the audit
+   line.
+3. **Edit-then-revert watcher fixture** (companion to the §10 M3
+   non-forced fixture). Edit a file, let the watcher enqueue, revert it
+   before the worker picks it up, with the stamp missing: the resulting
+   pure rechunk is a NO-OP SUCCESS (r26-M3) — row `indexed`, `Ok(())`,
+   no refusal, no `write_error_log` line; under the pre-fix behavior
+   this edit was refused on a `pending` row and stayed sweep-stuck.
+4. **Refusal storm** (r26-M4 acceptance for the two new caller pins).
+   Force-refuse N paths (missing stamp, unchanged bytes) through (a)
+   `bulk_reindex` and (b) the pipeline worker. Assert: `write_error_log`
+   count = 0 after the storm (the worker logged informational lines
+   only); `bulk_reindex` processed every non-refused path AND ran the
+   linker over the processed entity_ids despite the refusals.
+5. **Raw-scheme embed count** (folds into the r25 E6 latency
+   experiment). Assert the per-gated-message embed count: ONE embed
+   under `Scheme::Raw` (the stage-1 vector IS the fact vector —
+   `query_text_for_scheme` returns the query unchanged,
+   `src-tauri/src/embed_scheme.rs:149-150`; r26 m3), TWO under `instr1`.
+   The r25 E6 "second embed" p50/p95 measurement applies to instr1 only.
 
 ## Out of scope
 
