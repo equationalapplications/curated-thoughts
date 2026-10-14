@@ -1,7 +1,7 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
 **Date:** 2026-10-10 (rev 32 — Opus r30 REQUEST CHANGES resolved: forced-rechunk refusal replaced by a per-doc lossless hash check — model swaps no longer blocked by a missing stamp (M1); undefined "skip-set classes" deleted, scorable = has an `embeddings` row (M2); rule (ii) stage-2 edge pinned to the evidence-hash edge + top-1 (M3); m1–m5 folded). Full per-round changelog: **Revision history** block below.
-**Status:** Draft
+**Status:** Approved — implementation cleared (external review: Gemini, 2026-10-14, verdict **Approved** at rev 32; see **EXTERNAL REVIEW** block at end of file).
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
 **Issue:** equationalapplications/curated-thoughts#271
@@ -1849,6 +1849,14 @@ Same status as prior lists: requests, not acceptance gates.
 6. **Read-only gate on a pre-V18 brain** (r30-m2). `ct wisdom match
    --two-stage` read-only against a V17 fixture. Expected: exit 0 with
    the v1 label. Bad: exit 1 with "no such table".
+7. **v1-merge latency & volume overhead** (Gemini external review,
+   2026-10-14). During the live paired calibration, instrument
+   `wisdom_two_stage_audit` to count facts processed via the structural
+   complement (v1-merge) and record P95 latency of the combined call.
+   Expected: complement size ≈ the 3 known `user_stated`/`user_confirmed`
+   facts; v1-merge latency overhead negligible. Bad: complement
+   unexpectedly large ⇒ the relational hop is broken for a swath of
+   facts, or the anti-join over-joins.
 
 ## Out of scope
 
@@ -1882,3 +1890,25 @@ as-is · curated-thoughts merges: regular merge commits only, no squash ·
 **Option A — SIMPLIFY (Kurt, 2026-10-10): keep `documents.embed_key` +
 diff-swap + breaker + funnel stamp; delete grant/pass-docs/model-guard
 machinery; query-time coverage check in its place (§6).**
+
+## EXTERNAL REVIEW (Gemini, 2026-10-14)
+
+Verdict: **Approved** at rev 32 — "You are fully cleared to move this out of
+Draft and begin implementation."
+
+Named strengths: v1-merge via structural complement (future-proof vs.
+hardcoded provenance lists; guarantees never-dark); result-level dedup
+(path-salted `content_hash` would break row-level dedup); rule (ii)
+evidence-hash edge pin (trigger-doc fan-out bounded); Option A query-time
+coverage check (graceful v1 degradation on mixed-vector state); per-doc
+lossless hash check (model upgrades without a fresh chunker stamp).
+
+Experiments requested by the reviewer, folded into the paired-calibration
+list: (1) v1-merge latency & volume overhead — experiment 7 above;
+(2) rule (ii) top-1 vs top-k ablation — already covered by experiment 5
+(r30-m1); if Top-1 Hit@2 lands substantially below Top-k at stable FP,
+revisit the r31-E5 Top-k opening variant.
+
+One caution taken from the review's framing: the complement-size expectation
+(≈ 3 facts) is a LIVE-DATA hypothesis, not a gate — the gate remains the
+paired-run pass rule (not worse than single-stage).
