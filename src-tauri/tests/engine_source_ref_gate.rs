@@ -48,7 +48,8 @@ fn installed_engine_setup_does_not_rewrite_ct_source_refs() {
     );
 
     // The gate is only meaningful against the pinned engine: assert the
-    // version the probe reports is exactly 7.11.2 before checking the
+    // version the probe reports matches the schema-guard pin (single source
+    // of truth — src-tauri/src/db/schema_guard.rs) before checking the
     // source_refs, so drift between the installed and pinned versions fails
     // loudly instead of silently passing against the wrong engine. The probe
     // degrades to 'unknown' when pnpm cannot read the installed version —
@@ -56,10 +57,11 @@ fn installed_engine_setup_does_not_rewrite_ct_source_refs() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let report: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("probe output was not JSON ({e}): {stdout}"));
+    let pinned = tauri_app_lib::db::schema_guard::PINNED_CORE_LLM_WIKI_VERSION;
     assert_eq!(
         report["engineVersion"].as_str(),
-        Some("7.11.2"),
-        "engine-in-the-loop gate must run against core-llm-wiki 7.11.2, got {:?}. \
+        Some(pinned),
+        "engine-in-the-loop gate must run against core-llm-wiki {pinned}, got {:?}. \
          A value of \"unknown\" means pnpm could not read the installed package \
          version — run `pnpm install` before this gate",
         report["engineVersion"]

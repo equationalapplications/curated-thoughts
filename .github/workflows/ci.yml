@@ -195,6 +195,12 @@ jobs:
       - name: Vitest
         run: pnpm test
 
+      # Unmocked engine sentinel: every vitest suite mocks core-llm-wiki, so
+      # this is the only check that runs the REAL installed engine (FTS state
+      # machine, migration gate). Node 22 needs --experimental-sqlite.
+      - name: core-llm-wiki runtime smoke (unmocked)
+        run: node --experimental-sqlite scripts/runtime-smoke-clw.mjs
+
       - name: ESLint (jsx-a11y enforced)
         run: pnpm run lint
 
