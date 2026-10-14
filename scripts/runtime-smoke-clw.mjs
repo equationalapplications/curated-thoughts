@@ -7,8 +7,9 @@
  * node:sqlite (bundled SQLite, FTS5-enabled) wrapped in the expo-sqlite
  * adapter shape CT's Tauri adapter implements:
  *
- *   setup() -> upsertGraph() -> syncSearchIndex() -> keyword search hits,
- *   no WikiSearchUnavailableError.
+ * setup() -> upsertGraph() -> syncSearchIndex() -> searchKeyword probe via
+ * __testAccess must return the written node (the discriminating convergence
+ * assertion; isKeywordAvailable() alone is vacuous on a fresh tiny store).
  *
  * Exit 0 = sentinel green. Any failure exits non-zero with the error.
  *
@@ -93,25 +94,29 @@ try {
 }
 
 // 3. Host-side convergence: no-arg syncSearchIndex() (the exact call the
-//    scheduler in src/lib/wiki.ts makes).
+//    scheduler in src/lib/wiki.ts makes). Before it, the upsertGraph node is
+//    stashed, not yet keyword-indexed; after it, the ledger drain must have
+//    indexed it. searchKeyword is the discriminating assertion (r2 finding 2:
+//    isKeywordAvailable() alone is vacuous — it never degrades on a fresh
+//    tiny store).
 try {
   await wiki.syncSearchIndex();
 } catch (e) {
   fail('syncSearchIndex threw', e);
 }
 
-// 4. Keyword availability assertion through the engine's test access surface
-//    (searchService.isKeywordAvailable() — the exact predicate the FTS state
-//    machine drives; read() additionally needs an LLM provider, out of scope
-//    for this sentinel).
-let available;
+// 4. The convergence sentinel: the written node must be keyword-findable.
+let hits;
 try {
-  available = wiki.__testAccess.searchService.isKeywordAvailable();
+  hits = await wiki.__testAccess.searchService.searchKeyword('quintessence', [ENTITY], 5);
 } catch (e) {
-  fail('isKeywordAvailable() probe threw', e);
+  fail('searchKeyword probe threw', e);
 }
-if (available !== true) {
-  fail('keyword search unavailable after syncSearchIndex() — FTS state machine did not converge');
+if (!Array.isArray(hits) || hits.length === 0) {
+  fail(`keyword index did not converge: searchKeyword returned ${JSON.stringify(hits)}`);
 }
-console.log('SMOKE OK: keyword search available after real-engine setup + write + convergence');
+if (!hits.some((h) => h.id === 'smoke-node-1')) {
+  fail(`keyword hits lack the written node: ${JSON.stringify(hits)}`);
+}
+console.log(`SMOKE OK: keyword index converged; ${hits.length} hit(s), incl. smoke-node-1`);
 process.exit(0);

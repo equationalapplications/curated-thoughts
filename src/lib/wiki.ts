@@ -468,6 +468,19 @@ export function scheduleSearchIndexCatchup(target: typeof wiki): void {
   _searchCatchupTimer = setInterval(runOnce, SEARCH_CATCHUP_INTERVAL_MS);
 }
 
+// Vite HMR: a module reload orphans the old 30s interval, which would keep
+// calling syncSearchIndex on a superseded wiki instance for up to
+// SEARCH_CATCHUP_MAX_ATTEMPTS attempts (~5 min). Bounded and self-terminating
+// either way; dispose anyway so dev reloads stay clean.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    if (_searchCatchupTimer) {
+      clearInterval(_searchCatchupTimer);
+      _searchCatchupTimer = null;
+    }
+  });
+}
+
 async function readClassifierStatus(): Promise<ClassifierStatus> {
   const s = await getClassifierStatus().catch(() => null);
   return s && typeof s.available === "boolean" ? s : CLASSIFIER_OFF;

@@ -1,10 +1,11 @@
 # Bump core-llm-wiki 7.11.2 → 7.13.0
 
 **Date:** 2026-10-14
-**Status:** Draft — review cycle 1 adjudicated: GLM r1 verdict "Changes requested"
-(SPEC COMPLIANT no; Critical 1 + Important 2 + Minor 2, all verified against the
-tree and adopted — see Key verification result, Runtime-diff risk, Approach
-items 5–6, Testing). Delta review pending.
+**Status:** Draft — review cycle 1 adjudicated (GLM r1 "Changes requested", all
+findings adopted); delta review cycle 2 adjudicated (GLM r2 "DELTA COMPLIANT
+yes / Changes requested": Important 1 spec-text sync + Important 2 smoke
+assertion strengthened to searchKeyword, Minors 3–5 applied — cap-guard left as
+benign, HMR disposal added, ~23 figure corrected). Delta-2 verification pending.
 **Branch:** `spec/deps-core-llm-wiki-7130`
 **Priority:** Medium — consumer adoption of two upstream releases; small, mechanical, but gates every later CT task that wants the FTS state machine (issue-271 two-stage retrieval consumes wiki search).
 
@@ -40,9 +41,9 @@ extracts `setupDatabase` DDL from the *installed package's* `dist/index.js` and
 compares it against the Rust constant `okf_ddl::LLM_WIKI_PACKAGE_DDL`. **Scope
 pin (GLM r1, finding 2): the extractor captures only the FIRST
 `await db.execAsync(\`...\`)` block after the setupDatabase marker
-(`ddl_compat.rs:31-36`); 7.13.0's setupDatabase contains ~23 further execAsync
-statements (conditional migrations, per-table index DDL, FTS pending-index DDL)
-outside the mirrored batch.** The proven claim is therefore: *the mirrored
+(`ddl_compat.rs:31-36`); 7.13.0's setupDatabase body itself contains one
+mirrored execAsync block, with further DDL living in helper calls and migration
+runners whose statements ride unmirrored.** The proven claim is therefore: *the mirrored
 bootstrap batch is unchanged between 7.11.2 and 7.13.0* — the same Rust constant
 passes against both pins [V — test run at 7.13.0 in the delivery worktree; the
 7.11.2-side run is recorded in the controller session transcript for
@@ -86,14 +87,20 @@ additions required by GLM r1 (Critical finding 1 — adopted in full):
    `syncSearchIndex()` calls, and nothing in CT (or react-llm-wiki 7.11.2)
    calls it. Verified feasible in the pinned tree [V — runtime probe:
    `createWiki(...)` instance exposes `syncSearchIndex` as a function through
-   the override mix]. Design (single-flight, no new deps):
+   the override mix]. Shipped design (GLM r2-adjudicated; single module-level
+   timer, no new deps):
    - after any successful `wiki.setup()` (the `wiki.ts:439` path and the
-     re-create path at `wiki.ts:488`), fire-and-forget one no-arg
-     `wiki.syncSearchIndex()` catch-up;
-   - extend the existing `onDiagnostic` forward (`wiki.ts:396`) to also
-     schedule a convergence retry when a keyword-unavailability diagnostic
-     arrives (bounded backoff, single in-flight guard, dropped if a newer
-     retry is pending).
+     re-create path at `wiki.ts:488`), an immediate no-arg
+     `wiki.syncSearchIndex()` plus a bounded retry loop: one call every 30s,
+     capped at 10 attempts; a newer setup replaces the previous loop's timer;
+   - **deliberate deviation from the r1-proposed design:** a
+     diagnostic-triggered retry was considered and DROPPED — the engine's
+     `WikiDiagnosticCode` union has no keyword-unavailability code (verified
+     against `testing-CqsXv2_l.d.ts:804`), so degraded search never emits a
+     diagnostic; it surfaces only as `WikiSearchUnavailableError`. The
+     setup-driven loop relies on the engine's internal re-init cooldown
+     (5s doubling to 5min, single-flight) to make extra attempts cheap.
+     GLM r2 adjudicated this deviation SOUND.
 6. **Unmocked runtime smoke test** (`scripts/runtime-smoke-clw.mjs` + CI step):
    every TS test mocks the engine package, so nothing exercises 7.13.0 runtime
    lines today. The smoke drives the REAL installed engine in Node over
@@ -147,10 +154,10 @@ release (patch floor), and the bump commit itself releases.
   node_modules sits at 7.9.0 against the 7.11.2 pin — any future
   "verify in main checkout" run needs `pnpm install` first. Cleanup ride-along,
   not a gate for this PR.
-- **Decision needed (small, non-blocking):** the exact retry cadence for the
-  diagnostic-triggered convergence retry (bounded backoff ceiling). Default
-  proposal: 3 attempts, exponential 2s/8s/30s, then give up until the next
-  diagnostic. Kurt may override at review.
+- **Decision resolved (was: retry cadence):** the loop ships as immediate +
+  30s × 10 attempts (see Approach item 5); the diagnostic trigger from the
+  original proposal was dropped as unimplementable — no such diagnostic code
+  exists in the engine union.
 
 ## Testing
 
@@ -158,9 +165,10 @@ Nothing new to unit-test — the delivery's evidence is the existing gate suite
 run at the new pin (listed above) PLUS the two runtime-safety items from the
 Approach section, which carry their own acceptance:
 
-- Host convergence scheduling: exercised by the unmocked runtime smoke (setup
-  with a pre-seeded store + short budget → first `syncSearchIndex()` run
-  converges the index → keyword search hits).
+- Host convergence scheduling: exercised by the unmocked runtime smoke (fresh
+  in-memory store, tiny setup budget → write a node → `syncSearchIndex()` →
+  `searchKeyword` must return the written node — the discriminating assertion;
+  `isKeywordAvailable()` alone is vacuous on a fresh tiny store, per GLM r2).
 - Runtime smoke (`scripts/runtime-smoke-clw.mjs`): green locally before ready;
   CI step added in the same PR.
 - The DDL-mirror test remains the bootstrap-DDL sentinel, now with its scope
