@@ -416,6 +416,58 @@ let _classifier: ClassifierStatus = CLASSIFIER_OFF;
 let _outboxEnabled = false;
 let _wikiUpdateGeneration = 0;
 
+// --- Keyword-index convergence (core-llm-wiki 7.13.0 host contract) --------
+//
+// 7.13.0 bounds FTS (re)build work per setup()/syncSearchIndex() quantum
+// (config.setupBudgetMs, default 1500 ms). On an existing vault the first open
+// can leave the index "rebuilding"; until it converges, keyword search is
+// unavailable (WikiSearchUnavailableError) — which degrades embed-fallback
+// retrieval, librarian and heal passes. core never schedules its own catch-up:
+// the host must call the no-arg syncSearchIndex() on its own schedule (see the
+// syncSearchIndex JSDoc in the engine dist). No-arg calls never reject and the
+// engine self-cools re-init attempts (5 s doubling to 5 min), so a bounded
+// host-side retry loop is safe — attempts inside the cooldown are near-free.
+// The diagnostic channel has no keyword-unavailability code, so convergence
+// is driven purely from setup() completion.
+
+const SEARCH_CATCHUP_INTERVAL_MS = 30_000;
+const SEARCH_CATCHUP_MAX_ATTEMPTS = 10;
+
+let _searchCatchupTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Fire-and-forget convergence loop for one wiki instance: an immediate no-arg
+ * `syncSearchIndex()` quantum, then up to
+ * `SEARCH_CATCHUP_MAX_ATTEMPTS` more at `SEARCH_CATCHUP_INTERVAL_MS`. A newer
+ * call replaces the previous loop (same generation contract as rebuildWiki).
+ * Healthy indexes resolve each call in milliseconds (ledger check + drain of
+ * nothing), so the loop is cheap noise when there is nothing to converge.
+ */
+export function scheduleSearchIndexCatchup(target: typeof wiki): void {
+  if (_searchCatchupTimer) {
+    clearInterval(_searchCatchupTimer);
+    _searchCatchupTimer = null;
+  }
+  let attempts = 0;
+  const runOnce = () => {
+    attempts += 1;
+    // Test doubles created via vi.mock may not implement syncSearchIndex;
+    // a synchronous TypeError inside the interval callback would crash the
+    // suite rather than degrade — so probe before invoking.
+    if (typeof target.syncSearchIndex === 'function') {
+      void target.syncSearchIndex().catch((err: unknown) => {
+        console.warn('[wiki] syncSearchIndex catch-up failed:', err);
+      });
+    }
+    if (attempts >= SEARCH_CATCHUP_MAX_ATTEMPTS && _searchCatchupTimer) {
+      clearInterval(_searchCatchupTimer);
+      _searchCatchupTimer = null;
+    }
+  };
+  runOnce();
+  _searchCatchupTimer = setInterval(runOnce, SEARCH_CATCHUP_INTERVAL_MS);
+}
+
 async function readClassifierStatus(): Promise<ClassifierStatus> {
   const s = await getClassifierStatus().catch(() => null);
   return s && typeof s.available === "boolean" ? s : CLASSIFIER_OFF;
@@ -439,6 +491,9 @@ async function rebuildWiki(): Promise<void> {
   await updatedWiki.setup();
   if (gen !== _wikiUpdateGeneration) return;
   wiki = updatedWiki;
+  // core-llm-wiki 7.13.0 host contract: converge a rebuilding FTS index after
+  // the bounded setup quantum (see scheduleSearchIndexCatchup).
+  scheduleSearchIndexCatchup(updatedWiki);
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new Event('wiki-updated'));
   }
@@ -497,6 +552,10 @@ export async function setupWiki() {
   }
   if (_wikiUpdateGeneration === genAtStart) {
     wiki = newWiki;
+    // core-llm-wiki 7.13.0 host contract: converge a rebuilding FTS index
+    // after the bounded setup quantum (see scheduleSearchIndexCatchup). A
+    // superseded instance is owned by rebuildWiki, which schedules its own.
+    scheduleSearchIndexCatchup(newWiki);
   }
 
   // Seed the manifest for a brain whose selection was recorded before the
