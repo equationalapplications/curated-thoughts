@@ -1,6 +1,6 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-10 (rev 32 — Opus r30 REQUEST CHANGES resolved: forced-rechunk refusal replaced by a per-doc lossless hash check — model swaps no longer blocked by a missing stamp (M1); undefined "skip-set classes" deleted, scorable = has an `embeddings` row (M2); rule (ii) stage-2 edge pinned to the evidence-hash edge + top-1 (M3); m1–m5 folded). Full per-round changelog: **Revision history** block below.
+**Date:** 2026-10-14 (rev 33 — external reviews folded: Gemini **Approved** at rev 32 (implementation cleared; experiment 7 added), CodeRabbit **CHANGES_REQUESTED** 5 findings adjudicated — 4 resolved by the Supremacy clause + investigation banner, 2 real gaps folded: small-L breaker policy §8(b), pre-existing duplicate-embeddings guard §8(a); §10 rows added). Per-round changelog: **Revision history** block below.
 **Status:** Approved — implementation cleared (external review: Gemini, 2026-10-14, verdict **Approved** at rev 32; see **EXTERNAL REVIEW** block at end of file).
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -112,6 +112,24 @@ superseded twice over — the table itself is deleted under Option A (M4), so
   pinned to final-entries-non-empty; stale three-row ref fixed
   previously); 6 experiments recorded under EXPERIMENTS REQUESTED
   (r31).
+- **r32 → rev 33 (this rev):** external review folded (Gemini 2026-10-14,
+  Approved at rev 32 — EXTERNAL REVIEW block at end of file; experiment 7
+  added) + CodeRabbit external review (2026-10-14, CHANGES_REQUESTED on the
+  PR, 5 findings) adjudicated: findings 1–4 pointed at the Step-0
+  investigation's superseded text and are resolved BY CONSTRUCTION — the
+  Supremacy clause already subordinates it to this spec, and a
+  SUPERSEDED-IN-PART banner now names the four stale passages explicitly
+  (floors/acceptance absolute bars — dropped at r24; one-line label text —
+  superseded by the §5/§6/§10 seven-field audit pin; pre-scheme floor
+  semantics — §4 governs; breaker bullet — §8(b) governs). Two findings
+  were REAL spec gaps and are folded here: **small-L breaker policy (§8(b))
+  — threshold floor makes L ≤ 10 unconditionally safe (max(⌈0.05·L⌉,10) ≥ 10
+  > L ⇒ the all-or-nothing breaker refuses from zero spend; the entire
+  selected population can never be removed)**, and **pre-existing duplicate
+  embeddings guard (§8(a)) — the swap transaction now enforces the
+  one-row-per-chunk invariant it previously only assumed (delete extras by
+  rowid-max before the in-place UPDATE relies on it)**; test rows added to
+  §10.
 
 ## 1. Problem
 
@@ -875,8 +893,21 @@ are in scope:
   covers every chunk; unchanged-hash chunks KEEP their `chunk_id` and
   their `embeddings` row is UPDATEd in place with the new-model vector
   (never a bare INSERT — no unique constraint on `chunk_id`,
-  duplicates would double-return in `semantic_search`); changed-hash
-  chunks are inserted (new `(doc_id, content_hash)` identity — an
+  duplicates would double-return in `semantic_search`). **Pre-existing
+  duplicate guard (external review, CodeRabbit 2026-10-14): the in-place
+  UPDATE assumes at most one embeddings row per chunk, but nothing in
+  today's schema enforces that — a legacy duplicate (two rows, same
+  chunk_id) would leave one stale-model row behind after an in-place
+  UPDATE, and `semantic_search` would double-return the chunk. The swap
+  transaction therefore ENFORCES the invariant before relying on it:
+  inside the same transaction, after the upsert/delete/insert set,
+  `DELETE` any extra embeddings rows for a `(doc_id, chunk_id)` beyond
+  the newest (keep rowid-max as "the" row, matching the deterministic
+  row-choice convention used elsewhere), and treat a removed duplicate
+  as covered by the swap. This is bounded cleanup of a pre-existing
+  anomaly, not new machinery; changed-hash chunks are unaffected (they
+  insert fresh).** Changed-hash chunks are inserted (new
+  `(doc_id, content_hash)` identity — an
   UPDATE cannot represent them); removed chunks are deleted. Because a
   forced pass re-embeds ALL chunks, mixed-model vectors cannot arise
   within a doc. **`embed_key` is written HERE — in the swap
@@ -995,7 +1026,16 @@ are in scope:
   refusal line names which threshold was hit); spending
   against the one shared counter; rev 5, Opus r3 m1: each L is
   snapshotted under its OWN key — `breaker_L_heal` /
-  `breaker_L_regrade`. **Regrade batch semantics (rev 5, Opus r3 m4;
+ `breaker_L_regrade`. **Small-L policy (external review, CodeRabbit
+ 2026-10-14): the floor makes L ≤ 10 unconditionally safe — threshold
+ max(⌈0.05·L⌉, 10) ≥ 10 > L, so for any selection of ten or fewer rows
+ the all-or-nothing breaker refuses the WHOLE batch from a zero spent
+ counter and can never remove the entire selected population; shared
+ spending only shrinks `remaining`, never below the refusal it already
+ forces. Denominators stay separate per writer (heal's selection vs.
+ regrade's `librarian_evidence` count) exactly as pinned.**
+
+  **Regrade batch semantics (rev 5, Opus r3 m4;
   rev 7, Opus r5 MINOR-1):** `|doomed|` counts the rows the
   CLASSIFICATION flagged as doomed (the subset of `unanchored=1 AND
   deleted_at IS NULL` flagged rows that FAIL `evidence_has_live_chunk`
@@ -1559,10 +1599,20 @@ short-circuit is restored as-is, §6).
   `wisdom_two_stage_audit` line shape asserts ALL SEVEN pinned fields
   (§6) in pinned order — `rule`, `open`, `top`, `v1merged`, `floor`,
   `k`, `stale_embed_key` (r26-M1 restructure supersedes the six-field
-  pin; r25 m1: `hit@2_open`/`fp_open` are gone; the
-  harness derives hit/FP from probe labels plus the `open`/`top`
-  runtime facts) incl. `stale_embed_key=<n>` (r24 m1); `rule=none`
-  never on a two-stage close (r26 m4).
+ pin; r25 m1: `hit@2_open`/`fp_open` are gone; the
+ harness derives hit/FP from probe labels plus the `open`/`top`
+ runtime facts) incl. `stale_embed_key=<n>` (r24 m1); `rule=none`
+ never on a two-stage close (r26 m4).
+ - Small-L breaker (rev 33, CodeRabbit): with `breaker_L_heal`/`breaker_L_regrade`
+ snapshotted at 7 (or any L ≤ 10) and spent = 0, the pass REFUSES —
+ `|doomed|` (≥ 1) > remaining (10) — and no deletion occurs; with L = 3
+ the same holds. The entire selected population is unreachable to the
+ breaker-governed writers.
+ - Diff-swap duplicate guard (rev 33, CodeRabbit): a fixture with TWO
+ embeddings rows for one chunk_id (simulated pre-existing anomaly)
+ undergoes a forced swap ⇒ the transaction leaves exactly one row, the
+ newest (rowid-max), carrying the new-model vector; `semantic_search`
+ returns the chunk once.
 - Diff-swap: unchanged-hash preservation; changed-hash in-place UPDATE
   (no duplicate embeddings — `semantic_search` returns the chunk once);
   empty-hash rows removed; mid-document-insertion behavior (documents the

@@ -1,5 +1,17 @@
 # Step-0 Investigation v10 — CT issue #271: two-stage retrieval (gate on immutable-source chunks)
 
+> **SUPERSEDED IN PART — do not implement from this document.** This is the
+> Step-0 investigation record kept for provenance. The governing, current
+> design is `2026-10-09-issue271-two-stage-retrieval-design.md` (rev 33+);
+> per its Supremacy clause, where the two disagree, THE SPEC WINS. Known
+> superseded passages (CodeRabbit external review, 2026-10-14): §3(7)
+> "Floors + acceptance" carries the pre-r24 letter with absolute bars
+> (dropped — the pinned letter is not-worse-than-single-stage); §3(5) has
+> the old one-line label text (the audit line is seven-fields-pinned in
+> the spec's §5/§6/§10); §3(4) predates scheme-specific floor semantics
+> (spec §4/§3 govern); §3(8) breaker bullet predates the small-L policy
+> (spec §8(b) governs).
+
 Date: 2026-10-09. Investigator: Tessera (controller) + 2 leaf children (A: provenance/write path, B: read path). Ladder: GLM r1 FIX-FIRST → v1 · Opus r1–r9 (hash hop primary; composition; skip set; predicate; path shapes; kill-switch; v1-fallback; reindex no-op; heal scheduler; rechunk mass-deletion; diff-swap; budget-in-loop) → v9 · **Opus r9 (0 blockers, M1–M4, m1–m4 — "fixable in the document before implementation"; resolved in this v10**, controller-verified). Claims: [V] verified, [C] inferred, [PROPOSED] awaiting Kurt's pin. (v10 supersedes v8/v9; v1–v7 in the original file.)
 
 ## 1. Verified state
