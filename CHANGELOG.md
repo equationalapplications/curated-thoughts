@@ -1,3 +1,15 @@
+## [3.5.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.5.0...v3.5.1) (2026-10-14)
+
+### Bug Fixes
+
+* **deps:** [#186](https://github.com/equationalapplications/curated-thoughts/issues/186) engine gate reads the pin from schema_guard instead of a hardcoded 7.11.2 ([d983018](https://github.com/equationalapplications/curated-thoughts/commit/d98301864405fcdddbb4be630da0ca38f2c48c9f))
+* **wiki:** converge the FTS index after setup; add unmocked engine runtime smoke ([f1b0228](https://github.com/equationalapplications/curated-thoughts/commit/f1b0228b45fd77546504668189e560cd60e2f074))
+* **wiki:** discriminating searchKeyword assertion in smoke; HMR dispose; spec sync (GLM r2) ([4413207](https://github.com/equationalapplications/curated-thoughts/commit/44132078fd931bd667b8f3c673d7f87ac9393d6a))
+
+### Dependencies
+
+* **deps:** bump @equationalapplications/core-llm-wiki to 7.13.0 ([2446782](https://github.com/equationalapplications/curated-thoughts/commit/2446782e83d74b1e30dee2a8564da84b822f5ec8))
+
 ## [3.5.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.4.2...v3.5.0) (2026-10-09)
 
 ### Features
