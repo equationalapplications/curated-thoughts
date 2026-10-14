@@ -1,6 +1,6 @@
 # Two-stage retrieval for the wisdom gate: chunk-stage matching mapped to curated facts (issue #271)
 
-**Date:** 2026-10-14 (rev 33 — external reviews folded: Gemini **Approved** at rev 32 (implementation cleared; experiment 7 added), CodeRabbit **CHANGES_REQUESTED** 5 findings adjudicated — 4 resolved by the Supremacy clause + investigation banner, 2 real gaps folded: small-L breaker policy §8(b), pre-existing duplicate-embeddings guard §8(a); §10 rows added). Per-round changelog: **Revision history** block below.
+**Date:** 2026-10-14 (rev 34 — CodeRabbit re-review adjudicated: rev-33 small-L claim inverted the breaker's refusal semantics; corrected policy `|doomed| >= L` ⇒ refuse (full-population protection) folded into §8(b) + §10 rows rewritten; remaining findings covered by the rev-33 investigation banner). Rev 33 folded the earlier external reviews (Gemini Approved; CodeRabbit CHANGES_REQUESTED — small-L gap + duplicate-embeddings guard). Per-round changelog: **Revision history** block below.
 **Status:** Approved — implementation cleared (external review: Gemini, 2026-10-14, verdict **Approved** at rev 32; see **EXTERNAL REVIEW** block at end of file).
 **Branch:** `spec/issue271-two-stage-retrieval`
 **Priority:** High (merge-blocker-1 successor for PR #270; closes #265 when live matching works)
@@ -130,6 +130,21 @@ superseded twice over — the table itself is deleted under Option A (M4), so
   one-row-per-chunk invariant it previously only assumed (delete extras by
   rowid-max before the in-place UPDATE relies on it)**; test rows added to
   §10.
+- **r33 → rev 34 (this rev):** CodeRabbit re-review (2026-10-14, second
+  pass on rev 33) adjudicated. **The rev-33 small-L amendment was WRONG and
+  is corrected here: the refusal condition is `|doomed| > remaining`, so for
+  L ≤ 10 a full-population batch (|doomed| = L ≤ threshold) PROCEEDS under
+  the budget rule — rev 33's "unconditionally safe" claim inverted the
+  semantics and its §10 rows asserted a refusal that would not happen.**
+  Corrected policy (§8(b)): on top of the budget rule, both writers REFUSE
+  any batch with `|doomed| >= L` — a pass may never remove the ENTIRE
+  selected population; full-pop passes require the pinned `--allow-bulk`
+  one-run skip after investigation. §10 rows rewritten with correct
+  expected outcomes, including a proceed case (L=50, |doomed|=4). The
+  other four findings repeat the investigation-doc locations already
+  covered by the rev-33 Supremacy banner — no further spec change (the
+  banner plus this changelog are the record; the investigation stays a
+  provenance document).
 
 ## 1. Problem
 
@@ -1026,14 +1041,19 @@ are in scope:
   refusal line names which threshold was hit); spending
   against the one shared counter; rev 5, Opus r3 m1: each L is
   snapshotted under its OWN key — `breaker_L_heal` /
- `breaker_L_regrade`. **Small-L policy (external review, CodeRabbit
- 2026-10-14): the floor makes L ≤ 10 unconditionally safe — threshold
- max(⌈0.05·L⌉, 10) ≥ 10 > L, so for any selection of ten or fewer rows
- the all-or-nothing breaker refuses the WHOLE batch from a zero spent
- counter and can never remove the entire selected population; shared
- spending only shrinks `remaining`, never below the refusal it already
- forces. Denominators stay separate per writer (heal's selection vs.
- regrade's `librarian_evidence` count) exactly as pinned.**
+ `breaker_L_regrade`. **Small-L policy (external review; corrected rev 34
+ after the rev-33 wording inverted the refusal semantics): the threshold
+ floor does NOT protect small populations — for L ≤ 10 the budget is
+ ≥ L, so `|doomed| = L` stays under it and a pass could delete the
+ ENTIRE selected population in one batch. Therefore, ON TOP of the
+ budget rule, BOTH writers REFUSE when `|doomed| >= L` — a batch that
+ would remove the complete selected population is refused outright,
+ whatever L is. Removing everything is exactly the brain-wipe shape
+ this breaker exists to stop; partial batches (|doomed| < L) remain
+ governed by the budget math. Operators who genuinely want a full-pop
+ pass use the pinned `--allow-bulk` one-run skip after investigating.
+ Denominators stay separate per writer (heal's selection vs. regrade's
+ `librarian_evidence` count) exactly as pinned.**
 
   **Regrade batch semantics (rev 5, Opus r3 m4;
   rev 7, Opus r5 MINOR-1):** `|doomed|` counts the rows the
@@ -1603,11 +1623,13 @@ short-circuit is restored as-is, §6).
  harness derives hit/FP from probe labels plus the `open`/`top`
  runtime facts) incl. `stale_embed_key=<n>` (r24 m1); `rule=none`
  never on a two-stage close (r26 m4).
- - Small-L breaker (rev 33, CodeRabbit): with `breaker_L_heal`/`breaker_L_regrade`
- snapshotted at 7 (or any L ≤ 10) and spent = 0, the pass REFUSES —
- `|doomed|` (≥ 1) > remaining (10) — and no deletion occurs; with L = 3
- the same holds. The entire selected population is unreachable to the
- breaker-governed writers.
+ - Small-L breaker (rev 34, correcting the rev-33 wording): for ANY L
+   with spent = 0 and `|doomed| = L` (the whole selection flagged), the
+   pass REFUSES via the `|doomed| >= L` full-population rule — the
+   budget floor alone does NOT refuse (L ≤ 10 stays under budget; the
+   rev-33 claim inverted this). Test rows: L=7, |doomed|=7 ⇒ refuse;
+   L=3, |doomed|=3 ⇒ refuse; L=50, |doomed|=50 ⇒ refuse; L=50,
+   |doomed|=4 ⇒ budget-governed (4 ≤ 10, proceeds).
  - Diff-swap duplicate guard (rev 33, CodeRabbit): a fixture with TWO
  embeddings rows for one chunk_id (simulated pre-existing anomaly)
  undergoes a forced swap ⇒ the transaction leaves exactly one row, the
