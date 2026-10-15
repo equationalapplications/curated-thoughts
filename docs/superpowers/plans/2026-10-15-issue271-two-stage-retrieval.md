@@ -242,7 +242,7 @@ git commit -m "feat(db): V28 adds documents.embed_key + last_indexed_hash (one-s
   - `pub(crate) fn eligible_entry_ids(conn: &Connection, t: &Temporal, now_ms: i64) -> Result<Vec<String>>` — the same predicate as a standalone query, so Rust-side consumers share it.
   - Behavioral invariant: `gated_entries` (wisdom_match.rs:317) and stage-1's candidate/complement queries use THIS fragment — they can never disagree about which facts are eligible (§3.2).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -288,9 +288,9 @@ fn stage1_predicate_parity_above_1024_excludes() {
 
 (Helper seeds `seed_deleted`/`seed_null_title`/`seed_superseded`/`seed_expired` follow the existing `seed` helper's INSERT shape in the tests module; set `deleted_at`, NULL `title`, `superseded_by`/`superseded_at`, `valid_to` respectively.)
 
-- [ ] **Step 2: Run to verify FAIL** — `cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1 eligibility_predicate` → FAIL (functions don't exist).
+- [x] **Step 2: Run to verify FAIL** — `cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1 eligibility_predicate` → FAIL (functions don't exist).
 
-- [ ] **Step 3: Minimal implementation**
+- [x] **Step 3: Minimal implementation**
 
 Extract the WHERE-fragment builder from `gated_entries`'s SELECT (the predicate currently inlined at `wisdom_match.rs:317+`) into:
 
@@ -326,8 +326,8 @@ pub(crate) fn eligible_entry_ids(conn: &Connection, t: &Temporal, now_ms: i64) -
 
 Rewrite `gated_entries`'s SELECT to interpolate `entry_eligibility_where(temporal)` in place of its inlined predicate. No behavior change otherwise (the `raw < floor` drop at :379-381 stays in Task 2 — rule (ii)'s floor-bypass parameter lands in Task 5).
 
-- [ ] **Step 4: Run to verify PASS** — full `wisdom_match` test module + the two new tests.
-- [ ] **Step 5: Commit** — `git commit -m "refactor(wisdom): extract shared entry eligibility predicate (stage-1 parity, >1024 excludes guard)"`
+- [x] **Step 4: Run to verify PASS** — full `wisdom_match` test module + the two new tests.
+- [x] **Step 5: Commit** — `git commit -m "refactor(wisdom): extract shared entry eligibility predicate (stage-1 parity, >1024 excludes guard)"`
 
 ## Task 3: `two_stage` module — candidate set, complement, stage-1 search
 
@@ -379,7 +379,7 @@ pub fn member_chunk_ids(conn: &Connection, cands: &CandidateSet) -> Result<Vec<i
 pub fn coverage(conn: &Connection, profile_key: &str) -> Result<Option<(i64, i64)>>;
 ```
 
-- [ ] **Step 1: Write the failing tests** (fixture seeds documents + chunks + embeddings + librarian_evidence + curated_proposal_sources rows directly with SQL; embeddings vectors chosen orthonormal so cosine is exact)
+- [x] **Step 1: Write the failing tests** (fixture seeds documents + chunks + embeddings + librarian_evidence + curated_proposal_sources rows directly with SQL; embeddings vectors chosen orthonormal so cosine is exact)
 
 ```rust
 fn fixture() -> Connection {
@@ -479,9 +479,9 @@ fn probes_return_none_on_schema_skew() {
 }
 ```
 
-- [ ] **Step 2: Run to verify FAIL** — `cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1 two_stage` → FAIL (module missing).
+- [x] **Step 2: Run to verify FAIL** — `cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1 two_stage` → FAIL (module missing).
 
-- [ ] **Step 3: Minimal implementation (exact SQL)**
+- [x] **Step 3: Minimal implementation (exact SQL)**
 
 ```rust
 //! Stage-1 closed-set chunk search for the wisdom gate (spec §3.1, §4 GUARD, §6).
@@ -633,8 +633,8 @@ pub fn coverage(conn: &Connection, profile_key: &str) -> Result<Option<(i64, i64
 
 NOTE on `candidate_set(conn, 0, None)` inside `coverage`: pass the real `now_ms` through a parameter instead — coverage takes `now_ms: i64` too (update the signature and callers; `now_ms` feeds only the eligibility predicate).
 
-- [ ] **Step 4: Run to verify PASS** — `cargo test ... -- --test-threads=1 two_stage` then the full suite.
-- [ ] **Step 5: Commit** — `git commit -m "feat(two-stage): stage-1 candidate set (evidence-hash hop ∪ proposal chain), rule-relative complement, coverage check"`
+- [x] **Step 4: Run to verify PASS** — `cargo test ... -- --test-threads=1 two_stage` then the full suite.
+- [x] **Step 5: Commit** — `git commit -m "feat(two-stage): stage-1 candidate set (evidence-hash hop ∪ proposal chain), rule-relative complement, coverage check"`
 
 ## Task 4: Two-stage decision core in `wisdom_match.rs` — floors, rules, v1-merge, corrections parity
 
