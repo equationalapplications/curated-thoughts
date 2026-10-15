@@ -238,7 +238,7 @@ git commit -m "feat(db): V28 adds documents.embed_key + last_indexed_hash (one-s
 **Interfaces:**
 - Consumes: `Temporal { has_superseded_by: bool, has_valid_to: bool, scheme: Option<Scheme> }` (`wisdom_match.rs:162-171`); `crate::embed_scheme::scheme_filter_sql(Option<Scheme>) -> String` (`src-tauri/src/embed_scheme.rs:212`); `existing_columns` (Task 1 Interfaces).
 - Produces (used by Task 3's stage-1 SQL and Task 5's decision rules):
-  - `pub(crate) fn entry_eligibility_where(t: &Temporal) -> String` — ONE SQL WHERE fragment implementing the live-gate-eligible test (deleted_at IS NULL, NULL-only title/body test, supersession/validity per `Temporal` columns, `{scheme_filter}` interpolated).
+  - `pub(crate) fn entry_eligibility_where(t: &Temporal) -> String` — ONE SQL WHERE fragment implementing the live-gate-eligible test (deleted_at IS NULL, NULL-only title/body test, supersession/validity per `Temporal` columns, `{scheme_filter}` interpolated). The enumeration is EXHAUSTIVE and MUST include the V27 read-scheme filter: stage-1 SQL consumes `scheme_filter_sql(temporal.scheme)` (`src-tauri/src/embed_scheme.rs:212`) as part of this predicate — a stage-1 query without it is a spec §3.2 violation.
   - `pub(crate) fn eligible_entry_ids(conn: &Connection, t: &Temporal, now_ms: i64) -> Result<Vec<String>>` — the same predicate as a standalone query, so Rust-side consumers share it.
   - Behavioral invariant: `gated_entries` (wisdom_match.rs:317) and stage-1's candidate/complement queries use THIS fragment — they can never disagree about which facts are eligible (§3.2).
 
@@ -1043,7 +1043,7 @@ fn ct_ingest_treats_refusal_as_skip() { /* loop accounting: failed == 0, exit 0 
 - Modify: `src-tauri/src/db/heal.rs` (`heal_invalid_sources_conn` :46, per-row txn :80)
 - Modify: `src-tauri/src/lib.rs` (`heal_lost_librarian_inferred` :2403; breaker site :2440; `Transaction::new_unchecked(conn, TransactionBehavior::Immediate)` + grounding check INSIDE txn + conditional UPDATE guard)
 - Modify: `src-tauri/src/db/evidence_regrade.rs` (`purge_doomed_rows` :108-146: pre-delete `|doomed| >= L` check + budget check; :134 txn → IMMEDIATE; in-txn recount vs pre-txn doomed ID SET, abort on mismatch)
-- Modify: `tools/src/bin/ct.rs` (`Heal` variant :102 gains `--reset-breaker`, `--allow-bulk`; `evidence regrade` gains `--allow-bulk`)
+- Modify: `tools/src/bin/ct.rs` (`Heal` variant :102 gains `--reset-breaker`, `--allow-bulk`; `evidence regrade` gains `--allow-bulk` — note regrade is a DIFFERENT `Cmd` variant (`Regrade` :284, dispatch arm `EvidenceCmd::Regrade` :647), not part of `Heal`; thread the flag through `cli_common::evidence_regrade_cmd`'s signature)
 - Test: per-module tests
 
 **Interfaces:**
@@ -1080,7 +1080,7 @@ pub fn breaker_reset(conn: &Connection) -> Result<()>;
 
 **Interfaces:**
 - Consumes: Task 1's migration fn (extend it; V18 DDL already exists — trigger creation must come after `librarian_evidence` exists, which every post-V18 brain has; for pre-V18 replicas the migration must NOT fail).
-- Produces: meta key `librarian_evidence_seen = '1'`; `AFTER INSERT` trigger on `librarian_evidence` with `INSERT OR IGNORE INTO llm_wiki_meta` body (idempotent); migration backfills the key iff rows exist today; the key is explicitly KEPT by the clear transaction (NOT in any purge list — verify `db` clear paths don't wipe `llm_wiki_meta` blindly; if the clear path truncates `llm_wiki_meta`, exclude this key).
+- Produces: meta key `librarian_evidence_seen = '1'`; `AFTER INSERT` trigger on `librarian_evidence` with `INSERT OR IGNORE INTO llm_wiki_meta` body (idempotent); migration backfills the key iff rows exist today; the key is explicitly KEPT by the clear transaction (NOT in any purge list — verified: the clear path never deletes `llm_wiki_meta` (`db/queries.rs:244` "survives the clear"); verify by inspection only, NO code change needed — the plan's test at Step 1 already asserts the marker survives a meta round-trip).
 
 - [ ] **Step 1: Failing tests**
 
@@ -1113,6 +1113,7 @@ fn pre_v18_fixture_open_succeeds() { /* V17-shape fixture (no librarian_evidence
 - Test: `tools/tests/cli_reindex_repair.rs`
 
 **Interfaces:**
+- Depends on: Task 9 (refusal contract) — this task's smoke reads the breaker's stderr trip line, which Task 9's pipeline-worker log shape defines.
 - Consumes: `resolve()`/`open_rw`/`open_ro` (`tools/src/write.rs`); `retrieval::{resolve_brain_paths, load_embed_profile}` (`bulk_reindex.rs:87-89` pattern); `gate_model_key(profile, stub)`; `TransactionBehavior::Immediate`; `two_stage::coverage` (Task 3) for reporting.
 - Produces: `ct reindex repair-embed-key [--stale]` — re-embeds the STORED CHUNKS of every stale/NULL-key CANDIDATE doc directly from the DB (NO file read, NO status/tier precondition, NO stamp required); per doc ONE IMMEDIATE txn covering (a) in-place embeddings UPDATEs from stored chunk text and (b) `documents.embed_key = gate_model_key(profile, stub-as-used)`; the doc's chunk-id set RE-CHECKED UNDER THE LOCK against the pre-read (swap-race rule; mismatch ⇒ skip doc with a printed note, next run retries). Exit 0; prints per-doc verdicts + final coverage.
 
