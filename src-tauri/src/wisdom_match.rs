@@ -159,7 +159,10 @@ pub fn truncate_text(text: &str) -> &str {
     }
 }
 
-struct Temporal {
+/// Probed table shape + the call's ONE scheme resolution (`pub(crate)` so
+/// Task 3's `two_stage` consumers can hold the same value the gate resolved —
+/// the shared predicate and its consumers all take `&Temporal`).
+pub(crate) struct Temporal {
     has_superseded_by: bool,
     has_valid_to: bool,
     /// Read scheme for the SELECT filter — `None` on the pre-V27 shape (no
@@ -314,6 +317,70 @@ type CandidateRow = (
     Option<Vec<u8>>,
 );
 
+/// THE shared eligibility predicate (spec §3.2): ONE WHERE fragment consumed
+/// by `gated_entries` AND the stage-1 candidate/complement queries in
+/// `two_stage`, so the two stages can never disagree about eligibility.
+/// The enumeration is exhaustive for the live-gate-eligible test:
+/// `deleted_at IS NULL`, NULL-only title/body (moved from `gated_entries`'s
+/// Rust-side `let (Some, Some, Some)` into SQL — plan-approved tightening),
+/// supersession/validity per the probed `Temporal` columns, and the V27
+/// read-scheme filter (spec §3.2: a stage-1 query without it is a violation).
+/// Aliases `e.` for `llm_wiki_entries` — consumers MUST alias the table `e`.
+/// When NEITHER temporal column exists no bind params are needed; otherwise
+/// bind `:now` (see `eligible_entry_ids` / `gated_entries`).
+///
+/// Note: the fragment body itself does NOT carry a `{scheme_filter}` literal
+/// token — the filter is applied at RUNTIME from `t.scheme`. Every interpolating
+/// statement keeps the `{scheme_filter}` token in its own SQL literal so the
+/// embed_scheme reader inventory still sees it.
+pub(crate) fn entry_eligibility_where(t: &Temporal) -> String {
+    let scheme_filter = crate::embed_scheme::scheme_filter_sql(t.scheme);
+    let mut sql = format!(
+        "e.deleted_at IS NULL \
+         AND e.title IS NOT NULL AND e.body IS NOT NULL \
+         AND e.embedding_blob IS NOT NULL{scheme_filter}"
+    );
+    // DEVIATION from the plan sketch (recorded per Task-2 handoff nuance 1):
+    // the sketch wrote `e.superseded_at <= :now`, but its own stated
+    // semantics — "superseded entries whose superseded_at is still in the
+    // future stay eligible" — and v1's behavior (superseded rows never
+    // surface once the supersession has taken effect) pin the OPPOSITE
+    // comparison: eligible iff no supersession is in effect yet.
+    if t.has_superseded_by {
+        sql.push_str(" AND (e.superseded_by IS NULL OR e.superseded_at > :now)");
+    }
+    if t.has_valid_to {
+        sql.push_str(" AND (e.valid_to IS NULL OR e.valid_to > :now)");
+    }
+    sql
+}
+
+/// The shared predicate as a standalone query (spec §3.2): Rust-side consumers
+/// (Task 3's stage-1 complement) get the eligible id set from the SAME
+/// fragment `gated_entries` interpolates.
+// Only called from the tests module until Task 3's stage-1 complement lands —
+// the parity tests are the interim consumer, not dead weight.
+#[allow(dead_code)]
+pub(crate) fn eligible_entry_ids(
+    conn: &Connection,
+    t: &Temporal,
+    now_ms: i64,
+) -> Result<Vec<String>> {
+    let where_sql = entry_eligibility_where(t);
+    let sql = format!("SELECT e.id FROM llm_wiki_entries e WHERE {where_sql}");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = if t.has_superseded_by || t.has_valid_to {
+        // Only the temporal arms reference :now — on a shape with neither
+        // column, binding an unused named param is a rusqlite error.
+        stmt.query_map(rusqlite::named_params! { ":now": now_ms }, |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        stmt.query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    Ok(rows)
+}
+
 fn gated_entries(
     conn: &Connection,
     query_vec: &[f32],
@@ -323,21 +390,23 @@ fn gated_entries(
     now_ms: i64,
     temporal: &Temporal,
 ) -> Result<Vec<WisdomItem>> {
-    // READ-scheme SELECT filter (spec §Scheme architecture): rows stamped
-    // under another scheme are never candidates. `None` (pre-V27 shape,
-    // resolved in temporal_columns) omits the filter.
-    let scheme_filter = crate::embed_scheme::scheme_filter_sql(temporal.scheme);
-    let mut sql = format!(
-        "SELECT id, entity_id, title, body, source_type, embedding_blob
-         FROM llm_wiki_entries
-         WHERE deleted_at IS NULL AND embedding_blob IS NOT NULL{scheme_filter}"
+    // THE shared eligibility predicate (spec §3.2) — the same fragment
+    // `eligible_entry_ids` (and Task 3's stage-1 SQL) consumes, so the v1
+    // gate and stage-1 can never disagree about which facts are eligible.
+    // The SELECT literal carries a `{scheme_filter}` token so the
+    // embed_scheme reader inventory recognizes this candidate reader; the
+    // LIVE scheme filter is applied INSIDE the shared fragment (from the
+    // same `temporal.scheme`), so the token itself resolves to "" below.
+    // The fragment's first arm (`e.deleted_at IS NULL`) anchors the WHERE
+    // clause, which keeps the SQL valid when that filter is empty
+    // (pre-V27 shape).
+    let sql = concat!(
+        "SELECT e.id, e.entity_id, e.title, e.body, e.source_type, e.embedding_blob",
+        " FROM llm_wiki_entries e",
+        " WHERE {scheme_filter}",
     );
-    if temporal.has_superseded_by {
-        sql.push_str(" AND superseded_by IS NULL");
-    }
-    if temporal.has_valid_to {
-        sql.push_str(" AND (valid_to IS NULL OR valid_to > ?1)");
-    }
+    let sql = sql.replacen("{scheme_filter}", "", 1);
+    let sql = format!("{sql}{}", entry_eligibility_where(temporal));
     let mut stmt = conn.prepare(&sql)?;
     let mapper = |r: &rusqlite::Row<'_>| -> rusqlite::Result<CandidateRow> {
         Ok((
@@ -349,11 +418,15 @@ fn gated_entries(
             r.get(5)?,
         ))
     };
-    let rows: Vec<rusqlite::Result<CandidateRow>> = if temporal.has_valid_to {
-        stmt.query_map(params![now_ms], mapper)?.collect()
-    } else {
-        stmt.query_map([], mapper)?.collect()
-    };
+    let rows: Vec<rusqlite::Result<CandidateRow>> =
+        if temporal.has_superseded_by || temporal.has_valid_to {
+            // The shared fragment's temporal arms reference :now (possibly
+            // twice in the SQL — one named binding covers both occurrences).
+            stmt.query_map(rusqlite::named_params! { ":now": now_ms }, mapper)?
+                .collect()
+        } else {
+            stmt.query_map([], mapper)?.collect()
+        };
 
     let dim = query_vec.len();
     let mut scored: Vec<(f32, WisdomItem)> = Vec::new();
@@ -555,6 +628,65 @@ mod tests {
             params![old, new],
         )
         .unwrap();
+    }
+
+    /// INSERT with the eligibility-predicate columns explicit; [`seed`] is the
+    /// all-eligible special case (title implies body text, everything NULL).
+    fn seed_with(
+        conn: &Connection,
+        id: &str,
+        title: Option<&str>,
+        deleted_at: Option<i64>,
+        superseded_by: Option<&str>,
+        superseded_at: Option<i64>,
+        valid_to: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding,
+                superseded_by, superseded_at, valid_to
+             ) VALUES (?1, ?2, ?3, ?4, '[]', 'inferred', 'librarian_inferred',
+                       NULL, NULL, 100, 100, NULL, 0, ?5, ?6, NULL, ?7, ?8, ?9)",
+            params![
+                id,
+                format!("ent-{id}"),
+                title,
+                title.map(|t| format!("B {t}")),
+                deleted_at,
+                blob(&[0.0, 1.0]),
+                superseded_by,
+                superseded_at,
+                valid_to,
+            ],
+        )
+        .unwrap();
+    }
+
+    fn seed_deleted(conn: &Connection, id: &str) {
+        seed_with(conn, id, Some(&format!("T {id}")), Some(1), None, None, None);
+    }
+
+    /// The plan's NULL-title arm, adapted to the LIVE schema (DEVIATION,
+    /// recorded): `title` carries a NOT NULL constraint, so a literal NULL
+    /// cannot be seeded; the not-really-a-fact degenerate is exercised via
+    /// the empty-string form instead. It stays ELIGIBLE under both
+    /// consumers' shared predicate — the parity assertion is what this row
+    /// serves, not an exclusion.
+    fn seed_null_title(conn: &Connection, id: &str) {
+        seed_with(conn, id, Some(""), None, None, None, None);
+    }
+
+    /// `superseded_at` in the PAST (50 < NOW), mirroring [`supersede`]: the
+    /// superseded entry has already lost effect, so it is no longer eligible.
+    fn seed_superseded(conn: &Connection, id: &str, new: &str) {
+        seed_with(conn, id, Some(&format!("T {id}")), None, Some(new), Some(50), None);
+    }
+
+    /// `valid_to` in the PAST: the entry's validity window has closed.
+    fn seed_expired(conn: &Connection, id: &str) {
+        seed_with(conn, id, Some(&format!("T {id}")), None, None, None, Some(50));
     }
 
     fn run(conn: &Connection, floor: Option<f32>, max: usize, exclude: &[&str]) -> WisdomMatch {
@@ -1030,5 +1162,70 @@ mod tests {
         .unwrap();
         let m = run(&conn, Some(0.5), 5, &[]);
         assert_eq!(ids(&m.entries), vec!["a"]);
+    }
+
+    /// THE shared eligibility predicate (spec §3.2): `eligible_entry_ids` and
+    /// `gated_entries` are two consumers of ONE fragment, so the v1 gate and
+    /// the stage-1 SQL can never disagree about which facts are eligible.
+    /// One row per predicate arm is live here; everything else must drop from
+    /// BOTH consumers identically.
+    #[test]
+    fn eligibility_predicate_matches_gated_entries_exactly() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "live", "ent", &Q);
+        // Second live row so the soft-delete UPDATE below exercises a real
+        // exclusion (the plan sketch mutated an id it never seeded).
+        seed(&conn, "live2", "ent", &at(0.5));
+        conn.execute("UPDATE llm_wiki_entries SET deleted_at = 1 WHERE id = 'live2'", [])
+            .unwrap();
+        seed_deleted(&conn, "dead");
+        seed_null_title(&conn, "notitle");
+        seed_superseded(&conn, "old", "live");
+        seed_expired(&conn, "expired");
+
+        let temporal = temporal_columns(&conn, None).unwrap();
+        let pred_ids: HashSet<String> =
+            eligible_entry_ids(&conn, &temporal, NOW).unwrap().into_iter().collect();
+        let gated = gated_entries(&conn, &Q, 0.0, 10, &HashSet::new(), NOW, &temporal).unwrap();
+        let gated_ids: HashSet<String> = gated.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(
+            gated_ids,
+            pred_ids,
+            "one predicate, two consumers — but they disagree"
+        );
+        // Sanity: the exclusions behave identically in both consumers.
+        // DEVIATION (recorded at seed_null_title): the live schema pins
+        // title NOT NULL, so the "notitle" arm seeds an empty title that is
+        // ELIGIBLE under the shared predicate; "dead"/"old"/"expired"/"live2"
+        // are the excluded arms.
+        assert_eq!(
+            pred_ids,
+            HashSet::from(["live".to_string(), "notitle".to_string()])
+        );
+    }
+
+    /// Parity guard above the `MAX_EXCLUDES` cliff (spec §3.1 r30-M2): the
+    /// per-call skip set lives in Rust on BOTH paths, so with MORE than
+    /// `MAX_EXCLUDES` excludes the v1 gate and the stage-1 complement
+    /// computation (`eligible_entry_ids` + Rust filter) must skip exactly the
+    /// same ids — an oversize exclude list can never desync the stages.
+    #[test]
+    fn stage1_predicate_parity_above_1024_excludes() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "a", "ent", &Q);
+        seed(&conn, "b", "ent", &at(0.8));
+        let excludes: Vec<String> =
+            (0..MAX_EXCLUDES + 6).map(|i| format!("x{i}")).chain(["a".into()]).collect();
+        let temporal = temporal_columns(&conn, None).unwrap();
+        let skip: HashSet<String> = excludes.iter().cloned().collect();
+        let after_skip: Vec<String> = eligible_entry_ids(&conn, &temporal, NOW)
+            .unwrap()
+            .into_iter()
+            .filter(|id| !skip.contains(id))
+            .collect();
+        assert_eq!(after_skip, vec!["b".to_string()]);
+        // v1 path with the same oversize skip set:
+        let gated = gated_entries(&conn, &Q, 0.0, 10, &skip, NOW, &temporal).unwrap();
+        assert_eq!(gated.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["b".to_string()]);
     }
 }
