@@ -59,7 +59,7 @@
 - Consumes: `crate::db::ddl_compat::existing_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>>` (`src-tauri/src/db/ddl_compat.rs:128`).
 - Produces: `fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()>` (private, called from `migrate()`); columns `documents.embed_key TEXT` (NULL, NO backfill), `documents.last_indexed_hash TEXT` (one-shot backfill `WHERE status IN ('indexed','pending_reindex')`); stamped `schema_version` row 28 gated on V22. Later tasks call `ALTER`-free reads of these columns.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Update the pinned-version guard test (the test asserting `version, 27` at `connection.rs:3372-3379`):
 
@@ -143,12 +143,12 @@ fn pre_v15_fixture_gains_v28_columns_on_open() {
 
 (If the repo keeps pre-V15 fixtures as SQL dump files under `src-tauri/tests/fixtures/`, reuse the existing V15-upgrade fixture instead of hand-building the table; keep the same assertions.)
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1 v28`
 Expected: FAIL — `embed_key` column does not exist / version asserted 28 but is 27.
 
-- [ ] **Step 3: Write the migration (V24 pattern, exact code)**
+- [x] **Step 3: Write the migration (V24 pattern, exact code)**
 
 Add beside `apply_v27_embed_scheme` (`connection.rs:958`):
 
@@ -217,12 +217,12 @@ Call it in `migrate()` immediately after `apply_v27_embed_scheme(conn)?;` (`conn
 apply_v28_two_stage_columns(conn)?;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1 v28` and then the full connection test module (same command, filter `db::connection`).
 Expected: PASS. Also run the full suite once (Global Constraints command) — no other test may regress.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/db/connection.rs
