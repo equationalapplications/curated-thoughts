@@ -176,7 +176,10 @@ pub(crate) struct Temporal {
 /// Column probes plus the call's ONE scheme resolution. `declared` is a
 /// scheme the caller already resolved (and derived its query text / floor
 /// from); `None` resolves the active `wisdom_active_scheme` here.
-fn temporal_columns(conn: &Connection, declared: Option<Scheme>) -> Result<Temporal> {
+// Task 3: exposed for two_stage stage-1 SQL (plan §Task 3) — two_stage holds
+// the SAME Temporal the gate resolved, so its candidate/complement legs share
+// one scheme + table-shape resolution with the gate.
+pub(crate) fn temporal_columns(conn: &Connection, declared: Option<Scheme>) -> Result<Temporal> {
     // The scheme rule (fail-closed on unknown values, pre-V27 degradation,
     // declared-instr1-on-pre-V27 refusal) lives once in `embed_scheme`.
     let scheme = resolve_reader_scheme(conn, declared)?;
@@ -358,9 +361,8 @@ pub(crate) fn entry_eligibility_where(t: &Temporal) -> String {
 /// The shared predicate as a standalone query (spec §3.2): Rust-side consumers
 /// (Task 3's stage-1 complement) get the eligible id set from the SAME
 /// fragment `gated_entries` interpolates.
-// Only called from the tests module until Task 3's stage-1 complement lands —
-// the parity tests are the interim consumer, not dead weight.
-#[allow(dead_code)]
+// Real consumer landed in Task 3 (`two_stage::complement_entry_ids`) — the
+// parity tests are no longer the only callers.
 pub(crate) fn eligible_entry_ids(
     conn: &Connection,
     t: &Temporal,

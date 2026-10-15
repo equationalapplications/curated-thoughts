@@ -33,6 +33,7 @@ mod setup;
 mod timeline_api;
 pub mod tool_dispatch;
 pub mod trusted_links;
+pub mod two_stage;
 pub mod vault;
 pub mod walk_vault;
 pub mod watcher;
