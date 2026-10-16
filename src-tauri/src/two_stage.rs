@@ -13,6 +13,12 @@ use rusqlite::OptionalExtension;
 use crate::db::ddl_compat::existing_columns;
 use crate::wisdom_match::{eligible_entry_ids, entry_eligibility_where, temporal_columns};
 
+// Tests-only fixture surface for Task 4's decision-core tests: re-exported
+// pub(crate) so `wisdom_match::tests` can reuse Task 3's fixture() (one
+// fixture, one edge model). cfg(test)-gated — invisible in normal builds.
+#[cfg(test)]
+pub(crate) use two_stage_test_support::{blob, fixture, unit_vec, NOW_MS};
+
 /// One stage-1 candidate population. `doc_ids` = evidence-hash hop ∪ proposal
 /// chain — the raw UNION: doc-level dedupe is FORBIDDEN (r29-M2: membership
 /// is by doc_id; dedupe applies ONLY at result level in [`stage1_search`]).
@@ -366,28 +372,29 @@ pub fn coverage(conn: &Connection, profile_key: &str, now_ms: i64) -> Result<Opt
     Ok(Some((n, cov)))
 }
 
+/// Tests-only shared fixtures (Task 4's `wisdom_match` tests reuse Task 3's
+/// `fixture()` per the plan's Step-1 note — one fixture, one edge model, so
+/// the decision-core tests and the stage-1 SQL tests can never drift apart).
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod two_stage_test_support {
     use crate::db::connection::open_in_memory;
-    use crate::embed_scheme::Scheme;
-    use crate::wisdom_match::wisdom_match_with_floor;
+    use rusqlite::Connection;
 
-    const NOW_MS: i64 = 1_760_000_000_000;
+    pub(crate) const NOW_MS: i64 = 1_760_000_000_000;
 
-    fn blob(v: &[f32]) -> Vec<u8> {
+    pub(crate) fn blob(v: &[f32]) -> Vec<u8> {
         v.iter().flat_map(|f| f.to_le_bytes()).collect()
     }
 
     /// Orthonormal 4-dim basis vector — cosine against another basis vector
     /// is exactly 0.0 or 1.0, so score assertions are exact.
-    fn unit_vec(i: i64) -> Vec<f32> {
+    pub(crate) fn unit_vec(i: i64) -> Vec<f32> {
         let mut v = vec![0.0_f32; 4];
         v[(i as usize - 1) % 4] = 1.0;
         v
     }
 
-    fn fixture() -> Connection {
+    pub(crate) fn fixture() -> Connection {
         let conn = open_in_memory().unwrap();
         // docs 1,2 candidate (1 via evidence hash hop, 2 via proposal chain);
         // doc 3 NOT candidate; doc 4 candidate-shaped but reached by NO edge.
@@ -466,6 +473,14 @@ mod tests {
         .unwrap();
         conn
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::two_stage_test_support::*;
+    use super::*;
+    use crate::embed_scheme::Scheme;
+    use crate::wisdom_match::wisdom_match_with_floor;
 
     #[test]
     fn candidate_set_is_union_of_both_edges_no_doc_dedupe() {
