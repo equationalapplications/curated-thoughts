@@ -8,6 +8,11 @@ mod prose;
 
 pub use classify::{classify, path_uses_tsx, should_ingest_extension, AstLang, ChunkStrategy};
 
+/// Stable identity of the chunking algorithm + parameters. Written into the
+/// funnel stamp (spec §8(c), §6 — the stamp is CHUNKER-ONLY); bump on any
+/// change that alters produced chunk boundaries or content hashes.
+pub const CHUNKER_FINGERPRINT: &str = "v1";
+
 use std::path::Path;
 
 /// 1-indexed inclusive lines for `source[start_byte..end_byte]` (byte indices must be on char boundaries).
@@ -439,6 +444,12 @@ mod integration_tests {
             .map(|c| c.text)
             .collect();
         assert_eq!(a, chunk_text(text));
+    }
+
+    #[test]
+    fn chunker_fingerprint_is_stable_and_nonempty() {
+        assert!(!crate::chunker::CHUNKER_FINGERPRINT.is_empty());
+        assert_eq!(crate::chunker::CHUNKER_FINGERPRINT, "v1");
     }
 
     #[test]
