@@ -24,6 +24,7 @@ mod breaker_tests {
 
     const BREAKER_SPENT_KEY: &str = "breaker_spent";
     const BREAKER_EPOCH_TS_KEY: &str = "breaker_epoch_ts";
+    const BREAKER_TRIPPED_KEY: &str = "breaker_tripped";
 
     /// Seed `live` grounded + `ungrounded` vanished-path librarian_inferred
     /// rows. Grounded rows carry a legacy path ref backed by a `documents`
@@ -304,6 +305,67 @@ mod breaker_tests {
         );
     }
 
+    /// Fix round (task-reviewer IMPORTANT 1): the epoch's trip-ness is a
+    /// PERSISTED, SHARED fact — when ANY writer refuses, the epoch is marked
+    /// tripped, and no writer may roll it over. Concrete hole: regrade
+    /// (L=100 → threshold 10) trips at spent=10; heal (L=1000 → threshold 50)
+    /// checking >24h later used to infer "healthy" from 10 < 50, ROLL the
+    /// epoch, and reset spent to 0 — erasing the trip and reopening a fresh
+    /// budget. B must be refused (naming ITS threshold), the epoch must NOT
+    /// roll, spent must NOT reset.
+    #[test]
+    fn a_marked_tripped_epoch_refuses_a_higher_threshold_writer_and_never_rolls() {
+        let conn = open_in_memory().unwrap();
+
+        // Writer A (regrade, L=100 → threshold 10) spends to its threshold…
+        breaker_spend(&conn, 10).unwrap();
+        // …and its next batch is refused (spent 10 >= threshold 10). ANY
+        // writer's refusal must MARK the epoch tripped.
+        match breaker_check(&conn, 1, 100, 10, BREAKER_L_REGRADE).unwrap() {
+            BreakerVerdict::Refuse { .. } => {}
+            BreakerVerdict::Allow => panic!("writer A at its threshold must refuse"),
+        }
+        assert!(
+            meta(&conn, BREAKER_TRIPPED_KEY).is_some(),
+            "ANY writer's refusal must mark the epoch tripped"
+        );
+
+        // Age the epoch past the healthy-rollover window (>24h).
+        let now_ms = crate::db::commit::ms_now();
+        let backdated = (now_ms - 25 * 60 * 60 * 1000).to_string();
+        conn.execute(
+            "UPDATE llm_wiki_meta SET value = ?1 WHERE key = ?2",
+            params![backdated, BREAKER_EPOCH_TS_KEY],
+        )
+        .unwrap();
+
+        // Writer B (heal, L=1000 → threshold 50): spent 10 < 50, but the
+        // epoch is MARKED tripped — B must be refused, naming ITS threshold.
+        let verdict = breaker_check(&conn, 1, 1000, 50, BREAKER_L_HEAL).unwrap();
+        match verdict {
+            BreakerVerdict::Refuse { reason } => {
+                assert!(reason.contains("TRIPPED"), "reason: {reason}");
+                assert!(
+                    reason.contains("50"),
+                    "refusal must name writer B's OWN threshold: {reason}"
+                );
+            }
+            BreakerVerdict::Allow => {
+                panic!("a marked-tripped epoch must refuse every writer, not roll over")
+            }
+        }
+        assert_eq!(
+            breaker_spent(&conn).unwrap(),
+            10,
+            "a marked-tripped epoch must NOT reset spent"
+        );
+        assert_eq!(
+            meta(&conn, BREAKER_EPOCH_TS_KEY).as_deref(),
+            Some(backdated.as_str()),
+            "a marked-tripped epoch must NOT roll over"
+        );
+    }
+
     // ── Reset surface: `ct heal --reset-breaker` semantics ───────────────────
 
     #[test]
@@ -357,6 +419,10 @@ mod breaker_tests {
                 assert!(
                     reason.contains("10"),
                     "threshold number in reason: {reason}"
+                );
+                assert!(
+                    !reason.contains("100"),
+                    "threshold must not accidentally pass on '100': {reason}"
                 );
                 assert!(reason.contains("spent"), "reason: {reason}");
             }

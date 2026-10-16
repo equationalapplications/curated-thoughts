@@ -735,6 +735,129 @@ mod tests {
         );
     }
 
+    /// Fix round (task-reviewer IMPORTANT 2): the in-transaction
+    /// classification recount must ABORT on a mismatch against the PRE-txn
+    /// doomed ID SET: deletes aborted, re-anchor UPDATEs still committed (rev
+    /// 9), no row hard-deleted. The mismatch is forced directly: the harness
+    /// mutates the classification (grounds one flagged row via a live chunk)
+    /// between the caller's snapshot and the purge, so the in-lock recount
+    /// disagrees with the snapshot set. RED instrumentation (fix round): the
+    /// mismatch arm of `purge_doomed_rows_opts` had NO coverage — this
+    /// assertion proves the abort path is actually entered.
+    #[test]
+    fn recount_mismatch_against_pre_txn_doomed_set_aborts_deletes_but_keeps_re_anchors() {
+        let conn = open_in_memory().unwrap();
+        // One ANCHORED flagged row: the pre-txn snapshot will classify it as
+        // doomed (it carries no live chunk YET), the in-txn recount will
+        // re-classify it as anchored (the chunk exists by then) and re-anchor
+        // it — exactly one mismatch, plus a re-anchor that must commit.
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('/v/notes.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        // The live chunk is seeded but the evidence does NOT reference it
+        // yet, so the snapshot classification (shared SQL) says doomed.
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, entity_id, content_hash)
+             VALUES (1, 'c', 0, 'ent', ?1)",
+            [ANCHOR_HASH],
+        )
+        .unwrap();
+        seed_flagged(&conn, "fact_flip", false, None);
+
+        // PRE-txn classification (mirrors regrade_unanchored step 2): with
+        // no chunk reference in its evidence blob, `fact_flip` is doomed.
+        // Snapshot taken HERE, before the "concurrent writer" mutates the
+        // classification below.
+        let doomed_ids: std::collections::HashSet<String> =
+            ["fact_flip".to_string()].into_iter().collect();
+
+        // Export the doomed row (as regrade_unanchored step 4 would).
+        let doomed = vec![DoomedRow {
+            entry_id: "fact_flip".into(),
+            entity_id: "ent".into(),
+            title: "t".into(),
+            body: "b".into(),
+            source_ref: None,
+            created_at: 1,
+            evidence_json: r#"{"evidence":[],"proposal_id":"prop_flip"}"#.into(),
+            proposal_id: "prop_flip".into(),
+        }];
+        let dir = tempfile::TempDir::new().unwrap();
+        let export_dir = dir.path().join(REGRADE_EXPORT_DIR);
+        assert_eq!(export_doomed_rows(&conn, &doomed, &export_dir).unwrap(), 1);
+
+        // THE CONCURRENT WRITER: between the snapshot and the purge, the
+        // classification flips — the evidence now anchors the live chunk we
+        // seeded. (This is the exact mutation the recount exists to catch:
+        // without the abort, `hard_delete_entries` would hard-delete a row
+        // the recount just re-anchored.)
+        conn.execute(
+            "UPDATE librarian_evidence
+             SET evidence_json = ?1
+             WHERE entry_id = 'fact_flip'",
+            [format!(
+                r#"{{"evidence":[{{"chunk_id":1,"content_hash":"{ANCHOR_HASH}"}}],"proposal_id":"prop_flip"}}"#
+            )],
+        )
+        .unwrap();
+
+        // Mismatch is now unavoidable: the pre-txn set says {fact_flip} is
+        // doomed, the in-txn recount will classify it anchored. RED proof the
+        // abort arm is genuinely reached: check the outcome below asserts
+        // deletion was aborted — if the mismatch arm never existed, the purge
+        // would proceed and hard-delete the re-anchored row.
+        let (purged, skipped) = purge_doomed_rows_opts(
+            &conn,
+            &doomed,
+            &doomed_ids,
+            &export_dir,
+            1_000,
+            // The recount-mismatch abort is independent of the breaker; skip
+            // it so a |doomed|>=L full-population refusal can't mask the arm
+            // under test (L=1 here — the single live flagged row IS the
+            // whole selection).
+            RegradeOpts { allow_bulk: true },
+        )
+        .unwrap();
+
+        assert_eq!(purged, 0, "a recount mismatch must abort ALL hard-deletes");
+        assert!(
+            skipped,
+            "the abort must be reported as a skipped destructive phase"
+        );
+        // No rows hard-deleted — the entry AND its evidence survive.
+        let entries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = 'fact_flip'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(entries, 1, "no rows may be hard-deleted on a mismatch");
+        // Re-anchor UPDATEs still committed (rev 9: they are recovery
+        // actions) — the recount cleared the (now false) unanchored flag.
+        let unanchored: i64 = conn
+            .query_row(
+                "SELECT unanchored FROM librarian_evidence WHERE entry_id = 'fact_flip'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unanchored, 0,
+            "re-anchor UPDATEs must commit even though the deletes aborted"
+        );
+        // Export dir cleaned by the abort (no stale backup may masquerade as
+        // a completed one behind a skipped destructive phase).
+        assert!(
+            !export_dir.exists(),
+            "the aborted destructive phase must clean its export dir"
+        );
+    }
+
     // ── Task 10 (spec §10): the shared cross-process breaker on the purge ────
 
     /// Seed `n` UNANCHORED live flagged rows (all classified doomed) plus one

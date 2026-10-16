@@ -51,6 +51,13 @@ pub const BREAKER_L_REGRADE: &str = "breaker_L_regrade";
 const BREAKER_SPENT_KEY: &str = "breaker_spent";
 /// Meta key holding the epoch start (unix ms, decimal string).
 const BREAKER_EPOCH_TS_KEY: &str = "breaker_epoch_ts";
+/// Persisted `1` once ANY writer's refusal trips the epoch. Fix round (rev of
+/// task 10): trip-ness used to be inferred per-writer from
+/// `spent_before < own_threshold`, which let a HIGHER-threshold writer roll a
+/// tripped epoch >24h later and reset spent — erasing the trip and reopening
+/// a fresh budget. The marker lives in the same shared `llm_wiki_meta` table,
+/// so it is visible to every writer and cleared only by [`breaker_reset`].
+const BREAKER_TRIPPED_KEY: &str = "breaker_tripped";
 /// Healthy-epoch rollover cadence (spec §10: 24h; tripped epochs never roll).
 const EPOCH_ROLLOVER_MS: i64 = 24 * 60 * 60 * 1000;
 /// Threshold floor — pinned by the plan's Global Constraints.
@@ -87,7 +94,7 @@ fn write_meta(conn: &Connection, key: &str, value: i64) -> Result<()> {
 
 /// The pinned threshold math: `max(⌈0.05·L⌉, 10)` for ALL writers.
 fn threshold_for(l: i64) -> i64 {
-    // (l*4+50)/100 == ceil(0.05*l) for l >= 0 without the unstable
+    // (l*5+99)/100 == ceil(0.05*l) for l >= 0 without the unstable
     // `int_roundings` feature (rust 1.73 pin).
     let five_pct = (l * 5 + 99) / 100;
     five_pct.max(THRESHOLD_FLOOR)
@@ -180,10 +187,16 @@ pub fn breaker_check(
     // threshold and the old start stays, so the refusal persists until an
     // operator resolves the cause and resets the keys explicitly (spec §10).
     let spent_before = breaker_spent(conn)?;
+    let tripped = read_meta(conn, BREAKER_TRIPPED_KEY)?.unwrap_or(0) != 0;
     match read_meta(conn, BREAKER_EPOCH_TS_KEY)? {
         None => {
             write_meta(conn, BREAKER_EPOCH_TS_KEY, now_ms)?;
         }
+        // Fix round (rev of task 10): a MARKED-tripped epoch never rolls,
+        // regardless of any individual writer's threshold — trip-ness is a
+        // persisted, shared fact, not something re-inferred per writer from
+        // `spent_before < own_threshold`.
+        Some(_) if tripped => {}
         Some(ts) if now_ms - ts >= EPOCH_ROLLOVER_MS && spent_before < own_threshold => {
             write_meta(conn, BREAKER_EPOCH_TS_KEY, now_ms)?;
             write_meta(conn, BREAKER_SPENT_KEY, 0)?;
@@ -192,13 +205,17 @@ pub fn breaker_check(
     }
     snapshot_l(conn, l_key, own_l)?;
 
-    // Rule 1: tripped epoch (spent at/over THIS writer's threshold). The
-    // refusal line names which threshold was hit (spec §10).
+    // Rule 1: tripped epoch. Two ways in: the persisted marker (ANY writer's
+    // earlier refusal — a higher-threshold writer is refused TOO, not handed
+    // a fresh budget via rollover) or this writer's own budget being spent
+    // out. The refusal line names THIS writer's threshold (spec §10).
     let spent = breaker_spent(conn)?;
-    if spent >= own_threshold {
+    if tripped || spent >= own_threshold {
+        // Persist the marker so every other writer sees the trip as well.
+        write_meta(conn, BREAKER_TRIPPED_KEY, 1)?;
         return Ok(BreakerVerdict::Refuse {
             reason: format!(
-                "bulk-deletion breaker TRIPPED: shared spent {spent} >= this writer's threshold {own_threshold} (a tripped epoch does NOT roll over — investigate, then `ct heal --reset-breaker`)"
+                "bulk-deletion breaker TRIPPED: shared spent {spent} / this writer's threshold {own_threshold} (a tripped epoch does NOT roll over — investigate, then `ct heal --reset-breaker`)"
             ),
         });
     }
@@ -207,6 +224,10 @@ pub fn breaker_check(
     // populations — a batch removing the ENTIRE selected population is
     // refused outright, whatever L is.
     if own_l > 0 && doomed >= own_l {
+        // Same shared marker: a Small-L refusal trips the epoch too (any
+        // writer's refusal is a trip; spec: "the epoch is MARKED tripped
+        // when ANY writer refuses").
+        write_meta(conn, BREAKER_TRIPPED_KEY, 1)?;
         return Ok(BreakerVerdict::Refuse {
             reason: format!(
                 "bulk-deletion breaker: |doomed| {doomed} >= L {own_l} — refusing the ENTIRE selected population (use `--allow-bulk` only after investigating)"
@@ -217,6 +238,7 @@ pub fn breaker_check(
     // Rule 3: budget (all-or-nothing — never a partial delete).
     let remaining = own_threshold - spent;
     if doomed > remaining {
+        write_meta(conn, BREAKER_TRIPPED_KEY, 1)?;
         return Ok(BreakerVerdict::Refuse {
             reason: format!(
                 "bulk-deletion breaker: |doomed| {doomed} > remaining budget {remaining} (shared spent {spent} / threshold {own_threshold})"
@@ -228,14 +250,15 @@ pub fn breaker_check(
 }
 
 /// `ct heal --reset-breaker`: delete the epoch timestamp, the shared spent
-/// counter and both `breaker_L_*` keys in ONE IMMEDIATE transaction (the
-/// transaction is opened HERE so no caller can reset partially — spec §10
-/// pins the single-txn shape).
+/// counter, the tripped marker and both `breaker_L_*` keys in ONE IMMEDIATE
+/// transaction (the transaction is opened HERE so no caller can reset
+/// partially — spec §10 pins the single-txn shape).
 pub fn breaker_reset(conn: &Connection) -> Result<()> {
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     for key in [
         BREAKER_EPOCH_TS_KEY,
         BREAKER_SPENT_KEY,
+        BREAKER_TRIPPED_KEY,
         BREAKER_L_HEAL,
         BREAKER_L_REGRADE,
     ] {

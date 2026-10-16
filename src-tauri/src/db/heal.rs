@@ -392,6 +392,59 @@ mod tests {
         );
     }
 
+    /// Fix round (task-reviewer IMPORTANT 3): `--allow-bulk` is a real
+    /// BEHAVIORAL bypass — the exact fixture shape that refuses without the
+    /// flag (full-population, rev-34 `|doomed| >= L` rule) must PROCEED with
+    /// `HealOpts { allow_bulk: true }`: rows healed, no refusal line.
+    #[test]
+    fn allow_bulk_proceeds_on_a_full_population_fixture_that_refuses_without_it() {
+        let mut conn = open_in_memory().unwrap();
+        // The refused shape: 3 live librarian_inferred rows, ALL ungrounded
+        // (same as `heal_invalid_sources_conn_refuses_when_doomed_equals_selection`).
+        insert_entry(&conn, "lost0", "documents/vanished0.md");
+        insert_entry(&conn, "lost1", "documents/vanished1.md");
+        insert_entry(&conn, "lost2", "documents/vanished2.md");
+
+        // Negative control on the SAME shape: without the flag it refuses.
+        let refused = heal_invalid_sources_conn_opts(
+            &mut conn,
+            PathBuf::from("/vault"),
+            HealOpts { allow_bulk: false },
+        )
+        .unwrap();
+        assert_eq!(
+            refused.soft_deleted, 0,
+            "control: this fixture must refuse without the flag"
+        );
+
+        let summary = heal_invalid_sources_conn_opts(
+            &mut conn,
+            PathBuf::from("/vault"),
+            HealOpts { allow_bulk: true },
+        )
+        .unwrap();
+        assert_eq!(
+            summary.soft_deleted, 3,
+            "--allow-bulk must let the full-population batch PROCEED"
+        );
+        let alive: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            alive, 0,
+            "every selected row must be healed under the bypass"
+        );
+        assert_eq!(
+            breaker_spent(&conn),
+            3,
+            "the bypassed run still spends the shared budget for what it heals"
+        );
+    }
+
     /// Task 10 (spec §10): a PARTIAL batch within the budget proceeds, and
     /// every successful soft-delete spends the SHARED `breaker_spent` counter
     /// inside its per-row IMMEDIATE transaction.
