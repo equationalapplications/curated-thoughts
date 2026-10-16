@@ -61,6 +61,32 @@ fn seed_heal_fixture(dir: &std::path::Path) {
     .unwrap();
 }
 
+/// Task 10: a grounded companion keeps the batch PARTIAL — `seed_heal_fixture`
+/// alone presents a single ungrounded row as the ENTIRE heal selection
+/// (L=1, |doomed|=1), and the rev-34 `|doomed| >= L` breaker refuses the
+/// whole pass before the --yes tests could ever exercise the heal/purge
+/// behavior they pin. Only the tests that assert a COMPLETED heal use this;
+/// the refusal-arm tests keep the bare fixture (their pin IS the refusal).
+fn seed_grounded_companion(dir: &std::path::Path) {
+    let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
+    conn.execute(
+        "INSERT INTO documents (path, hash, tier, status)
+         VALUES ('documents/alive.md', 'h', 'user_doc', 'indexed')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO llm_wiki_entries (
+            id, entity_id, title, body, tags, confidence, source_type,
+            source_ref, created_at, updated_at, deleted_at
+         ) VALUES ('companion', 'ent-1', 'Title companion', 'body', '[]',
+                   'inferred', 'librarian_inferred', 'documents/alive.md',
+                   1, 1, NULL)",
+        [],
+    )
+    .unwrap();
+}
+
 fn run_ct(dir: &std::path::Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ct"))
         .env("CURATED_BRAIN_DIR", dir)
@@ -143,6 +169,7 @@ fn heal_refusal_does_not_create_brain_db_on_a_fresh_brain() {
 #[test]
 fn heal_with_yes_heals_purges_and_prints_summary_json() {
     with_seeded_heal_brain(|dir| {
+        seed_grounded_companion(dir);
         let out = run_ct(dir, &["heal", "--yes"]);
         assert!(
             out.status.success(),
@@ -154,8 +181,9 @@ fn heal_with_yes_heals_purges_and_prints_summary_json() {
         let summary: serde_json::Value = serde_json::from_str(stdout.trim())
             .unwrap_or_else(|e| panic!("stdout must be a single JSON object ({e}): {stdout}"));
         assert_eq!(
-            summary["evaluated"], 1,
-            "only the live row is evaluated: {summary}"
+            summary["evaluated"], 2,
+            "both live rows are evaluated (the Task-10 grounded companion is part of the \
+             selection; the pre-soft-deleted partner is excluded): {summary}"
         );
         assert_eq!(
             summary["soft_deleted"], 1,
@@ -371,6 +399,7 @@ fn heal_confirm_drift_without_yes_is_a_usage_error() {
 #[test]
 fn heal_yes_with_unconfirmed_drift_still_source_heals_and_skips_ontology() {
     with_seeded_heal_brain(|dir| {
+        seed_grounded_companion(dir);
         seed_watermark(dir, "deadbeef", 7);
         let out = run_ct(dir, &["heal", "--yes"]);
         assert_eq!(out.status.code(), Some(1), "unconfirmed drift exits 1");
@@ -523,6 +552,7 @@ fn heal_yes_on_configless_fixture_reports_clean_ontology_section() {
 #[test]
 fn heal_yes_with_degraded_config_still_source_heals_but_refuses_ontology() {
     with_seeded_heal_brain(|dir| {
+        seed_grounded_companion(dir);
         std::fs::write(dir.join("config.json"), b"{not json").unwrap();
         let out = run_ct(dir, &["heal", "--yes"]);
         assert_eq!(out.status.code(), Some(1));

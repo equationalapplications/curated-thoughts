@@ -21,6 +21,14 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde::Serialize;
 
+/// Per-run options for [`heal_invalid_sources_conn`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HealOpts {
+    /// Skip the bulk-deletion breaker for THIS one run (the pinned
+    /// `--allow-bulk` escape, spec §10). Nothing else changes.
+    pub allow_bulk: bool,
+}
+
 /// Counts from one heal pass over live `librarian_inferred` entries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct HealSummary {
@@ -43,7 +51,23 @@ pub struct HealSummary {
 /// stale (empty / unparseable / DB-error refs stay). Each soft-delete plus
 /// its edge purge is atomic per row; `healed` events are written once per
 /// affected entity after the loop.
+///
+/// Task 10 (spec §10): the pass is breaker-governed. The breaker check runs
+/// once before the loop — `|doomed|` here is the count of selected rows that
+/// are UNGROUNDED, computed per row inside the same IMMEDIATE transaction
+/// that soft-deletes it; the pre-loop check pins the batch decision (a refusal
+/// deletes NOTHING) while the spend increments ride the per-row transactions.
 pub fn heal_invalid_sources_conn(conn: &mut Connection, _vault: PathBuf) -> Result<HealSummary> {
+    heal_invalid_sources_conn_opts(conn, _vault, HealOpts::default())
+}
+
+/// [`heal_invalid_sources_conn`] with explicit [`HealOpts`] (the `ct heal`
+/// `--allow-bulk` path).
+pub fn heal_invalid_sources_conn_opts(
+    conn: &mut Connection,
+    _vault: PathBuf,
+    opts: HealOpts,
+) -> Result<HealSummary> {
     let entries: Vec<(i64, String, String, String)> = {
         let mut stmt = conn.prepare(
             "SELECT e.rowid, e.source_ref, e.entity_id, e.id
@@ -59,6 +83,39 @@ pub fn heal_invalid_sources_conn(conn: &mut Connection, _vault: PathBuf) -> Resu
         }
         v
     };
+
+    // Task 10 (spec §10): ONE pre-loop breaker decision for the whole pass.
+    // `|doomed|` is the count of selected rows whose source_ref is
+    // demonstrably stale — the exact set the loop would soft-delete. On a
+    // refusal the pass soft-deletes NOTHING (all-or-nothing) and spends
+    // nothing; the stderr line names the threshold that was hit.
+    if !opts.allow_bulk {
+        let l = crate::db::breaker::heal_denominator(conn)?;
+        let threshold = crate::db::breaker::heal_threshold(conn)?;
+        let mut doomed = 0usize;
+        for (_, source_ref, _, _) in &entries {
+            if !crate::db::commit::source_ref_is_still_grounded(conn, source_ref) {
+                doomed += 1;
+            }
+        }
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let verdict = crate::db::breaker::breaker_check(
+            &tx,
+            doomed,
+            l,
+            threshold,
+            crate::db::breaker::BREAKER_L_HEAL,
+        )?;
+        tx.commit()?;
+        if let crate::db::breaker::BreakerVerdict::Refuse { reason } = verdict {
+            eprintln!("refusing heal pass: {reason}");
+            return Ok(HealSummary {
+                evaluated: entries.len(),
+                ..HealSummary::default()
+            });
+        }
+    }
 
     let mut summary = HealSummary {
         evaluated: entries.len(),
@@ -101,6 +158,10 @@ pub fn heal_invalid_sources_conn(conn: &mut Connection, _vault: PathBuf) -> Resu
             // Capture the cascade count so the summary reports what the
             // heal actually purged (spec §5 — previously discarded).
             summary.edges_purged += crate::db::edge_purge::purge_edges_for_entry(&tx, &entry_id)?;
+            // Task 10 (spec §10): the soft-delete spends the SHARED counter
+            // INSIDE this per-row IMMEDIATE transaction — scheduler, `ct heal`
+            // and the GUI button share one budget across processes.
+            crate::db::breaker::breaker_spend(&tx, changed as i64)?;
             tx.commit()?;
             *healed_by_entity.entry(entity_id).or_insert(0) += 1;
             summary.soft_deleted += 1;
@@ -175,6 +236,12 @@ mod tests {
         // Grounded: the referenced document exists and is indexed.
         grounded_document(&conn, "documents/a.md");
         insert_entry(&conn, "live", "documents/a.md");
+        // Task 10: a grounded companion keeps the batch PARTIAL — a lone
+        // ungrounded row would be the ENTIRE selection (L=1) and the rev-34
+        // breaker refuses it before the edge-purge assertions could ever be
+        // exercised. The companion matches the heal selection, so it counts
+        // toward L but is grounded and stays live.
+        insert_entry(&conn, "companion", "documents/a.md");
         insert_edge(&conn, "edge_lost", "lost", "live");
         insert_edge(&conn, "edge_live", "live", "lost");
 
@@ -191,8 +258,9 @@ mod tests {
 
         let summary = heal_invalid_sources_conn(&mut conn, PathBuf::from("/vault")).unwrap();
         assert_eq!(
-            summary.evaluated, 1,
-            "only live rows are evaluated (the pre-soft-deleted partner is excluded)"
+            summary.evaluated, 2,
+            "only live rows are evaluated (the pre-soft-deleted partner is excluded; \
+             the Task-10 grounded companion is live and therefore evaluated)"
         );
         assert_eq!(summary.soft_deleted, 1, "only the ungrounded row heals");
         assert_eq!(
@@ -259,15 +327,89 @@ mod tests {
     fn skipped_rows_are_not_double_evaluated_on_second_pass() {
         let mut conn = open_in_memory().unwrap();
         insert_entry(&conn, "lost", "documents/vanished.md");
+        // Task 10: a grounded companion keeps the batch PARTIAL — a lone
+        // ungrounded row would be the ENTIRE selection (L=1) and the rev-34
+        // breaker refuses it. Because a proceeding batch can never heal its
+        // whole selection, pass 2 always still selects the live grounded
+        // companion (evaluated == 1); the soft-deleted row is what must
+        // disappear from the count.
+        grounded_document(&conn, "documents/a.md");
+        insert_entry(&conn, "companion", "documents/a.md");
         let first = heal_invalid_sources_conn(&mut conn, PathBuf::from("/vault")).unwrap();
         assert_eq!(first.soft_deleted, 1);
         // Second pass: the healed row is soft-deleted, so the selection
         // (`deleted_at IS NULL`) skips it.
         let second = heal_invalid_sources_conn(&mut conn, PathBuf::from("/vault")).unwrap();
         assert_eq!(
-            second.evaluated, 0,
-            "soft-deleted rows are not re-evaluated"
+            second.evaluated, 1,
+            "soft-deleted rows are not re-evaluated (only the live grounded companion is selected)"
         );
         assert_eq!(second.soft_deleted, 0);
+    }
+
+    // ── Task 10 (spec §10): the shared cross-process breaker on this writer ──
+
+    fn breaker_spent(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT CAST(value AS INTEGER) FROM llm_wiki_meta WHERE key = 'breaker_spent'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    }
+
+    /// Task 10 (spec §10): a batch that would remove the ENTIRE selected
+    /// population is refused outright (rev-34 `|doomed| >= L` rule), the
+    /// breaker stays unspent, and the row survives. `ct heal` and the
+    /// scheduler both route through this writer, so this is the refusal arm
+    /// for BOTH of those surfaces.
+    #[test]
+    fn heal_invalid_sources_conn_refuses_when_doomed_equals_selection() {
+        let mut conn = open_in_memory().unwrap();
+        // 3 live librarian_inferred rows, ALL of them ungrounded: L=3,
+        // |doomed|=3 ⇒ refuse even though 3 ≤ threshold 10 (Small-L rule).
+        insert_entry(&conn, "lost0", "documents/vanished0.md");
+        insert_entry(&conn, "lost1", "documents/vanished1.md");
+        insert_entry(&conn, "lost2", "documents/vanished2.md");
+
+        let summary = heal_invalid_sources_conn(&mut conn, PathBuf::from("/vault")).unwrap();
+        assert_eq!(
+            summary.soft_deleted, 0,
+            "a full-population batch must soft-delete NOTHING"
+        );
+        let alive: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(alive, 3, "all selected rows must survive the refusal");
+        assert_eq!(
+            breaker_spent(&conn),
+            0,
+            "a refused pass must not spend the shared budget"
+        );
+    }
+
+    /// Task 10 (spec §10): a PARTIAL batch within the budget proceeds, and
+    /// every successful soft-delete spends the SHARED `breaker_spent` counter
+    /// inside its per-row IMMEDIATE transaction.
+    #[test]
+    fn heal_invalid_sources_conn_spends_shared_budget_per_soft_deleted_row() {
+        let mut conn = open_in_memory().unwrap();
+        // Grounded partner keeps the selection live so the batch is partial.
+        grounded_document(&conn, "documents/a.md");
+        insert_entry(&conn, "live", "documents/a.md");
+        insert_entry(&conn, "lost", "documents/vanished.md");
+        // L=2 → threshold max(⌈0.1⌉, 10) = 10; |doomed|=1 < L ⇒ budget-governed.
+
+        let summary = heal_invalid_sources_conn(&mut conn, PathBuf::from("/vault")).unwrap();
+        assert_eq!(summary.soft_deleted, 1, "partial batch proceeds");
+        assert_eq!(
+            breaker_spent(&conn),
+            1,
+            "each soft-deleted row increments the shared counter"
+        );
     }
 }

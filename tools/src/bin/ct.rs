@@ -111,6 +111,17 @@ enum Cmd {
         /// remaps, or watermark storage (requires --yes).
         #[arg(long, requires = "yes")]
         waive_drift: Option<String>,
+        /// Task 10 (spec §10): delete the breaker epoch timestamp, the shared
+        /// spent counter and both `breaker_L_*` keys (one IMMEDIATE
+        /// transaction) and exit WITHOUT running the heal — the operator
+        /// surface for a tripped breaker (requires --yes).
+        #[arg(long, requires = "yes", conflicts_with = "allow_bulk")]
+        reset_breaker: bool,
+        /// Task 10 (spec §10): skip the bulk-deletion breaker for THIS one
+        /// run — the only sanctioned way to run a full-population pass after
+        /// investigating (requires --yes).
+        #[arg(long, requires = "yes")]
+        allow_bulk: bool,
     },
     /// Approve, list, or revoke symlinks the ingest walker may follow.
     Trust {
@@ -285,6 +296,10 @@ enum EvidenceCmd {
         /// Confirm the destructive write (export + purge).
         #[arg(long)]
         yes: bool,
+        /// Task 10 (spec §10): skip the bulk-deletion breaker for THIS one
+        /// run (requires --yes).
+        #[arg(long, requires = "yes")]
+        allow_bulk: bool,
     },
 }
 
@@ -654,7 +669,9 @@ fn run(cmd: Cmd) -> Result<i32> {
             ),
         },
         Cmd::Evidence { cmd } => match cmd {
-            EvidenceCmd::Regrade { yes } => cli_common::evidence_regrade_cmd(yes),
+            EvidenceCmd::Regrade { yes, allow_bulk } => {
+                cli_common::evidence_regrade_cmd(yes, allow_bulk)
+            }
         },
         Cmd::Proposals { cmd } => match cmd {
             ProposalsCmd::List { json } => proposals_list(json),
@@ -745,6 +762,8 @@ fn run(cmd: Cmd) -> Result<i32> {
             yes,
             confirm_drift,
             waive_drift,
+            reset_breaker,
+            allow_bulk,
         } => {
             if !yes {
                 // Path-only resolution so a fresh brain (no brain.db yet)
@@ -806,7 +825,7 @@ fn run(cmd: Cmd) -> Result<i32> {
             // plan-p6-m1: the --yes arm returns the heal's own exit code —
             // an unconfirmed drift report or a refused ontology section is
             // exit 1 even though the source-heal above it succeeded.
-            cli_common::heal_run(confirm_drift, waive_drift)
+            cli_common::heal_run(confirm_drift, waive_drift, reset_breaker, allow_bulk)
         }
         Cmd::Trust { link, list, revoke } => trust_cmd(link, list, revoke),
         Cmd::Watch {
@@ -1239,5 +1258,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Task 10 (spec §10): `ct heal --reset-breaker` and `--allow-bulk` parse
+    /// against THIS clap definition, so the printed refusal/reset guidance
+    /// (and every script copying it) cannot drift from the real flags.
+    /// `--allow-bulk` requires `--yes` — it is a one-run skip for an operator
+    /// who has already confirmed the write, never a standalone bypass.
+    #[test]
+    fn heal_breaker_flags_parse() {
+        // reset-breaker requires --yes.
+        let parsed = Ct::try_parse_from(["ct", "heal", "--yes", "--reset-breaker"])
+            .expect("heal --yes --reset-breaker must parse");
+        let Cmd::Heal {
+            yes,
+            reset_breaker,
+            allow_bulk,
+            ..
+        } = parsed.cmd
+        else {
+            panic!("parsed as another command");
+        };
+        assert!(yes);
+        assert!(reset_breaker);
+        assert!(!allow_bulk);
+
+        // Without --yes the reset flag refuses to parse (the human gate holds).
+        assert!(
+            Ct::try_parse_from(["ct", "heal", "--reset-breaker"]).is_err(),
+            "--reset-breaker must require --yes"
+        );
+
+        // allow-bulk requires --yes and is distinct from the reset.
+        let parsed = Ct::try_parse_from(["ct", "heal", "--yes", "--allow-bulk"])
+            .expect("heal --yes --allow-bulk must parse");
+        let Cmd::Heal {
+            yes,
+            reset_breaker,
+            allow_bulk,
+            ..
+        } = parsed.cmd
+        else {
+            panic!("parsed as another command");
+        };
+        assert!(yes);
+        assert!(!reset_breaker);
+        assert!(allow_bulk);
+        assert!(Ct::try_parse_from(["ct", "heal", "--allow-bulk"]).is_err());
+
+        // regrade gains --allow-bulk (the breaker-skip on its destructive batch).
+        let parsed = Ct::try_parse_from(["ct", "evidence", "regrade", "--yes", "--allow-bulk"])
+            .expect("evidence regrade --yes --allow-bulk must parse");
+        let Cmd::Evidence {
+            cmd: EvidenceCmd::Regrade { yes, allow_bulk },
+        } = parsed.cmd
+        else {
+            panic!("parsed as another command");
+        };
+        assert!(yes);
+        assert!(allow_bulk);
+        assert!(
+            Ct::try_parse_from(["ct", "evidence", "regrade", "--allow-bulk"]).is_err(),
+            "regrade --allow-bulk must require --yes"
+        );
     }
 }

@@ -3013,6 +3013,33 @@ mod tests {
             [],
         )
         .unwrap();
+        // Task 10: a live unanchored-but-GROUNDED companion keeps regrade's
+        // batch PARTIAL — `fact_orphan` alone would be regrade's ENTIRE
+        // selection (L=1, |doomed|=1) and the rev-34 breaker refuses the
+        // recovered pass outright. The companion counts toward L but anchors
+        // to the live chunk `seed_v18_damage` plants, so the recount keeps it.
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type,
+                 source_ref, created_at, updated_at)
+             VALUES ('fact_companion', 'ent', 'companion', 'b', '[]', 'inferred',
+                     'librarian_inferred',
+                     'librarian-cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json,
+                 unanchored, created_at)
+             VALUES ('fact_companion', 'prop_companion', ?1, 1, 1)",
+            [{
+                let hash64 = "feedface00".to_string() + &"0".repeat(54);
+                format!(
+                    r#"{{"evidence":[{{"chunk_id":1,"content_hash":"{hash64}"}}],"proposal_id":"prop_companion"}}"#
+                )
+            }],
+        )
+        .unwrap();
         // Block the V20 export directory with a regular FILE so
         // create_dir_all/export fails with a non-DB error (full-disk proxy).
         std::fs::write(tmp.path().join("repair-export-phase2"), "not a dir").unwrap();
