@@ -186,6 +186,16 @@ impl Default for EmbedProfile {
 /// guard tests in `embed_sweep` and `db::commit` — a misbehaving provider that
 /// drops a row must trip the guard, not silently mis-pair vectors.
 ///
+/// The stub AS OBSERVED by `embed_batch` (issue #271 §8(a) embed_key rule:
+/// the stub wins over the profile, so the key stamped into
+/// `documents.embed_key` must be computed from the same value). Empty string
+/// counts as absent, matching `gate_model_key`.
+pub fn active_embed_stub() -> Option<String> {
+    std::env::var("CURATED_EMBED_STUB")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 /// Test/CI embed-call counter (issue #271 Task 5 embed-skip tests): when
 /// `CURATED_EMBED_COUNT_FILE` is set, every `embed_batch` call APPENDS one
 /// line (the batch size) to that file — a cross-process counting stub, since
