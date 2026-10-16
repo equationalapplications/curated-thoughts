@@ -354,7 +354,16 @@ fn wisdom_match_impl(
             // One id, one list: excluded ids and correction heads are skipped.
             let mut skip: HashSet<String> = exclude.iter().cloned().collect();
             skip.extend(corrections.iter().map(|c| c.id.clone()));
-            gated_entries(conn, query_vec, Some(floor), max, &skip, now_ms, &temporal, None)?
+            gated_entries(
+                conn,
+                query_vec,
+                Some(floor),
+                max,
+                &skip,
+                now_ms,
+                &temporal,
+                None,
+            )?
         }
         _ => Vec::new(),
     };
@@ -429,8 +438,10 @@ pub(crate) fn eligible_entry_ids(
     let rows = if t.has_superseded_by || t.has_valid_to {
         // Only the temporal arms reference :now — on a shape with neither
         // column, binding an unused named param is a rusqlite error.
-        stmt.query_map(rusqlite::named_params! { ":now": now_ms }, |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        stmt.query_map(rusqlite::named_params! { ":now": now_ms }, |r| {
+            r.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         stmt.query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?
@@ -472,7 +483,11 @@ fn gated_entries(
         // Task 4's two-stage selection narrows the scan to a precomputed id
         // set (rule-(i) restricted facts / rule-(ii) evidence-hash facts).
         // Ids are entry ids the queries above produced — never user input.
-        let list = ids.iter().map(|i| format!("'{i}'")).collect::<Vec<_>>().join(",");
+        let list = ids
+            .iter()
+            .map(|i| format!("'{i}'"))
+            .collect::<Vec<_>>()
+            .join(",");
         sql.push_str(&format!(" AND e.id IN ({list})"));
     }
     let mut stmt = conn.prepare(&sql)?;
@@ -653,25 +668,24 @@ pub fn two_stage_entries(
     let mut skip: HashSet<String> = exclude.iter().cloned().collect();
     skip.extend(corrections_absent_ids.iter().cloned());
 
-    let closed =
-        |rule: Option<TwoStageRule>,
-         top: Option<f32>,
-         floor_key: String,
-         stale: i64,
-         merged: usize| {
-            (
-                Vec::<WisdomItem>::new(),
-                TwoStageOutcome {
-                    rule,
-                    open: false,
-                    top,
-                    v1merged: merged,
-                    floor_key_used: floor_key,
-                    k,
-                    stale_embed_key: stale,
-                },
-            )
-        };
+    let closed = |rule: Option<TwoStageRule>,
+                  top: Option<f32>,
+                  floor_key: String,
+                  stale: i64,
+                  merged: usize| {
+        (
+            Vec::<WisdomItem>::new(),
+            TwoStageOutcome {
+                rule,
+                open: false,
+                top,
+                v1merged: merged,
+                floor_key_used: floor_key,
+                k,
+                stale_embed_key: stale,
+            },
+        )
+    };
 
     // §4 cells 1-2 resolved by `two_stage_floor`:
     //   None + v1 None  → uncalibrated (cell 2);
@@ -792,7 +806,10 @@ pub fn two_stage_entries(
                 &temporal,
                 Some(&restricted),
             )?;
-            let best = scored.iter().filter_map(|e| e.score).fold(0.0_f32, f32::max);
+            let best = scored
+                .iter()
+                .filter_map(|e| e.score)
+                .fold(0.0_f32, f32::max);
             let top = if scored.is_empty() { None } else { Some(best) };
             (scored, top)
         }
@@ -802,8 +819,9 @@ pub fn two_stage_entries(
             // that chunk's doc (evidence-hash edge, r30-M3) with NO
             // fact-level floor (r25-M4, r26 m2: floor = None bypasses the
             // raw<floor drop). The chunk score is NEVER an entry score.
-            let members: HashSet<i64> =
-                crate::two_stage::member_chunk_ids(conn, &cands)?.into_iter().collect();
+            let members: HashSet<i64> = crate::two_stage::member_chunk_ids(conn, &cands)?
+                .into_iter()
+                .collect();
             let hit = hits
                 .iter()
                 .find(|h| members.contains(&h.chunk_id) && h.score >= ts_floor);
@@ -839,13 +857,8 @@ pub fn two_stage_entries(
 
     // ---- §3 v1-merge: the STRUCTURAL complement, scored via the v1 path
     // with the SCHEME-PREFIXED vector (r28-m2), floor = the v1 floor. ----
-    let complement = crate::two_stage::complement_entry_ids(
-        conn,
-        &cands,
-        rule.as_str(),
-        now_ms,
-        Some(scheme),
-    )?;
+    let complement =
+        crate::two_stage::complement_entry_ids(conn, &cands, rule.as_str(), now_ms, Some(scheme))?;
     let mut merged: Vec<(f32, WisdomItem)> = Vec::new();
     let mut v1merged = 0usize;
     if v1_floor.is_some() && max > 0 && !query_vec_schemed.is_empty() && !complement.is_empty() {
@@ -898,8 +911,8 @@ pub fn two_stage_entries(
     combined.truncate(max);
     let entries: Vec<WisdomItem> = combined.into_iter().map(|(_, item)| item).collect();
     let open = !entries.is_empty(); // r30-m5: FINAL list non-empty
-    // Rule closes below its floor while the merge opens: rule stays the
-    // evaluated rule, top stays the RULE's variable (r27 m5, r28-m3).
+                                    // Rule closes below its floor while the merge opens: rule stays the
+                                    // evaluated rule, top stays the RULE's variable (r27 m5, r28-m3).
     Ok((
         entries,
         TwoStageOutcome {
@@ -925,7 +938,9 @@ fn entity_tier_weight(conn: &Connection, id: &str) -> Result<f32> {
             |r| r.get(0),
         )
         .optional()?;
-    Ok(crate::wiki_graph::tier_weight(entity_id.as_deref().unwrap_or("")))
+    Ok(crate::wiki_graph::tier_weight(
+        entity_id.as_deref().unwrap_or(""),
+    ))
 }
 
 /// The two-stage orchestrator (issue #271 plan Task 5): the shared entry
@@ -1029,16 +1044,16 @@ pub fn two_stage_pre_embed_check(
     // Floor resolution — mirrors `wisdom_match_two_stage_with_v1` exactly.
     let scheme_key = floor_key_for(profile_key, scheme);
     let v1_floor_present = gate_floor(&scheme_key).is_some();
-    let ts_floor_present = two_stage_rule_floor(&format!("{scheme_key}:two-stage:restricted-cosine"))
-        .or_else(|| two_stage_rule_floor(&format!("{scheme_key}:two-stage:chunk-hop")))
-        .is_some();
+    let ts_floor_present =
+        two_stage_rule_floor(&format!("{scheme_key}:two-stage:restricted-cosine"))
+            .or_else(|| two_stage_rule_floor(&format!("{scheme_key}:two-stage:chunk-hop")))
+            .is_some();
 
     // The §6 coverage probe FIRST — this whole fn exists so the gate can
     // veto before the caller spends an embed.
     let probe = crate::two_stage::coverage(conn, profile_key, now_ms)?;
 
-    let (projected_cell, embed_plan, stale_embed_key) = match (v1_floor_present, ts_floor_present)
-    {
+    let (projected_cell, embed_plan, stale_embed_key) = match (v1_floor_present, ts_floor_present) {
         // §4 cell 2: both missing — uncalibrated, no embeds at all.
         (false, false) => (2, TwoStageEmbedPlan::None, 0),
         // §4 cell 1: v1-only fallback — needs exactly the schemed vector.
@@ -1392,7 +1407,15 @@ mod tests {
     }
 
     fn seed_deleted(conn: &Connection, id: &str) {
-        seed_with(conn, id, Some(&format!("T {id}")), Some(1), None, None, None);
+        seed_with(
+            conn,
+            id,
+            Some(&format!("T {id}")),
+            Some(1),
+            None,
+            None,
+            None,
+        );
     }
 
     /// The plan's NULL-title arm, adapted to the LIVE schema (DEVIATION,
@@ -1408,12 +1431,28 @@ mod tests {
     /// `superseded_at` in the PAST (50 < NOW), mirroring [`supersede`]: the
     /// superseded entry has already lost effect, so it is no longer eligible.
     fn seed_superseded(conn: &Connection, id: &str, new: &str) {
-        seed_with(conn, id, Some(&format!("T {id}")), None, Some(new), Some(50), None);
+        seed_with(
+            conn,
+            id,
+            Some(&format!("T {id}")),
+            None,
+            Some(new),
+            Some(50),
+            None,
+        );
     }
 
     /// `valid_to` in the PAST: the entry's validity window has closed.
     fn seed_expired(conn: &Connection, id: &str) {
-        seed_with(conn, id, Some(&format!("T {id}")), None, None, None, Some(50));
+        seed_with(
+            conn,
+            id,
+            Some(&format!("T {id}")),
+            None,
+            None,
+            None,
+            Some(50),
+        );
     }
 
     fn run(conn: &Connection, floor: Option<f32>, max: usize, exclude: &[&str]) -> WisdomMatch {
@@ -1903,21 +1942,35 @@ mod tests {
         // Second live row so the soft-delete UPDATE below exercises a real
         // exclusion (the plan sketch mutated an id it never seeded).
         seed(&conn, "live2", "ent", &at(0.5));
-        conn.execute("UPDATE llm_wiki_entries SET deleted_at = 1 WHERE id = 'live2'", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 1 WHERE id = 'live2'",
+            [],
+        )
+        .unwrap();
         seed_deleted(&conn, "dead");
         seed_null_title(&conn, "notitle");
         seed_superseded(&conn, "old", "live");
         seed_expired(&conn, "expired");
 
         let temporal = temporal_columns(&conn, None).unwrap();
-        let pred_ids: HashSet<String> =
-            eligible_entry_ids(&conn, &temporal, NOW).unwrap().into_iter().collect();
-        let gated = gated_entries(&conn, &Q, Some(0.0), 10, &HashSet::new(), NOW, &temporal, None).unwrap();
+        let pred_ids: HashSet<String> = eligible_entry_ids(&conn, &temporal, NOW)
+            .unwrap()
+            .into_iter()
+            .collect();
+        let gated = gated_entries(
+            &conn,
+            &Q,
+            Some(0.0),
+            10,
+            &HashSet::new(),
+            NOW,
+            &temporal,
+            None,
+        )
+        .unwrap();
         let gated_ids: HashSet<String> = gated.iter().map(|e| e.id.clone()).collect();
         assert_eq!(
-            gated_ids,
-            pred_ids,
+            gated_ids, pred_ids,
             "one predicate, two consumers — but they disagree"
         );
         // Sanity: the exclusions behave identically in both consumers.
@@ -1941,8 +1994,10 @@ mod tests {
         let conn = open_in_memory().unwrap();
         seed(&conn, "a", "ent", &Q);
         seed(&conn, "b", "ent", &at(0.8));
-        let excludes: Vec<String> =
-            (0..MAX_EXCLUDES + 6).map(|i| format!("x{i}")).chain(["a".into()]).collect();
+        let excludes: Vec<String> = (0..MAX_EXCLUDES + 6)
+            .map(|i| format!("x{i}"))
+            .chain(["a".into()])
+            .collect();
         let temporal = temporal_columns(&conn, None).unwrap();
         let skip: HashSet<String> = excludes.iter().cloned().collect();
         let after_skip: Vec<String> = eligible_entry_ids(&conn, &temporal, NOW)
@@ -1953,7 +2008,10 @@ mod tests {
         assert_eq!(after_skip, vec!["b".to_string()]);
         // v1 path with the same oversize skip set:
         let gated = gated_entries(&conn, &Q, Some(0.0), 10, &skip, NOW, &temporal, None).unwrap();
-        assert_eq!(gated.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["b".to_string()]);
+        assert_eq!(
+            gated.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+            vec!["b".to_string()]
+        );
     }
 
     // ===================== Task 4: two-stage decision core =====================
@@ -2150,9 +2208,13 @@ mod tests {
     #[test]
     fn precheck_v1_floor_only_projects_cell1_and_one_schemed_embed() {
         let conn = fixture();
-        let pre =
-            two_stage_pre_embed_check(&conn, "external:qwen/qwen3-embedding-4b", Scheme::Raw, TS_NOW)
-                .unwrap();
+        let pre = two_stage_pre_embed_check(
+            &conn,
+            "external:qwen/qwen3-embedding-4b",
+            Scheme::Raw,
+            TS_NOW,
+        )
+        .unwrap();
         assert!(pre.v1_floor_present, "qwen raw key has a v1 floor (0.70)");
         assert!(
             !pre.ts_floor_present,
@@ -2165,7 +2227,10 @@ mod tests {
             TwoStageEmbedPlan::SchemedOnly,
             "v1 fallback needs exactly the schemed vector"
         );
-        assert_eq!(pre.stale_embed_key, 0, "no candidate doc carries the qwen key");
+        assert_eq!(
+            pre.stale_embed_key, 0,
+            "no candidate doc carries the qwen key"
+        );
     }
 
     /// Precheck, BOTH floors missing: cell 2, no embeds at all — the shared
@@ -2173,8 +2238,13 @@ mod tests {
     #[test]
     fn precheck_both_floors_missing_projects_cell2_no_embeds() {
         let conn = fixture();
-        let pre = two_stage_pre_embed_check(&conn, "external:never-calibrated-model", Scheme::Raw, TS_NOW)
-            .unwrap();
+        let pre = two_stage_pre_embed_check(
+            &conn,
+            "external:never-calibrated-model",
+            Scheme::Raw,
+            TS_NOW,
+        )
+        .unwrap();
         assert!(!pre.v1_floor_present);
         assert!(!pre.ts_floor_present);
         assert_eq!(pre.projected_cell, 2, "both missing ⇒ §4 cell 2");
@@ -2201,7 +2271,10 @@ mod tests {
         );
         assert!(!pre.coverage_probe_miss);
         assert_eq!(pre.projected_cell, 3, "floors present + cov<100% ⇒ cell 3");
-        assert_eq!(pre.stale_embed_key, 1, "doc1 stale ⇒ one stale candidate doc");
+        assert_eq!(
+            pre.stale_embed_key, 1,
+            "doc1 stale ⇒ one stale candidate doc"
+        );
         // Cell 3 with the v1 floor PRESENT ⇒ the orchestrator runs FULL v1
         // as the fallback ⇒ the schemed vector IS needed (a v1-missing
         // caller would get None here — pinned by the both-missing test).
@@ -2237,7 +2310,10 @@ mod tests {
             .unwrap();
         let pre = two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW).unwrap();
         assert!(pre.coverage_probe_miss);
-        assert_eq!(pre.projected_cell, 1, "no coverage info ⇒ same as v1-only here");
+        assert_eq!(
+            pre.projected_cell, 1,
+            "no coverage info ⇒ same as v1-only here"
+        );
         assert_eq!(pre.stale_embed_key, 0, "probe can't answer ⇒ 0");
         assert_eq!(
             pre.embed_plan,
@@ -2261,12 +2337,22 @@ mod tests {
         assert_eq!(outcome.rule, Some(TwoStageRule::RestrictedCosine));
         assert!(outcome.open, "best restricted fact cosine 1.0 ≥ floor 0.5");
         let got = (outcome.top.unwrap() - 1.0).abs() < 1e-6;
-        assert!(got, "top = best restricted FACT cosine, got {:?}", outcome.top);
+        assert!(
+            got,
+            "top = best restricted FACT cosine, got {:?}",
+            outcome.top
+        );
         assert!(!entries.is_empty());
-        assert_eq!(outcome.floor_key_used, format!("{TS_KEY}:two-stage:restricted-cosine"));
+        assert_eq!(
+            outcome.floor_key_used,
+            format!("{TS_KEY}:two-stage:restricted-cosine")
+        );
         assert_eq!(outcome.stale_embed_key, 0);
         // f2 is complement (no edges) ⇒ merge path; f1 is rule-(i) reachable.
-        assert!(entries.iter().any(|e| e.id == "f1"), "rule-(i)-reachable fact scored");
+        assert!(
+            entries.iter().any(|e| e.id == "f1"),
+            "rule-(i)-reachable fact scored"
+        );
         assert_eq!(outcome.v1merged, 1, "f2 admitted by the v1-merge");
     }
 
@@ -2284,7 +2370,8 @@ mod tests {
         // Query u1: chunk c1 (a MEMBER chunk, h-c1 in f1's evidence) scores
         // 1.0 ≥ chunk-hop floor; f1's fact vector u2 is ORTHOGONAL to u1 —
         // far below ANY floor — yet rule (ii) must inject it.
-        let (entries, outcome) = ts_run(&conn, &unit_vec(1), &unit_vec(1), Some(0.9), Some(0.45), 8);
+        let (entries, outcome) =
+            ts_run(&conn, &unit_vec(1), &unit_vec(1), Some(0.9), Some(0.45), 8);
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
         assert!(outcome.open);
         let f1 = entries.iter().find(|e| e.id == "f1").expect("f1 injected");
@@ -2344,10 +2431,7 @@ mod tests {
         );
         // `top` is the best MEMBER chunk score: c2 at 1.0 (c1 is not a member).
         assert!((outcome.top.unwrap() - 1.0).abs() < 1e-6);
-        assert_eq!(
-            outcome.v1merged, 0,
-            "u1 ⊥ u4 ⇒ the merge admits nothing"
-        );
+        assert_eq!(outcome.v1merged, 0, "u1 ⊥ u4 ⇒ the merge admits nothing");
     }
 
     /// r26-M1: an ALL-`user_stated` brain has NO candidate docs, but with a
@@ -2366,12 +2450,18 @@ mod tests {
         .unwrap();
         let (entries, outcome) = ts_run(&conn, &unit_vec(1), &unit_vec(4), Some(0.5), Some(0.5), 8);
         // Empty candidate set = vacuous coverage ⇒ two-stage still runs.
-        assert!(entries.iter().any(|e| e.id == "s1"), "merge must open the gate");
+        assert!(
+            entries.iter().any(|e| e.id == "s1"),
+            "merge must open the gate"
+        );
         assert!(outcome.open);
         assert_eq!(outcome.v1merged, 1);
         // The stage-1 arm found nothing above ITS floor (no chunks at all).
         assert_eq!(outcome.rule, Some(TwoStageRule::RestrictedCosine));
-        assert_eq!(outcome.top, None, "no restricted fact above floor ⇒ top None");
+        assert_eq!(
+            outcome.top, None,
+            "no restricted fact above floor ⇒ top None"
+        );
     }
 
     /// r27-M1: a ZERO-CHUNK doc's facts are in the structural complement by
@@ -2505,7 +2595,10 @@ mod tests {
         assert!(entries.is_empty());
         assert_eq!(outcome.top, None, "no fact cleared the floor ⇒ top None");
         assert_eq!(outcome.v1merged, 0, "u2 ⊥ u4 ⇒ merge admits nothing");
-        assert_eq!(outcome.floor_key_used, format!("{TS_KEY}:two-stage:restricted-cosine"));
+        assert_eq!(
+            outcome.floor_key_used,
+            format!("{TS_KEY}:two-stage:restricted-cosine")
+        );
         assert_eq!(outcome.k, 8, "TWO_STAGE_K default");
         assert_eq!(outcome.stale_embed_key, 0);
         // (b) Mixed open: rule (i)'s floor 0.95 admits the u4 fact (1.0 ≥
@@ -2513,14 +2606,18 @@ mod tests {
         // variable = the best RESTRICTED fact cosine 1.0. The chunk probes
         // (u1) score 0 against the u4 query — a different scale from
         // `top` = 1.0, proving the fact-cosine source.
-        let (entries, outcome) = ts_run(&conn, &unit_vec(1), &unit_vec(4), Some(0.9), Some(0.95), 8);
+        let (entries, outcome) =
+            ts_run(&conn, &unit_vec(1), &unit_vec(4), Some(0.9), Some(0.95), 8);
         assert_eq!(outcome.rule, Some(TwoStageRule::RestrictedCosine));
         assert!(outcome.open);
         assert!(
             (outcome.top.unwrap() - 1.0).abs() < 1e-6,
             "top = best restricted fact cosine (chunks scored 0)"
         );
-        assert_eq!(outcome.v1merged, 1, "f2 via merge; f1 is rule-(i) reachable");
+        assert_eq!(
+            outcome.v1merged, 1,
+            "f2 via merge; f1 is rule-(i) reachable"
+        );
         // f3 is ALSO rule-(i)-reachable (proposal leg → doc2 has a scorable
         // chunk) and clears the 0.95 floor: 3 entries, ONE ranked list.
         assert_eq!(entries.len(), 3, "f1 + f3 (rule) + f2 (merge)");

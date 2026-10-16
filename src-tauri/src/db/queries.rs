@@ -88,10 +88,17 @@ pub fn insert_embedding(conn: &Connection, chunk_id: i64, vector: &[f32]) -> Res
     Ok(())
 }
 
-pub fn mark_document_indexed(conn: &Connection, doc_id: i64) -> Result<()> {
+/// Mark a document indexed and record `last_indexed_hash` — the hash of the
+/// bytes ACTUALLY chunked and embedded. This function is the ONLY legitimate
+/// writer of `documents.last_indexed_hash` (issue #271 rev-12 m3); the
+/// migration's one-shot backfill is the sole exception. Callers inside the
+/// diff-swap transaction pass the pre-embed byte hash; a mismatch there means
+/// the row's `last_indexed_hash` no longer describes its chunks.
+pub fn mark_document_indexed(conn: &Connection, doc_id: i64, indexed_hash: &str) -> Result<()> {
     conn.execute(
-        "UPDATE documents SET status = 'indexed', last_indexed = unixepoch() WHERE id = ?1",
-        [doc_id],
+        "UPDATE documents SET status = 'indexed', last_indexed = unixepoch(), \
+         last_indexed_hash = ?2 WHERE id = ?1",
+        rusqlite::params![doc_id, indexed_hash],
     )?;
     // Preserve per-doc ingest history (documents.last_indexed is overwritten
     // on every re-ingest; this table keeps one row per attempt).
@@ -460,8 +467,8 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let id_a = upsert_document(&conn, "/documents/a.md", "ha").unwrap();
         let id_b = upsert_document(&conn, "/documents/b.md", "hb").unwrap();
-        mark_document_indexed(&conn, id_b).unwrap();
-        mark_document_indexed(&conn, id_a).unwrap();
+        mark_document_indexed(&conn, id_b, "seed-h").unwrap();
+        mark_document_indexed(&conn, id_a, "seed-h").unwrap();
         assert_eq!(
             list_indexed_user_doc_paths(&conn).unwrap(),
             vec!["/documents/a.md", "/documents/b.md"],
@@ -473,7 +480,7 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let id = upsert_document(&conn, "/docs/c.md", "hash3").unwrap();
         assert_eq!(count_pending_documents(&conn).unwrap(), 1);
-        mark_document_indexed(&conn, id).unwrap();
+        mark_document_indexed(&conn, id, "seed-h").unwrap();
         assert_eq!(count_indexed_documents(&conn).unwrap(), 1);
         assert_eq!(count_pending_documents(&conn).unwrap(), 0);
     }

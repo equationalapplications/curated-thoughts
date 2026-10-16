@@ -65,7 +65,7 @@ fn main() {
         .expect("chunk");
         insert_embedding(conn, cid, &query_vec).expect("embedding");
     }
-    mark_document_indexed(conn, doc_id).expect("indexed");
+    mark_document_indexed(conn, doc_id, "seed-h").expect("indexed");
 
     let _warm = semantic_search(conn, &query_vec, 10).expect("warmup");
 

@@ -733,7 +733,7 @@ fn ingest_file_virtual(
     }
 
     if chunks.is_empty() {
-        mark_document_indexed(conn, doc_id)?;
+        mark_document_indexed(conn, doc_id, &hash)?;
         let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
         return Ok(());
     }
@@ -760,7 +760,7 @@ fn ingest_file_virtual(
         insert_embedding(conn, chunk_id, vector)?;
     }
 
-    mark_document_indexed(conn, doc_id)?;
+    mark_document_indexed(conn, doc_id, &hash)?;
     let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
     Ok(())
 }

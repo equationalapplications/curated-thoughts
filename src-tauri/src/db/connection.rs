@@ -1043,7 +1043,10 @@ fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()> {
                 conn.execute("ALTER TABLE documents ADD COLUMN embed_key TEXT", [])?;
             }
             if !existing.iter().any(|c| c == "last_indexed_hash") {
-                conn.execute("ALTER TABLE documents ADD COLUMN last_indexed_hash TEXT", [])?;
+                conn.execute(
+                    "ALTER TABLE documents ADD COLUMN last_indexed_hash TEXT",
+                    [],
+                )?;
                 // ONE-SHOT backfill, inside the ALTER call only (V27 precedent,
                 // connection.rs:973-984): `pending` rows may already carry
                 // queue.rs's pre-written NEW hash (spec §8(c) B1); pending_reindex
@@ -1805,7 +1808,8 @@ mod tests {
         )
         .unwrap();
         // simulate a pre-upgrade pair by clearing the backfill on one row:
-        conn.execute("UPDATE documents SET last_indexed_hash = NULL", []).unwrap();
+        conn.execute("UPDATE documents SET last_indexed_hash = NULL", [])
+            .unwrap();
         // Re-open is required to re-run migrate; use migrate_open_db directly:
         crate::db::connection::migrate_open_db(&conn, None).unwrap();
         let n: i64 = conn
@@ -1856,17 +1860,20 @@ mod tests {
         ))
         .unwrap();
         conn.execute_batch(MIGRATION_V4).unwrap();
-        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V5)).unwrap();
-        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6)).unwrap();
-        conn.execute_batch(&format!(
-            "BEGIN;\n{}\nCOMMIT;",
-            okf_ddl::migration_v7_sql()
-        ))
-        .unwrap();
-        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V9)).unwrap();
-        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V10)).unwrap();
-        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V11)).unwrap();
-        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V12)).unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V5))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V9))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V10))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V11))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V12))
+            .unwrap();
         crate::db::ddl_compat::add_column_if_missing(
             &conn,
             "documents",
@@ -1874,8 +1881,10 @@ mod tests {
             "INTEGER",
         )
         .unwrap();
-        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V13)).unwrap();
-        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V14)).unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V13))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V14))
+            .unwrap();
 
         conn.execute(
             "INSERT INTO documents (path, hash, tier, status)

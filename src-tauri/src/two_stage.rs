@@ -178,10 +178,9 @@ fn reachable_entry_ids(
     let mut stmt = conn.prepare(&sql)?;
     let bind_now = elig.contains(":now");
     let rows: Vec<String> = if bind_now {
-        stmt.query_map(
-            rusqlite::named_params! { ":now": now_ms },
-            |r| r.get::<_, String>(0),
-        )?
+        stmt.query_map(rusqlite::named_params! { ":now": now_ms }, |r| {
+            r.get::<_, String>(0)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         stmt.query_map([], |r| r.get::<_, String>(0))?

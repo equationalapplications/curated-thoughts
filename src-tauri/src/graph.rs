@@ -169,7 +169,7 @@ mod tests {
         let conn = open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         let doc = upsert_document(&conn, "/vault/documents/priority.rs", "h").unwrap();
-        mark_document_indexed(&conn, doc).unwrap();
+        mark_document_indexed(&conn, doc, "seed-h").unwrap();
         let root = insert_chunk(&conn, doc, &make_def_chunk("root"), 0, "tier_fact", "").unwrap();
         let target =
             insert_chunk(&conn, doc, &make_def_chunk("target"), 1, "tier_fact", "").unwrap();
@@ -199,7 +199,7 @@ mod tests {
     fn setup_diamond(conn: &rusqlite::Connection) -> (i64, i64, i64, i64) {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         let doc = upsert_document(conn, "/vault/documents/diamond.rs", "h").unwrap();
-        mark_document_indexed(conn, doc).unwrap();
+        mark_document_indexed(conn, doc, "seed-h").unwrap();
         let a = insert_chunk(conn, doc, &make_def_chunk("a"), 0, "tier_fact", "").unwrap();
         let b = insert_chunk(conn, doc, &make_def_chunk("b"), 1, "tier_fact", "").unwrap();
         let c = insert_chunk(conn, doc, &make_def_chunk("c"), 2, "tier_fact", "").unwrap();
