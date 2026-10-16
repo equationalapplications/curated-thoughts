@@ -759,8 +759,49 @@ fn print_ontology_pass_summary(
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// `ct wisdom match` — issue #265 (consumer: CTI live wisdom delivery).
+// `ct wisdom match` — issue #265 (consumer: CTI live wisdom delivery);
+// two-stage wiring issue #271 (plan Task 5).
 // ---------------------------------------------------------------------------
+
+use tauri_app_lib::wisdom_match as wm;
+
+/// Which retrieval path `ct wisdom match` takes (issue #271 §5). `Auto` is
+/// the plain v1 behavior until flip-to-default (Task 15) — the flag is
+/// opt-in, the env var is the off-switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WisdomStageMode {
+    /// No stage flag given: v1 today, two-stage after the Task-15 flip.
+    Auto,
+    /// `--two-stage` requested.
+    TwoStage,
+    /// `--single-stage` requested (or `CURATED_WISDOM_SINGLE_STAGE=1`).
+    SingleStage,
+}
+
+/// The seven-field `wisdom_two_stage_audit` stderr line (§6 pin, plan Step 3):
+/// `wisdom_two_stage_audit rule=<i|ii|none> open=<0|1> top=<score|none>
+/// v1merged=<n> floor=<key> k=<k> stale_embed_key=<n>` — token + EXACTLY
+/// seven space-separated fields, in this order, ONE line. Emitted on EVERY
+/// path where two-stage was requested, including fallbacks and uncalibrated
+/// no-opens (r29-m4).
+pub fn print_two_stage_audit(o: &wm::TwoStageOutcome) {
+    let rule = match o.rule {
+        Some(r) => match r {
+            wm::TwoStageRule::RestrictedCosine => "i",
+            wm::TwoStageRule::ChunkHop => "ii",
+        },
+        None => "none",
+    };
+    let open = if o.open { "1" } else { "0" };
+    let top = match o.top {
+        Some(t) => format!("{t:.4}"),
+        None => "none".to_string(),
+    };
+    eprintln!(
+        "wisdom_two_stage_audit rule={rule} open={open} top={top} v1merged={} floor={} k={} stale_embed_key={}",
+        o.v1merged, o.floor_key_used, o.k, o.stale_embed_key
+    );
+}
 
 /// Relevance-gated, read-only wisdom match (spec 2026-10-06-issue265).
 /// Exit 0 on success including zero matches and an uncalibrated gate;
@@ -770,6 +811,7 @@ pub fn wisdom_match_cmd(
     max: usize,
     exclude: &[String],
     json_mode: bool,
+    stage_mode: WisdomStageMode,
 ) -> Result<i32> {
     use tauri_app_lib::wisdom_match as wm;
 
@@ -786,13 +828,6 @@ pub fn wisdom_match_cmd(
     let read_scheme = tauri_app_lib::embed_scheme::read_scheme_for_reader(&conn)?;
     let scheme_key = wm::gate_model_key_for_scheme(&profile, stub.as_deref(), read_scheme);
     let query_text = tauri_app_lib::embed_scheme::query_text_for_scheme(text, read_scheme);
-    // Embed only when entries can actually be produced: an uncalibrated
-    // gate, --max 0, or an empty text never needs the embedding backend.
-    let query_vec = if text.trim().is_empty() || max == 0 || wm::gate_floor(&scheme_key).is_none() {
-        Vec::new()
-    } else {
-        embed_one(&profile, query_text).context("failed to embed query")?
-    };
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -802,31 +837,119 @@ pub fn wisdom_match_cmd(
     // meta: a cutover landing during the embed round-trip can never pair
     // this query with the other scheme's floor or rows.
     let key = wm::gate_model_key(&profile, stub.as_deref());
-    let result =
-        wm::wisdom_match_in_scheme(&conn, &query_vec, &key, read_scheme, max, exclude, now_ms)?;
-    // Gate-decision log line (spec 2026-10-07 merge blocker 3, form pinned):
-    // exactly one line per `ct wisdom match` call, on STDERR so stdout stays
-    // pure JSON. Machine-parseable for the tripwire cron — stable grep token
-    // `wisdom_gate_decision` followed by tab-separated fields IN ORDER:
-    //   wisdom_gate_decision<TAB>ts<TAB>scheme<TAB>open|closed<TAB>n_results
-    // ts is ISO-8601 UTC of the call; scheme is the active read scheme string;
-    // open|closed is whether the gate returned any entries; n_results is the
-    // entry count. Never re-order or re-space these fields.
+
+    // Stage selection (issue #271 §5): --two-stage XOR --single-stage XOR
+    // env kill-switch XOR Auto (= v1 until the Task-15 flip).
+    // Intended §5 semantics: the env kill-switch DOMINATES an explicit
+    // --two-stage flag (pinned by
+    // cli_wisdom_two_stage::env_kill_switch_dominates_explicit_two_stage_flag).
+    let two_stage_requested = match stage_mode {
+        WisdomStageMode::TwoStage => true,
+        WisdomStageMode::SingleStage => false,
+        WisdomStageMode::Auto => !tauri_app_lib::embedder::single_stage_env_kill(),
+    };
+    let two_stage_active = two_stage_requested && !tauri_app_lib::embedder::single_stage_env_kill();
+
+    if !two_stage_active {
+        // ---- The v1 path, byte-identical to the pre-#271 behavior. ----
+        // Embed only when entries can actually be produced: an uncalibrated
+        // gate, --max 0, or an empty text never needs the embedding backend.
+        let query_vec =
+            if text.trim().is_empty() || max == 0 || wm::gate_floor(&scheme_key).is_none() {
+                Vec::new()
+            } else {
+                embed_one(&profile, query_text).context("failed to embed query")?
+            };
+        let result =
+            wm::wisdom_match_in_scheme(&conn, &query_vec, &key, read_scheme, max, exclude, now_ms)?;
+        let ts = DateTime::<Utc>::from(std::time::SystemTime::now())
+            .to_rfc3339_opts(SecondsFormat::Secs, true);
+        eprintln!(
+            "wisdom_gate_decision\t{}\t{}\t{}\t{}",
+            ts,
+            read_scheme.as_str(),
+            if result.entries.is_empty() {
+                "closed"
+            } else {
+                "open"
+            },
+            result.entries.len(),
+        );
+        print_wisdom_match(&result, json_mode);
+        return Ok(0);
+    }
+
+    // ---- Two-stage requested (§3 embed-skip, §4, §6 coverage-first). ----
+    // Fix-round Important #1: the PUB precheck runs FIRST — floor resolution
+    // AND the §6 coverage probe happen BEFORE any embed, so a coverage veto
+    // (§4 cell 3) or an uncalibrated call (cell 2) costs ZERO embedder
+    // round-trips. This fn is the shared §3 embed-skip authority — the CLI
+    // branches its embed logic on the plan it returns (Task 14/15 callers do
+    // the same instead of reimplementing the skip).
+    let v1_key = key.clone();
+    let pre = wm::two_stage_pre_embed_check(&conn, &v1_key, read_scheme, now_ms)?;
+
+    // §3 embed-skip: embed EXACTLY what the precheck's plan names. Empty
+    // text or `--max 0` never needs a vector on any path (same short-circuit
+    // the v1 path applies).
+    let skip_for_no_query = text.trim().is_empty() || max == 0;
+    let (raw_vec, schemed_vec) = if skip_for_no_query {
+        (Vec::new(), Vec::new())
+    } else {
+        match pre.embed_plan {
+            wm::TwoStageEmbedPlan::None => (Vec::new(), Vec::new()),
+            wm::TwoStageEmbedPlan::SchemedOnly => (
+                Vec::new(),
+                embed_one(&profile, query_text).context("failed to embed query")?,
+            ),
+            wm::TwoStageEmbedPlan::RawAndSchemed => {
+                let raw = embed_one(&profile, text.to_string()).context("failed to embed query")?;
+                let schemed = match read_scheme {
+                    tauri_app_lib::embed_scheme::Scheme::Raw => raw.clone(),
+                    tauri_app_lib::embed_scheme::Scheme::Instr1 => {
+                        embed_one(&profile, query_text.clone()).context("failed to embed query")?
+                    }
+                };
+                (raw, schemed)
+            }
+        }
+    };
+
+    let run = wm::wisdom_match_two_stage_with_v1(
+        &conn,
+        &raw_vec,
+        &schemed_vec,
+        read_scheme,
+        max,
+        exclude,
+        now_ms,
+        &v1_key,
+    )?;
+    // The audit line on EVERY two-stage-requested path (r29-m4) — BEFORE the
+    // pinned gate-decision line so each line type stays greppable in order.
+    print_two_stage_audit(&run.outcome);
     let ts = DateTime::<Utc>::from(std::time::SystemTime::now())
         .to_rfc3339_opts(SecondsFormat::Secs, true);
     eprintln!(
         "wisdom_gate_decision\t{}\t{}\t{}\t{}",
         ts,
         read_scheme.as_str(),
-        if result.entries.is_empty() {
+        if run.result.entries.is_empty() {
             "closed"
         } else {
             "open"
         },
-        result.entries.len(),
+        run.result.entries.len(),
     );
+    print_wisdom_match(&run.result, json_mode);
+    Ok(0)
+}
+
+/// Shared stdout rendering (JSON contract or the human lines) — identical
+/// under both paths so `--two-stage` output shape never drifts from v1.
+fn print_wisdom_match(result: &wm::WisdomMatch, json_mode: bool) {
     if json_mode {
-        print_json(&result);
+        print_json(result);
     } else {
         println!("gate: {}", result.gate);
         for c in &result.corrections {
@@ -841,7 +964,6 @@ pub fn wisdom_match_cmd(
             println!("{:.4} {}: {}", e.score.unwrap_or(0.0), e.id, e.title);
         }
     }
-    Ok(0)
 }
 
 // ---------------------------------------------------------------------------

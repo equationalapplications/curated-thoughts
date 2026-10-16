@@ -360,6 +360,16 @@ enum WisdomCmd {
         /// Fact id already in the caller's context (repeatable; use the --exclude=<id> form).
         #[arg(long = "exclude", value_parser = parse_fact_id, action = clap::ArgAction::Append)]
         exclude: Vec<String>,
+        /// Force the two-stage retrieval path (issue #271 §5). Mutually
+        /// exclusive with --single-stage. Until the calibrated two-stage
+        /// floors land (Task 15), this degrades to the v1 path with the
+        /// seven-field `wisdom_two_stage_audit` stderr line.
+        #[arg(long = "two-stage", group = "stage_sel")]
+        two_stage: bool,
+        /// Force the plain v1 path (issue #271 §5 off-switch). Mutually
+        /// exclusive with --two-stage.
+        #[arg(long = "single-stage", group = "stage_sel")]
+        single_stage: bool,
         /// The message to match. Only accepted after `--`.
         #[arg(last = true, required = true)]
         text: Vec<String>,
@@ -703,6 +713,8 @@ fn run(cmd: Cmd) -> Result<i32> {
                 json,
                 max,
                 exclude,
+                two_stage,
+                single_stage,
                 text,
             } => {
                 if exclude.len() > tauri_app_lib::wisdom_match::MAX_EXCLUDES {
@@ -711,7 +723,14 @@ fn run(cmd: Cmd) -> Result<i32> {
                         tauri_app_lib::wisdom_match::MAX_EXCLUDES
                     );
                 }
-                cli_common::wisdom_match_cmd(&text.join(" "), max, &exclude, json)
+                let mode = if two_stage {
+                    cli_common::WisdomStageMode::TwoStage
+                } else if single_stage {
+                    cli_common::WisdomStageMode::SingleStage
+                } else {
+                    cli_common::WisdomStageMode::Auto
+                };
+                cli_common::wisdom_match_cmd(&text.join(" "), max, &exclude, json, mode)
             }
             WisdomCmd::Scheme { cmd } => match cmd {
                 SchemeCmd::Status { json } => cli_common::wisdom_scheme_status_cmd(json),

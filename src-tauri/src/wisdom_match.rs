@@ -31,6 +31,10 @@ use crate::wiki_graph::tier_weight;
 pub const SCHEMA_VERSION: u32 = 1;
 /// `gate` value when the embed model has no calibrated floor.
 pub const GATE_UNCALIBRATED: &str = "uncalibrated";
+/// Two-stage stdout/stdin gate-label prefix (issue #271 §5): the active
+/// two-stage gate prints `semantic-v2-two-stage:{key}` where `{key}` is the
+/// scheme-suffixed floor key (`floor_key_for(gate_model_key, scheme)`).
+pub const TWO_STAGE_LABEL_PREFIX: &str = "semantic-v2-two-stage:";
 /// `superseded_by` chain bound; mirrors core-llm-wiki `HISTORY_MAX_DEPTH`.
 pub const MAX_CHAIN_DEPTH: usize = 100;
 /// `--max` is clamped to this.
@@ -924,6 +928,279 @@ fn entity_tier_weight(conn: &Connection, id: &str) -> Result<f32> {
     Ok(crate::wiki_graph::tier_weight(entity_id.as_deref().unwrap_or("")))
 }
 
+/// The two-stage orchestrator (issue #271 plan Task 5): the shared entry
+/// point the CLI (`ct wisdom match --two-stage`) and the desktop driver
+/// (Task 14/15) call. Resolves the §4 floors, applies the §6 coverage-first
+/// gate, and runs `two_stage_entries`; embeds are the CALLER's (the embed
+/// inputs are passed in), so this fn stays free of embedder I/O.
+///
+/// Caller contract (pinned order, plan Step 3):
+///  1. The caller calls [`two_stage_pre_embed_check`] FIRST (the shared §3
+///     embed-skip authority) and embeds ONLY the vectors its
+///     [`TwoStagePreEmbed::embed_plan`] names — stage-1 RAW vector + schemed
+///     vector (`Scheme::Raw` reuses one vector; `Instr1` embeds the prefixed
+///     text). The §6 coverage gate therefore sees the call BEFORE any embed
+///     was spent, on EVERY caller path.
+///  2. This fn runs the coverage probe again internally (cheap, ONE
+///     authority for the §4 cell decision) and falls back to v1 exactly
+///     per §4 — the precheck's projection is advisory; the in-call decision
+///     is authoritative.
+///
+/// Returns `(match_result, outcome)`: the match carries the FINAL entries
+/// (v1 fallback ⇒ the caller's `v1_result` semantics — see
+/// [`wisdom_match_two_stage_with_v1`]) and the label the caller prints.
+pub struct TwoStageRun {
+    /// The two-stage arm's own entries (may be empty on any fallback).
+    pub result: WisdomMatch,
+    /// The audit outcome for the seven-field stderr line.
+    pub outcome: TwoStageOutcome,
+    /// True when the two-stage arm actually RAN (label
+    /// `semantic-v2-two-stage:{key}`); false on any §4 fallback/closed cell
+    /// (the caller keeps the v1 label — CARRIED WARNING: cell 1 falls back to
+    /// a FULL v1 run, which the caller performs via
+    /// [`wisdom_match_two_stage_with_v1`]).
+    pub ran: bool,
+}
+
+/// Which vectors the CALLER must produce before calling
+/// [`wisdom_match_two_stage_with_v1`] — the shared §3 embed-skip authority
+/// (fix-round Important #1/#2): every caller invokes
+/// [`two_stage_pre_embed_check`] FIRST and embeds exactly what this plan
+/// names, so the §6 coverage gate can veto BEFORE any embedder round-trip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TwoStageEmbedPlan {
+    /// Uncalibrated / cell-3 no-open: NO vectors needed, embed nothing.
+    None,
+    /// The v1 fallback (or any v1-scored path): only the SCHEME-PREFIXED
+    /// query vector.
+    SchemedOnly,
+    /// Two-stage will run: the stage-1 RAW vector plus the schemed vector
+    /// (under `Scheme::Raw` the caller reuses the raw bytes for both —
+    /// r26 m3, ONE embed per message).
+    RawAndSchemed,
+}
+
+/// Everything [`two_stage_pre_embed_check`] answers BEFORE the caller embeds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TwoStagePreEmbed {
+    /// The v1 floor (`gate_floor(scheme_key)`) is calibrated.
+    pub v1_floor_present: bool,
+    /// A composite two-stage floor (restricted-cosine OR chunk-hop, pinned
+    /// order) is calibrated.
+    pub ts_floor_present: bool,
+    /// True when `two_stage::coverage` missed (pre-V28 shape etc.) — no
+    /// coverage information; `stale_embed_key` is meaningless (0).
+    pub coverage_probe_miss: bool,
+    /// The §4 cell this call would land in: 1 = v1 fallback, 2 = both
+    /// floors missing (uncalibrated), 3 = cell-3 uncalibrated no-open,
+    /// 4 = two-stage runs. Projection only — the orchestrator re-derives
+    /// the cell inside (ONE authority for decisions; the probe is cheap).
+    pub projected_cell: u8,
+    /// Vectors the caller must embed before the orchestrator call.
+    pub embed_plan: TwoStageEmbedPlan,
+    /// Candidate docs with a stale/NULL embed_key when the probe can answer,
+    /// else 0. Mirrors the audit line's `stale_embed_key`.
+    pub stale_embed_key: i64,
+}
+
+/// The PUB pre-embed precheck (fix-round Important #1/#2 — the shared §3
+/// embed-skip authority): resolves the §4 floors and runs the §6 coverage
+/// probe BEFORE any embed, returning which floors are present, the projected
+/// §4 cell, whether embedding is needed at all (and which vectors), and the
+/// stale-embed_key count when the probe can answer.
+///
+/// Caller contract (pinned order, plan Step 3.3 — "coverage check BEFORE any
+/// embed"):
+///  1. Call THIS fn first. Embed exactly [`TwoStagePreEmbed::embed_plan`]'s
+///     vectors (`None` ⇒ zero embedder round-trips).
+///  2. Then call [`wisdom_match_two_stage_with_v1`] with those vectors. The
+///     orchestrator keeps its internal re-probe (cheap; one authority for
+///     cell decisions) — the precheck is the CHEAP EARLY answer that makes
+///     the coverage gate able to veto before any embed.
+///
+/// Task 14/15 callers use this instead of reimplementing floor/cell/coverage
+/// logic.
+pub fn two_stage_pre_embed_check(
+    conn: &Connection,
+    profile_key: &str,
+    scheme: Scheme,
+    now_ms: i64,
+) -> Result<TwoStagePreEmbed> {
+    // Floor resolution — mirrors `wisdom_match_two_stage_with_v1` exactly.
+    let scheme_key = floor_key_for(profile_key, scheme);
+    let v1_floor_present = gate_floor(&scheme_key).is_some();
+    let ts_floor_present = two_stage_rule_floor(&format!("{scheme_key}:two-stage:restricted-cosine"))
+        .or_else(|| two_stage_rule_floor(&format!("{scheme_key}:two-stage:chunk-hop")))
+        .is_some();
+
+    // The §6 coverage probe FIRST — this whole fn exists so the gate can
+    // veto before the caller spends an embed.
+    let probe = crate::two_stage::coverage(conn, profile_key, now_ms)?;
+
+    let (projected_cell, embed_plan, stale_embed_key) = match (v1_floor_present, ts_floor_present)
+    {
+        // §4 cell 2: both missing — uncalibrated, no embeds at all.
+        (false, false) => (2, TwoStageEmbedPlan::None, 0),
+        // §4 cell 1: v1-only fallback — needs exactly the schemed vector.
+        // Probe miss also lands here whenever the v1 floor exists (no
+        // coverage veto possible without the probe).
+        (true, false) => (1, TwoStageEmbedPlan::SchemedOnly, 0),
+        // Composite floor present: coverage decides cell 3 vs cell 4.
+        (v1, true) => match probe {
+            None => {
+                // Probe miss with a composite floor: no coverage veto is
+                // possible; the orchestrator treats a miss as coverage 0 ⇒
+                // cell 3 when v1 is missing, cell-1-shaped fallback when v1
+                // exists. Project the DARKER cell (3 / no embeds) so the
+                // caller never embeds for a call that cannot open.
+                if v1 {
+                    (1, TwoStageEmbedPlan::SchemedOnly, 0)
+                } else {
+                    (3, TwoStageEmbedPlan::None, 0)
+                }
+            }
+            Some((n, cov)) => {
+                let stale = n - cov;
+                if cov < n {
+                    // §4 cell 3: uncalibrated no-open (or v1 fallback when
+                    // the v1 floor exists — either way the two-stage arm
+                    // never opens and the caller needs no two-stage embeds;
+                    // a v1-present caller still needs the schemed vector
+                    // for the fallback run).
+                    if v1 {
+                        (3, TwoStageEmbedPlan::SchemedOnly, stale)
+                    } else {
+                        (3, TwoStageEmbedPlan::None, stale)
+                    }
+                } else {
+                    // §4 cell 4: two-stage runs — stage-1 raw + schemed.
+                    (4, TwoStageEmbedPlan::RawAndSchemed, stale)
+                }
+            }
+        },
+    };
+
+    Ok(TwoStagePreEmbed {
+        v1_floor_present,
+        ts_floor_present,
+        coverage_probe_miss: probe.is_none(),
+        projected_cell,
+        embed_plan,
+        stale_embed_key,
+    })
+}
+
+/// Full two-stage run INCLUDING the §4 cell-1 v1 fallback: on every fallback
+/// cell the v1 path executes against the same connection (the caller passes
+/// the v1 query vector it already embedded — or an empty slice when embeds
+/// were skipped) and the returned [`TwoStageRun::result`] carries the v1
+/// entries with the v1 gate label. The two-stage arm's own (empty) result is
+/// discarded; only its audit outcome survives.
+#[allow(clippy::too_many_arguments)]
+pub fn wisdom_match_two_stage_with_v1(
+    conn: &Connection,
+    query_vec_raw: &[f32],
+    query_vec_schemed: &[f32],
+    scheme: Scheme,
+    max: usize,
+    exclude: &[String],
+    now_ms: i64,
+    profile_key: &str,
+) -> Result<TwoStageRun> {
+    let v1_key = profile_key.to_string();
+    // Floor resolution (plan Step 3.2): v1 floor under the resolved scheme;
+    // the composite two-stage floors in PINNED rule order. The composite
+    // lookup goes through `two_stage_rule_floor` so test builds see the
+    // test-only slice — mirroring the core's attribution exactly.
+    let scheme_key = floor_key_for(profile_key, scheme);
+    let v1_floor = gate_floor(&scheme_key);
+    let ts_floor = two_stage_rule_floor(&format!("{scheme_key}:two-stage:restricted-cosine"))
+        .or_else(|| two_stage_rule_floor(&format!("{scheme_key}:two-stage:chunk-hop")));
+
+    // Probe BEFORE any decision so `stale_embed_key` is reportable on every
+    // path (r24 M2). `Ok(None)` = probe miss (pre-V28 shape) ⇒ v1 fallback
+    // with the count reported when the probe can still answer it (r28-M3).
+    // The core re-probes inside `two_stage_entries` — the probe is cheap
+    // (indexed COUNT over candidate docs) and one authority keeps the §4
+    // cells from drifting; `stale` here is only a cross-check.
+    let _probe = crate::two_stage::coverage(conn, profile_key, now_ms)?;
+
+    // §4 matrix, resolved ONCE here and mirrored by `two_stage_entries`:
+    //   cell 1: ts floor missing + v1 present  → v1 fallback
+    //   cell 2: BOTH missing                   → uncalibrated (no embeds —
+    //           the caller checked `two_stage_embed_keys` before embedding)
+    //   cell 3: ts present + v1 missing + cov<100% → uncalibrated no-open
+    //   cell 4: ts present + cov = 100%        → two-stage runs
+    // The cell decision ITSELF is re-derived inside the core from the same
+    // floors; here we only route (and the core re-probes coverage).
+    let (ts_entries, outcome) = two_stage_entries(
+        conn,
+        query_vec_raw,
+        query_vec_schemed,
+        scheme,
+        v1_floor,
+        ts_floor,
+        max,
+        &exclude.iter().cloned().collect(),
+        &HashSet::new(),
+        now_ms,
+        profile_key,
+    )?;
+    let ran = outcome.rule.is_some();
+    debug_assert!(
+        ran || ts_entries.is_empty(),
+        "fallback cells never carry two-stage entries"
+    );
+
+    // §4 cell-1 (and any other non-running cell): run FULL v1 and return ITS
+    // entries under the v1 label. Corrections are computed inside the v1
+    // path, so both paths emit identical corrections (r29-m2). The v1 vector
+    // is the SCHEMED one — `wisdom_match_in_scheme`'s own contract.
+    if !ran {
+        let v1_result = wisdom_match_in_scheme(
+            conn,
+            query_vec_schemed,
+            &v1_key,
+            scheme,
+            max,
+            exclude,
+            now_ms,
+        )?;
+        return Ok(TwoStageRun {
+            result: v1_result,
+            outcome,
+            ran: false,
+        });
+    }
+
+    // Two-stage ran: the arm's entries ARE the final entries. Corrections
+    // flow through the v1 resolver unchanged (the entries themselves carry
+    // the skip set already).
+    let corrections = find_corrections_public(conn, exclude, now_ms, scheme)?;
+    Ok(TwoStageRun {
+        result: WisdomMatch {
+            schema: SCHEMA_VERSION,
+            gate: format!("{TWO_STAGE_LABEL_PREFIX}{scheme_key}"),
+            entries: ts_entries,
+            corrections,
+        },
+        outcome,
+        ran: true,
+    })
+}
+
+/// Corrections for the two-stage ran-path: the same resolver the v1 path
+/// uses, under the same scheme (r29-m2 — identical corrections both paths).
+fn find_corrections_public(
+    conn: &Connection,
+    exclude: &[String],
+    now_ms: i64,
+    scheme: Scheme,
+) -> Result<Vec<WisdomItem>> {
+    let temporal = temporal_columns(conn, Some(scheme))?;
+    find_corrections(conn, exclude, now_ms, &temporal)
+}
+
 fn find_corrections(
     conn: &Connection,
     exclude: &[String],
@@ -1795,6 +2072,178 @@ mod tests {
         assert!(!outcome.open);
         assert!(entries.is_empty());
         assert_eq!(outcome.stale_embed_key, 1);
+    }
+
+    /// Task 5: the orchestrator's ran-path label. In test builds the stub's
+    /// composite floors ARE resolvable (`two_stage_rule_floor` sees the
+    /// test-only slice), so with coverage 100% two-stage RUNS and the caller
+    /// prints `semantic-v2-two-stage:{scheme_key}` — this pins the label the
+    /// CLI emits when `outcome.rule.is_some()` (the CLI integration tests
+    /// compile without cfg(test) and can only reach the cell-1 fallback).
+    #[test]
+    fn orchestrator_emits_two_stage_label_when_it_runs() {
+        let conn = fixture();
+        let run = wisdom_match_two_stage_with_v1(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            8,
+            &[],
+            TS_NOW,
+            TS_KEY,
+        )
+        .unwrap();
+        assert!(
+            run.ran,
+            "stub composite floor + full coverage ⇒ two-stage runs"
+        );
+        assert_eq!(
+            run.outcome.rule,
+            Some(TwoStageRule::RestrictedCosine),
+            "pinned order: restricted-cosine floor wins attribution"
+        );
+        assert_eq!(
+            run.result.gate,
+            format!("{TWO_STAGE_LABEL_PREFIX}{TS_KEY}"),
+            "ran ⇒ semantic-v2-two-stage:{TS_KEY}"
+        );
+    }
+
+    /// Task 5: BOTH floors missing ⇒ the uncalibrated no-embed cell — empty
+    /// result, `uncalibrated` gate, rule=none, floor_key_used empty (the
+    /// caller's audit line prints `floor=`). Uses the never-calibrated
+    /// external key (no v1 floor, no composite floor anywhere) instead of
+    /// mutating the const floor table.
+    #[test]
+    fn orchestrator_uncalibrated_cell_reports_rule_none_and_empty_floor_key() {
+        let conn = fixture();
+        let run = wisdom_match_two_stage_with_v1(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            8,
+            &[],
+            TS_NOW,
+            "external:never-calibrated-model",
+        )
+        .unwrap();
+        assert!(!run.ran);
+        assert_eq!(run.outcome.rule, None);
+        assert_eq!(run.outcome.floor_key_used, "");
+        assert!(run.result.entries.is_empty());
+        assert_eq!(run.result.gate, GATE_UNCALIBRATED);
+    }
+
+    /// Task-5 fix round (reviewer Important #1/#2): the PUB pre-embed
+    /// precheck — the shared §3 embed-skip authority. Every caller (CLI,
+    /// Task-14/15 harness) invokes it BEFORE any embed_one and branches its
+    /// embed logic on the projected §4 cell + the coverage probe, so §6's
+    /// "coverage check BEFORE any embed" holds on ALL caller paths.
+
+    /// Precheck on the fixture, v1 floor only: cell-1 projected, one schemed
+    /// embed needed, zero stale keys (fixture coverage is 2/2). Uses the
+    /// real qwen key — the ONLY key with a v1 floor and NO composite floor
+    /// even in test builds (the test-only composite slice covers the stub
+    /// keys, so the stub cannot produce a v1-only world here).
+    #[test]
+    fn precheck_v1_floor_only_projects_cell1_and_one_schemed_embed() {
+        let conn = fixture();
+        let pre =
+            two_stage_pre_embed_check(&conn, "external:qwen/qwen3-embedding-4b", Scheme::Raw, TS_NOW)
+                .unwrap();
+        assert!(pre.v1_floor_present, "qwen raw key has a v1 floor (0.70)");
+        assert!(
+            !pre.ts_floor_present,
+            "no composite floor for the qwen key anywhere"
+        );
+        assert!(!pre.coverage_probe_miss);
+        assert_eq!(pre.projected_cell, 1, "v1-only ⇒ §4 cell 1 (v1 fallback)");
+        assert_eq!(
+            pre.embed_plan,
+            TwoStageEmbedPlan::SchemedOnly,
+            "v1 fallback needs exactly the schemed vector"
+        );
+        assert_eq!(pre.stale_embed_key, 0, "no candidate doc carries the qwen key");
+    }
+
+    /// Precheck, BOTH floors missing: cell 2, no embeds at all — the shared
+    /// authority the caller branches on for the §3 uncalibrated skip.
+    #[test]
+    fn precheck_both_floors_missing_projects_cell2_no_embeds() {
+        let conn = fixture();
+        let pre = two_stage_pre_embed_check(&conn, "external:never-calibrated-model", Scheme::Raw, TS_NOW)
+            .unwrap();
+        assert!(!pre.v1_floor_present);
+        assert!(!pre.ts_floor_present);
+        assert_eq!(pre.projected_cell, 2, "both missing ⇒ §4 cell 2");
+        assert_eq!(pre.embed_plan, TwoStageEmbedPlan::None);
+    }
+
+    /// Precheck, composite floor only + stale candidate (coverage < 100%):
+    /// §4 cell 3 (the dark-adjacent cell) projected BEFORE any embed — this
+    /// is the ordering Important #1 pins. With the probe able to answer, the
+    /// stale count rides along.
+    #[test]
+    fn precheck_cell3_low_coverage_projects_before_any_embed() {
+        let conn = fixture();
+        conn.execute(
+            "UPDATE documents SET embed_key = 'old-model' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let pre = two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW).unwrap();
+        assert!(pre.v1_floor_present);
+        assert!(
+            pre.ts_floor_present,
+            "test builds see the composite slice ⇒ composite floor present"
+        );
+        assert!(!pre.coverage_probe_miss);
+        assert_eq!(pre.projected_cell, 3, "floors present + cov<100% ⇒ cell 3");
+        assert_eq!(pre.stale_embed_key, 1, "doc1 stale ⇒ one stale candidate doc");
+        // Cell 3 with the v1 floor PRESENT ⇒ the orchestrator runs FULL v1
+        // as the fallback ⇒ the schemed vector IS needed (a v1-missing
+        // caller would get None here — pinned by the both-missing test).
+        assert_eq!(pre.embed_plan, TwoStageEmbedPlan::SchemedOnly);
+    }
+
+    /// Precheck, all floors present + full coverage: §4 cell 4 — embedding
+    /// proceeds; under Raw the schemed vector REUSES the raw one (r26 m3),
+    /// so the plan is raw+schemed with ONE embed, not two.
+    #[test]
+    fn precheck_cell4_full_coverage_plans_stage1_embed_raw_reuse() {
+        let conn = fixture();
+        let pre = two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW).unwrap();
+        assert!(pre.v1_floor_present);
+        assert!(pre.ts_floor_present);
+        assert_eq!(pre.projected_cell, 4);
+        assert_eq!(
+            pre.embed_plan,
+            TwoStageEmbedPlan::RawAndSchemed,
+            "cell 4 ⇒ stage-1 raw + schemed (Raw reuses under embed, still both vecs)"
+        );
+        assert_eq!(pre.stale_embed_key, 0);
+    }
+
+    /// Probe miss (pre-V28 shape): the precheck reports the miss, projects
+    /// the §4 fallback (no coverage veto possible), and `stale_embed_key`
+    /// degrades to 0 — the probe cannot answer (r28-M3 semantics the audit
+    /// line also carries).
+    #[test]
+    fn precheck_probe_miss_reports_miss_and_zero_stale() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE documents (id INTEGER PRIMARY KEY, path TEXT);")
+            .unwrap();
+        let pre = two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW).unwrap();
+        assert!(pre.coverage_probe_miss);
+        assert_eq!(pre.projected_cell, 1, "no coverage info ⇒ same as v1-only here");
+        assert_eq!(pre.stale_embed_key, 0, "probe can't answer ⇒ 0");
+        assert_eq!(
+            pre.embed_plan,
+            TwoStageEmbedPlan::SchemedOnly,
+            "v1 floor exists ⇒ the fallback still needs the schemed vector"
+        );
     }
 
     /// Rule (i): with coverage 100% and the restricted-cosine floor

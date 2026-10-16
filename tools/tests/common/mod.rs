@@ -124,3 +124,48 @@ pub fn run_ct(args: &[&str]) -> Output {
         .output()
         .expect("spawn ct")
 }
+
+/// Run `ct` with ADDITIONAL env vars layered over this test process's env
+/// (which `with_seeded_brain` has already pointed at the temp brain).
+pub fn run_ct_with_env<const N: usize>(args: &[&str], vars: [(&str, &str); N]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ct"));
+    cmd.args(args);
+    for (k, v) in vars {
+        // An empty value REMOVES the var (stub opt-out must not leak a
+        // resolved empty string into gate_model_key, which filters empties —
+        // explicit is safer than relying on that filter).
+        if v.is_empty() {
+            cmd.env_remove(k);
+        } else {
+            cmd.env(k, v);
+        }
+    }
+    cmd.output().expect("spawn ct")
+}
+
+/// The seeded brain's raw SQLite handle (fixture brain DB path via the
+/// `CURATED_BRAIN_DIR` that `with_seeded_brain` set).
+pub fn brain_db() -> rusqlite::Connection {
+    let dir = std::env::var("CURATED_BRAIN_DIR").expect("with_seeded_brain sets it");
+    rusqlite::Connection::open(std::path::Path::new(&dir).join("brain.db")).unwrap()
+}
+
+/// Seed one wisdom fact matching ct_wisdom_match.rs's pattern: a blob
+/// `[1,0,…]` (stub query vectors share the direction ⇒ cosine ≈ 1) scoring
+/// above the `stub:constant8` floor (0.5).
+pub fn seed_fact(id: &str) {
+    let mut v = [0f32; 8];
+    v[0] = 1.0;
+    let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+    brain_db()
+        .execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES (?1, 'ent_t', ?2, ?3, '[]', 'inferred', 'librarian_inferred',
+                       NULL, NULL, 100, 100, NULL, 0, NULL, ?4, NULL)",
+            rusqlite::params![id, format!("Title {id}"), format!("Body {id}"), blob],
+        )
+        .unwrap();
+}

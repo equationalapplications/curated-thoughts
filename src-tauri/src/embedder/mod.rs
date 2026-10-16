@@ -142,6 +142,16 @@ impl ExternalEmbedProfile {
 /// than an inline literal (spec §2.2).
 pub const EXTERNAL_EMBED_TIMEOUT_SECS: u64 = 120;
 
+/// Env kill-switch for the two-stage CLI path (issue #271 §5):
+/// `CURATED_WISDOM_SINGLE_STAGE=1` forces the plain v1 path. Lives here so
+/// the CLI and the desktop driver (Task 14/15) read ONE literal.
+pub const SINGLE_STAGE_ENV: &str = "CURATED_WISDOM_SINGLE_STAGE";
+
+/// True when the §5 kill-switch is set to `1` in the environment.
+pub fn single_stage_env_kill() -> bool {
+    std::env::var(SINGLE_STAGE_ENV).is_ok_and(|v| v == "1")
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmbedProfile {
@@ -175,7 +185,27 @@ impl Default for EmbedProfile {
 /// `texts.len() - 1` vectors. It exists solely for the R6 length-mismatch
 /// guard tests in `embed_sweep` and `db::commit` — a misbehaving provider that
 /// drops a row must trip the guard, not silently mis-pair vectors.
+///
+/// Test/CI embed-call counter (issue #271 Task 5 embed-skip tests): when
+/// `CURATED_EMBED_COUNT_FILE` is set, every `embed_batch` call APPENDS one
+/// line (the batch size) to that file — a cross-process counting stub, since
+/// `ct` runs the embedder in a child process the test cannot instrument.
+/// Best-effort: a counting failure NEVER fails the embed itself.
+fn count_embed_call(n: usize) {
+    if let Ok(path) = std::env::var("CURATED_EMBED_COUNT_FILE") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{n}");
+        }
+    }
+}
+
 pub fn embed_batch(profile: &EmbedProfile, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+    count_embed_call(texts.len());
     let stub = std::env::var("CURATED_EMBED_STUB").ok();
     if let Some(name) = stub.as_deref() {
         if name == "constant8" || name == "constant8_short" {
