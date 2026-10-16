@@ -8,7 +8,7 @@ use crate::db::schema::{
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
 /// Outcome of one `v22_unify_documents_path` pass. Reported so the caller
@@ -1034,7 +1034,49 @@ fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()> {
     let existing = crate::db::ddl_compat::existing_columns(conn, "documents")?;
     let missing_embed_key = !existing.iter().any(|c| c == "embed_key");
     let missing_lih = !existing.iter().any(|c| c == "last_indexed_hash");
-    if missing_embed_key || missing_lih {
+    let missing_cols = missing_embed_key || missing_lih;
+    // Fresh-brain marker machinery (spec §8, "Fresh brain" defined): a
+    // COUNT(*)=0 check cannot implement "no rows EVER" — rows leave via
+    // regrade/prune/clear hard deletes — so the marker is a persistent
+    // `llm_wiki_meta` row armed by an AFTER INSERT trigger on
+    // `librarian_evidence` and backfilled for any brain that has rows today.
+    // All probes below are read-only (no write lock taken to evaluate them);
+    // the LOCK is entered only when work is actually pending:
+    // - pre-V18 replica (`librarian_evidence` absent, V18 not yet run): skip
+    //   everything WITHOUT error — SQLite rejects CREATE TRIGGER … ON a
+    //   missing table; the machinery lands on a later open after V18's DDL.
+    // - trigger missing (table present): create it (one lock, then steady).
+    // - backfill pending (rows exist AND marker absent): arm the marker
+    //   (one lock, then steady — nothing in production deletes the key, the
+    //   clear transaction keeps `llm_wiki_meta`). An empty-evidence brain
+    //   never re-locks for the backfill, so no per-open write-lock hazard
+    //   (V27 precedent); `INSERT OR IGNORE` keeps the write idempotent.
+    let evidence_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='librarian_evidence'",
+        [],
+        |r| r.get(0),
+    )?;
+    let has_evidence_table = evidence_table > 0;
+    let trigger_pending =
+        has_evidence_table && !trigger_exists(conn, "librarian_evidence_seen_trg")?;
+    let backfill_pending = has_evidence_table && {
+        let rows_exist: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM librarian_evidence)",
+            [],
+            |r| r.get::<_, i64>(0).map(|v| v > 0),
+        )?;
+        rows_exist
+            && conn
+                .query_row(
+                    "SELECT value FROM llm_wiki_meta
+                      WHERE key = 'librarian_evidence_seen'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .is_none()
+    };
+    if missing_cols || trigger_pending || backfill_pending {
         conn.execute_batch("BEGIN IMMEDIATE;")?;
         let applied = (|| -> Result<()> {
             // Re-inspect UNDER the write lock (concurrent desktop/`--mcp` open).
@@ -1057,6 +1099,27 @@ fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()> {
                     [],
                 )?;
             }
+            if has_evidence_table {
+                // Idempotent both ways: `IF NOT EXISTS` + `INSERT OR IGNORE`
+                // body. Concurrent opens that both entered the lock re-run
+                // these harmlessly.
+                conn.execute_batch(
+                    "CREATE TRIGGER IF NOT EXISTS librarian_evidence_seen_trg
+                       AFTER INSERT ON librarian_evidence
+                     BEGIN
+                       INSERT OR IGNORE INTO llm_wiki_meta (key, value)
+                       VALUES ('librarian_evidence_seen', '1');
+                     END;",
+                )?;
+                if backfill_pending {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO llm_wiki_meta (key, value)
+                         SELECT 'librarian_evidence_seen', '1'
+                          WHERE EXISTS (SELECT 1 FROM librarian_evidence)",
+                        [],
+                    )?;
+                }
+            }
             Ok(())
         })();
         if let Err(e) = applied.and_then(|()| Ok(conn.execute_batch("COMMIT;")?)) {
@@ -1077,6 +1140,18 @@ fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// True when a trigger of the given name exists (any table). Used to decide
+/// whether the `librarian_evidence_seen_trg` creation still needs to run on a
+/// steady-state open.
+fn trigger_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name = ?1",
+        [name],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// Best-effort ensure failure logging (r8-m6). The open NEVER fails when
@@ -1906,6 +1981,146 @@ mod tests {
             )
             .unwrap();
         assert_eq!(lih.as_deref(), Some("h-old"));
+    }
+
+    /// V28 — `librarian_evidence_seen` fresh-brain marker (spec
+    /// 2026-10-09-issue271 §8, "Fresh brain" defined): an `AFTER INSERT`
+    /// trigger on `librarian_evidence` arms the marker on every live insert,
+    /// and the migration backfills it once for any brain that has rows
+    /// today. A COUNT(*)=0 check cannot implement "no rows EVER" (rows leave
+    /// via regrade/prune/clear hard deletes), hence the persistent marker.
+    #[test]
+    fn evidence_seen_marker_armed_by_trigger_and_backfill() {
+        let conn = open_in_memory().unwrap();
+
+        // Trigger exists after migration (V18's DDL ran earlier in the chain).
+        let trg: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='trigger' AND name='librarian_evidence_seen_trg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(trg, 1, "the AFTER INSERT trigger must exist after open");
+
+        // A live evidence insert arms the marker (trigger path).
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+             VALUES ('e_seen', 'ent_seen', 't', 'b', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, created_at)
+             VALUES ('e_seen', 'prop_seen', '{\"evidence\":[],\"proposal_id\":\"prop_seen\"}', 1)",
+            [],
+        )
+        .unwrap();
+        let v: String = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'librarian_evidence_seen'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "1");
+
+        // Backfill arm: a brain with rows but a missing marker gets it on the
+        // next migrate — the one-shot backfill rides the ALTER-call
+        // transaction (V27 precedent) and `INSERT OR IGNORE` keeps it
+        // idempotent against the already-armed value.
+        conn.execute(
+            "DELETE FROM llm_wiki_meta WHERE key = 'librarian_evidence_seen'",
+            [],
+        )
+        .unwrap();
+        crate::db::connection::migrate_open_db(&conn, None).unwrap();
+        let backfilled: Option<String> = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'librarian_evidence_seen'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            backfilled.as_deref(),
+            Some("1"),
+            "the migration backfill must arm the marker for a brain with evidence rows"
+        );
+    }
+
+    /// Pre-V18 replica upgrade (spec §8 Trigger placement): `librarian_evidence`
+    /// does not exist yet, so migrate() must NOT fail creating the trigger —
+    /// the marker machinery is skipped and lands on a later open once V18's
+    /// DDL has run. Marker absent = fresh per definition.
+    #[test]
+    fn pre_v18_fixture_open_succeeds_and_arms_marker_on_upgrade() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = Connection::open(tmp.path().join("brain.db")).unwrap();
+        build_pre_v18_brain(&conn);
+
+        // First open: V18's DDL runs inside the same migrate pass, but the
+        // marker machinery must be harmless either way — no trigger failure,
+        // no marker (no evidence rows ever existed on this brain).
+        migrate(&conn, None, Some(tmp.path())).unwrap();
+        let trg: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='trigger' AND name='librarian_evidence_seen_trg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let marker: Option<String> = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'librarian_evidence_seen'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(marker, None, "no evidence rows ⇒ the marker stays absent");
+
+        // Now the brain gains V18's evidence table and live rows (as a real
+        // replica upgrade would), and the NEXT open must arm the machinery:
+        // trigger created (table now exists) and the one-shot backfill fires
+        // because rows exist today.
+        conn.execute_batch(crate::db::schema::MIGRATION_V18)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+             VALUES ('e_replica', 'ent_replica', 't', 'b', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, created_at)
+             VALUES ('e_replica', 'prop_replica',
+                     '{\"evidence\":[],\"proposal_id\":\"prop_replica\"}', 1)",
+            [],
+        )
+        .unwrap();
+
+        crate::db::connection::migrate_open_db(&conn, None).unwrap();
+        let trg: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='trigger' AND name='librarian_evidence_seen_trg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(trg, 1, "the trigger lands once librarian_evidence exists");
+        let v: String = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'librarian_evidence_seen'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "1", "the backfill arms the marker for existing rows");
     }
 
     /// Fresh-DB path: `open_in_memory` applies every migration, so the
