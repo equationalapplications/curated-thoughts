@@ -691,7 +691,7 @@ Floor-key selection during calibration uses composite keys passed to `gate_floor
 4. two-stage floor present (+ v1 floor any) + coverage = 100% → two-stage runs (rule = calibrated rule for this key).
 5. Below-floor stage 1 → gate closed, audit line STILL emitted (`rule=i|ii open=0` — never `rule=none` on a two-stage close).
 
-- [ ] **Step 1: Write the failing tests** — fixtures reuse Task 3's `fixture()` via `pub(crate)` re-export or a tests-only helper module `#[cfg(test)] pub(crate) mod two_stage_test_support`. Core rows:
+- [x] **Step 1: Write the failing tests** — fixtures reuse Task 3's `fixture()` via `pub(crate)` re-export or a tests-only helper module `#[cfg(test)] pub(crate) mod two_stage_test_support`. Core rows:
 
 ```rust
 #[test]
@@ -738,8 +738,8 @@ fn corrections_identical_and_heads_excluded() { /* r29-m2 parity vs v1 call */ }
 fn audit_outcome_fields_pinned() { /* rule/open/top/v1merged/floor_key_used/k/stale semantics */ }
 ```
 
-- [ ] **Step 2: Run to verify FAIL.**
-- [ ] **Step 3: Implement.** Decision core sketch (fills the five rule rows + rule mechanics):
+- [x] **Step 2: Run to verify FAIL.**
+- [x] **Step 3: Implement.** Decision core sketch (fills the five rule rows + rule mechanics):
 
 ```rust
 // Rule (i): score facts of candidate docs (union hop, doc-level) with the
@@ -766,8 +766,8 @@ fn audit_outcome_fields_pinned() { /* rule/open/top/v1merged/floor_key_used/k/st
 
 Also update the `WISDOM_GATE_FLOORS` doc comment (:50-52) — a `chunk-hop` floor abstains on a chunk score, not raw cosine (Opus r5 MINOR-4).
 
-- [ ] **Step 4: Run to verify PASS** (module + full suite, `--test-threads=1`).
-- [ ] **Step 5: Commit** — `git commit -m "feat(wisdom): two-stage decision core — rules (i)/(ii), structural v1-merge, §4 fallback matrix"`
+- [x] **Step 4: Run to verify PASS** (module + full suite, `--test-threads=1`) — run 2026-10-15: `wisdom_match` 36/0 · `two_stage` 8/0 · FULL suite (`--features test-utils,mcp-server`) 1697 passed / 0 failed, exit 0 (fix round sa-0-8ab57239, see `task-4-fix-report.md`).
+- [x] **Step 5: Commit** — `git commit -m "feat(wisdom): two-stage decision core — rules (i)/(ii), structural v1-merge, §4 fallback matrix"` → 8b67580, review-fix round AMENDED to **c602357** (+885/−18; review verdict APPROVED, five fixes applied).
 
 ## Task 5: CLI wiring — `--two-stage` flag, labels, audit line, embed-skip, query-time coverage
 
