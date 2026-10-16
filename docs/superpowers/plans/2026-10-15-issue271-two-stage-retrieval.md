@@ -848,7 +848,7 @@ fn raw_scheme_reuses_one_embed_per_message() { /* scheme raw: exactly ONE embed 
 - Consumes: `gate_floor` lookup semantics (composite key must resolve, `wisdom_gate_bench.rs:107-111`); `WISDOM_GATE_FLOORS` (Task 4 adds two-stage keys ONLY at flip-to-default, Task 15).
 - Produces: `#[test] fn replay_two_stage()` (reads `expected.json` from its freeze dir like the existing replay tests) and `#[test] fn every_non_stub_floor_key_has_a_freeze_dir()`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -866,11 +866,11 @@ fn replay_two_stage() {
 }
 ```
 
-- [ ] **Step 2: Run to verify FAIL** (no composite key in `WISDOM_GATE_FLOORS` yet ⇒ `gate_floor` lookup misses). Create the freeze dir now with the `expected.json` SCHEMA (keys only): `{"floor": 0.0, "rule": "restricted-cosine", "k": 8, "probes": []}`. The floor VALUE is genuinely decided by calibration (Task 15): because the composite key is absent from `WISDOM_GATE_FLOORS` pre-calibration, `replay_two_stage` is `#[ignore]`d until Task 15 flips it, and THIS task adds the explicit CI step that runs that ignored test (Global Constraints rule). `every_non_stub_floor_key_has_a_freeze_dir` runs always and passes now.
+- [x] **Step 2: Run to verify FAIL** (no composite key in `WISDOM_GATE_FLOORS` yet ⇒ `gate_floor` lookup misses). Create the freeze dir now with the `expected.json` SCHEMA (keys only): `{"floor": 0.0, "rule": "restricted-cosine", "k": 8, "probes": []}`. The floor VALUE is genuinely decided by calibration (Task 15): because the composite key is absent from `WISDOM_GATE_FLOORS` pre-calibration, `replay_two_stage` is `#[ignore]`d until Task 15 flips it, and THIS task adds the explicit CI step that runs that ignored test (Global Constraints rule). `every_non_stub_floor_key_has_a_freeze_dir` runs always and passes now.
 
-- [ ] **Step 3: Implement** the two test fns + fixture dir with a minimal `expected.json` schema documented in the dir's README line inside `expected.json` (`{"floor": <f32>, "rule": "restricted-cosine"|"chunk-hop", "k": <usize>, "probes": [...] }`).
-- [ ] **Step 4: Verify PASS** (non-ignored coverage test).
-- [ ] **Step 5: Commit** — `git commit -m "test(bench): two-stage freeze-dir coverage assertion + ignored replay_two_stage (unignored at flip-to-default)"`
+- [x] **Step 3: Implement** the two test fns + fixture dir with a minimal `expected.json` schema documented in the dir's README line inside `expected.json` (`{"floor": <f32>, "rule": "restricted-cosine"|"chunk-hop", "k": <usize>, "probes": [...] }`).
+- [x] **Step 4: Verify PASS** (non-ignored coverage test).
+- [x] **Step 5: Commit** — `git commit -m "test(bench): two-stage freeze-dir coverage assertion + ignored replay_two_stage (unignored at flip-to-default)"` → a02affc. Review ladder: sor Approved (1 finding = the plan-mandated ci.yml `|| true`+marker-grep guard, sev 1.56/is_real 0.64); task-reviewer **Approved** (sa-0-e5c54be9): RED re-verified live (`replay_two_stage` 1 failed), green re-run live (3/0/1-ignored), all 7 deviations verified legitimate. 3 Minors adjudicated: #1 plan-mandated guard can't distinguish wrong-reason failures pre-flip — ACCEPTED, rot window bounded to Task 15 (sor concurred); #2 f64→f32 double-rounding `assert_eq!` on floor (Task 15 will surface if it ever bites) — ACCEPTED, pins same pattern as existing per-key tests; #3 hard-coded historical key→dir mappings in `freeze_dir_for` — ACCEPTED, forced by on-disk v1 history + doc comment. No fix round.
 
 ---
 
@@ -886,7 +886,7 @@ fn replay_two_stage() {
 - Consumes: nothing (greenfield constant; the chunker has NO fingerprint today — verified: zero `fingerprint` hits in the repo at bc83d06).
 - Produces: `pub const CHUNKER_FINGERPRINT: &str` (Task 8's decision table + Task 13's verify-scratch + the stamp write/read in both consume it). Semantics: a short stable string identifying the chunking ALGORITHM+params (e.g. `"v1"` initially); bumping it must be a deliberate code change.
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```rust
 #[test]
@@ -896,7 +896,7 @@ fn chunker_fingerprint_is_stable_and_nonempty() {
 }
 ```
 
-- [ ] **Step 2: Verify FAIL** (constant missing).
+- [x] **Step 2: Verify FAIL** (constant missing).
 - [ ] **Step 3: Implement**
 
 ```rust
@@ -906,8 +906,8 @@ fn chunker_fingerprint_is_stable_and_nonempty() {
 pub const CHUNKER_FINGERPRINT: &str = "v1";
 ```
 
-- [ ] **Step 4: Verify PASS.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(chunker): CHUNKER_FINGERPRINT constant for the funnel stamp"`
+- [x] **Step 4: Verify PASS.**
+- [x] **Step 5: Commit** — `git commit -m "feat(chunker): CHUNKER_FINGERPRINT constant for the funnel stamp"` → 7011c08d (executed inline by controller; see task-7-report.md deviations). Review ladder: sor Approved (0 findings, risk 0.68); task-reviewer **Approved** (sa-1-b255799e): verbatim plan implementation, single commit + exact message verified, tree/HEAD consistency checked. 1 Minor (constant placed before `use std::path::Path;` vs "after imports" note) — ACCEPTED as cosmetic. No fix round.
 
 ## Task 8: Diff-swap transaction in `ingest_file_virtual` (+ `mark_document_indexed` hash param, `embed_key` writer, `IngestRefused`, four-row decision table)
 
