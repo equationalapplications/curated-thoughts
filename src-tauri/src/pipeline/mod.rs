@@ -256,6 +256,14 @@ impl PipelineWorker {
                                 }
                             }
                             Err(e) => {
+                                // §8(c) caller contract (Task 9): a typed
+                                // refusal is NEVER a generic error — ONE
+                                // informational stderr line, no
+                                // write_error_log, loop continues.
+                                if e.downcast_ref::<IngestRefused>().is_some() {
+                                    eprintln!("[pipeline] ingest skipped (refused): {path}");
+                                    return;
+                                }
                                 let msg = format!("ingest error {}: {:#}", path, e);
                                 eprintln!("[pipeline] {}", msg);
                                 write_error_log(vault_root.as_deref(), &msg);
@@ -645,11 +653,10 @@ fn ingest_file(
 /// Typed refusal for a destructive-suspect forced pure rechunk (issue #271
 /// §8(c), r25 m4): the funnel refuses a forced pass whose bytes are unchanged
 /// but whose stored chunk hashes would drift. SINGLE struct, no enum — every
-/// refusal reason funnels here and callers downcast for the skip accounting.
-/// (Task 9 wires the four callers' downcasts; the drift-refusal arm below is
-/// the constructor.)
+/// refusal reason funnels here and callers downcast for the skip accounting
+/// (Task 9 wired all four callers' downcasts; the drift-refusal arm below is
+/// the constructor).
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct IngestRefused;
 
 impl std::fmt::Display for IngestRefused {
@@ -701,6 +708,26 @@ fn stored_chunks(conn: &Connection, doc_id: i64) -> Result<Vec<StoredChunk>> {
         out.push(row?);
     }
     Ok(out)
+}
+
+/// Swap-race rule (rev 5, Opus r3 m5): compare the pre-embed stored hash SET
+/// against the under-lock re-read; any mismatch means a concurrent writer
+/// moved the doc ⇒ clean retryable error. Extracted (Task 9 D3) so the
+/// mismatch ⇒ retryable-Err mapping is unit-testable directly — the call is
+/// mid-transaction with no deterministic in-process race seam.
+fn swap_race_check(
+    virtual_path: &str,
+    pre: &[StoredChunk],
+    stored_now: &[StoredChunk],
+) -> Result<()> {
+    let pre_set: HashSet<&str> = pre.iter().map(|c| c.hash.as_str()).collect();
+    let now_set: HashSet<&str> = stored_now.iter().map(|c| c.hash.as_str()).collect();
+    if pre_set != now_set {
+        return Err(anyhow::anyhow!(
+            "chunk set changed concurrently for {virtual_path}; retrying ingest"
+        ));
+    }
+    Ok(())
 }
 
 fn ingest_file_virtual(
@@ -983,13 +1010,7 @@ fn ingest_file_virtual(
         // UNDER the IMMEDIATE lock; any mismatch vs the pre-embed read means
         // a concurrent writer moved the doc — abort cleanly (retryable).
         let stored_now = stored_chunks(&tx, doc_id)?;
-        let pre: HashSet<&str> = stored.iter().map(|c| c.hash.as_str()).collect();
-        let now: HashSet<&str> = stored_now.iter().map(|c| c.hash.as_str()).collect();
-        if pre != now {
-            return Err(anyhow::anyhow!(
-                "chunk set changed concurrently for {virtual_path}; retrying ingest"
-            ));
-        }
+        swap_race_check(virtual_path, &stored, &stored_now)?;
     }
 
     // Diff application. kept-hash chunks keep their chunk_id and get their
@@ -2240,5 +2261,244 @@ mod diff_swap_tests {
             )
             .unwrap();
         assert_eq!(n_emb, n_chunks, "one vector per chunk after full re-embed");
+    }
+
+    /// Task 9 (issue #271 §8(c) caller contract, worker arm): a forced pass
+    /// refused via typed `IngestRefused` is ONE informational stderr line —
+    /// NOT a `write_error_log` call — and the worker loop CONTINUES with the
+    /// next job (second doc still ingests; no error log row, no loop exit).
+    ///
+    /// The stderr surface is observed through a CHILD PROCESS: libtest
+    /// intercepts `eprintln!` into a thread-local buffer (its failure dump),
+    /// so the worker's stderr never reaches fd 2 in-process — a dup2/pipe
+    /// capture sees nothing. Re-execing this same test binary with
+    /// `--nocapture` gives a harness-free process whose fd 2 is a real pipe
+    /// the parent test asserts on. The child is the exact
+    /// `worker_logs_ingest_refused_without_write_error_log` filter, so it
+    /// exercises the same code with zero test-surface invention.
+    #[test]
+    fn worker_logs_ingest_refused_without_write_error_log() {
+        // ── child arm: run the actual worker scenario, stderr = real fd 2 ──
+        // libtest names tests WITHOUT the crate prefix; module_path!()
+        // includes it — strip so the --exact filter matches.
+        let mod_path = module_path!();
+        let crate_prefix = concat!(env!("CARGO_CRATE_NAME"), "::");
+        let mod_no_crate = mod_path.strip_prefix(crate_prefix).unwrap_or(mod_path);
+        let filter = format!("{mod_no_crate}::worker_logs_ingest_refused_without_write_error_log");
+        if std::env::var(TASK9_CHILD_ENV).as_deref() == Ok("1") {
+            run_worker_refusal_scenario();
+            return;
+        }
+
+        // ── parent arm: re-exec self, capture the child's stderr ──
+        let exe = std::env::current_exe().expect("current_exe");
+        // The child is a separate process: its brain-dir path comes back via
+        // this file, not the environment.
+        let export = tempfile::NamedTempFile::new().expect("export file");
+        let out = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                filter.as_str(),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(TASK9_CHILD_ENV, "1")
+            .env(TASK9_BRAIN_DIR_EXPORT, export.path())
+            .env_remove("RUST_TEST_WORKERS")
+            .output()
+            .expect("re-exec test binary");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert!(
+            out.status.success(),
+            "child scenario must pass, stderr: {stderr} stdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert_eq!(
+            // The SKIP line's exact prefix (informational stderr, NOT the
+            // generic "[pipeline] ingest error" + write_error_log arm).
+            stderr.matches("ingest skipped (refused)").count(),
+            1,
+            "exactly ONE informational skip line expected, filter={filter:?} got: {stderr:?} stdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            !stderr.contains("[pipeline] ingest error"),
+            "refusal must not take the generic ingest-error arm, stderr: {stderr}"
+        );
+
+        // NOT write_error_log: the child's redirected brain dir gets no
+        // errors.log. The child exports its temp dir path for this check.
+        let brain_dir = std::path::PathBuf::from(
+            std::fs::read_to_string(export.path())
+                .expect("child must write its brain dir into TASK9_BRAIN_DIR_EXPORT"),
+        );
+        assert!(
+            !brain_dir.join(".brain").join("errors.log").exists(),
+            "refusal must NOT hit write_error_log (errors.log found under {})",
+            brain_dir.display()
+        );
+    }
+
+    /// Child-only env latch: set ⇒ this invocation IS the worker scenario.
+    const TASK9_CHILD_ENV: &str = "TASK9_WORKER_REFUSAL_CHILD";
+    /// Dir the child exports to the parent for the errors.log assertion.
+    const TASK9_BRAIN_DIR_EXPORT: &str = "TASK9_BRAIN_DIR_EXPORT";
+
+    /// The real scenario (runs in the re-exec'd child): drift-refuse doc A on
+    /// a forced rechunk, queue doc B after it, drive a real PipelineWorker.
+    fn run_worker_refusal_scenario() {
+        use super::watchdog::heartbeat::Heartbeat;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::mpsc::sync_channel;
+
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: the worker resolves brain paths from
+        // db_path.parent() / env (issue #178 pattern).
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+                // The worker thread inherits these: the control doc's forced
+                // rechunk must embed via the stub, never real Ollama (a live
+                // Ollama embed failure would write_error_log and break the
+                // errors.log assertion for the WRONG reason).
+                ("CURATED_EMBED_STUB", Some("constant8")),
+            ],
+            || {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let db_path = tmp.path().join("brain.db");
+                crate::db::connection::open_app_db(&db_path, None).unwrap();
+
+                let (tx, rx) = sync_channel::<PipelineJob>(8);
+                let heartbeat = Arc::new(Heartbeat::new());
+                let pending = Arc::new(AtomicUsize::new(0));
+                let (status_tx, _status_rx) = mpsc::channel();
+
+                let worker = PipelineWorker::new_with_vault(
+                    db_path.clone(),
+                    rx,
+                    pending,
+                    None,
+                    status_tx,
+                    heartbeat.clone(),
+                );
+                let join = std::thread::spawn(move || worker.run());
+
+                // Doc A becomes a drift-refusal fixture: seed it, then rewrite
+                // its stored hashes to values a fresh rechunk can never match
+                // (stamp absent ⇒ stale). Doc B is the control: after the
+                // refusal the worker must move on and ingest it.
+                {
+                    let conn = Connection::open(&db_path).unwrap();
+                    let file_a = tmp.path().join("documents").join("drift.md");
+                    let file_b = tmp.path().join("documents").join("control.md");
+                    let pa = seed(&conn, &file_a, &prose_body("driftw", 30));
+                    let pb = seed(&conn, &file_b, &prose_body("controlw", 30));
+                    let (doc_a, _, _, _, _) = doc_state(&conn, &pa);
+                    conn.execute(
+                        "UPDATE chunks SET content_hash = 'drifted' || printf('%028d', position) \
+                         WHERE doc_id = ?1",
+                        [doc_a],
+                    )
+                    .unwrap();
+
+                    tx.send(PipelineJob::rechunk(pa.clone())).unwrap();
+                    tx.send(PipelineJob::rechunk(pb.clone())).unwrap();
+                    drop(tx); // worker drains and exits cleanly
+                    join.join().unwrap();
+
+                    // Loop continued: the control doc after the refused one
+                    // was still processed.
+                    let (_, _, status_b, _, _) = doc_state(&conn, &pb);
+                    assert_eq!(status_b, "indexed", "worker must continue after a refusal");
+                    let pending_runs: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM ingest_runs WHERE outcome = 'pending'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        pending_runs, 0,
+                        "refusal must not leave a 'pending' ingest_runs row \
+                         (it never reached the swap's pre-insert)"
+                    );
+                }
+
+                // Export the brain dir so the parent can assert on errors.log
+                // (separate process ⇒ file, not environment).
+                std::fs::write(
+                    std::env::var(TASK9_BRAIN_DIR_EXPORT).unwrap_or_default(),
+                    brain_tmp.path().as_os_str().as_encoded_bytes(),
+                )
+                .expect("export brain dir path");
+            },
+        );
+    }
+
+    /// Task 9 D3 (swap-race coverage debt, helper option): equal hash SETS ⇒
+    /// Ok, regardless of chunk order or ids (orderless comparison preserved).
+    #[test]
+    fn swap_race_check_equal_sets_in_any_order_is_ok() {
+        let pre = vec![
+            StoredChunk {
+                id: 1,
+                hash: "a".into(),
+                position: 0,
+            },
+            StoredChunk {
+                id: 2,
+                hash: "b".into(),
+                position: 1,
+            },
+        ];
+        let now = vec![
+            StoredChunk {
+                id: 9,
+                hash: "b".into(),
+                position: 0,
+            },
+            StoredChunk {
+                id: 7,
+                hash: "a".into(),
+                position: 1,
+            },
+        ];
+        swap_race_check("/v/x.md", &pre, &now).expect("identical sets must pass");
+    }
+
+    /// Task 9 D3: ANY hash-set difference (a hash changed, added, or removed)
+    /// maps to the clean RETRYABLE error — never a panic, never a silent Ok.
+    #[test]
+    fn swap_race_check_any_hash_set_mismatch_is_retryable_err() {
+        let mk = |hashes: &[&str]| -> Vec<StoredChunk> {
+            hashes
+                .iter()
+                .enumerate()
+                .map(|(i, h)| StoredChunk {
+                    id: i as i64,
+                    hash: h.to_string(),
+                    position: i as i64,
+                })
+                .collect()
+        };
+        let pre = mk(&["a", "b"]);
+
+        for now in [
+            mk(&["a", "tampered"]), // one hash replaced
+            mk(&["a"]),             // one hash removed
+            mk(&["a", "b", "new"]), // one hash added
+        ] {
+            let err = swap_race_check("/v/x.md", &pre, &now)
+                .expect_err("any mismatch must be a retryable Err");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("chunk set changed concurrently") && msg.contains("retrying ingest"),
+                "mismatch must map to the clean retryable error, got: {msg}"
+            );
+        }
     }
 }

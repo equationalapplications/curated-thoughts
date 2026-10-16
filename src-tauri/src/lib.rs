@@ -3755,6 +3755,9 @@ pub use pipeline::{
     entity_id_for_path, entity_id_for_virtual_path, ingest_document, ingest_document_virtual,
     ingest_document_with_vault_root,
 };
+// Task 9 (issue #271 §8(c)): out-of-tree callers (`ct ingest`, `bulk_reindex`)
+// downcast to the typed refusal for their skip accounting.
+pub use pipeline::IngestRefused;
 
 #[tauri::command]
 fn ingest_document_cmd(

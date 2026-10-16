@@ -43,7 +43,7 @@ use tauri_app_lib::retrieval;
 pub use tauri_app_lib::walk_vault::{
     collect_files, walk_vault, DeniedLink, PendingLink, WalkOutcome, WalkedFile, MAX_VIRTUAL_DEPTH,
 };
-use tauri_app_lib::{entity_id_for_virtual_path, ingest_document_virtual};
+use tauri_app_lib::{entity_id_for_virtual_path, ingest_document_virtual, IngestRefused};
 
 /// Default `once` mode watchdog: exit after this many seconds even if no
 /// SIGINT arrives. The plan suggested 60s; using a named constant (per the
@@ -187,6 +187,21 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
                 ));
                 println!(
                     "[{}/{}] ok: {}",
+                    i + 1,
+                    files.len(),
+                    f.virtual_path.display()
+                );
+            }
+            // §8(c) caller contract (Task 9): a typed refusal is SKIP
+            // accounting — exit 0, no `failed += 1`, and the file's entity
+            // STAYS in the linker set. Downcast FIRST in the Err arm.
+            Err(e) if e.downcast_ref::<IngestRefused>().is_some() => {
+                entity_ids.insert(entity_id_for_virtual_path(
+                    virtual_str,
+                    Some(vault_root_str),
+                ));
+                eprintln!(
+                    "[{}/{}] skipped: {} (refused: {e})",
                     i + 1,
                     files.len(),
                     f.virtual_path.display()
