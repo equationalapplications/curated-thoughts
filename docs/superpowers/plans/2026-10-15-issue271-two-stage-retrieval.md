@@ -787,7 +787,7 @@ Also update the `WISDOM_GATE_FLOORS` doc comment (:50-52) — a `chunk-hop` floo
   - The pinned 5-field `wisdom_gate_decision` stderr line: byte-identical under both paths.
   - `pub fn wisdom_match_two_stage(conn, profile, query, scheme, max, exclude, two_stage: bool, now_ms) -> Result<WisdomMatch>` in `src-tauri/src/wisdom_match.rs` — the shared entry point (Task 14/15's driver calls this directly).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // tools/tests/cli_wisdom_two_stage.rs  (pattern: existing CLI integration tests
@@ -819,8 +819,8 @@ fn raw_scheme_reuses_one_embed_per_message() { /* scheme raw: exactly ONE embed 
     the fact vector, r26 m3); instrument via the counting stub */ }
 ```
 
-- [ ] **Step 2: Run to verify FAIL.**
-- [ ] **Step 3: Implement.** In `wisdom_match_cmd` (:768): after resolving profile + scheme, when `two_stage` active (flag XOR env) call `wisdom_match_two_stage`; else the existing path. `wisdom_match_two_stage` order of operations (pinned):
+- [x] **Step 2: Run to verify FAIL.**
+- [x] **Step 3: Implement.** In `wisdom_match_cmd` (:768): after resolving profile + scheme, when `two_stage` active (flag XOR env) call `wisdom_match_two_stage`; else the existing path. `wisdom_match_two_stage` order of operations (pinned):
   1. Probe schema: `two_stage::two_stage_schema_ready` false → v1 fallback path (label v1; audit `rule=none ... stale_embed_key=<count via probe 0>`), never error (r28-M3).
   2. Resolve floors: `v1_floor = gate_floor(gate_model_key_for_scheme-or-current-key ...)`, `ts_floor = gate_floor(&format!("{}:two-stage:{}", floor_key_for(key, scheme), calibrated_rule))` — during harness runs the rule is passed explicitly; shipped default reads the composite key for each rule in pinned order `restricted-cosine` then `chunk-hop`.
   3. Coverage check BEFORE any embed (§6): `coverage(conn, &gate_model_key(profile, stub))` — `None` ⇒ fallback; `Some((n,c))` with `c < n` ⇒ fallback with `stale_embed_key = n - c`; `n == 0` ⇒ vacuously covered.
@@ -835,8 +835,8 @@ fn raw_scheme_reuses_one_embed_per_message() { /* scheme raw: exactly ONE embed 
   5. Under `Scheme::Raw`, reuse the raw vector as the schemed vector (r26 m3 — ONE embed); under `Instr1`, embed `query_text_for_scheme(query, scheme)` a second time (:788 call site already builds the prefixed text).
   6. Call `two_stage_entries`, print the stdout label `semantic-v2-two-stage:{key}` only when rule ran; emit the audit line on every requested path; print the pinned 5-field line EXACTLY as today with the merged entries.
 
-- [ ] **Step 4: Run to verify PASS.** `cargo test --manifest-path tools/Cargo.toml -- --test-threads=1 two_stage` + full both-manifest suites.
-- [ ] **Step 5: Commit** — `git commit -m "feat(cli): ct wisdom match --two-stage — labels, seven-field audit line, embed-skip, coverage-first ordering"`
+- [x] **Step 4: Run to verify PASS.** `cargo test --manifest-path tools/Cargo.toml -- --test-threads=1 two_stage` + full both-manifest suites — run 2026-10-16 (fix round included): `cli_wisdom_two_stage` 8/0 · `ct_wisdom_match` 10/0 · `wisdom_match` lib 43/0 · FULL src-tauri (`--features test-utils,mcp-server`) 1704/0 · FULL tools 202/0, both exits 0.
+- [x] **Step 5: Commit** — `git commit -m "feat(cli): ct wisdom match --two-stage — labels, seven-field audit line, embed-skip, coverage-first ordering"` → 2a1804b, review-fix round AMENDED to **dbb854f** (+1055/−23). Review ladder: sor Approved; task-reviewer "Needs fixes" (Important #1 coverage-before-embed, #2 signature deviation, 3 Minors) → controller adjudication (fix #1 via pub precheck; #2 blessed-with-precheck; minors fix) → fix round applied; controller verified the fix shapes in code + tools suites re-run green (lib re-verification: 43/0 per fix report).
 
 ## Task 6: Benchmark freeze coverage — `replay_two_stage` + per-key freeze assertion
 
