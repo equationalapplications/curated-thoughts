@@ -1021,7 +1021,7 @@ git commit -m "feat(pipeline): four-row funnel decision table + typed IngestRefu
 - Consumes: `IngestRefused` (Task 8).
 - Produces: caller contract — a refusal is NEVER a generic `Err`: (1) `ct ingest` ⇒ success (exit 0, SKIP in loop accounting: no `failed += 1`, file still in linker entity set); (2) `bulk_reindex` ⇒ SKIP: one informational stderr line, pass CONTINUES, linker still runs over processed entity_ids; (3) pipeline worker ⇒ ONE informational stderr line, NOT `write_error_log`, continue loop; (4) `wisdom_deposit` kick ⇒ defensive downcast before `map_err`, treated as success, still records `chunked` (unreachable today — force=false at :384 — belt-and-suspenders).
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[test]
@@ -1034,9 +1034,11 @@ fn bulk_reindex_counts_refusal_as_skip_and_continues() { /* two paths, first ref
 fn ct_ingest_treats_refusal_as_skip() { /* loop accounting: failed == 0, exit 0 */ }
 ```
 
-- [ ] **Step 2: Verify FAIL.**  **Step 3: Implement** the four downcasts per the contract above (`downcast_ref::<IngestRefused>()` FIRST in each arm).
-- [ ] **Step 4: Verify PASS.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(pipeline): IngestRefused downcasts at all four callers (skip semantics, no error-log storm)"`
+- [x] **Step 2: Verify FAIL.**  **Step 3: Implement** the four downcasts per the contract above (`downcast_ref::<IngestRefused>()` FIRST in each arm).
+- [x] **Step 4: Verify PASS.**
+- [x] **Step 5: Commit** — `git commit -m "feat(pipeline): IngestRefused downcasts at all four callers (skip semantics, no error-log storm)"`
+
+> **Adjudication (controller, 2026-10-16):** commit cb15a737 on 045b8894 (+555/−15, 6 files). RED verbatim first (task-9-red.md 17:59:07Z); suites src-tauri **1717/0/1**, tools **204/0** (controller-summed, exits 0; 1 ignored = pre-existing node-gated installed_engine_setup). sor: Approved (risk 2.04/3). Task-reviewer: ✅ spec-compliant (⚠️ serial/fmt unverifiable from diff), **Approved, no fix round**; sor findings adjudicated: worker arm = no real bug (return exits per-job closure only; pending decrement outside), wisdom_deposit defensive downcast correct-as-written (unreachable today, per brief), cmds.rs test-gap partially real → subsumed by carried debt. **CARRIED DEBT (test-strength, non-blocking):** (1) worker test's errors.log assertion doubly vacuous (vault_root=None ⇒ write_error_log no-op; TempDir dropped before parent check) — make real by passing `Some(tmp.path())`; (2) bulk/ct linker edge assertions pre-satisfied by seed — bulk refusal skips `entity_ids.insert` (contract-consistent: bulk binds "over *processed* entity_ids" vs ct's "file still in linker entity set" — deliberate wording divergence, behavior matches contract as written). Surface both at whole-branch review (Task 15/16). Deviations D-A/D-B/D-C/D-E/D-F in task-9-report.md; D3 via `swap_race_check()` helper + 2 unit tests; D8 `#[allow]` removed, no warning.
 
 ## Task 10: Cross-process deletion breaker — heal + regrade + `ct heal` flags
 
