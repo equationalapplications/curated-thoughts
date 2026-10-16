@@ -162,12 +162,18 @@ fn ingest_same_file_twice_unchanged_does_not_reindex() {
         count_force, count_after,
         "strategy-stable rechunk preserves chunk count"
     );
+    // Issue #271 §8(a) diff-swap: a LOSSLESS forced rechunk (same chunker,
+    // unchanged bytes) keeps every chunk_id — the swap UPDATEs the embeddings
+    // rows in place instead of delete-then-reinsert, so chunk identity (and
+    // every evidence hash anchored to it) survives the pass. The old
+    // "force rechunk should replace chunk rows" expectation pinned the
+    // destructive pre-swap behavior.
     let max_id_after: i64 = conn
         .query_row("SELECT COALESCE(MAX(id), 0) FROM chunks", [], |r| r.get(0))
         .unwrap();
-    assert!(
-        max_id_after > max_id_before,
-        "force rechunk should replace chunk rows"
+    assert_eq!(
+        max_id_after, max_id_before,
+        "lossless force rechunk must keep chunk identity (diff-swap §8(a))"
     );
 }
 

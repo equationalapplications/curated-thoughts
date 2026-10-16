@@ -642,6 +642,40 @@ fn ingest_file(
     ingest_file_virtual(conn, profile, path, path, force_rechunk, vault_root, hb)
 }
 
+/// Typed refusal for a destructive-suspect forced pure rechunk (issue #271
+/// §8(c), r25 m4): the funnel refuses a forced pass whose bytes are unchanged
+/// but whose stored chunk hashes would drift. SINGLE struct, no enum — every
+/// refusal reason funnels here and callers downcast for the skip accounting.
+/// (Task 9 wires the four callers' downcasts; the drift-refusal arm below is
+/// the constructor.)
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct IngestRefused;
+
+impl std::fmt::Display for IngestRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ingest refused: forced pure rechunk would orphan evidence hashes (chunker drift; bootstrap via `ct reindex verify-scratch`)"
+        )
+    }
+}
+
+impl std::error::Error for IngestRefused {}
+
+/// Chunker currency for the §8(c) funnel: the stamp is CHUNKER-ONLY (r25-M3 —
+/// no model component). Missing/unreadable stamp ⇒ not current.
+fn chunker_stamp_current(conn: &Connection) -> bool {
+    let read = || -> rusqlite::Result<String> {
+        conn.query_row(
+            "SELECT value FROM llm_wiki_meta WHERE key = 'reindex_stamp'",
+            [],
+            |r| r.get(0),
+        )
+    };
+    matches!(read(), Ok(v) if v == crate::chunker::CHUNKER_FINGERPRINT)
+}
+
 /// One stored chunk as read for the diff (diff-swap §8(a)).
 struct StoredChunk {
     id: i64,
@@ -775,7 +809,83 @@ fn ingest_file_virtual(
         .enumerate()
         .map(|(i, c)| crate::db::chunk_hash::compute_chunk_hash(&c.text, virtual_path, i))
         .collect();
-    // (Task 8 commit C adds the §8(c) funnel here.)
+    // Pure rechunk (spec §8(c)): the doc's last_indexed_hash equals the file's
+    // current hash AND the doc has ≥1 stored chunk — i.e. the BYTES are
+    // unchanged since the last successful swap, whatever the stored hash set
+    // now contains.
+    let bytes_unchanged = match &existing_doc {
+        Some(_) if !chunks.is_empty() => {
+            let lih: Option<String> = conn
+                .query_row(
+                    "SELECT last_indexed_hash FROM documents WHERE id = ?1",
+                    [doc_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            lih.as_deref() == Some(hash.as_str())
+        }
+        _ => false,
+    };
+    // Lossless (r30-M1): freshly computed hash set == stored set.
+    let is_lossless = match &existing_doc {
+        Some(_) if !chunks.is_empty() => {
+            let stored_pre = stored_chunks(conn, doc_id)?;
+            let stored: HashSet<&str> = stored_pre.iter().map(|c| c.hash.as_str()).collect();
+            let fresh: HashSet<&str> = new_hashes.iter().map(|h| h.as_str()).collect();
+            stored == fresh
+        }
+        _ => false,
+    };
+
+    if bytes_unchanged {
+        // Rows 1-2 (forced) vs rows 3-4 (non-forced).
+        if force_rechunk {
+            // Forced + chunker stale/missing ⇒ per-doc LOSSLESS check
+            // (r30-M1): equal (lossless — same-chunker rechunk or model swap)
+            // ⇒ PROCEED to the swap. Stored set ≠ new set on unchanged bytes
+            // ⇒ chunker drift ⇒ typed refusal (evidence hashes would orphan);
+            // the reset restores pending/pending_reindex rows. A current
+            // stamp takes row 1 (pass) unconditionally.
+            if !chunker_stamp_current(conn) && !is_lossless {
+                reset_pending_row(conn, doc_id)?;
+                return Err(anyhow::Error::new(IngestRefused));
+            }
+        } else {
+            // Non-forced pure rechunk ⇒ NO-OP SUCCESS, `pending` ROWS ONLY
+            // (r26-M3 narrowed by r28-M2). `pending_reindex` rows are
+            // EXCLUDED: they must stay sweepable for the sweep's forced job.
+            // Key-currency (r28-M2): embed_key stale/NULL ⇒ re-embed the
+            // STORED chunks in place first (repair-embed-key mechanics).
+            if existing_doc.as_ref().map(|d| d.status.as_str()) == Some("pending") {
+                let embed_key: Option<String> = conn
+                    .query_row(
+                        "SELECT embed_key FROM documents WHERE id = ?1",
+                        [doc_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(None);
+                let current_key =
+                    gate_model_key(profile, crate::embedder::active_embed_stub().as_deref());
+                if embed_key.as_deref() != Some(current_key.as_str()) {
+                    // Repair: re-embed stored chunks in place; on embed
+                    // failure apply the refusal reset (r29-m3) — the data is
+                    // intact, the row must not sit pending (401-loop).
+                    match repair_embed_key_in_place(conn, profile, doc_id, &current_key) {
+                        Ok(()) => {}
+                        Err(_) => {
+                            reset_pending_row(conn, doc_id)?;
+                            return Ok(());
+                        }
+                    }
+                }
+                reset_pending_row(conn, doc_id)?;
+                let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
+                return Ok(());
+            }
+            // pending_reindex (or anything else): untouched, stay sweepable.
+            return Ok(());
+        }
+    }
 
     if chunks.is_empty() {
         // Zero-chunk docs bypass the table entirely: drop any legacy chunks
@@ -956,6 +1066,84 @@ fn ingest_file_virtual(
     tx.commit()?;
 
     let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
+    Ok(())
+}
+
+/// r27 m3 refusal/no-op row reset — ONE statement: restore the row to its
+/// last-good indexed state. `pending_reindex` rows are NOT reset here (they
+/// only reach this helper from the r29-m3 embed-failure path, which the spec
+/// pins to the same reset).
+fn reset_pending_row(conn: &Connection, doc_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE documents SET status = 'indexed', hash = last_indexed_hash \
+         WHERE status IN ('pending', 'pending_reindex') AND id = ?1 \
+         AND last_indexed_hash IS NOT NULL",
+        [doc_id],
+    )?;
+    Ok(())
+}
+
+/// Repair-embed-key mechanics (r28-M2 key-currency): re-embed the STORED
+/// chunks in place under the current key and stamp the key. No rechunk, no
+/// file read.
+fn repair_embed_key_in_place(
+    conn: &Connection,
+    profile: &EmbedProfile,
+    doc_id: i64,
+    key: &str,
+) -> Result<()> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, chunk_text FROM chunks WHERE doc_id = ?1 ORDER BY position")?;
+        let mapped = stmt.query_map([doc_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let texts: Vec<String> = rows.iter().map(|(_, t)| t.clone()).collect();
+    let vectors = embed_batch(profile, texts).map_err(|e| {
+        eprintln!("[pipeline] key-repair embed failed for doc {doc_id}: {e:#}");
+        e
+    })?;
+    if vectors.len() != rows.len() {
+        return Err(anyhow::anyhow!(
+            "key-repair embed returned {} vectors for {} chunks",
+            vectors.len(),
+            rows.len()
+        ));
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    // Swap-race rule: re-check the chunk-id set under the lock.
+    let ids_now: Vec<i64> = {
+        let mut stmt = tx.prepare("SELECT id FROM chunks WHERE doc_id = ?1 ORDER BY position")?;
+        let mapped = stmt.query_map([doc_id], |r| r.get(0))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let pre: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
+    if ids_now != pre {
+        return Err(anyhow::anyhow!(
+            "chunk set changed concurrently during key repair for doc {doc_id}"
+        ));
+    }
+    for ((id, _), v) in rows.iter().zip(vectors.iter()) {
+        let bytes: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+        tx.execute(
+            "UPDATE embeddings SET vector = ?1 WHERE chunk_id = ?2",
+            rusqlite::params![bytes, id],
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM embeddings WHERE rowid NOT IN \
+         (SELECT MAX(rowid) FROM embeddings GROUP BY chunk_id) \
+         AND chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1)",
+        [doc_id],
+    )?;
+    tx.execute(
+        "UPDATE documents SET embed_key = ?1 WHERE id = ?2",
+        rusqlite::params![key, doc_id],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1765,6 +1953,99 @@ mod diff_swap_tests {
     }
 
     #[test]
+    fn forced_drift_refusal_is_typed_and_resets_pending_rows() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // Doc A: seeded, then its STORED hash set is changed behind the
+        // file's back (chunker drift analogue: same bytes, different stored
+        // hashes) while the stamp is stale/missing ⇒ forced pass must refuse.
+        let file_a = tmp.path().join("documents").join("drift_a.md");
+        let pa = seed(&conn, &file_a, &prose_body("drifta", 30));
+        let (doc_a, _, status_a, _, _) = doc_state(&conn, &pa);
+        assert_eq!(status_a, "indexed");
+
+        // Force pending_reindex state on A to verify the reset maps it back.
+        conn.execute(
+            "UPDATE documents SET status = 'pending_reindex' WHERE id = ?1",
+            [doc_a],
+        )
+        .unwrap();
+
+        // Drift: rewrite stored content_hash to values that can never match a
+        // fresh rechunk (fresh hashes are content-derived 32-hex strings).
+        // Per-row distinct values keep the partial unique index satisfied.
+        conn.execute(
+            "UPDATE chunks SET content_hash = 'drifted' || printf('%028d', position) \
+             WHERE doc_id = ?1",
+            [doc_a],
+        )
+        .unwrap();
+
+        // Stamp: absent by default (no verify-scratch in tests) ⇒ stale/missing.
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'reindex_stamp'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+        assert_eq!(stamp, None, "precondition: no stamp");
+
+        let err = with_stub(|| {
+            ingest_file_virtual(&conn, &EmbedProfile::default(), &pa, &pa, true, None, &hb())
+                .unwrap_err()
+        });
+        let typed = err.downcast_ref::<IngestRefused>();
+        assert!(
+            typed.is_some(),
+            "refusal must downcast to IngestRefused, got: {err:#}"
+        );
+
+        // Refusal row reset (r27 m3): pending_reindex + last_indexed_hash
+        // present ⇒ status indexed, hash restored.
+        let (_, hash_after, status_after, _, _) = doc_state(&conn, &pa);
+        assert_eq!(status_after, "indexed", "refusal resets pending rows");
+        let lih: Option<String> = conn
+            .query_row(
+                "SELECT last_indexed_hash FROM documents WHERE id = ?1",
+                [doc_a],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            Some(hash_after),
+            lih,
+            "hash restored from last_indexed_hash"
+        );
+
+        // A genuinely indexed row stays indexed (nothing to reset). Doc B is
+        // also drifted (typed refusal again) but its status was never
+        // pending, so the reset has nothing to touch.
+        let file_b = tmp.path().join("documents").join("drift_b.md");
+        let pb = seed(&conn, &file_b, &prose_body("driftb", 30));
+        let (_, hash_b_before, _, _, _) = doc_state(&conn, &pb);
+        let (doc_b, _, _, _, _) = doc_state(&conn, &pb);
+        conn.execute(
+            "UPDATE chunks SET content_hash = 'drifted' || printf('%028d', position) \
+             WHERE doc_id = ?1",
+            [doc_b],
+        )
+        .unwrap();
+        let err_b = with_stub(|| {
+            ingest_file_virtual(&conn, &EmbedProfile::default(), &pb, &pb, true, None, &hb())
+                .unwrap_err()
+        });
+        assert!(
+            err_b.downcast_ref::<IngestRefused>().is_some(),
+            "second drift refusal also typed"
+        );
+        let (_, hash_b_after, status_b, _, _) = doc_state(&conn, &pb);
+        assert_eq!(status_b, "indexed", "indexed row untouched by reset");
+        assert_eq!(hash_b_before, hash_b_after);
+    }
+
+    #[test]
     fn forced_lossless_model_swap_proceeds_without_stamp() {
         let conn = open_in_memory().unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1807,6 +2088,104 @@ mod diff_swap_tests {
             stored_hashes(&conn, doc_id),
             hashes_before,
             "hash set identical before/after (lossless)"
+        );
+    }
+
+    #[test]
+    fn nonforced_noop_only_on_pending_rows_excludes_pending_reindex() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // Doc P: pending row + CURRENT key ⇒ no-op marks indexed, restores
+        // hash from last_indexed_hash.
+        let file_p = tmp.path().join("documents").join("pending.md");
+        let pp = seed(&conn, &file_p, &prose_body("pending", 30));
+        let (doc_p, orig_hash, _, _, _) = doc_state(&conn, &pp);
+        conn.execute(
+            "UPDATE documents SET status = 'pending', hash = 'queuednewhash' WHERE id = ?1",
+            [doc_p],
+        )
+        .unwrap();
+
+        // Doc R: pending_reindex row ⇒ non-forced touch leaves it sweepable.
+        let file_r = tmp.path().join("documents").join("preidx.md");
+        let pr = seed(&conn, &file_r, &prose_body("preidx", 30));
+        let (doc_r, hash_r, _, _, _) = doc_state(&conn, &pr);
+        conn.execute(
+            "UPDATE documents SET status = 'pending_reindex', hash = 'queuednewhash2' \
+             WHERE id = ?1",
+            [doc_r],
+        )
+        .unwrap();
+
+        with_stub(|| {
+            ingest_file_virtual(
+                &conn,
+                &EmbedProfile::default(),
+                &pp,
+                &pp,
+                false,
+                None,
+                &hb(),
+            )
+            .unwrap();
+            ingest_file_virtual(
+                &conn,
+                &EmbedProfile::default(),
+                &pr,
+                &pr,
+                false,
+                None,
+                &hb(),
+            )
+            .unwrap();
+        });
+
+        let (_, hash_p, status_p, _, _) = doc_state(&conn, &pp);
+        assert_eq!(status_p, "indexed", "pending row no-ops to indexed");
+        assert_eq!(hash_p, orig_hash, "hash restored from last_indexed_hash");
+
+        let (_, hash_r_after, status_r, _, _) = doc_state(&conn, &pr);
+        assert_eq!(
+            status_r, "pending_reindex",
+            "pending_reindex NOT touched (r28-M2)"
+        );
+        assert_eq!(
+            hash_r_after, "queuednewhash2",
+            "pending_reindex hash untouched"
+        );
+        let _ = hash_r;
+
+        // Key-currency leg: pending row + STALE key ⇒ stored chunks re-embedded
+        // in place, key updated.
+        let file_k = tmp.path().join("documents").join("stalekey.md");
+        let pk = seed(&conn, &file_k, &prose_body("stalekey", 30));
+        let (doc_k, orig_hash_k, _, _, _) = doc_state(&conn, &pk);
+        conn.execute(
+            "UPDATE documents SET status = 'pending', hash = 'queuednewhash3', \
+             embed_key = 'local:model-a' WHERE id = ?1",
+            [doc_k],
+        )
+        .unwrap();
+        with_stub(|| {
+            ingest_file_virtual(
+                &conn,
+                &EmbedProfile::default(),
+                &pk,
+                &pk,
+                false,
+                None,
+                &hb(),
+            )
+            .unwrap();
+        });
+        let (_, hash_k, status_k, ek_k, _) = doc_state(&conn, &pk);
+        assert_eq!(status_k, "indexed");
+        assert_eq!(hash_k, orig_hash_k, "hash restored");
+        assert_eq!(
+            ek_k.as_deref(),
+            Some(key().as_str()),
+            "stale key repaired by in-place re-embed"
         );
     }
 
