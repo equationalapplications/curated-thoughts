@@ -54,7 +54,7 @@ pub fn seed_vault(brain_path: &std::path::Path) -> i64 {
         let v = embed_one(&profile, text).unwrap();
         insert_embedding(&db.0, rowid, &v).unwrap();
     }
-    mark_document_indexed(&db.0, doc_id).unwrap();
+    mark_document_indexed(&db.0, doc_id, "seed-h").unwrap();
     chunk_id
 }
 
