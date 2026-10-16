@@ -936,7 +936,7 @@ This is the largest task; it lands as several commits inside one task.
   - Duplicate-embeddings guard: inside the swap txn, after the write set, `DELETE FROM embeddings WHERE rowid NOT IN (SELECT MAX(rowid) FROM embeddings GROUP BY chunk_id) AND chunk_id IN (SELECT id FROM chunks WHERE doc_id=?1)` (rowid-max kept, CodeRabbit rev-33).
   - Per-doc unforced-edit skip: unchanged-hash chunks skip re-embed ONLY when `documents.embed_key == gate_model_key(profile, stub)`; NULL/stale ⇒ full re-embed (rev-24 MAJOR-2).
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```rust
 #[test]
@@ -978,8 +978,8 @@ fn unforced_edit_skip_requires_per_doc_key_match() { /* NULL embed_key ⇒ full 
     chunks (rev-24 MAJOR-2) */ }
 ```
 
-- [ ] **Step 2: Verify FAIL.**
-- [ ] **Step 3: Implement.** Restructure `ingest_file_virtual` (:644-766): keep :653-690 gates + :688 hash read; short-circuit :691-694 untouched; then the decision table; the swap body:
+- [x] **Step 2: Verify FAIL.**
+- [x] **Step 3: Implement.** Restructure `ingest_file_virtual` (:644-766): keep :653-690 gates + :688 hash read; short-circuit :691-694 untouched; then the decision table; the swap body:
 
 ```text
 PRE (outside txn): read file bytes, chunk (in memory), compute new content_hash set,
@@ -998,14 +998,15 @@ On embed failure BEFORE swap opens: existing doc ⇒ log + return Ok (state inta
 new doc ⇒ mark_document_error (row exists from pre-embed upsert, which STAYS outside for new docs).
 ```
 
-- [ ] **Step 4: Verify PASS** (pipeline tests + full suite).
-- [ ] **Step 5: Commit(s)**
+- [x] **Step 4: Verify PASS** (pipeline tests + full suite).
+- [x] **Step 5: Commit(s)**
 
 ```bash
 git commit -m "feat(db): mark_document_indexed gains indexed_hash param (sole last_indexed_hash writer)"
 git commit -m "feat(pipeline): diff-swap transaction with embed_key write, swap-race recheck, duplicate guard"
 git commit -m "feat(pipeline): four-row funnel decision table + typed IngestRefused + refusal row reset"
 ```
+→ 4 commits: d40d3001 (c1), 4517f860 (c2), e3cff345 (c3, amended once — includes the §8(a)-mandated semantics-coupled update to tests/pipeline.rs, D7), aa6fbb85 (c4: two missed tools/tests fixture callers, D6 — separate honest fix commit within the 3-4 allowance). Review ladder: sor per commit — c1 Approved, c2 "Changes requested", c3 Approved, c4 Approved (0 findings); task-reviewer adjudicated ALL 11 findings: **0 real defects, 9 false-positives, 2 accepted-with-reason** (pipeline/mod.rs:1618 test-gap = D3, no deterministic seam without new production surface — CARRIED AS DEBT to Task 9+; tests/pipeline.rs:174 = D7 plan-mandated flip). **Approved, no fix round.** Controller post-adjudication verification: --lib diff_swap 9/0, --test pipeline 5/0, tools full 202/0, exits 0; implementer's full src-tauri 1714/0/1 consistent with the 1705/0/1 gate (+9 new tests). Deviations D1-D8 in task-8-report.md; fmt disclosure controller-audited as pure rewraps. Carried to Task 9: removable `#[allow(dead_code)]` on IngestRefused, D8 report-text cleanup, D3 coverage (injectable pre-swap hook or unit-testable hash-set helper).
 
 ## Task 9: `IngestRefused` callers — ct ingest, bulk_reindex skip, pipeline worker log, defensive kick downcast
 
