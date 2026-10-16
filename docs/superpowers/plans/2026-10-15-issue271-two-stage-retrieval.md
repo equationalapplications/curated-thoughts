@@ -1087,7 +1087,7 @@ pub fn breaker_reset(conn: &Connection) -> Result<()>;
 - Consumes: Task 1's migration fn (extend it; V18 DDL already exists — trigger creation must come after `librarian_evidence` exists, which every post-V18 brain has; for pre-V18 replicas the migration must NOT fail).
 - Produces: meta key `librarian_evidence_seen = '1'`; `AFTER INSERT` trigger on `librarian_evidence` with `INSERT OR IGNORE INTO llm_wiki_meta` body (idempotent); migration backfills the key iff rows exist today; the key is explicitly KEPT by the clear transaction (NOT in any purge list — verified: the clear path never deletes `llm_wiki_meta` (`db/queries.rs:244` "survives the clear"); verify by inspection only, NO code change needed — the plan's test at Step 1 already asserts the marker survives a meta round-trip).
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[test]
@@ -1106,9 +1106,13 @@ fn pre_v18_fixture_open_succeeds() { /* V17-shape fixture (no librarian_evidence
     migrate must NOT fail creating the trigger; marker absent = fresh per definition */ }
 ```
 
-- [ ] **Step 2: Verify FAIL.**  **Step 3: Implement** — inside `apply_v28_two_stage_columns`'s locked section, AFTER confirming `librarian_evidence` exists (probe `sqlite_master`; skip trigger creation when absent — pre-V18 replicas get it on a later open): `CREATE TRIGGER IF NOT EXISTS librarian_evidence_seen_trg AFTER INSERT ON librarian_evidence BEGIN INSERT OR IGNORE INTO llm_wiki_meta (key, value) VALUES ('librarian_evidence_seen','1'); END;` plus the one-shot backfill `INSERT OR IGNORE INTO llm_wiki_meta SELECT 'librarian_evidence_seen','1' WHERE EXISTS (SELECT 1 FROM librarian_evidence)` — inside the ALTER-call transaction only.
-- [ ] **Step 4: Verify PASS.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(db): librarian_evidence_seen fresh-brain marker (AFTER INSERT trigger + one-shot migration backfill)"`
+- [x] **Step 2: Verify FAIL.**  **Step 3: Implement** — inside `apply_v28_two_stage_columns`'s locked section, AFTER confirming `librarian_evidence` exists (probe `sqlite_master`; skip trigger creation when absent — pre-V18 replicas get it on a later open): `CREATE TRIGGER IF NOT EXISTS librarian_evidence_seen_trg AFTER INSERT ON librarian_evidence BEGIN INSERT OR IGNORE INTO llm_wiki_meta (key, value) VALUES ('librarian_evidence_seen','1'); END;` plus the one-shot backfill `INSERT OR IGNORE INTO llm_wiki_meta SELECT 'librarian_evidence_seen','1' WHERE EXISTS (SELECT 1 FROM librarian_evidence)` — inside the ALTER-call transaction only.
+- [x] **Step 4: Verify PASS.**
+- [x] **Step 5: Commit** — `git commit -m "feat(db): librarian_evidence_seen fresh-brain marker (AFTER INSERT trigger + one-shot migration backfill)"`
+
+> **ERRATA (controller, 2026-10-16, per Task-11 review):** Step 3's "inside the ALTER-call transaction only" is WRONG for the marker backfill — it contradicts this task's own Step-1 contract test (a strictly-ALTER-gated backfill could never re-arm after marker deletion on an already-migrated brain) and the spec (spec:1424-1427 says only "backfilled by the new ungated migration"; the pinned one-shot sentence at spec:1471-1487 names only the embed_key/last_indexed_hash backfills). As built: the backfill rides a migration transaction **gated on marker-pending** (rows exist AND marker absent) — self-disarming, write lock taken at most once per brain (production never deletes the key; clear keeps it, now test-pinned). The V27 one-shot constraint applies to the column backfills, not this meta insert. Also note: the second contract test landed as `pre_v18_fixture_open_succeeds_and_arms_marker_on_upgrade` (exact-prefix superset of the sketch name). Do NOT "fix" the gate back into impossibility.
+
+> **Adjudication (controller, 2026-10-16):** commit **2bedb35d** on 94e11e41 (2 files, +228/−10). Gates: src-tauri **1737/0/1** (=1735+2), tools **205/0**; RED verbatim first; sor Approved (risk 1.81/3). Reviewer: ✅ spec-compliant, **Approved, no fix round**; backfill-gating deviation ACCEPTED-with-reason (see errata above); clear-path survival now test-pinned (keep-count 3→4); pre-V18 safety tested both directions. MINORS CARRIED as debt (whole-branch review): (1) dead first `let trg` binding in the pre-V18 test (shadowed; likely test-profile warning — assert `trg == 0` to strengthen); (2) stale "V27 precedent" comment in test 1 (align with production comment); (3) undeclared test-name extension (declared here).
 
 ## Task 12: `ct reindex` subcommand skeleton + `repair-embed-key --stale`
 
