@@ -1,3 +1,42 @@
+## [3.6.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.5.1...v3.6.0) (2026-10-17)
+
+### Features
+
+* **calibration:** grid picker with pinned tie-break + letter-gated flip-to-default ([37af849](https://github.com/equationalapplications/curated-thoughts/commit/37af849ac26308a11b0fab082e55e215e1f39317))
+* **calibration:** paired live two-stage vs single-stage driver with acceptance-letter verdict + artifact ([14669e3](https://github.com/equationalapplications/curated-thoughts/commit/14669e3f528c8419a91b1cabd750f97bd63430d2))
+* **chunker:** CHUNKER_FINGERPRINT constant for the funnel stamp ([7011c08](https://github.com/equationalapplications/curated-thoughts/commit/7011c08d63e19e0fc192a18e8fe84d205ff8d3a7))
+* **cli:** ct reindex repair-embed-key --stale (DB-only per-doc repair under one IMMEDIATE txn) ([8e64eec](https://github.com/equationalapplications/curated-thoughts/commit/8e64eec7c6b67ce33bdb382fec36314496c015ee))
+* **cli:** ct reindex verify-scratch — chunker-only stamp, sampled embed_key backfill, guarded live writes ([feb4a31](https://github.com/equationalapplications/curated-thoughts/commit/feb4a311e61ae8d454fb821e71ef4496c4789a3e))
+* **cli:** ct wisdom match --two-stage — labels, seven-field audit line, embed-skip, coverage-first ordering ([dbb854f](https://github.com/equationalapplications/curated-thoughts/commit/dbb854f9a2ada8b9e0af8fcb72dbcf9b70ade67d)), closes [1/#2](https://github.com/1/curated-thoughts/issues/2) [4/#5](https://github.com/4/curated-thoughts/issues/5)
+* **db:** cross-process bulk-deletion breaker (shared budget, |doomed|>=L rule, ct heal --reset-breaker/--allow-bulk) ([f07eaaf](https://github.com/equationalapplications/curated-thoughts/commit/f07eaaffb12216c52373c0052231a9e30714e0d4))
+* **db:** librarian_evidence_seen fresh-brain marker (AFTER INSERT trigger + one-shot migration backfill) ([2bedb35](https://github.com/equationalapplications/curated-thoughts/commit/2bedb35d26ebfd0c3ac665b8de1e0b9897c50e67))
+* **db:** mark_document_indexed gains indexed_hash param (sole last_indexed_hash writer) ([d40d300](https://github.com/equationalapplications/curated-thoughts/commit/d40d30014e986793290f7ab746e5e35fe91080b9))
+* **db:** V28 adds documents.embed_key + last_indexed_hash (one-shot backfill, V22-gated stamp) ([9210dce](https://github.com/equationalapplications/curated-thoughts/commit/9210dce8891edf2d53fd59354b0958978e56469f))
+* **pipeline:** diff-swap transaction with embed_key write, swap-race recheck, duplicate guard ([4517f86](https://github.com/equationalapplications/curated-thoughts/commit/4517f86008e030c74e991bef9666cf5f6255c096))
+* **pipeline:** four-row funnel decision table + typed IngestRefused + refusal row reset ([e3cff34](https://github.com/equationalapplications/curated-thoughts/commit/e3cff345b1de2d1f611eea5971ac6094b41884d5))
+* **pipeline:** IngestRefused downcasts at all four callers (skip semantics, no error-log storm) ([cb15a73](https://github.com/equationalapplications/curated-thoughts/commit/cb15a73798733752d99f51d0af66265636936f4a))
+* **wisdom:** two_stage module — candidate set, structural complement, stage-1 search (Task 3) ([b8a1a1d](https://github.com/equationalapplications/curated-thoughts/commit/b8a1a1dafee7cedc78f771fdaa4f43c9312099bf))
+* **wisdom:** two-stage decision core — rules (i)/(ii), structural v1-merge, §4 fallback matrix ([c602357](https://github.com/equationalapplications/curated-thoughts/commit/c6023572473d0d6b01c3957d343c41c4c6fd9107))
+
+### Bug Fixes
+
+* **calibration:** k row keyed by the resolver's unschemed profile key; flip rule validation; grid sha consistency; honest read-error context ([8e1e073](https://github.com/equationalapplications/curated-thoughts/commit/8e1e073a57251d3c0c8e8e1b0b017dd554f87f1b))
+* **calibration:** side-core parity tripwire + SQL literal pins; artifact code_sha; honest embed-latency samples ([c58bf5a](https://github.com/equationalapplications/curated-thoughts/commit/c58bf5a8364e2100ec6df67590d3bb75104902b5))
+* **cli:** repair-embed-key survives discovery-time doc deletion; per-chunk rows_affected guard ([63e1747](https://github.com/equationalapplications/curated-thoughts/commit/63e17474069d0f26ea377524889757403a953dc6))
+* **cli:** verify-scratch dry-run previews the full analysis; RAII scratch cleanup; honest skip labels ([f33996e](https://github.com/equationalapplications/curated-thoughts/commit/f33996e1cc0c8c5824c07b9d04f09779be7572bc))
+* **db:** breaker tripped-marker closes cross-writer rollover hole; pin recount-mismatch abort + allow-bulk bypass tests ([52ebfcf](https://github.com/equationalapplications/curated-thoughts/commit/52ebfcf306f06955ce56839a00e4cca66ae28292))
+* **db:** update remaining tools test-fixture callers of mark_document_indexed for indexed_hash param ([aa6fbb8](https://github.com/equationalapplications/curated-thoughts/commit/aa6fbb851baadf82c618c3b493294f9aa908482a))
+* **pr283-review:** Auto stays plain v1 until an explicit flip (§5 opt-in) ([27dc2a7](https://github.com/equationalapplications/curated-thoughts/commit/27dc2a734d9dee015cbeede2659ec745c868a5a0))
+* **pr283-review:** baseline arm passes the unschemed profile key ([c7d4064](https://github.com/equationalapplications/curated-thoughts/commit/c7d406465dde578ba82c32c584014b6df75dbe64))
+* **pr283-review:** bulk_reindex keeps refused docs' entities in the linker set ([8618597](https://github.com/equationalapplications/curated-thoughts/commit/8618597891a92e55a2ac976bd60ff787b5712be3))
+* **pr283-review:** calibrate runbook runs the §9 step-3 grid end-to-end ([34139db](https://github.com/equationalapplications/curated-thoughts/commit/34139db7e89df4e68ebb15345a7e3e7ad7a00d1f))
+* **pr283-review:** drop unused two_stage_test_support glob in the tests module (CI-only lint) ([9b2d54c](https://github.com/equationalapplications/curated-thoughts/commit/9b2d54c184937c527ab45573cde76228eb9cb937))
+* **pr283-review:** dup-cleanup DELETE keeps its doc scope (CodeRabbit Critical regression test); breaker rollover ruling; runbook grid dir + test isolation ([5d2162d](https://github.com/equationalapplications/curated-thoughts/commit/5d2162d8186dcf43c3cb429033a737d72cc7f46f))
+* **pr283-review:** never log embedder errors tainted by resolved_api_key ([ac55ea7](https://github.com/equationalapplications/curated-thoughts/commit/ac55ea75aac301775fd106f14968592e84410c06)), closes [#283](https://github.com/equationalapplications/curated-thoughts/issues/283)
+* **pr283-review:** pipeline diff-swap — hash on zero-chunk, embed skip, kept-chunk spans, scoped dup cleanup ([da38da1](https://github.com/equationalapplications/curated-thoughts/commit/da38da1a9442c720e0950a26c17c664c2215be5e))
+* **pr283-review:** regrade refusal commits the trip marker; export cleanup spares prior backups ([9107581](https://github.com/equationalapplications/curated-thoughts/commit/9107581566aee7f8c9e02272dc37bccb7110f3d0))
+* **pr283-review:** verify-scratch rechunks with the canonical chunk list ([8a58865](https://github.com/equationalapplications/curated-thoughts/commit/8a58865500de846abcf7058c7aac0c2fa37fb9e1))
+
 ## [3.5.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.5.0...v3.5.1) (2026-10-14)
 
 ### Bug Fixes
