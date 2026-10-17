@@ -557,17 +557,18 @@ fn scratch_rechunk_doc(
     // rows cascade away with the chunks; the backfill's comparisons read
     // vectors snapshotted BEFORE the rechunk).
     conn.execute("BEGIN IMMEDIATE", [])?;
+    // Loop-invariant: the entity id derives from the virtual path, not from
+    // the chunk — compute it ONCE, not per chunk (fix round 4a).
+    let eid = tauri_app_lib::entity_id_for_virtual_path(doc_path, vault_root);
     let res = (|| -> Result<()> {
         conn.execute(
             "DELETE FROM chunks WHERE doc_id = ?1",
             rusqlite::params![doc_id],
         )?;
         for (i, ch) in chunks.iter().enumerate() {
-            // entity_id: the pipeline derives it from the virtual path — the
-            // re-exported `entity_id_for_virtual_path` is the same value the
-            // original ingest wrote; the evidence/hop SQL never reads it,
+            // The re-exported `entity_id_for_virtual_path` is the same value
+            // the original ingest wrote; the evidence/hop SQL never reads it,
             // but keep the row honest.
-            let eid = tauri_app_lib::entity_id_for_virtual_path(doc_path, vault_root);
             tauri_app_lib::retrieval::insert_chunk(conn, doc_id, ch, i, &eid, &hashes[i])?;
         }
         Ok(())
@@ -786,32 +787,29 @@ pub fn verify_scratch(dry_run: bool) -> Result<i32> {
     let scratch = rusqlite::Connection::open(&scratch_path)
         .with_context(|| format!("open scratch {}", scratch_path.display()))?;
     scratch.busy_timeout(std::time::Duration::from_secs(5))?;
-    // The scratch copy is ALWAYS discarded (r26 m6 / test 3): removed via
-    // `drop_scratch` on every exit path below, including early returns.
-    let drop_scratch = |p: &std::path::Path| {
-        let _ = std::fs::remove_file(p);
-    };
+    // The scratch copy is ALWAYS discarded (r26 m6 / test 3) — including the
+    // `?` early-return paths below, which is why this is a Drop guard and
+    // not an explicit cleanup call: Drop runs on every unwind/return path
+    // after construction.
+    struct ScratchGuard<'a>(&'a std::path::Path);
+    impl Drop for ScratchGuard<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0);
+        }
+    }
+    let _scratch_guard = ScratchGuard(&scratch_path);
 
     let now_ms = now_ms_at();
     if dry_run {
-        // Print-only (r26 m6): report what WOULD be checked and the current
-        // coverage, touching nothing on either DB. The scratch copy is
-        // discarded (guard above) — the live file is never opened for write.
-        let docs = chunk_bearing_docs(&scratch)?;
+        // Print-only (r26 m6), but the ANALYSIS is the real one (fix round):
+        // the full pipeline below runs — snapshot+sample, chunk-only scratch
+        // rechunk, evidence/hop lossless checks, per-doc verdicts — with
+        // ONLY the live writes suppressed (no live rw conn, no race seam,
+        // no stamp). The live DB stays byte-identical (pinned test 3).
         println!(
-            "verify-scratch (dry-run): would rechunk {} chunk-bearing docs and evaluate {} evidence blobs + gate-eligible hops; nothing written.",
-            docs.len(),
-            {
-                let n: i64 = scratch
-                    .query_row("SELECT COUNT(*) FROM librarian_evidence", [], |r| r.get(0))
-                    .unwrap_or(0);
-                n
-            }
+            "verify-scratch (dry-run): running the full analysis on a scratch copy of {} chunk-bearing docs — snapshot+sample, chunk-only rechunk, evidence/hop lossless checks; ALL live writes suppressed.",
+            chunk_bearing_docs(&scratch)?.len()
         );
-        let ro = write::open_ro(&brain)?;
-        print_coverage(&ro, &key, now_ms)?;
-        drop_scratch(&scratch_path);
-        return Ok(0);
     }
 
     // Snapshot the backfill comparison data BEFORE the rechunk: stored
@@ -841,16 +839,21 @@ pub fn verify_scratch(dry_run: bool) -> Result<i32> {
         });
     }
 
-    // 2. Chunk-only scratch rechunk of every chunk-bearing doc.
+    // 2. Chunk-only scratch rechunk of every chunk-bearing doc. Skipped
+    //    rechunks (unreadable file / un-ingestable extension / empty
+    //    rechunk) are COUNTED and surfaced in the summary (fix round 4b):
+    //    the artifact record must show them, not just a stderr line.
+    let mut rechunk_skipped = 0usize;
     for (id, path) in &docs {
         match scratch_rechunk_doc(&scratch, *id, path, vault_root.as_deref()) {
             Ok(Some(hashes)) => {
                 let _ = hashes; // hashes now stored on scratch chunks
             }
-            Ok(None) => {}
+            Ok(None) => rechunk_skipped += 1,
             Err(e) => {
                 // One unreadable file must not sink the whole check: leave
                 // that doc's stored chunks as-is and note it.
+                rechunk_skipped += 1;
                 eprintln!("verify-scratch: rechunk skipped for {path}: {e}");
             }
         }
@@ -865,7 +868,14 @@ pub fn verify_scratch(dry_run: bool) -> Result<i32> {
     // 4. Per-doc verdicts + guarded live backfill. The backfill applies
     //    regardless of the stamp outcome (it is evidence-driven per doc);
     //    the stamp decision below gates ONLY the stamp write.
-    let mut live = write::open_rw(&brain).context("open brain read-write")?;
+    //    Under --dry-run there is NO live rw conn at all: the same verdict
+    //    math runs, but the guarded write and the race seam are skipped
+    //    (nothing may touch the live DB, r26 m6).
+    let mut live = if dry_run {
+        None
+    } else {
+        Some(write::open_rw(&brain).context("open brain read-write")?)
+    };
     let mut backfilled = 0usize;
     let mut failed_samples = 0usize;
     let mut skipped_race = 0usize;
@@ -889,6 +899,17 @@ pub fn verify_scratch(dry_run: bool) -> Result<i32> {
                 );
             }
             Ok(true) => {
+                if dry_run {
+                    backfilled += 1;
+                    println!(
+                        "[{}/{}] ok (dry-run: would backfill embed_key): {}",
+                        i + 1,
+                        verdicts.len(),
+                        v.path
+                    );
+                    continue;
+                }
+                let live = live.as_mut().expect("live conn present when !dry_run");
                 // TEST SEAM (Step-1 test 5): mutate the LIVE doc's chunk-id
                 // set inside the sample-compute → guarded-write window, so
                 // the under-lock re-check observes a changed set exactly as
@@ -896,7 +917,7 @@ pub fn verify_scratch(dry_run: bool) -> Result<i32> {
                 // sets this var.
                 if let Ok(race_id) = std::env::var("CURATED_VERIFY_SCRATCH_TEST_RACE") {
                     if race_id == v.doc_id.to_string() {
-                        test_race_mutate_live_chunks(&live, v.doc_id);
+                        test_race_mutate_live_chunks(live, v.doc_id);
                     }
                 }
                 // GUARDED per-doc write (r28-m6): ONE IMMEDIATE txn
@@ -921,11 +942,24 @@ pub fn verify_scratch(dry_run: bool) -> Result<i32> {
                     )
                     .optional()?
                     .flatten();
-                if pre != now || current_key.as_deref() == Some(key.as_str()) {
+                if pre != now {
+                    // True swap-race drift: the doc moved under us since the
+                    // scratch snapshot. Next run retries.
                     tx.rollback().ok();
                     skipped_race += 1;
                     println!(
-                        "[{}/{}] skip (chunk set or embed_key changed since sampling): {}",
+                        "[{}/{}] skip (chunk set changed since sampling): {}",
+                        i + 1,
+                        verdicts.len(),
+                        v.path
+                    );
+                } else if current_key.as_deref() == Some(key.as_str()) {
+                    // Benign idempotent skip: the sample matched but the key
+                    // is already correct — nothing to backfill, not a race.
+                    tx.rollback().ok();
+                    skipped_race += 1;
+                    println!(
+                        "[{}/{}] skip (already backfilled): {}",
                         i + 1,
                         verdicts.len(),
                         v.path
@@ -950,18 +984,46 @@ pub fn verify_scratch(dry_run: bool) -> Result<i32> {
         }
     }
 
-    // 5. The stamp: written ONLY if both lossless conditions hold.
+    // 5. The stamp: written ONLY if both lossless conditions hold — and
+    //    NEVER under --dry-run (the verdict below is would-be).
     let exit_code = if ev_holds && hop_holds {
-        live.execute(
-            "INSERT OR REPLACE INTO llm_wiki_meta (key, value) VALUES ('reindex_stamp', ?1)",
-            rusqlite::params![tauri_app_lib::chunker::CHUNKER_FINGERPRINT],
-        )
-        .context("write reindex_stamp")?;
-        println!(
-            "verify-scratch: stamp written ({}); evidence refs {ev_ok}/{ev_total} resolve; gate-eligible hops {hop_ok}/{hop_total} resolve.",
-            tauri_app_lib::chunker::CHUNKER_FINGERPRINT
-        );
+        if dry_run {
+            println!(
+                "verify-scratch (dry-run): stamp WOULD be written ({}); evidence refs {ev_ok}/{ev_total} resolve; gate-eligible hops {hop_ok}/{hop_total} resolve. Nothing written.",
+                tauri_app_lib::chunker::CHUNKER_FINGERPRINT
+            );
+        } else {
+            let live = live.as_mut().expect("live conn present when !dry_run");
+            live.execute(
+                "INSERT OR REPLACE INTO llm_wiki_meta (key, value) VALUES ('reindex_stamp', ?1)",
+                rusqlite::params![tauri_app_lib::chunker::CHUNKER_FINGERPRINT],
+            )
+            .context("write reindex_stamp")?;
+            println!(
+                "verify-scratch: stamp written ({}); evidence refs {ev_ok}/{ev_total} resolve; gate-eligible hops {hop_ok}/{hop_total} resolve.",
+                tauri_app_lib::chunker::CHUNKER_FINGERPRINT
+            );
+        }
         0
+    } else if dry_run {
+        let mut msg = String::from(
+            "verify-scratch (dry-run) WOULD REFUSE: the scratch rechunk is not lossless —",
+        );
+        if let Some(entry) = &ev_first_fail {
+            msg.push_str(&format!(
+                " evidence refs orphaned ({ev_ok}/{ev_total} resolve; first missing: entry {entry});"
+            ));
+        }
+        if let Some(entry) = &hop_first_missing {
+            msg.push_str(&format!(
+                " gate-eligible entries lost their hop ({hop_ok}/{hop_total} resolve; first missing: entry {entry});"
+            ));
+        }
+        msg.push_str(
+            " a chunker bump must NOT rechunk until the rechunk is LOSSLESS (every evidence hash ref and gate-eligible hop still resolves on the rechunk). Nothing written.",
+        );
+        println!("{msg}");
+        1
     } else {
         let mut msg = String::from("verify-scratch REFUSED: the scratch rechunk is not lossless —");
         if let Some(entry) = &ev_first_fail {
@@ -981,13 +1043,20 @@ pub fn verify_scratch(dry_run: bool) -> Result<i32> {
         1
     };
 
-    println!(
-        "verify-scratch: {backfilled} backfilled, {failed_samples} failed samples, {skipped_race} skipped."
-    );
+    let summary = if dry_run {
+        format!(
+            "verify-scratch (dry-run): {backfilled} would backfill, {failed_samples} failed samples, {skipped_race} skipped, {rechunk_skipped} rechunks skipped. Nothing written."
+        )
+    } else {
+        format!(
+            "verify-scratch: {backfilled} backfilled, {failed_samples} failed samples, {skipped_race} skipped, {rechunk_skipped} rechunks skipped."
+        )
+    };
+    println!("{summary}");
 
     // Final candidate-set coverage over a fresh read conn (post-commit).
     drop(live);
-    drop_scratch(&scratch_path);
+    // Scratch discarded by the Drop guard.
     let ro = write::open_ro(&brain)?;
     print_coverage(&ro, &key, now_ms)?;
     let _ = std::io::stdout().flush();

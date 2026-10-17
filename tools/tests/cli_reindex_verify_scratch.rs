@@ -259,6 +259,27 @@ fn verify_scratch_dry_run_touches_nothing() {
             out_str.contains("dry-run"),
             "dry-run must be visible in the output, got: {out_str}"
         );
+        // Fix round: dry-run now runs the SAME analysis, so the would-be
+        // per-doc verdict AND the would-be stamp outcome must be printed.
+        assert!(
+            out_str.contains("ok (dry-run: would backfill embed_key)"),
+            "dry-run must print the per-doc would-be verdict, got: {out_str}"
+        );
+        assert!(
+            out_str.contains("stamp WOULD be written"),
+            "dry-run must print the would-be stamp outcome, got: {out_str}"
+        );
+        // The coverage printed is the CURRENT live coverage — under dry-run
+        // nothing was backfilled, so the fixture doc stays uncovered (the
+        // would-be coverage is implied by the stamp line above).
+        assert!(
+            out_str.contains("coverage: 0/1"),
+            "dry-run must print the final candidate-set coverage, got: {out_str}"
+        );
+        assert!(
+            out_str.contains("would backfill"),
+            "dry-run summary must count would-be backfills, got: {out_str}"
+        );
     });
 }
 

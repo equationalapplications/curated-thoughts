@@ -348,7 +348,9 @@ enum ReindexCmd {
     /// re-embedded from STORED CHUNK TEXT and matched by cosine ≥ 1−1e−3;
     /// on match `documents.embed_key` is backfilled under a GUARDED
     /// per-doc IMMEDIATE transaction (r28-m6 chunk-set + key re-check;
-    /// skip on mismatch). `--dry-run` writes NOTHING to either DB.
+    /// `--dry-run` runs the SAME analysis (sample, scratch rechunk, lossless
+    /// checks, per-doc verdicts) with ALL live writes suppressed: nothing is
+    /// written to either DB, the stamp/refusal outcome is printed as WOULD-be.
     /// Per-doc verdicts + final candidate-set coverage; exit 0 or 1.
     VerifyScratch {
         /// Print-only: no stamp, no embed_key, nothing on either DB.
