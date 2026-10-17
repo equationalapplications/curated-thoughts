@@ -449,6 +449,7 @@ pub(crate) fn eligible_entry_ids(
     Ok(rows)
 }
 
+#[allow(clippy::too_many_arguments)] // internal helper; the 8 params read as one query shape
 fn gated_entries(
     conn: &Connection,
     query_vec: &[f32],
@@ -772,11 +773,7 @@ pub fn two_stage_entries(
         // harness (compiles without cfg(test), so it resolves via gate_floor
         // on the production table only) passes explicit floors during
         // calibration sweeps and lands HERE — the rule-(i) tie-break.
-        debug_assert!(
-            cfg!(test) || true,
-            "unattributable two-stage floor: harness callers with explicit floors \
-             hit the rule-(i) tie-break; shipped-path composite keys must attribute"
-        );
+        // (No debug_assert here: the harness legitimately reaches this arm.)
     };
     let floor_key_used = if attributed {
         format!("{scheme_key}:two-stage:{}", rule.as_str())
@@ -2209,7 +2206,6 @@ mod tests {
     /// Task-14/15 harness) invokes it BEFORE any embed_one and branches its
     /// embed logic on the projected §4 cell + the coverage probe, so §6's
     /// "coverage check BEFORE any embed" holds on ALL caller paths.
-
     /// Precheck on the fixture, v1 floor only: cell-1 projected, one schemed
     /// embed needed, zero stale keys (fixture coverage is 2/2). Uses the
     /// real qwen key — the ONLY key with a v1 floor and NO composite floor

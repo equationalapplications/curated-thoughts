@@ -1192,7 +1192,7 @@ fn simulated_flip_satisfies_freeze_dir_assertion() {
             k,
             fixtures
                 .join("wisdom_gate_bench")
-                .join(k.replace(':', "_").replace('/', "_")),
+                .join(k.replace([':', '/'], "_")),
         ));
     }
     // The simulated flip adds the winning composite key with the flip's

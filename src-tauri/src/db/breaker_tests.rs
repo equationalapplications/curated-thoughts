@@ -12,7 +12,7 @@
 //! - refusal reasons name the threshold that was hit.
 
 #[cfg(test)]
-mod breaker_tests {
+mod tests {
     use crate::db::breaker::{
         breaker_check, breaker_reset, breaker_spend, breaker_spent, heal_denominator,
         heal_threshold, regrade_denominator, regrade_threshold, BreakerVerdict, BREAKER_L_HEAL,

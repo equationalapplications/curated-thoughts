@@ -530,10 +530,7 @@ pub fn composite_floor_key(artifact: &CalibrationArtifact) -> String {
 /// historical v1 keys keep their dedicated dirs and never route through
 /// here (the flip only ever writes composite two-stage keys).
 pub fn freeze_relative_dir(key: &str) -> String {
-    format!(
-        "wisdom_gate_bench/{}",
-        key.replace(':', "_").replace('/', "_")
-    )
+    format!("wisdom_gate_bench/{}", key.replace([':', '/'], "_"))
 }
 
 /// Campaign homogeneity + integrity checks over a grid (§7: one paired run,
@@ -1600,7 +1597,7 @@ fn main() -> Result<()> {
     let per_split: Vec<HeldOutSplit> = splits
         .iter()
         .map(|s| {
-            let rel_idx: Vec<usize> = s.held_out.iter().copied().collect();
+            let rel_idx: Vec<usize> = s.held_out.to_vec();
             let rel: Vec<bool> = rel_idx.iter().map(|&i| labels[i]).collect();
             let ss_v: Vec<ProbeVerdict> = rel_idx.iter().map(|&i| ss_verdicts[i].clone()).collect();
             let ts_v: Vec<ProbeVerdict> = rel_idx.iter().map(|&i| ts_verdicts[i].clone()).collect();
@@ -1624,7 +1621,7 @@ fn main() -> Result<()> {
 
     let ablation = if rule == TwoStageRule::ChunkHop {
         Some(TopKAblation {
-            k: k,
+            k,
             top1: ts_metrics.clone(),
             topk: arm_metrics(&ablation_verdicts, &labels),
         })
@@ -1650,14 +1647,14 @@ fn main() -> Result<()> {
         },
         candidate: CandidateCell {
             rule: rule.as_str().to_string(),
-            floor: floor,
-            k: k,
+            floor,
+            k,
         },
         grid: GridInfo {
             cells: 1,
             rule: rule.as_str().to_string(),
-            floor: floor,
-            k: k,
+            floor,
+            k,
         },
         coverage,
         single_stage: ss_metrics.clone(),

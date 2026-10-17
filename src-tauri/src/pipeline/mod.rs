@@ -1982,7 +1982,7 @@ mod diff_swap_tests {
             "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
             rusqlite::params![
                 first_chunk,
-                vec![9_f32; 8]
+                [9_f32; 8]
                     .iter()
                     .flat_map(|f| f.to_le_bytes())
                     .collect::<Vec<u8>>()
@@ -2014,8 +2014,10 @@ mod diff_swap_tests {
         };
         assert_eq!(rows.len(), 1, "swap collapses to exactly one row");
         let v: Vec<f32> = rows[0]
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
         assert_ne!(v[0], 9.0, "surviving row is the re-embedded one, not junk");
 

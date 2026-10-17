@@ -77,7 +77,7 @@ fn test_race_mutate_chunks(conn: &rusqlite::Connection, doc_id: i64) {
     )
     .expect("race seam: insert chunk");
     let new_id = conn.last_insert_rowid();
-    let vec = vec![0_f32; 8];
+    let vec = [0_f32; 8];
     let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
     conn.execute(
         "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
@@ -491,7 +491,7 @@ fn test_race_mutate_live_chunks(conn: &rusqlite::Connection, doc_id: i64) {
     )
     .expect("race seam: insert chunk");
     let new_id = conn.last_insert_rowid();
-    let vec = vec![0_f32; 8];
+    let vec = [0_f32; 8];
     let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
     conn.execute(
         "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
@@ -673,7 +673,12 @@ fn sample_doc(
             return Err(format!("dimension mismatch on sample for {doc_path}"));
         }
         let sim = tauri_app_lib::search::cosine_similarity(vec, &stored);
-        if !(sim >= SAMPLE_COSINE_FLOOR) {
+        // NaN-conservative: an incomparable similarity is treated as below-floor.
+        let below_floor = matches!(
+            sim.partial_cmp(&SAMPLE_COSINE_FLOOR),
+            None | Some(std::cmp::Ordering::Less)
+        );
+        if below_floor {
             return Err(format!(
                 "sample cosine {sim:.6} below floor {SAMPLE_COSINE_FLOOR} for {doc_path}"
             ));

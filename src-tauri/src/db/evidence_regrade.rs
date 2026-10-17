@@ -901,9 +901,9 @@ mod tests {
             [],
         )
         .unwrap();
-        seed_flagged(&conn, "fact_anchored", true, None);
+        seed_flagged(conn, "fact_anchored", true, None);
         for i in 0..n {
-            seed_flagged(&conn, &format!("fact_doomed_{i}"), false, None);
+            seed_flagged(conn, &format!("fact_doomed_{i}"), false, None);
         }
     }
 
