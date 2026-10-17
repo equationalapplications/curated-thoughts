@@ -38,7 +38,13 @@
 //!    (all-or-nothing; never a partial delete).
 //!
 //! The sanctioned escape is the pinned one-run `--allow-bulk` flag, which
-//! simply skips the check for that run — it never touches these keys.
+//! skips the CHECK for that run — the trip/snapshot bookkeeping is not
+//! evaluated and no refusal can fire. Deletes that proceed under
+//! `--allow-bulk` still SPEND the shared counter (`breaker_spend` runs on
+//! the successful delete path regardless of the flag) — one shared budget,
+//! even for sanctioned passes (pr283-review finding 8: the earlier wording
+//! "never touches these keys" was wrong; the spec pins the flag as a
+//! one-run CHECK skip, not a budget exemption).
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
