@@ -237,7 +237,7 @@ fn single_stage_flags_and_env_are_kill_switches() {
 /// sidecar (`CURATED_EMBED_COUNT_FILE`).
 #[test]
 fn embed_skip_when_both_floors_missing() {
-    let counts = count_file();
+    let counts = count_file("embed_skip_when_both_floors_missing");
     fs::remove_file(&counts).ok();
     let count_arg = counts.to_str().unwrap().to_string();
     with_seeded_brain(|| {
@@ -277,7 +277,7 @@ fn embed_skip_when_both_floors_missing() {
 /// exactly ONE embed per message on a full `--two-stage` run.
 #[test]
 fn raw_scheme_reuses_one_embed_per_message() {
-    let counts = count_file();
+    let counts = count_file("raw_scheme_reuses_one_embed_per_message");
     fs::remove_file(&counts).ok();
     let count_arg = counts.to_str().unwrap().to_string();
     with_seeded_brain(|| {
@@ -383,8 +383,11 @@ fn uncalibrated_no_open_still_emits_audit_line() {
 // (`CURATED_EMBED_COUNT_FILE`, one line per embed_batch call).
 // ---------------------------------------------------------------------------
 
-fn count_file() -> std::path::PathBuf {
-    std::env::temp_dir().join("ct_two_stage_embed_count_test")
+// pr283-review finding 18: one shared temp count file raced across the
+// integration-test binary's PARALLEL test threads — the count is unique per
+// test now.
+fn count_file(test: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("ct_two_stage_embed_count_{test}"))
 }
 
 fn read_count(path: &std::path::Path) -> usize {
