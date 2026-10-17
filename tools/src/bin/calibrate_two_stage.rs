@@ -687,6 +687,23 @@ fn profile_key_for_k_row(baseline_key: &str, scheme: &str) -> String {
     }
 }
 
+/// pr283-review finding 14: the gate key the BASELINE arm passes to
+/// `wisdom_match_in_scheme` — the UNSCHEMED profile key. `--baseline-key`
+/// is validated as `floor_key_for(profile_key, scheme)` (already schemed),
+/// but `wisdom_match_in_scheme` applies `floor_key_for` AGAIN inside
+/// `match_with_resolved_floor`; passing the schemed key produced
+/// `…:instr1:instr1`, an unregistered key, a None floor, and a vacuous
+/// 0/0 baseline arm. Same derivation rule as `profile_key_for_k_row`.
+pub fn baseline_gate_key(schemed_baseline_key: &str, scheme: &Scheme) -> String {
+    match scheme {
+        Scheme::Instr1 => schemed_baseline_key
+            .strip_suffix(":instr1")
+            .unwrap_or(schemed_baseline_key)
+            .to_string(),
+        Scheme::Raw => schemed_baseline_key.to_string(),
+    }
+}
+
 /// The ready-to-apply patch snippet for the winner (plan §Task 15
 /// Interfaces): the `WISDOM_GATE_FLOORS` composite row, plus the
 /// `TWO_STAGE_K` row under rule (ii) ONLY — rule (i) scores the whole
@@ -1460,13 +1477,18 @@ fn main() -> Result<()> {
     let mut hits_via_merge_only = 0usize;
     let mut stale_total = 0i64;
 
+    // pr283-review finding 14: `wisdom_match_in_scheme` resolves the floor
+    // as `floor_key_for(gate_key, scheme)` — pass the UNSCHEMED profile key
+    // or an instr1 run double-suffixes to an unregistered key and measures
+    // the letter against a vacuous 0/0 baseline.
+    let ss_gate_key = baseline_gate_key(&baseline_key, &scheme);
     for (i, probe) in probes.iter().enumerate() {
         // ---- Arm 1: the SHIPPED single-stage default (baseline). ----
         let t0 = Instant::now();
         let ss = wisdom_match_in_scheme(
             &conn,
             &schemed_vecs[i],
-            &baseline_key,
+            &ss_gate_key,
             scheme,
             HIT_K,
             &[],

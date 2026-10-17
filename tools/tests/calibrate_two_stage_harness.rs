@@ -1230,3 +1230,40 @@ fn simulated_flip_satisfies_freeze_dir_assertion() {
     .expect("valid JSON");
     assert!((expected["floor"].as_f64().unwrap() - 0.55).abs() < 1e-6);
 }
+
+// ── pr283-review finding 14: the baseline arm's gate key ─────────────────────────────
+
+/// The baseline arm passes its key to `wisdom_match_in_scheme`, which
+/// resolves the floor as `floor_key_for(gate_key, scheme)` — so the key it
+/// receives must be the UNSCHEMED profile key. Round-trip property: for
+/// every scheme, `floor_key_for(baseline_gate_key(schemed_key, scheme),
+/// scheme) == schemed_key` — the key the arm passes resolves to the
+/// REGISTERED schemed floor, never to a double-suffixed `…:instr1:instr1`.
+#[test]
+fn baseline_gate_key_round_trips_through_floor_key_for() {
+    use tauri_app_lib::embed_scheme::floor_key_for;
+
+    let profile_key = "local:nomic-embed-code";
+    for scheme in [Scheme::Raw, Scheme::Instr1] {
+        let schemed = floor_key_for(profile_key, scheme);
+        let unschemed = calibrate_two_stage::baseline_gate_key(&schemed, &scheme);
+        assert_eq!(
+            unschemed, profile_key,
+            "{scheme:?}: the baseline arm's key must be the UNSCHEMED profile key"
+        );
+        assert_eq!(
+            floor_key_for(&unschemed, scheme),
+            schemed,
+            "{scheme:?}: the arm's key must resolve back to the registered \
+             schemed floor key"
+        );
+    }
+    // The exact production ghost: the schemed key passed verbatim produces
+    // the double suffix the old code measured the letter against.
+    let schemed = floor_key_for(profile_key, Scheme::Instr1);
+    assert_eq!(
+        floor_key_for(&schemed, Scheme::Instr1),
+        format!("{schemed}:instr1"),
+        "passing the already-schemed key double-suffixes it"
+    );
+}
