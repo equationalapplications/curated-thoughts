@@ -1253,9 +1253,11 @@ cargo run --manifest-path tools/Cargo.toml --bin calibrate_two_stage -- pick --g
 cargo run --manifest-path tools/Cargo.toml --bin calibrate_two_stage -- flip --artifact artifact.json
 ```
 
-- [ ] **Step 1-3:** write script; `shellcheck scripts/calibrate-two-stage.sh` clean; dry-run against a scratch Brain to verify the gate ordering refuses when coverage < 100%.
-- [ ] **Step 4: Verify** (shellcheck + dry run exit codes).
-- [ ] **Step 5: Commit** — `git commit -m "chore(scripts): step-3a-ordered calibration runbook (verify-scratch → repair → paired run → flip)"`
+- [x] **Step 1-3:** write script; `shellcheck scripts/calibrate-two-stage.sh` clean; dry-run against a scratch Brain to verify the gate ordering refuses when coverage < 100%.
+- [x] **Step 4: Verify** (shellcheck + dry run exit codes).
+- [x] **Step 5: Commit** — `git commit -m "chore(scripts): step-3a-ordered calibration runbook (verify-scratch → repair → paired run → flip)"`
+
+> **Adjudication (controller, 2026-10-17, single round):** commit **f628f303**. shellcheck clean. Dry-run validated via a `cargo` shim (no live brain touched): recovery scenario exits 0 with the exact pinned sequence (verify-scratch → dry-run 360/365 → repair → verify-scratch → dry-run 365/365 → paired run → pick → flip); persistent-low-coverage scenario aborts exit 2 BEFORE any calibration invocation; missing-probes usage abort exit 3. SKETCH CORRECTION: the plan sketch grepped `coverage=\K[0-9.]+`, but Task 13's real output contract is `coverage: <covered>/<candidates>` (reindex.rs print_coverage) — the script parses the real format and compares covered == candidates. Task 17 gate condition: **NOT TRIGGERED** (no live calibration has run; Task 13's live-baseline evidence showed 406/406 evidence-hash refs + 365/365 hop-resolvable; post-calibration audit is a precondition that does not exist yet) — record "step 4 not triggered" in the PR description.
 
 ## Task 17 (conditional): Provenance backfill — ONLY if the §9 step-4 audit shows hop gaps
 
