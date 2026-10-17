@@ -135,6 +135,13 @@ fn main() -> Result<()> {
         {
             if e.downcast_ref::<IngestRefused>().is_some() {
                 eprintln!("[{}/{}] skip (refused): {}", i + 1, total, path);
+                // pr283-review finding 13: a refusal is SKIP accounting —
+                // the doc's entity STAYS in the linker set (same as ct
+                // ingest) and the progress line still fires.
+                entity_ids.insert(entity_id_for_path(path, Some(vault_root_str)));
+                if (i + 1) % 25 == 0 || i + 1 == total {
+                    eprintln!("[{}/{}] done …", i + 1, total);
+                }
                 continue;
             }
             return Err(e).with_context(|| format!("reindex {}", path));

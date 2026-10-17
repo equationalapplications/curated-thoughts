@@ -19,17 +19,28 @@ use tempfile::tempdir;
 
 mod common;
 
-/// Two `.rs` docs whose only chunk set makes the linker resolve one edge:
-/// `a.rs` defines `shared_fn`, `b.rs` calls it. Both land in the same
-/// working-tier entity, so "the linker ran over the refused doc's entity" is
-/// observable as the surviving edge.
+/// Two `.rs` docs in DIFFERENT tier entities, each SELF-CONTAINED (defines
+/// its own symbol and calls it, so each doc's entity resolves one edge):
+/// `documents/a.rs` routes to `tier_fact`; `notes/b.rs` routes to the
+/// working-tier entity `tier_working::<vault-hash>`. pr283-review finding
+/// 13: with the old same-entity fixture the linker pass over the PROCESSED
+/// doc's entity recreated the shared edge, so the test could not detect a
+/// refused doc's entity missing from the linker set at all. Edge accounting
+/// is exact now: seed ⇒ 2 edges; clearing `curated_relationships` and
+/// re-running must recreate BOTH (one per entity).
 fn write_rs_fixture(vault: &std::path::Path) {
     let docs = vault.join("documents");
     std::fs::create_dir_all(&docs).unwrap();
-    std::fs::write(docs.join("a.rs"), "pub fn shared_fn() -> u32 { 42 }\n").unwrap();
+    let notes = vault.join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
     std::fs::write(
-        docs.join("b.rs"),
-        "pub fn caller_fn() -> u32 { shared_fn() }\n",
+        docs.join("a.rs"),
+        "pub fn fact_fn() -> u32 { 42 }\npub fn fact_caller() -> u32 { fact_fn() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        notes.join("b.rs"),
+        "pub fn work_fn() -> u32 { 7 }\npub fn work_caller() -> u32 { work_fn() }\n",
     )
     .unwrap();
 }
@@ -43,6 +54,20 @@ fn edge_count(conn: &rusqlite::Connection) -> i64 {
         r.get(0)
     })
     .unwrap()
+}
+
+/// The fixture precondition: the two docs really landed in DIFFERENT
+/// entities (the whole point of the finding-13 fixture).
+fn assert_two_distinct_entities(conn: &rusqlite::Connection) {
+    let n: i64 = conn
+        .query_row("SELECT COUNT(DISTINCT entity_id) FROM chunks", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        n, 2,
+        "fixture: documents/a.rs (tier_fact) and notes/b.rs (tier_working) must map to 2 distinct entities"
+    );
 }
 
 /// Force the chunker-drift refusal on `a.rs`: same bytes on disk, stored
@@ -115,13 +140,21 @@ fn bulk_reindex_counts_refusal_as_skip_and_continues() {
             );
             {
                 let conn = brain_conn(&dir);
-                assert!(
-                    edge_count(&conn) > 0,
-                    "fixture precondition: linker must resolve the shared_fn edge"
+                assert_two_distinct_entities(&conn);
+                assert_eq!(
+                    edge_count(&conn),
+                    2,
+                    "fixture precondition: one resolved edge per entity"
                 );
             }
 
             drift_first_doc(&brain_conn(&dir));
+            // pr283-review finding 13: exact accounting — wipe all edges, so
+            // pass 2's edge count can ONLY come from entities the linker
+            // actually ran over.
+            brain_conn(&dir)
+                .execute("DELETE FROM curated_relationships", [])
+                .unwrap();
 
             // Pass 2: the FIRST path (sorted ORDER BY path) is refused ⇒ SKIP
             // (one informational stderr line, pass CONTINUES, exit 0); the
@@ -141,11 +174,13 @@ fn bulk_reindex_counts_refusal_as_skip_and_continues() {
             );
 
             let conn = brain_conn(&dir);
-            // The refused doc's entity STILL got its linker pass: the edge
-            // survives (nothing orphaned by the skip).
-            assert!(
-                edge_count(&conn) > 0,
-                "linker must run over the refused doc's entity too"
+            // The refused doc's entity STILL got its linker pass: BOTH edges
+            // are recreated (one per entity). The old same-entity fixture
+            // could not see this — b.rs's entity pass masked the gap.
+            assert_eq!(
+                edge_count(&conn),
+                2,
+                "linker must run over the refused doc's entity too (both edges recreated)"
             );
             // ...and the pass continued: the second doc was reprocessed (the
             // "[2/2] done …" progress line comes AFTER the loop arm ran).
@@ -201,17 +236,25 @@ fn ct_ingest_treats_refusal_as_skip() {
             );
             {
                 let conn = brain_conn(&dir);
-                assert!(
-                    edge_count(&conn) > 0,
-                    "fixture precondition: linker must resolve the shared_fn edge"
+                assert_two_distinct_entities(&conn);
+                assert_eq!(
+                    edge_count(&conn),
+                    2,
+                    "fixture precondition: one resolved edge per entity"
                 );
             }
 
             drift_first_doc(&brain_conn(&dir));
+            // Exact accounting (pr283-review finding 13): wipe all edges so
+            // the re-run's count can only come from entities the linker ran
+            // over.
+            brain_conn(&dir)
+                .execute("DELETE FROM curated_relationships", [])
+                .unwrap();
 
             // Second ingest: the drifted doc is refused ⇒ SKIP accounting —
             // exit 0, failed == 0, and the refused file's entity stays in the
-            // linker set (the shared edge survives).
+            // linker set (BOTH edges are recreated).
             let out = Command::new(env!("CARGO_BIN_EXE_ct"))
                 .args(["ingest", "--yes"])
                 .output()
@@ -231,9 +274,10 @@ fn ct_ingest_treats_refusal_as_skip() {
                 "loop accounting must report failed == 0, stdout: {stdout}"
             );
             let conn = brain_conn(&dir);
-            assert!(
-                edge_count(&conn) > 0,
-                "refused file's entity must stay in the linker set"
+            assert_eq!(
+                edge_count(&conn),
+                2,
+                "refused file's entity must stay in the linker set (both edges recreated)"
             );
         },
     );
