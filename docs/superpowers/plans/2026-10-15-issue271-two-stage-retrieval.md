@@ -1126,7 +1126,7 @@ fn pre_v18_fixture_open_succeeds() { /* V17-shape fixture (no librarian_evidence
 - Consumes: `resolve()`/`open_rw`/`open_ro` (`tools/src/write.rs`); `retrieval::{resolve_brain_paths, load_embed_profile}` (`bulk_reindex.rs:87-89` pattern); `gate_model_key(profile, stub)`; `TransactionBehavior::Immediate`; `two_stage::coverage` (Task 3) for reporting.
 - Produces: `ct reindex repair-embed-key [--stale]` — re-embeds the STORED CHUNKS of every stale/NULL-key CANDIDATE doc directly from the DB (NO file read, NO status/tier precondition, NO stamp required); per doc ONE IMMEDIATE txn covering (a) in-place embeddings UPDATEs from stored chunk text and (b) `documents.embed_key = gate_model_key(profile, stub-as-used)`; the doc's chunk-id set RE-CHECKED UNDER THE LOCK against the pre-read (swap-race rule; mismatch ⇒ skip doc with a printed note, next run retries). Exit 0; prints per-doc verdicts + final coverage.
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```rust
 #[test]
@@ -1140,9 +1140,11 @@ fn repair_rechecks_chunk_ids_under_lock() { /* mutate a chunk id between read an
     direct conn); assert doc SKIPPED, no partial write (vectors unchanged, key unchanged) */ }
 ```
 
-- [ ] **Step 2: Verify FAIL.**  **Step 3: Implement** the subcommand + re-embed-from-DB loop (embed via `embed_batch(profile, texts)` — `src-tauri/src/embedder/mod.rs:178`).
-- [ ] **Step 4: Verify PASS.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(cli): ct reindex repair-embed-key --stale (DB-only per-doc repair under one IMMEDIATE txn)"`
+- [x] **Step 2: Verify FAIL.**  **Step 3: Implement** the subcommand + re-embed-from-DB loop (embed via `embed_batch(profile, texts)` — `src-tauri/src/embedder/mod.rs:178`).
+- [x] **Step 4: Verify PASS.**
+- [x] **Step 5: Commit** — `git commit -m "feat(cli): ct reindex repair-embed-key --stale (DB-only per-doc repair under one IMMEDIATE txn)"`
+
+> **Adjudication (controller, 2026-10-16, TWO-ROUND ladder):** main commit **8e64eec7** on 385fd99d (4 files, +646/−0) + fix commit **63e17474** (2 files, +119/−14). Gates: tools **208/0** (205 baseline + 2 task tests + 1 fix-round test), src-tauri **1737/0/1** (untouched by fix round); sor Approved (1.57/3). Round 1: reviewer **Approved** with named rulings — highest-id chunk seam LEGITIMATE (evidence topology; deleting the first chunk would drop the doc from the candidate set), embed_batch OUTSIDE the IMMEDIATE txn CORRECT (holding the write lock across a provider round-trip would make the under-lock re-check trivially always-pass — all writes are under the txn), removed scaffolding test ACCEPTABLE (near-tautological; test 1's in-process gate_model_key comparison carries the property). One Important carried to fix round: discovery-time race (doc deleted between candidate_set and per-doc read aborted the pass, exit 1 — contract violation). Round 2 re-review: **✅ all findings resolved, Fix round Approved** — per-candidate QueryReturnedNoRows catch (skip + continue, exit 0, note shape consistent), rows_affected==1 guard with 'doc_pass rollback, comment aligned; new seam CURATED_REPAIR_TEST_DELETE_DOC follows the accepted CURATED_REPAIR_TEST_RACE pattern (production-never-set, documented; no FK cascade — CT never sets the pragma). Remaining minors CARRIED as debt (whole-branch review): report overclaim on per-doc-failure continuation, dead now_ms param, `let _ = rw;` redundancy, raw CURATED_EMBED_STUB env reads (should use embedder::active_embed_stub), untested branches (count-mismatch skip, no-stored-chunks skip, write-error path).
 
 ## Task 13: `ct reindex verify-scratch` (bootstrap: chunk-only scratch rechunk + stamp write + sampled backfill)
 
