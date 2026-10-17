@@ -476,7 +476,6 @@ mod two_stage_test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::two_stage_test_support::*;
     use super::*;
     use crate::embed_scheme::Scheme;
     use crate::wisdom_match::wisdom_match_with_floor;
