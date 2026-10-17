@@ -321,6 +321,31 @@ fn env_kill_switch_dominates_explicit_two_stage_flag() {
     });
 }
 
+/// pr283-review finding 15 (§5 opt-in): plain `ct wisdom match` (no stage
+/// flag = Auto) runs BYTE-IDENTICAL v1 — no audit line, no two-stage label —
+/// until an explicit flip changes the default. The env kill-switch is an
+/// OFF-switch only; Auto never enables two-stage on its own.
+#[test]
+fn auto_mode_runs_plain_v1_until_flip() {
+    with_seeded_brain(|| {
+        common::seed_fact("fact_a");
+        let out = run_ct(&["wisdom", "match", "--json", "--", "q"]);
+        assert_eq!(out.status.code(), Some(0), "stderr={}", stderr(&out));
+        assert!(
+            !stderr(&out).contains(AUDIT_TOKEN),
+            "Auto ⇒ NO audit line: {}",
+            stderr(&out)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let gate = v["gate"].as_str().unwrap();
+        assert_eq!(
+            gate, "semantic-v1:stub:constant8",
+            "Auto runs the plain v1 path (never a two-stage label)"
+        );
+        assert!(!gate.contains("two-stage"));
+    });
+}
+
 /// Fix-round Minor #4: the audit line IS emitted on the uncalibrated
 /// no-open path (both floors missing) — r29-m4's "every requested path".
 #[test]

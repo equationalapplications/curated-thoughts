@@ -770,7 +770,8 @@ use tauri_app_lib::wisdom_match as wm;
 /// opt-in, the env var is the off-switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WisdomStageMode {
-    /// No stage flag given: v1 today, two-stage after the Task-15 flip.
+    /// No stage flag given: plain v1 until an explicit flip changes the
+    /// default (§5 opt-in; pr283-review finding 15).
     Auto,
     /// `--two-stage` requested.
     TwoStage,
@@ -839,14 +840,16 @@ pub fn wisdom_match_cmd(
     let key = wm::gate_model_key(&profile, stub.as_deref());
 
     // Stage selection (issue #271 §5): --two-stage XOR --single-stage XOR
-    // env kill-switch XOR Auto (= v1 until the Task-15 flip).
+    // env kill-switch XOR Auto (= plain v1 until an explicit flip changes
+    // the default; pr283-review finding 15 — Auto previously enabled the
+    // two-stage path, contradicting §5's opt-in promise).
     // Intended §5 semantics: the env kill-switch DOMINATES an explicit
     // --two-stage flag (pinned by
     // cli_wisdom_two_stage::env_kill_switch_dominates_explicit_two_stage_flag).
     let two_stage_requested = match stage_mode {
         WisdomStageMode::TwoStage => true,
         WisdomStageMode::SingleStage => false,
-        WisdomStageMode::Auto => !tauri_app_lib::embedder::single_stage_env_kill(),
+        WisdomStageMode::Auto => false,
     };
     let two_stage_active = two_stage_requested && !tauri_app_lib::embedder::single_stage_env_kill();
 
