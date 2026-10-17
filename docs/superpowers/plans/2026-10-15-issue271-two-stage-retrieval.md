@@ -1161,7 +1161,7 @@ fn repair_rechecks_chunk_ids_under_lock() { /* mutate a chunk id between read an
   3. Sampled backfill: per chunk-bearing doc, FIRST + LAST chunk re-embedded from STORED CHUNK TEXT (file existence + document status IRRELEVANT, r25-M1); match by cosine ≥ 1−1e−3 vs the stored vectors; on match, backfill `documents.embed_key` — the live write is GUARDED (r28-m6): each doc's write is ONE IMMEDIATE txn re-checking the doc's chunk-id set and current `embed_key` against the scratch snapshot; skip on mismatch. Failed sample ⇒ doc stays NULL/unchanged, PRINTED per doc.
   4. Prints per-doc verdicts + final candidate-set coverage; `--dry-run` writes NOTHING to either DB (print-only, r26 m6).
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[test]
@@ -1181,9 +1181,11 @@ fn guarded_live_write_skips_on_chunk_set_change() { /* mutate live doc's chunks 
     write skipped, no mismatched stamping (r28-m6) */ }
 ```
 
-- [ ] **Step 2: Verify FAIL.**  **Step 3: Implement.**
-- [ ] **Step 4: Verify PASS.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(cli): ct reindex verify-scratch — chunker-only stamp, sampled embed_key backfill, guarded live writes"`
+- [x] **Step 2: Verify FAIL.**  **Step 3: Implement.**
+- [x] **Step 4: Verify PASS.**
+- [x] **Step 5: Commit** — `git commit -m "feat(cli): ct reindex verify-scratch — chunker-only stamp, sampled embed_key backfill, guarded live writes"`
+
+> **Adjudication (controller, 2026-10-17, TWO-ROUND ladder):** main commit **feb4a311** on 7a581318 (3 files + RED evidence; all 5 verbatim tests GREEN). Gates: tools **213/0/0**, src-tauri **1737/0/1** (untouched), check --tests **0 warnings**, fmt clean. Round 1 review: **Changes requested** — Important: `--dry-run` was hollow (counts only, no analysis); Minors: scratch cleanup leaked on `?` paths (closure), guarded-write skip label conflated swap-race with already-backfilled, `entity_id_for_virtual_path` recomputed per chunk + skipped rechunks unsurfaced; plus test strengthening (4 dry-run assertions) and 2 report corrections (race seam = SAME live conn pre-txn; hop SQL necessarily drops the embeddings join on the chunk-only scratch). Round 2: fix commit **f33996e1** (+138/−46: full-analysis dry-run with NO live rw conn, ScratchGuard RAII, honest split skip labels, eid hoist + `rechunk_skipped` in summary, additive-only test diff); gates re-run green through the heavy-build wrapper (oomd had killed two bare runs); Tier-2 fix-delta re-review (glm-5.3, receipts-verified): **✅ Approved** — all 5 findings FIXED with quoted before/after, NO-WEAKEN confirmed (test names/line numbers identical, 0 deleted lines). Non-blocking Minors CARRIED as debt (whole-branch review): dry-run per-doc verdict prints "would backfill" where live would print "already backfilled" (scratch snapshot could predict it); ScratchGuard constructed one statement after `busy_timeout(?)` (negligible leak window); pre-existing src-tauri warning `unused variable: trg` at connection.rs:2068 (2bedb35d, not this task).
 
 ---
 
