@@ -123,6 +123,12 @@ enum Cmd {
         #[arg(long, requires = "yes")]
         allow_bulk: bool,
     },
+    /// Reindex operations (issue #271 Task 12): repair stale/NULL-key
+    /// candidate docs from stored chunk text.
+    Reindex {
+        #[command(subcommand)]
+        cmd: ReindexCmd,
+    },
     /// Approve, list, or revoke symlinks the ingest walker may follow.
     Trust {
         /// Vault-relative path of the symlink, e.g. `documents/specs`.
@@ -313,6 +319,23 @@ enum LibrarianCmd {
         /// Re-run every document, bypassing the synthesis watermark gate.
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReindexCmd {
+    /// Re-embed the STORED CHUNKS of every stale/NULL-key candidate doc
+    /// directly from the DB (spec 2026-10-09-issue271 §6 repair path): no
+    /// file read, no status/tier precondition, no stamp. Per doc ONE
+    /// IMMEDIATE transaction covers the in-place vector updates and the
+    /// `documents.embed_key` write; the chunk-id set is re-checked under
+    /// the lock (swap-race rule; a mismatch skips the doc — the next run
+    /// retries). Exit 0; per-doc verdicts + final coverage.
+    RepairEmbedKey {
+        /// Repair every stale/NULL-key candidate doc (the current and only
+        /// selection).
+        #[arg(long)]
+        stale: bool,
     },
 }
 #[derive(Subcommand)]
@@ -758,6 +781,14 @@ fn run(cmd: Cmd) -> Result<i32> {
             },
         },
         Cmd::Drift { json } => curated_thoughts_tools::drift::drift_cmd(json),
+        Cmd::Reindex { cmd } => match cmd {
+            ReindexCmd::RepairEmbedKey { stale } => {
+                if !stale {
+                    bail!("`ct reindex repair-embed-key` requires --stale (the only supported selection)");
+                }
+                curated_thoughts_tools::reindex::repair_embed_key_stale()
+            }
+        },
         Cmd::Heal {
             yes,
             confirm_drift,
