@@ -566,16 +566,26 @@ fn gated_entries(
 /// matchable by `gate_floor`). Default 8 until calibration pins a key.
 pub const TWO_STAGE_K: &[(&str, usize)] = &[("default", 8)];
 
+/// `two_stage_k` over an EXPLICIT table — the exact-find-then-default lookup
+/// [`two_stage_k`] runs on [`TWO_STAGE_K`]. `pub` so the calibration harness
+/// can pin the emitter↔resolver k-row binding against a SIMULATED paste
+/// (production `TWO_STAGE_K` ships unflipped — task-15 controller notes: the
+/// machine ships WITHOUT a flip, so the pasted row can only live in a test
+/// table, never in this file).
+pub fn two_stage_k_in(table: &[(&str, usize)], gate_key: &str) -> usize {
+    table
+        .iter()
+        .find(|(k, _)| *k == gate_key)
+        .or_else(|| table.iter().find(|(k, _)| *k == "default"))
+        .map(|(_, k)| *k)
+        .unwrap_or(8)
+}
+
 /// `two_stage_k(TWO_STAGE_K)` row for `gate_key`; the `default` row (8) when
 /// the key (or its suffix tail) carries no pinned k. Never errors — an
 /// unlisted key takes the default, exactly like an unlisted floor abstains.
 pub fn two_stage_k(gate_key: &str) -> usize {
-    TWO_STAGE_K
-        .iter()
-        .find(|(k, _)| *k == gate_key)
-        .or_else(|| TWO_STAGE_K.iter().find(|(k, _)| *k == "default"))
-        .map(|(_, k)| *k)
-        .unwrap_or(8)
+    two_stage_k_in(TWO_STAGE_K, gate_key)
 }
 
 /// The calibrated rule whose decision opened (or closed) the gate — the

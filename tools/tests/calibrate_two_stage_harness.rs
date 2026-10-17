@@ -39,11 +39,11 @@ mod calibrate_two_stage;
 
 use calibrate_two_stage::{
     arm_metrics, check_coverage, check_embed_stub, composite_floor_key, eligibility_where,
-    flip_plan, freeze_relative_dir, grid_cells, letter_verdict, load_artifact, pick_report,
-    pick_winner, score_entries, stratified_splits, temporal_shape, write_flip_package, ArmMetrics,
-    BaselineArm, CalibrationArtifact, CandidateCell, Coverage, EmbedStats, GridInfo, HeldOutInfo,
-    HeldOutSplit, InjectionStats, MergeAttribution, ProbeSetInfo, ProbeVerdict, TemporalShape,
-    TopKAblation, V1MergeStats,
+    flip_plan, freeze_relative_dir, grid_cells, letter_verdict, load_artifact, patch_snippet,
+    pick_report, pick_winner, score_entries, stratified_splits, temporal_shape, write_flip_package,
+    ArmMetrics, BaselineArm, CalibrationArtifact, CandidateCell, Coverage, EmbedStats, GridInfo,
+    HeldOutInfo, HeldOutSplit, InjectionStats, MergeAttribution, ProbeSetInfo, ProbeVerdict,
+    TemporalShape, TopKAblation, V1MergeStats,
 };
 use rusqlite::Connection;
 use tauri_app_lib::embed_scheme::Scheme;
@@ -906,6 +906,99 @@ fn grid_cells_reads_artifacts_and_skips_unparseable_files() {
     assert_eq!(cells.len(), 2, "unparseable/non-artifact files are skipped");
 }
 
+// ── 8b. task-15-fix: emitted k row binds at the resolver; smaller-k tie-break;
+//        grid-wide build provenance ──────────────────────────────────────────
+
+/// I-1 (task-15-fix): the production k resolver looks rows up by the
+/// UNSCHEMED profile key (`two_stage_k(gate_model_key(..))`,
+/// wisdom_match.rs:666 via tools/src/queries.rs:839). The emitted
+/// `TWO_STAGE_K` row must be keyed by THAT key for BOTH schemes — under
+/// `raw` the two coincide, but an `instr1` baseline.key carries the
+/// `:instr1` suffix the resolver's exact find would miss (the pasted row
+/// would be inert and production would silently run k=8). Resolved exactly
+/// as an operator's paste would bind: `TWO_STAGE_K` + the pasted row, the
+/// resolver's exact-find-then-default lookup (`two_stage_k_in` — production
+/// `TWO_STAGE_K` ships unflipped, so the pasted row can only live in a test
+/// table; `two_stage_k` delegates to the same lookup).
+#[test]
+fn emitted_k_row_binds_at_the_resolver_for_both_schemes() {
+    let profile = tauri_app_lib::embedder::EmbedProfile::External {
+        profile: tauri_app_lib::embedder::ExternalEmbedProfile {
+            base_url: String::new(),
+            model: "qwen/qwen3-embedding-4b".to_string(),
+            api_key: None,
+        },
+    };
+    // The key the runtime resolver actually looks up (queries.rs:839).
+    let profile_key = tauri_app_lib::wisdom_match::gate_model_key(&profile, None);
+    assert_eq!(profile_key, "external:qwen/qwen3-embedding-4b");
+
+    for scheme in ["instr1", "raw"] {
+        let mut winner = grid_cell("chunk-hop", 0.55, 12, 0.525, 2, true);
+        let read_scheme = if scheme == "instr1" {
+            Scheme::Instr1
+        } else {
+            Scheme::Raw
+        };
+        winner.baseline.scheme = scheme.to_string();
+        winner.baseline.key = tauri_app_lib::embed_scheme::floor_key_for(&profile_key, read_scheme);
+        let snippet = patch_snippet(&winner);
+        // The pasted row: the FIRST ("key", k) row AFTER the TWO_STAGE_K
+        // marker (the composite floor row precedes it).
+        let after = snippet.split("TWO_STAGE_K").nth(1).expect("k row section");
+        let k_key = after
+            .split("(\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("k row key");
+        let pasted: Vec<(&str, usize)> = tauri_app_lib::wisdom_match::TWO_STAGE_K
+            .iter()
+            .copied()
+            .chain(std::iter::once((k_key, winner.candidate.k)))
+            .collect();
+        assert_eq!(
+            tauri_app_lib::wisdom_match::two_stage_k_in(&pasted, &profile_key),
+            winner.candidate.k,
+            "scheme {scheme}: the emitted k row must bind at the resolver \
+             (emitted key was {k_key:?})"
+        );
+    }
+}
+
+/// M-1 (task-15-fix): full tie on (hit@2, FP, rule, floor), cells differing
+/// only in k ⇒ the smaller k — pinned under BOTH input orders (the pick must
+/// be permutation-stable, not sort-accidental).
+#[test]
+fn picker_prefers_smaller_k_on_full_metric_tie() {
+    let small_a = grid_cell("restricted-cosine", 0.55, 8, 0.525, 2, true);
+    let large_a = grid_cell("restricted-cosine", 0.55, 12, 0.525, 2, true);
+    // Reversed order: without the k tie-break the stable sort would keep the
+    // larger-k cell first.
+    let w_rev = pick_winner(&[large_a, small_a]).expect("a passing grid has a winner");
+    assert_eq!(w_rev.candidate.k, 8, "full tie ⇒ smaller k");
+    let small_b = grid_cell("restricted-cosine", 0.55, 8, 0.525, 2, true);
+    let large_b = grid_cell("restricted-cosine", 0.55, 12, 0.525, 2, true);
+    let w_fwd = pick_winner(&[small_b, large_b]).expect("a passing grid has a winner");
+    assert_eq!(w_fwd.candidate.k, 8, "tie-break must be order-stable");
+}
+
+/// M-3 (task-15-fix): a grid holding artifacts from TWO builds of the driver
+/// must be refused — `code_sha` is the build provenance compared across
+/// cells, alongside the baseline arm and probe-set checks.
+#[test]
+fn picker_refuses_grid_mixing_builds() {
+    let mut other_build = grid_cell("chunk-hop", 0.5, 8, 0.525, 2, true);
+    other_build.code_sha = "a-different-build".to_string();
+    let err = pick_winner(&[grid_cell("chunk-hop", 0.5, 8, 0.500, 2, true), other_build])
+        .expect_err("a grid across builds must be refused");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("code_sha"),
+        "the refusal must name the build provenance, got: {msg}"
+    );
+    assert!(msg.contains("a-different-build"), "got: {msg}");
+}
+
 #[test]
 fn grid_cells_refuses_empty_grid_dir() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1026,6 +1119,25 @@ fn flip_accepts_passing_artifact_and_writes_freeze_package() {
         patch.contains("WISDOM_GATE_FLOORS") && patch.contains("two-stage:chunk-hop"),
         "got: {patch}"
     );
+}
+
+/// M-2 (task-15-fix): `flip` bypasses `check_grid` (`cmd_flip` goes
+/// `load_artifact` → `flip_plan` directly), so `flip_plan` itself must
+/// refuse a rule outside the two-stage vocabulary — otherwise a hand-edited
+/// artifact with a self-consistent passing letter would reach the flip
+/// package with a nonsense composite key. Same bail wording `check_grid`
+/// uses for grids.
+#[test]
+fn flip_refuses_unknown_rule() {
+    let mut artifact = grid_cell("chunk-hop", 0.55, 12, 0.525, 2, true);
+    artifact.candidate.rule = "magic-vibes".to_string();
+    let err = flip_plan(&artifact, FIXTURE_CODE_SHA).expect_err("unknown rule ⇒ refuse");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("unknown two-stage rule"),
+        "reuse check_grid's bail wording, got: {msg}"
+    );
+    assert!(msg.contains("magic-vibes"), "got: {msg}");
 }
 
 // ── 10. Simulated flip satisfies the bench freeze-dir assertion ──────────────

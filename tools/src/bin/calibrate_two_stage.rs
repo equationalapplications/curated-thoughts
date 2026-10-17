@@ -575,6 +575,18 @@ pub fn check_grid(cells: &[CalibrationArtifact]) -> Result<()> {
                 c.probes.sha256
             );
         }
+        // M-3 (task-15-fix): a grid mixing artifacts from two builds of the
+        // driver is not one campaign — refuse it the way a stale artifact is
+        // refused at flip time, naming both builds.
+        if c.code_sha != first.code_sha {
+            bail!(
+                "grid mixes builds (produced by {:?} but also by {:?}) — all cells must \
+                 carry the SAME code_sha (one paired calibration build per grid); re-run \
+                 the paired calibration so every cell is current",
+                first.code_sha,
+                c.code_sha
+            );
+        }
         if c.candidate.rule != "restricted-cosine" && c.candidate.rule != "chunk-hop" {
             bail!("unknown two-stage rule {:?} in the grid", c.candidate.rule);
         }
@@ -657,6 +669,24 @@ pub fn pick_winner(cells: &[CalibrationArtifact]) -> Result<CalibrationArtifact>
     Ok(passing[0].clone())
 }
 
+/// The UNSCHEMED profile key the production k resolver looks rows up by
+/// (`two_stage_k(gate_model_key(..))`, wisdom_match.rs:666 via
+/// tools/src/queries.rs:839's `gate_model_key`): the v1 floor key minus the
+/// scheme suffix `floor_key_for` composed onto it (only `instr1` appends
+/// `:instr1`; raw keys are already byte-identical to `gate_model_key`).
+/// I-1 (task-15-fix): keying the emitted k row by the SCHEMED baseline.key
+/// left it unreachable from the resolver — an inert row, production silently
+/// running k=8.
+fn profile_key_for_k_row(baseline_key: &str, scheme: &str) -> String {
+    match scheme {
+        "instr1" => baseline_key
+            .strip_suffix(":instr1")
+            .unwrap_or(baseline_key)
+            .to_string(),
+        _ => baseline_key.to_string(),
+    }
+}
+
 /// The ready-to-apply patch snippet for the winner (plan §Task 15
 /// Interfaces): the `WISDOM_GATE_FLOORS` composite row, plus the
 /// `TWO_STAGE_K` row under rule (ii) ONLY — rule (i) scores the whole
@@ -668,10 +698,14 @@ pub fn patch_snippet(winner: &CalibrationArtifact) -> String {
         winner.candidate.floor
     );
     if winner.candidate.rule == "chunk-hop" {
+        // I-1 (task-15-fix): the resolver looks k rows up by the UNSCHEMED
+        // profile key, NOT the schemed baseline.key — emit the key it will
+        // actually bind at, naming the scheme the k was measured under.
+        let k_key = profile_key_for_k_row(&winner.baseline.key, &winner.baseline.scheme);
         out.push_str(&format!(
             "// TWO_STAGE_K (src-tauri/src/wisdom_match.rs) — add (rule (ii) only; \
-             rule (i) never uses stage-1 breadth):\n    (\"{}\", {}),\n",
-            winner.baseline.key, winner.candidate.k
+             rule (i) never uses stage-1 breadth; k measured under scheme {:?}):\n    (\"{}\", {}),\n",
+            winner.baseline.scheme, k_key, winner.candidate.k
         ));
     }
     out
@@ -761,11 +795,15 @@ pub fn grid_cells(dir: &Path) -> Result<Vec<CalibrationArtifact>> {
 
 /// Load one artifact file (the `flip` entry point).
 pub fn load_artifact(path: &Path) -> Result<CalibrationArtifact> {
-    let raw = std::fs::read(path).with_context(|| {
-        format!(
-            "read calibration artifact {} — no such file",
-            path.display()
-        )
+    let raw = std::fs::read(path).map_err(|io_err| {
+        // M-4 (task-15-fix): name the ACTUAL io error kind — a permission or
+        // is-a-directory error is not "no such file".
+        let detail = if io_err.kind() == std::io::ErrorKind::NotFound {
+            "no such file".to_string()
+        } else {
+            format!("failed to read ({io_err})")
+        };
+        anyhow::anyhow!("read calibration artifact {} — {detail}", path.display())
     })?;
     serde_json::from_slice(&raw)
         .with_context(|| format!("parse calibration artifact {}", path.display()))
@@ -790,7 +828,9 @@ pub struct FlipPlan {
 
 /// The letter-gated flip decision (plan §Task 15): the flip proceeds ONLY on
 /// a passing artifact current for THIS build. Refusals, in order: unknown
-/// schema; artifact without code provenance (unversioned build — cannot be
+/// schema; unknown two-stage rule (M-2, task-15-fix — `flip` bypasses
+/// `check_grid`, so `flip_plan` validates the rule name itself, same bail
+/// wording); artifact without code provenance (unversioned build — cannot be
 /// tied to a real calibration run); STALE artifact (produced by a different
 /// build than the one asked to flip); recorded verdict contradicting the
 /// artifact's own numbers; FAILING letter (prints the letter numbers, §7).
@@ -805,6 +845,15 @@ pub fn flip_plan(artifact: &CalibrationArtifact, current_sha: &str) -> Result<Fl
         bail!(
             "unknown artifact schema {} — refusing to flip (expected 1)",
             artifact.schema
+        );
+    }
+    // M-2 (task-15-fix): `flip` loads the artifact and calls `flip_plan`
+    // directly (cmd_flip), bypassing `check_grid` — so the rule vocabulary is
+    // re-validated here, with `check_grid`'s bail wording.
+    if artifact.candidate.rule != "restricted-cosine" && artifact.candidate.rule != "chunk-hop" {
+        bail!(
+            "unknown two-stage rule {:?} in the flip artifact",
+            artifact.candidate.rule
         );
     }
     if artifact.code_sha == "unversioned" {
