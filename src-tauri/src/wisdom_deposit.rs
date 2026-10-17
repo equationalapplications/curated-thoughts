@@ -376,6 +376,10 @@ fn run_kick(
         // `rel_path` stays the document key (status probe, V25 folder rules);
         // the bytes are read from the vault, not the process CWD.
         let read_path = vault_dir.join(&rel_path).to_string_lossy().into_owned();
+        // §8(c) caller contract (Task 9, belt-and-suspenders): force is false
+        // here, so the funnel never refuses today — but if a future reason
+        // ever produces a typed refusal, treat it as success and still record
+        // `chunked`, NEVER as a kick failure. Downcast BEFORE the map_err.
         crate::pipeline::ingest_document_virtual(
             &conn,
             &profile,
@@ -384,6 +388,13 @@ fn run_kick(
             false,
             Some(vault_dir.to_string_lossy().as_ref()),
         )
+        .or_else(|e| {
+            if e.downcast_ref::<crate::pipeline::IngestRefused>().is_some() {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
         .map_err(|e| anyhow!("ingest: {e:#}"))?;
         set_kick_state(&conn, &rel_path, "chunked", None)?;
 

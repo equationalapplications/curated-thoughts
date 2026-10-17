@@ -33,6 +33,7 @@ mod setup;
 mod timeline_api;
 pub mod tool_dispatch;
 pub mod trusted_links;
+pub mod two_stage;
 pub mod vault;
 pub mod walk_vault;
 pub mod watcher;
@@ -2435,21 +2436,81 @@ fn heal_lost_librarian_inferred(
         v
     };
 
+    // Task 10 (spec §10): the breaker decision is BATCH-scoped — computed
+    // ONCE before the loop over the whole would-be-doomed set. A per-row
+    // check would let iteration 2+ proceed after a full-population refusal
+    // (|doomed| shrinks by one each time a row is deleted), which is exactly
+    // the salami-slice the breaker exists to stop. On refusal: NOTHING is
+    // soft-deleted, NOTHING is spent, and the line names the threshold hit.
+    if !entries.is_empty() {
+        let own_l = crate::db::breaker::heal_denominator(conn).map_err(|e| e.to_string())?;
+        let threshold = crate::db::breaker::heal_threshold(conn).map_err(|e| e.to_string())?;
+        let mut doomed = 0usize;
+        for (_, source_ref, _) in &entries {
+            if !crate::db::commit::source_ref_is_still_grounded(conn, source_ref) {
+                doomed += 1;
+            }
+        }
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+        let verdict = crate::db::breaker::breaker_check(
+            &tx,
+            doomed,
+            own_l,
+            threshold,
+            crate::db::breaker::BREAKER_L_HEAL,
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        if let crate::db::breaker::BreakerVerdict::Refuse { reason } = verdict {
+            eprintln!("refusing heal (GUI button): {reason}");
+            return Ok(0);
+        }
+    }
+
     let mut updated = 0;
     for (rowid, source_ref, entry_id) in entries {
-        if !crate::db::commit::source_ref_is_still_grounded(conn, &source_ref) {
-            // Soft-delete and edge purge must be atomic (spec §2): a crash
-            // between them would strand the edges. These sites had no
-            // transaction before this change.
-            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-            updated += tx
+        // §8(b) transaction fix: `unchecked_transaction()` was DEFERRED and
+        // the grounding check ran BEFORE it — a concurrent writer could race
+        // the read-then-write window or hit an upgrade SQLITE_BUSY. The tx is
+        // now `Transaction::new_unchecked` + `TransactionBehavior::Immediate`
+        // (keeping the `&Connection` signature), `source_ref_is_still_grounded`
+        // runs INSIDE the txn (as `heal.rs` already does), and the UPDATE is
+        // conditional on `deleted_at IS NULL AND source_ref = ?` so an
+        // already-soft-deleted (or re-reffed) row is skipped without
+        // re-stamping or double-counting.
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+        if !crate::db::commit::source_ref_is_still_grounded(&tx, &source_ref) {
+            let changed = tx
                 .execute(
-                    "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE rowid = ?2",
-                    rusqlite::params![crate::db::commit::ms_now(), rowid],
+                    "UPDATE llm_wiki_entries
+                     SET deleted_at = ?1
+                     WHERE rowid = ?2
+                       AND deleted_at IS NULL
+                       AND source_ref = ?3",
+                    rusqlite::params![crate::db::commit::ms_now(), rowid, source_ref],
                 )
                 .map_err(|e| e.to_string())?;
+            if changed == 0 {
+                // Row was already soft-deleted (or its source_ref changed)
+                // between the SELECT and this txn — nothing to cascade,
+                // nothing to count (mirrors `heal.rs`).
+                tx.commit().map_err(|e| e.to_string())?;
+                continue;
+            }
             crate::db::edge_purge::purge_edges_for_entry(&tx, &entry_id)
                 .map_err(|e| e.to_string())?;
+            // Task 10 (spec §10): the soft-delete spends the SHARED counter
+            // INSIDE this per-row IMMEDIATE transaction.
+            crate::db::breaker::breaker_spend(&tx, changed as i64).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            updated += 1;
+        } else {
+            // Grounded: release the IMMEDIATE lock so the next iteration can
+            // open its own tx without contention.
             tx.commit().map_err(|e| e.to_string())?;
         }
     }
@@ -3751,9 +3812,12 @@ fn copy_os_drop_paths_to_vault(
 // ── Test utilities ────────────────────────────────────────────────────────────
 
 pub use pipeline::{
-    entity_id_for_path, entity_id_for_virtual_path, ingest_document, ingest_document_virtual,
-    ingest_document_with_vault_root,
+    chunk_list_for_text, entity_id_for_path, entity_id_for_virtual_path, ingest_document,
+    ingest_document_virtual, ingest_document_with_vault_root,
 };
+// Task 9 (issue #271 §8(c)): out-of-tree callers (`ct ingest`, `bulk_reindex`)
+// downcast to the typed refusal for their skip accounting.
+pub use pipeline::IngestRefused;
 
 #[tauri::command]
 fn ingest_document_cmd(
@@ -5069,6 +5133,27 @@ mod heal_invalid_sources_tests {
                     )
                     .unwrap();
 
+                    // Task 10: a grounded companion keeps the batch PARTIAL —
+                    // a lone ungrounded row would be the ENTIRE selection
+                    // (L=1) and the rev-34 breaker refuses it before the
+                    // soft-delete assertion could ever be exercised.
+                    conn.execute(
+                        "INSERT INTO documents (path, hash, tier, status)
+                         VALUES ('documents/alive.md', 'h', 'user_doc', 'indexed')",
+                        [],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "INSERT INTO llm_wiki_entries (
+                        id, entity_id, title, body, tags, confidence, source_type,
+                        source_ref, created_at, updated_at, deleted_at
+                     ) VALUES ('alive-companion', 'tier_fact', 'Title alive-companion',
+                               'body', '[]', 'inferred', 'librarian_inferred',
+                               'documents/alive.md', 1, 1, NULL)",
+                        [],
+                    )
+                    .unwrap();
+
                     let before: Option<i64> = conn
                         .query_row(
                             "SELECT deleted_at FROM llm_wiki_entries WHERE rowid = 1",
@@ -5237,7 +5322,7 @@ mod maintenance_command_tests {
         run_embedding_sweep, DbState, VaultConfigState,
     };
     use crate::db::connection::open_in_memory;
-    use rusqlite::{params, Connection};
+    use rusqlite::{params, Connection, OptionalExtension};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
 
@@ -5516,6 +5601,21 @@ mod maintenance_command_tests {
             r#"{{"proposal_id":"prop_dead","evidence":[{{"chunk_id":{chunk_id},"content_hash":"h_gone","quote":"q","start_line":1,"end_line":3,"source_kind":"prose"}}]}}"#
         );
         insert_wiki_entry(&conn, "json-dead", "librarian_inferred", &dead_json, None);
+        // Task 10: a grounded companion keeps the batch PARTIAL — a lone row
+        // would be the ENTIRE selection and the rev-34 breaker refuses it.
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('documents/alive.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        insert_wiki_entry(
+            &conn,
+            "json-anchor",
+            "librarian_inferred",
+            "documents/alive.md",
+            None,
+        );
 
         // Kill the chunk — simulate vault-pruning.
         conn.execute("DELETE FROM chunks WHERE id = ?1", [chunk_id])
@@ -5605,6 +5705,26 @@ mod maintenance_command_tests {
                     rusqlite::params!["immutable"],
                 )
                 .expect("insert immutable_document");
+                // Task 10: a grounded companion keeps the batch PARTIAL — a
+                // lone ungrounded row would be the ENTIRE selection (L=1) and
+                // the rev-34 breaker refuses it before the scope assertions
+                // could ever be exercised.
+                db.0.execute(
+                    "INSERT INTO documents (path, hash, tier, status)
+                     VALUES ('documents/alive.md', 'h', 'user_doc', 'indexed')",
+                    [],
+                )
+                .expect("insert grounded companion document");
+                db.0.execute(
+                    "INSERT INTO llm_wiki_entries
+                    (id, entity_id, title, body, tags, confidence, source_type,
+                     source_ref, created_at, updated_at, deleted_at)
+                 VALUES ('alive-companion', 'tier_fact', 'Title alive-companion',
+                         'body', '[]', 'inferred', 'librarian_inferred',
+                         'documents/alive.md', 1, 1, NULL)",
+                    [],
+                )
+                .expect("insert grounded companion entry");
 
                 let cfg = crate::vault::VaultConfig::new(tmp.path().join("config.json"));
                 cfg.set_vault_path(&vault_root.to_string_lossy())
@@ -5680,6 +5800,23 @@ mod maintenance_command_tests {
                     "documents/missing.md",
                     None,
                 );
+                // Task 10: a grounded companion keeps the batch PARTIAL — a
+                // lone ungrounded row would be the ENTIRE selection (L=1) and
+                // the rev-34 breaker refuses it before the millisecond-stamp
+                // assertions could ever be exercised.
+                conn.execute(
+                    "INSERT INTO documents (path, hash, tier, status)
+                     VALUES ('documents/alive.md', 'h', 'user_doc', 'indexed')",
+                    [],
+                )
+                .unwrap();
+                insert_wiki_entry(
+                    &conn,
+                    "alive-companion",
+                    "librarian_inferred",
+                    "documents/alive.md",
+                    None,
+                );
                 let tmp = tempfile::TempDir::new().unwrap();
                 heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
                 let deleted_at_lost: i64 = conn
@@ -5709,6 +5846,25 @@ mod maintenance_command_tests {
                     [],
                 )
                 .expect("insert target-invalid");
+                // Task 10: same breaker-necessitated companion as (a) — a
+                // lone ungrounded row is the ENTIRE selection and the rev-34
+                // breaker refuses it wholesale.
+                db.0.execute(
+                    "INSERT INTO documents (path, hash, tier, status)
+                     VALUES ('documents/alive.md', 'h', 'user_doc', 'indexed')",
+                    [],
+                )
+                .expect("insert grounded companion document");
+                db.0.execute(
+                    "INSERT INTO llm_wiki_entries
+                    (id, entity_id, title, body, tags, confidence, source_type,
+                     source_ref, created_at, updated_at, deleted_at)
+                 VALUES ('alive-companion', 'tier_fact', 'Title alive-companion',
+                         'body', '[]', 'inferred', 'librarian_inferred',
+                         'documents/alive.md', 1, 1, NULL)",
+                    [],
+                )
+                .expect("insert grounded companion entry");
                 let cfg = crate::vault::VaultConfig::new(tmp.path().join("e4-config.json"));
                 cfg.set_vault_path(&tmp.path().to_string_lossy())
                     .expect("set vault");
@@ -6030,6 +6186,24 @@ mod maintenance_command_tests {
             "documents/a.md",
             None,
         );
+        // Task 10: `documents/a.md` must EXIST in the fixture for live-b to
+        // be genuinely grounded (previously only live-a referenced it, and
+        // live-a was soft-deleted below). live-b keeps the heal's selection
+        // from being a single-row population, which the rev-34 breaker
+        // refuses outright (|doomed| >= L).
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('documents/a.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        insert_wiki_entry_ms(
+            &conn,
+            "live-b",
+            "librarian_inferred",
+            "documents/a.md",
+            None,
+        );
 
         // R1 (remediation): the new heterogeneous contract only purges edges
         // whose partner is also dead in every endpoint table. Soft-delete
@@ -6062,6 +6236,145 @@ mod maintenance_command_tests {
             )
             .unwrap();
         assert_eq!(dangling, 0, "soft-delete must purge edges too (spec §2)");
+    }
+
+    // ── Task 10 (spec §10 + §8(b)): the GUI button writer's breaker + fix ────
+
+    /// Task 10 (spec §10, rev-34): the GUI "Heal Database" writer REFUSES a
+    /// batch that would remove the ENTIRE selected population — nothing is
+    /// soft-deleted and the shared counter stays unspent.
+    #[test]
+    fn heal_lost_librarian_inferred_refuses_full_population_batch() {
+        let conn = open_in_memory().unwrap();
+        insert_wiki_entry(
+            &conn,
+            "lost0",
+            "librarian_inferred",
+            "documents/v0.md",
+            None,
+        );
+        insert_wiki_entry(
+            &conn,
+            "lost1",
+            "librarian_inferred",
+            "documents/v1.md",
+            None,
+        );
+        insert_wiki_entry(
+            &conn,
+            "lost2",
+            "librarian_inferred",
+            "documents/v2.md",
+            None,
+        );
+        // L=3, |doomed|=3 ⇒ refuse (Small-L rule; 3 ≤ threshold 10).
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let updated = heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            updated, 0,
+            "a full-population batch must soft-delete NOTHING on the button path"
+        );
+        let alive: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(alive, 3);
+        // Task 10: a REFUSED pass writes NO `breaker_spent` key at all (the
+        // shared counter stays untouched, per spec §10) — absence is the
+        // contract, so an absent key reads as 0 spent.
+        let spent: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM llm_wiki_meta WHERE key = 'breaker_spent'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or(0);
+        assert_eq!(spent, 0, "a refused pass must not spend the shared budget");
+    }
+
+    /// Task 10 (spec §8(b)): the button writer's per-row transaction moves to
+    /// IMMEDIATE (`Transaction::new_unchecked`) with the grounding check
+    /// INSIDE the txn and the CONDITIONAL UPDATE
+    /// (`WHERE deleted_at IS NULL AND source_ref = ?`) — a row already
+    /// soft-deleted (or whose ref changed) between the SELECT and the txn is
+    /// NOT re-stamped and NOT counted.
+    #[test]
+    fn heal_lost_librarian_inferred_skips_already_deleted_rows_without_double_counting() {
+        let conn = open_in_memory().unwrap();
+        insert_wiki_entry(
+            &conn,
+            "lost",
+            "librarian_inferred",
+            "documents/vanished.md",
+            None,
+        );
+        // Pre-soft-delete the row BEFORE the pass: the old unconditional
+        // `UPDATE ... WHERE rowid = ?` would re-stamp and count it.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 100 WHERE id = 'lost'",
+            [],
+        )
+        .unwrap();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let updated = heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            updated, 0,
+            "an already-soft-deleted row must not be re-stamped or counted"
+        );
+        let deleted_at: i64 = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'lost'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            deleted_at, 100,
+            "the original stamp must be preserved (conditional UPDATE)"
+        );
+    }
+
+    /// Task 10 (spec §10): a partial batch on the button path proceeds and
+    /// spends the SAME shared counter the other writers use.
+    #[test]
+    fn heal_lost_librarian_inferred_spends_shared_budget_on_partial_batch() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('documents/a.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        insert_wiki_entry(&conn, "live", "librarian_inferred", "documents/a.md", None);
+        insert_wiki_entry(
+            &conn,
+            "lost",
+            "librarian_inferred",
+            "documents/vanished.md",
+            None,
+        );
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let updated = heal_lost_librarian_inferred(&conn, tmp.path()).unwrap();
+        assert_eq!(updated, 1, "partial batch proceeds");
+        let spent: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM llm_wiki_meta WHERE key = 'breaker_spent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            spent, 1,
+            "the button path spends the same shared counter as heal/regrade"
+        );
     }
 
     // ── Spec section 7: embedding sweep trigger ──────────────────────────────

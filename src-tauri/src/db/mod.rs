@@ -1,3 +1,4 @@
+pub mod breaker;
 pub mod bundle_apply;
 pub mod bundle_io;
 pub mod chunk_hash;
@@ -32,6 +33,9 @@ pub mod schema_guard;
 pub mod tasks;
 pub mod wiki_forget;
 pub mod wisdom;
+
+#[cfg(test)]
+mod breaker_tests;
 
 pub use connection::AppDb;
 pub use queries::*;

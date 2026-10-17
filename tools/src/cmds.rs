@@ -43,7 +43,7 @@ use tauri_app_lib::retrieval;
 pub use tauri_app_lib::walk_vault::{
     collect_files, walk_vault, DeniedLink, PendingLink, WalkOutcome, WalkedFile, MAX_VIRTUAL_DEPTH,
 };
-use tauri_app_lib::{entity_id_for_virtual_path, ingest_document_virtual};
+use tauri_app_lib::{entity_id_for_virtual_path, ingest_document_virtual, IngestRefused};
 
 /// Default `once` mode watchdog: exit after this many seconds even if no
 /// SIGINT arrives. The plan suggested 60s; using a named constant (per the
@@ -192,6 +192,21 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
                     f.virtual_path.display()
                 );
             }
+            // §8(c) caller contract (Task 9): a typed refusal is SKIP
+            // accounting — exit 0, no `failed += 1`, and the file's entity
+            // STAYS in the linker set. Downcast FIRST in the Err arm.
+            Err(e) if e.downcast_ref::<IngestRefused>().is_some() => {
+                entity_ids.insert(entity_id_for_virtual_path(
+                    virtual_str,
+                    Some(vault_root_str),
+                ));
+                eprintln!(
+                    "[{}/{}] skipped: {} (refused: {e})",
+                    i + 1,
+                    files.len(),
+                    f.virtual_path.display()
+                );
+            }
             Err(e) => {
                 failed += 1;
                 eprintln!(
@@ -257,8 +272,31 @@ pub fn ingest_run(trust_new_links: bool) -> Result<()> {
 ///
 /// Concurrency: `open_rw` sets a 5s busy timeout, matching every other
 /// concurrent-writer participant (desktop per-event connections, watchdog).
-pub fn heal_run(confirm_drift: Option<String>, waive_drift: Option<String>) -> Result<i32> {
+///
+/// Task 10 (spec §10): with `reset_breaker` the function runs ONLY the
+/// breaker reset — deletes the epoch timestamp, the shared spent counter and
+/// both `breaker_L_*` keys in ONE IMMEDIATE transaction — prints the reason to
+/// stderr, and returns WITHOUT running the heal or the ontology pass (an
+/// operator resetting the breaker is resolving a trip, not asking for a
+/// deletion pass).
+pub fn heal_run(
+    confirm_drift: Option<String>,
+    waive_drift: Option<String>,
+    reset_breaker: bool,
+    allow_bulk: bool,
+) -> Result<i32> {
     use tauri_app_lib::db::heal_ontology::DriftFlag;
+
+    if reset_breaker {
+        let brain = crate::write::resolve()?;
+        let conn = crate::write::open_rw(&brain)?;
+        tauri_app_lib::db::breaker::breaker_reset(&conn)?;
+        eprintln!(
+            "breaker reset: cleared the epoch timestamp, the shared spent counter and both breaker_L_* keys in {} — the next heal/regrade pass starts a fresh epoch",
+            brain.paths.db_path.display()
+        );
+        return Ok(0);
+    }
 
     let flag = match (confirm_drift, waive_drift) {
         (Some(h), None) => DriftFlag::Confirm(h),
@@ -292,7 +330,11 @@ pub fn heal_run(confirm_drift: Option<String>, waive_drift: Option<String>) -> R
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| retrieval::resolve_brain_paths().brain_dir)
     };
-    let summary = tauri_app_lib::db::heal::heal_invalid_sources_conn(&mut conn, vault)?;
+    let summary = tauri_app_lib::db::heal::heal_invalid_sources_conn_opts(
+        &mut conn,
+        vault,
+        tauri_app_lib::db::heal::HealOpts { allow_bulk },
+    )?;
     // Ontology pass COMPOSES after the source-heal (plan-p1-M3): the drift
     // gate and the degraded-config refusal scope to the ONTOLOGY section
     // only, so source-heal mutations above stand either way. The pass
@@ -1595,7 +1637,11 @@ fn wait_for_sigint() -> Result<Arc<AtomicBool>> {
 /// command refuses with a summary of what WOULD run. On success prints the
 /// same `report line` shape the migration gate prints so grepping a brain's
 /// history finds both runs.
-pub fn evidence_regrade_cmd(yes: bool) -> Result<i32> {
+///
+/// `allow_bulk` (Task 10, spec §10): skips the bulk-deletion breaker for this
+/// ONE run — the only sanctioned way to exceed the budget after an operator
+/// has verified the deletion is intended.
+pub fn evidence_regrade_cmd(yes: bool, allow_bulk: bool) -> Result<i32> {
     if !yes {
         let brain = crate::write::resolve()?;
         eprintln!(
@@ -1609,7 +1655,7 @@ pub fn evidence_regrade_cmd(yes: bool) -> Result<i32> {
     let brain = crate::write::resolve()?;
     let conn = crate::write::open_rw(&brain)?;
     let now_ms = tauri_app_lib::db::commit::ms_now();
-    let report = tauri_app_lib::db::evidence_regrade::regrade_unanchored(
+    let report = tauri_app_lib::db::evidence_regrade::regrade_unanchored_opts(
         &conn,
         Some(
             brain
@@ -1619,6 +1665,7 @@ pub fn evidence_regrade_cmd(yes: bool) -> Result<i32> {
                 .unwrap_or(std::path::Path::new(".")),
         ),
         now_ms,
+        tauri_app_lib::db::evidence_regrade::RegradeOpts { allow_bulk },
     )?;
     println!(
         "[ct::regrade] #186 V20: regraded_anchored={} exported={} purged={} skipped_destructive={}",

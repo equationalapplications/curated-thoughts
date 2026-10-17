@@ -133,7 +133,7 @@ mod tests {
         let conn = open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         let doc_id = upsert_document(&conn, "/vault/documents/main.rs", "hash1").unwrap();
-        mark_document_indexed(&conn, doc_id).unwrap();
+        mark_document_indexed(&conn, doc_id, "seed-h").unwrap();
 
         let def_id =
             insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact", "").unwrap();
@@ -161,7 +161,7 @@ mod tests {
         let conn = open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         let doc_id = upsert_document(&conn, "/vault/documents/main.rs", "hash2").unwrap();
-        mark_document_indexed(&conn, doc_id).unwrap();
+        mark_document_indexed(&conn, doc_id, "seed-h").unwrap();
 
         let def_id =
             insert_chunk(&conn, doc_id, &def_chunk("init_db"), 0, "tier_fact", "").unwrap();
@@ -198,8 +198,8 @@ mod tests {
 
         let doc_a = upsert_document(&conn, "/vault_a/documents/a.rs", "ha").unwrap();
         let doc_b = upsert_document(&conn, "/vault_b/documents/b.rs", "hb").unwrap();
-        mark_document_indexed(&conn, doc_a).unwrap();
-        mark_document_indexed(&conn, doc_b).unwrap();
+        mark_document_indexed(&conn, doc_a, "seed-h").unwrap();
+        mark_document_indexed(&conn, doc_b, "seed-h").unwrap();
 
         insert_chunk(&conn, doc_a, &def_chunk("shared_fn"), 0, "tier_fact", "").unwrap();
         insert_chunk(&conn, doc_b, &ref_chunk("shared_fn"), 0, "tier_wisdom", "").unwrap();
@@ -221,7 +221,7 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
 
         let doc_id = upsert_document(&conn, "/vault/documents/main.rs", "hash1").unwrap();
-        mark_document_indexed(&conn, doc_id).unwrap();
+        mark_document_indexed(&conn, doc_id, "seed-h").unwrap();
         let def_id = insert_chunk(&conn, doc_id, &def_chunk("foo"), 0, "tier_fact", "").unwrap();
         let ref_id = insert_chunk(&conn, doc_id, &ref_chunk("foo"), 1, "tier_fact", "").unwrap();
 

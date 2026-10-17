@@ -16,7 +16,7 @@ use tauri_app_lib::db::{list_indexed_user_doc_paths, AppDb};
 use tauri_app_lib::indexer::linker::run_linker;
 use tauri_app_lib::retrieval;
 use tauri_app_lib::vault::VaultConfig;
-use tauri_app_lib::{entity_id_for_path, ingest_document_with_vault_root};
+use tauri_app_lib::{entity_id_for_path, ingest_document_with_vault_root, IngestRefused};
 
 struct Args {
     dry_run: bool,
@@ -126,8 +126,26 @@ fn main() -> Result<()> {
             eprintln!("[{}/{}] skip missing: {}", i + 1, total, path);
             continue;
         }
-        ingest_document_with_vault_root(conn, &profile, path, true, Some(vault_root_str))
-            .with_context(|| format!("reindex {}", path))?;
+        // §8(c) caller contract (Task 9): a typed refusal is a SKIP, not an
+        // abort — one informational stderr line, the pass CONTINUES, and the
+        // linker still runs over every processed entity (including the
+        // refused doc's own entity).
+        if let Err(e) =
+            ingest_document_with_vault_root(conn, &profile, path, true, Some(vault_root_str))
+        {
+            if e.downcast_ref::<IngestRefused>().is_some() {
+                eprintln!("[{}/{}] skip (refused): {}", i + 1, total, path);
+                // pr283-review finding 13: a refusal is SKIP accounting —
+                // the doc's entity STAYS in the linker set (same as ct
+                // ingest) and the progress line still fires.
+                entity_ids.insert(entity_id_for_path(path, Some(vault_root_str)));
+                if (i + 1) % 25 == 0 || i + 1 == total {
+                    eprintln!("[{}/{}] done …", i + 1, total);
+                }
+                continue;
+            }
+            return Err(e).with_context(|| format!("reindex {}", path));
+        }
         entity_ids.insert(entity_id_for_path(path, Some(vault_root_str)));
         if (i + 1) % 25 == 0 || i + 1 == total {
             eprintln!("[{}/{}] done …", i + 1, total);

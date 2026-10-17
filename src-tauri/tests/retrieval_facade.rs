@@ -44,7 +44,7 @@ fn retrieval_facade_semantic_search_readonly_stub() {
                 let profile = retrieval::load_embed_profile(&paths.config_path).unwrap();
                 let v = embed_one(&profile, chunk.text.clone()).unwrap();
                 insert_embedding(&db.0, chunk_id, &v).unwrap();
-                mark_document_indexed(&db.0, doc_id).unwrap();
+                mark_document_indexed(&db.0, doc_id, "seed-h").unwrap();
             }
 
             let conn = retrieval::open_brain_readonly(&paths.db_path).expect("readonly open");

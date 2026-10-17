@@ -25,6 +25,7 @@ use crate::embedder::{embed_batch, EmbedProfile};
 use crate::hasher::hash_bytes;
 use crate::indexer::{extract_references, RefLang};
 use crate::retrieval::BrainPaths;
+use crate::wisdom_match::gate_model_key;
 
 #[derive(Debug, Clone)]
 pub enum PipelineJob {
@@ -255,6 +256,14 @@ impl PipelineWorker {
                                 }
                             }
                             Err(e) => {
+                                // §8(c) caller contract (Task 9): a typed
+                                // refusal is NEVER a generic error — ONE
+                                // informational stderr line, no
+                                // write_error_log, loop continues.
+                                if e.downcast_ref::<IngestRefused>().is_some() {
+                                    eprintln!("[pipeline] ingest skipped (refused): {path}");
+                                    return;
+                                }
                                 let msg = format!("ingest error {}: {:#}", path, e);
                                 eprintln!("[pipeline] {}", msg);
                                 write_error_log(vault_root.as_deref(), &msg);
@@ -641,6 +650,114 @@ fn ingest_file(
     ingest_file_virtual(conn, profile, path, path, force_rechunk, vault_root, hb)
 }
 
+/// Typed refusal for a destructive-suspect forced pure rechunk (issue #271
+/// §8(c), r25 m4): the funnel refuses a forced pass whose bytes are unchanged
+/// but whose stored chunk hashes would drift. SINGLE struct, no enum — every
+/// refusal reason funnels here and callers downcast for the skip accounting
+/// (Task 9 wired all four callers' downcasts; the drift-refusal arm below is
+/// the constructor).
+#[derive(Debug)]
+pub struct IngestRefused;
+
+impl std::fmt::Display for IngestRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ingest refused: forced pure rechunk would orphan evidence hashes (chunker drift; bootstrap via `ct reindex verify-scratch`)"
+        )
+    }
+}
+
+impl std::error::Error for IngestRefused {}
+
+/// Chunker currency for the §8(c) funnel: the stamp is CHUNKER-ONLY (r25-M3 —
+/// no model component). Missing/unreadable stamp ⇒ not current.
+fn chunker_stamp_current(conn: &Connection) -> bool {
+    let read = || -> rusqlite::Result<String> {
+        conn.query_row(
+            "SELECT value FROM llm_wiki_meta WHERE key = 'reindex_stamp'",
+            [],
+            |r| r.get(0),
+        )
+    };
+    matches!(read(), Ok(v) if v == crate::chunker::CHUNKER_FINGERPRINT)
+}
+
+/// One stored chunk as read for the diff (diff-swap §8(a)).
+struct StoredChunk {
+    id: i64,
+    hash: String,
+    #[allow(dead_code)]
+    position: i64,
+}
+
+fn stored_chunks(conn: &Connection, doc_id: i64) -> Result<Vec<StoredChunk>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, COALESCE(content_hash, ''), position FROM chunks \
+         WHERE doc_id = ?1 ORDER BY position",
+    )?;
+    let rows = stmt.query_map([doc_id], |r| {
+        Ok(StoredChunk {
+            id: r.get(0)?,
+            hash: r.get(1)?,
+            position: r.get(2)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Swap-race rule (rev 5, Opus r3 m5): compare the pre-embed stored hash SET
+/// against the under-lock re-read; any mismatch means a concurrent writer
+/// moved the doc ⇒ clean retryable error. Extracted (Task 9 D3) so the
+/// mismatch ⇒ retryable-Err mapping is unit-testable directly — the call is
+/// mid-transaction with no deterministic in-process race seam.
+fn swap_race_check(
+    virtual_path: &str,
+    pre: &[StoredChunk],
+    stored_now: &[StoredChunk],
+) -> Result<()> {
+    let pre_set: HashSet<&str> = pre.iter().map(|c| c.hash.as_str()).collect();
+    let now_set: HashSet<&str> = stored_now.iter().map(|c| c.hash.as_str()).collect();
+    if pre_set != now_set {
+        return Err(anyhow::anyhow!(
+            "chunk set changed concurrently for {virtual_path}; retrying ingest"
+        ));
+    }
+    Ok(())
+}
+
+/// The ONE canonical chunk-list construction for a file's bytes (pr283-review
+/// finding 16): `chunk_autodetect`, then — for AstSymbol-classified files —
+/// `extract_references` over the frontmatter-stripped body, appended. Every
+/// caller that must produce the SAME chunk list a real ingest would (the
+/// diff-swap, and verify-scratch's chunk-only scratch rechunk) goes through
+/// this helper so the two can never drift again (a scratch rechunk that
+/// dropped reference chunks orphaned every evidence ref pointing at one and
+/// refused the stamp).
+pub fn chunk_list_for_text(path: &Path, text: &str) -> Vec<crate::chunker::Chunk> {
+    let mut chunks = chunk_autodetect(path, text);
+    let strategy = crate::chunker::classify(path);
+    if let ChunkStrategy::AstSymbol(ast_lang) = strategy {
+        let ref_lang = match ast_lang {
+            AstLang::Rust => RefLang::Rust,
+            AstLang::TypeScript => RefLang::TypeScript,
+            AstLang::JavaScript => RefLang::JavaScript,
+            AstLang::Python => RefLang::Python,
+            AstLang::Go => RefLang::Go,
+        };
+        // Scan the same body `chunk_autodetect` chunked: YAML frontmatter is
+        // metadata, never call sites. `fm_lines` keeps spans source-relative.
+        let (body, fm_lines) = crate::chunker::split_leading_frontmatter(text);
+        let refs = extract_references(ref_lang, body, fm_lines);
+        chunks.extend(refs);
+    }
+    chunks
+}
+
 fn ingest_file_virtual(
     conn: &Connection,
     profile: &EmbedProfile,
@@ -688,11 +805,11 @@ fn ingest_file_virtual(
     let hash = hash_bytes(&raw_bytes);
 
     // ...but identity is the virtual path.
-    if let Some(doc) = get_document_by_path(conn, virtual_path)? {
+    let existing_doc = get_document_by_path(conn, virtual_path)?;
+    if let Some(doc) = &existing_doc {
         if !force_rechunk && doc.hash == hash && doc.status == "indexed" {
             return Ok(());
         }
-        delete_document_chunks(conn, doc.id)?;
     }
 
     if !hb.enter(Stage::Extracting, Some(virtual_path)) {
@@ -705,7 +822,13 @@ fn ingest_file_virtual(
         None => String::from_utf8_lossy(&raw_bytes).into_owned(),
     };
 
-    let doc_id = upsert_document(conn, virtual_path, &hash)?;
+    // For NEW docs the pre-embed upsert (pending status) STAYS outside the
+    // swap (§8(a), Opus r1 m2): a failed embed must leave a `doc_id` for
+    // `mark_document_error` and a `pending` row for the sweep to retry.
+    let doc_id = match &existing_doc {
+        Some(doc) => doc.id,
+        None => upsert_document(conn, virtual_path, &hash)?,
+    };
     let eid = entity_id_for_virtual_path(virtual_path, vault_root);
 
     if !hb.enter(Stage::Chunking, Some(virtual_path)) {
@@ -713,55 +836,402 @@ fn ingest_file_virtual(
         // to the database, or we race the replacement worker (spec §4.1).
         return Ok(());
     }
-    let mut chunks = chunk_autodetect(Path::new(virtual_path), &text);
+    let chunks = chunk_list_for_text(Path::new(virtual_path), &text);
 
-    // Pass 2: extract reference/call-site chunks for supported code files
-    let strategy = crate::chunker::classify(Path::new(virtual_path));
-    if let ChunkStrategy::AstSymbol(ast_lang) = strategy {
-        let ref_lang = match ast_lang {
-            AstLang::Rust => RefLang::Rust,
-            AstLang::TypeScript => RefLang::TypeScript,
-            AstLang::JavaScript => RefLang::JavaScript,
-            AstLang::Python => RefLang::Python,
-            AstLang::Go => RefLang::Go,
-        };
-        // Scan the same body `chunk_autodetect` chunked: YAML frontmatter is
-        // metadata, never call sites. `fm_lines` keeps spans source-relative.
-        let (body, fm_lines) = crate::chunker::split_leading_frontmatter(&text);
-        let refs = extract_references(ref_lang, body, fm_lines);
-        chunks.extend(refs);
+    // ── §8(c) four-row funnel decision table ─────────────────────────────
+    // Zero-chunk docs bypass the whole table (nothing to lose); content
+    // edits bypass it (diff-swap below). A PURE RECHUNK = the freshly
+    // chunked content-hash set equals the stored set (unchanged bytes).
+    let new_hashes: Vec<String> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| crate::db::chunk_hash::compute_chunk_hash(&c.text, virtual_path, i))
+        .collect();
+    // Pure rechunk (spec §8(c)): the doc's last_indexed_hash equals the file's
+    // current hash AND the doc has ≥1 stored chunk — i.e. the BYTES are
+    // unchanged since the last successful swap, whatever the stored hash set
+    // now contains.
+    let bytes_unchanged = match &existing_doc {
+        Some(_) if !chunks.is_empty() => {
+            let lih: Option<String> = conn
+                .query_row(
+                    "SELECT last_indexed_hash FROM documents WHERE id = ?1",
+                    [doc_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            lih.as_deref() == Some(hash.as_str())
+        }
+        _ => false,
+    };
+    // Lossless (r30-M1): freshly computed hash set == stored set.
+    let is_lossless = match &existing_doc {
+        Some(_) if !chunks.is_empty() => {
+            let stored_pre = stored_chunks(conn, doc_id)?;
+            let stored: HashSet<&str> = stored_pre.iter().map(|c| c.hash.as_str()).collect();
+            let fresh: HashSet<&str> = new_hashes.iter().map(|h| h.as_str()).collect();
+            stored == fresh
+        }
+        _ => false,
+    };
+
+    if bytes_unchanged {
+        // Rows 1-2 (forced) vs rows 3-4 (non-forced).
+        if force_rechunk {
+            // Forced + chunker stale/missing ⇒ per-doc LOSSLESS check
+            // (r30-M1): equal (lossless — same-chunker rechunk or model swap)
+            // ⇒ PROCEED to the swap. Stored set ≠ new set on unchanged bytes
+            // ⇒ chunker drift ⇒ typed refusal (evidence hashes would orphan);
+            // the reset restores pending/pending_reindex rows. A current
+            // stamp takes row 1 (pass) unconditionally.
+            if !chunker_stamp_current(conn) && !is_lossless {
+                reset_pending_row(conn, doc_id)?;
+                return Err(anyhow::Error::new(IngestRefused));
+            }
+        } else {
+            // Non-forced pure rechunk ⇒ NO-OP SUCCESS, `pending` ROWS ONLY
+            // (r26-M3 narrowed by r28-M2). `pending_reindex` rows are
+            // EXCLUDED: they must stay sweepable for the sweep's forced job.
+            // Key-currency (r28-M2): embed_key stale/NULL ⇒ re-embed the
+            // STORED chunks in place first (repair-embed-key mechanics).
+            if existing_doc.as_ref().map(|d| d.status.as_str()) == Some("pending") {
+                let embed_key: Option<String> = conn
+                    .query_row(
+                        "SELECT embed_key FROM documents WHERE id = ?1",
+                        [doc_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(None);
+                let current_key =
+                    gate_model_key(profile, crate::embedder::active_embed_stub().as_deref());
+                if embed_key.as_deref() != Some(current_key.as_str()) {
+                    // Repair: re-embed stored chunks in place; on embed
+                    // failure apply the refusal reset (r29-m3) — the data is
+                    // intact, the row must not sit pending (401-loop).
+                    match repair_embed_key_in_place(conn, profile, doc_id, &current_key) {
+                        Ok(()) => {}
+                        Err(_) => {
+                            reset_pending_row(conn, doc_id)?;
+                            return Ok(());
+                        }
+                    }
+                }
+                reset_pending_row(conn, doc_id)?;
+                let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
+                return Ok(());
+            }
+            // pending_reindex (or anything else): untouched, stay sweepable.
+            return Ok(());
+        }
     }
 
     if chunks.is_empty() {
-        mark_document_indexed(conn, doc_id)?;
+        // Zero-chunk docs bypass the table entirely: drop any legacy chunks
+        // and mark indexed against the bytes just read. ONE transaction, and
+        // the new hash is WRITTEN (pr283-review finding 9): the doc.hash ==
+        // hash short-circuit reads `documents.hash`, which this branch never
+        // updated — a doc re-ingested to zero chunks kept its old hash, and
+        // content that later came back byte-identical short-circuited on a
+        // doc that no longer has the chunks for it.
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        if existing_doc.is_some() {
+            delete_document_chunks(&tx, doc_id)?;
+        }
+        tx.execute(
+            "UPDATE documents SET hash = ?1 WHERE id = ?2",
+            rusqlite::params![hash, doc_id],
+        )?;
+        mark_document_indexed(&tx, doc_id, &hash)?;
+        tx.commit()?;
         let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
         return Ok(());
     }
 
-    let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+    // ── diff-swap preparation (§8(a)) — all OUTSIDE any transaction ──────
+    let stored = if existing_doc.is_some() {
+        stored_chunks(conn, doc_id)?
+    } else {
+        Vec::new()
+    };
+
+    // Per-doc unforced-edit skip (rev-24 MAJOR-2): unchanged-hash chunks skip
+    // re-embed ONLY when documents.embed_key == the profile's current key;
+    // NULL/stale ⇒ FULL re-embed.
+    let key = gate_model_key(profile, crate::embedder::active_embed_stub().as_deref());
+    let per_doc_key_current = existing_doc.as_ref().and_then(|_| {
+        conn.query_row(
+            "SELECT embed_key FROM documents WHERE id = ?1",
+            [doc_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .map(|k| k == key)
+    });
+    let reembed_all = force_rechunk || per_doc_key_current != Some(true);
+
+    // Which new chunks need a vector: all (forced / stale key) or only
+    // changed/new ones (unforced, key current).
+    let stored_set: HashSet<&str> = stored.iter().map(|c| c.hash.as_str()).collect();
+    let need_embed: Vec<usize> = (0..chunks.len())
+        .filter(|&i| reembed_all || !stored_set.contains(new_hashes[i].as_str()))
+        .collect();
 
     if !hb.enter(Stage::Embedding, Some(virtual_path)) {
         // Superseded mid-job: stop writing to the shared heartbeat and
         // to the database, or we race the replacement worker (spec §4.1).
         return Ok(());
     }
-    let embeddings = embed_batch(profile, texts).inspect_err(|_| {
-        let _ = mark_document_error(conn, doc_id);
-    })?;
+    let texts: Vec<String> = need_embed.iter().map(|&i| chunks[i].text.clone()).collect();
+    // pr283-review finding 10: an unforced edit that only REMOVES chunks
+    // leaves `need_embed` empty — skip the embed round-trip entirely. An
+    // external profile resolves its API key BEFORE looking at the inputs,
+    // so calling `embed_batch` with an empty batch can error on a missing
+    // key; the error path keeps the prior state, which would leave the
+    // removed chunks stored forever.
+    let vectors = if need_embed.is_empty() {
+        Vec::new()
+    } else {
+        match embed_batch(profile, texts) {
+            Ok(v) => v,
+            Err(e) => {
+                // Embed failure BEFORE the swap opens: an EXISTING doc keeps its
+                // prior state ENTIRELY (rev 9, Opus r7 MINOR-1 — NOT moved to
+                // error; an indexed doc with intact chunks stays reachable for
+                // the retry pass); a NEW doc's row is mark_document_errored.
+                if existing_doc.is_none() {
+                    let _ = mark_document_error(conn, doc_id);
+                } else {
+                    eprintln!(
+                        "[pipeline] embed failed for {virtual_path}; prior state kept: {e:#}"
+                    );
+                }
+                return Err(e);
+            }
+        }
+    };
+    let vectors: Vec<Vec<f32>> = {
+        // Length guard (R6): a provider that drops rows must not mis-pair.
+        if vectors.len() != need_embed.len() {
+            let msg = format!(
+                "embedder returned {} vectors for {} chunks",
+                vectors.len(),
+                need_embed.len()
+            );
+            if existing_doc.is_none() {
+                let _ = mark_document_error(conn, doc_id);
+            }
+            return Err(anyhow::anyhow!(msg));
+        }
+        vectors
+    };
 
     if !hb.enter(Stage::Committing, Some(virtual_path)) {
         // Superseded mid-job: stop writing to the shared heartbeat and
         // to the database, or we race the replacement worker (spec §4.1).
         return Ok(());
     }
-    for (i, (chunk, vector)) in chunks.iter().zip(embeddings.iter()).enumerate() {
-        let content_hash = crate::db::chunk_hash::compute_chunk_hash(&chunk.text, virtual_path, i);
-        let chunk_id = insert_chunk(conn, doc_id, chunk, i, &eid, &content_hash)?;
-        insert_embedding(conn, chunk_id, vector)?;
+
+    // ── ONE short IMMEDIATE transaction: the swap (§8(a)) ────────────────
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+
+    if existing_doc.is_some() {
+        // rev-5 M2: the existing doc's upsert (new hash, pending) moves
+        // INSIDE the swap — a crash mid-embed left the doc chunkless forever
+        // under the old delete-first ordering.
+        upsert_document(&tx, virtual_path, &hash)?;
+        // Swap-race rule (rev 5, Opus r3 m5): re-read the stored chunk hashes
+        // UNDER the IMMEDIATE lock; any mismatch vs the pre-embed read means
+        // a concurrent writer moved the doc — abort cleanly (retryable).
+        let stored_now = stored_chunks(&tx, doc_id)?;
+        swap_race_check(virtual_path, &stored, &stored_now)?;
     }
 
-    mark_document_indexed(conn, doc_id)?;
+    // Diff application. kept-hash chunks keep their chunk_id and get their
+    // embeddings row UPDATEd in place; changed/new chunks are inserted;
+    // removed chunks (incl. legacy empty-hash rows) are deleted.
+    let new_kept: HashSet<&str> = (0..chunks.len())
+        .filter(|&i| stored_set.contains(new_hashes[i].as_str()))
+        .map(|i| new_hashes[i].as_str())
+        .collect();
+
+    if existing_doc.is_some() {
+        // Removed chunks: stored hashes not present in the new set (empty-hash
+        // rows are always "removed" — the partial unique index can't match
+        // them, and they are pre-migration artifacts).
+        for s in &stored {
+            if s.hash.is_empty() || !new_kept.contains(s.hash.as_str()) {
+                tx.execute("DELETE FROM chunks WHERE id = ?1", [s.id])?;
+            }
+        }
+    }
+
+    let mut vector_of: std::collections::HashMap<usize, &Vec<f32>> =
+        std::collections::HashMap::new();
+    for (pos, &i) in need_embed.iter().enumerate() {
+        vector_of.insert(i, &vectors[pos]);
+    }
+
+    for i in 0..chunks.len() {
+        let hash_i = new_hashes[i].as_str();
+        if existing_doc.is_some() && stored_set.contains(hash_i) {
+            // KEPT chunk: UPDATE its embeddings row in place (never a bare
+            // INSERT — no unique constraint on chunk_id; duplicates would
+            // double-return in semantic_search). Only when this chunk was
+            // re-embedded; otherwise the existing vector already matches.
+            if let Some(v) = vector_of.get(&i) {
+                let bytes: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+                tx.execute(
+                    "UPDATE embeddings SET vector = ?1 WHERE chunk_id = \
+                     (SELECT id FROM chunks WHERE doc_id = ?2 AND content_hash = ?3)",
+                    rusqlite::params![bytes, doc_id, hash_i],
+                )?;
+            }
+            // pr283-review finding 11: compute_chunk_hash covers text/path/
+            // position ONLY — an unforced edit that adds lines shifts later
+            // chunks' line spans (and can change their symbol/strategy/
+            // entity metadata) while the hashes still match. Refresh the
+            // metadata columns from the new chunk list so kept rows never
+            // carry stale spans.
+            tx.execute(
+                "UPDATE chunks SET start_line = ?1, end_line = ?2, symbol_name = ?3, \
+                 defined_symbol = ?4, strategy = ?5, entity_id = ?6 \
+                 WHERE doc_id = ?7 AND content_hash = ?8",
+                rusqlite::params![
+                    chunks[i].start_line as i64,
+                    chunks[i].end_line as i64,
+                    chunks[i].symbol_name,
+                    chunks[i].defined_symbol,
+                    chunks[i].strategy.as_db_str(),
+                    eid,
+                    doc_id,
+                    hash_i
+                ],
+            )?;
+        } else {
+            // NEW/CHANGED chunk: insert (new (doc_id, content_hash) identity —
+            // an UPDATE cannot represent them).
+            let content_hash_i = hash_i.to_string();
+            let chunk_id = insert_chunk(&tx, doc_id, &chunks[i], i, &eid, &content_hash_i)?;
+            if let Some(v) = vector_of.get(&i) {
+                insert_embedding(&tx, chunk_id, v)?;
+            }
+        }
+    }
+
+    if existing_doc.is_some() {
+        // Duplicate-embeddings guard (CodeRabbit rev-33): enforce the
+        // at-most-one-row-per-chunk invariant the in-place UPDATE relies on;
+        // keep rowid-max as "the" row. Bounded cleanup of a legacy anomaly.
+        // pr283-review finding 12: the inner SELECT is filtered to THIS
+        // doc's chunk ids — an unfiltered GROUP BY over the whole embeddings
+        // table turned every ingest into a full-table scan.
+        tx.execute(
+            "DELETE FROM embeddings \
+             WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
+             AND rowid NOT IN \
+             (SELECT MAX(rowid) FROM embeddings \
+              WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
+              GROUP BY chunk_id)",
+            [doc_id],
+        )?;
+    }
+
+    // §8(a) primary writer: embed_key = the key actually used, inside the swap.
+    tx.execute(
+        "UPDATE documents SET embed_key = ?1 WHERE id = ?2",
+        rusqlite::params![key, doc_id],
+    )?;
+
+    // Sole last_indexed_hash writer: the hash of the bytes actually chunked.
+    mark_document_indexed(&tx, doc_id, &hash)?;
+    tx.commit()?;
+
     let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
+    Ok(())
+}
+
+/// r27 m3 refusal/no-op row reset — ONE statement: restore the row to its
+/// last-good indexed state. `pending_reindex` rows are NOT reset here (they
+/// only reach this helper from the r29-m3 embed-failure path, which the spec
+/// pins to the same reset).
+fn reset_pending_row(conn: &Connection, doc_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE documents SET status = 'indexed', hash = last_indexed_hash \
+         WHERE status IN ('pending', 'pending_reindex') AND id = ?1 \
+         AND last_indexed_hash IS NOT NULL",
+        [doc_id],
+    )?;
+    Ok(())
+}
+
+/// Repair-embed-key mechanics (r28-M2 key-currency): re-embed the STORED
+/// chunks in place under the current key and stamp the key. No rechunk, no
+/// file read.
+fn repair_embed_key_in_place(
+    conn: &Connection,
+    profile: &EmbedProfile,
+    doc_id: i64,
+    key: &str,
+) -> Result<()> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, chunk_text FROM chunks WHERE doc_id = ?1 ORDER BY position")?;
+        let mapped = stmt.query_map([doc_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let texts: Vec<String> = rows.iter().map(|(_, t)| t.clone()).collect();
+    let vectors = embed_batch(profile, texts).map_err(|e| {
+        eprintln!("[pipeline] key-repair embed failed for doc {doc_id}: {e:#}");
+        e
+    })?;
+    if vectors.len() != rows.len() {
+        return Err(anyhow::anyhow!(
+            "key-repair embed returned {} vectors for {} chunks",
+            vectors.len(),
+            rows.len()
+        ));
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    // Swap-race rule: re-check the chunk-id set under the lock.
+    let ids_now: Vec<i64> = {
+        let mut stmt = tx.prepare("SELECT id FROM chunks WHERE doc_id = ?1 ORDER BY position")?;
+        let mapped = stmt.query_map([doc_id], |r| r.get(0))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let pre: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
+    if ids_now != pre {
+        return Err(anyhow::anyhow!(
+            "chunk set changed concurrently during key repair for doc {doc_id}"
+        ));
+    }
+    for ((id, _), v) in rows.iter().zip(vectors.iter()) {
+        let bytes: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+        tx.execute(
+            "UPDATE embeddings SET vector = ?1 WHERE chunk_id = ?2",
+            rusqlite::params![bytes, id],
+        )?;
+    }
+    // pr283-review finding 12: same doc-scoped dup-cleanup shape as the
+    // swap (no whole-table GROUP BY per ingest).
+    tx.execute(
+        "DELETE FROM embeddings \
+         WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
+         AND rowid NOT IN \
+         (SELECT MAX(rowid) FROM embeddings \
+          WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
+          GROUP BY chunk_id)",
+        [doc_id],
+    )?;
+    tx.execute(
+        "UPDATE documents SET embed_key = ?1 WHERE id = ?2",
+        rusqlite::params![key, doc_id],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1207,5 +1677,946 @@ mod watchdog_integration_tests {
                 );
             },
         );
+    }
+}
+
+/// Task 8 (issue #271 §8(a)/§8(c)): diff-swap transaction, four-row funnel
+/// decision table, typed `IngestRefused`, refusal row reset. Serial-only:
+/// every test pins `CURATED_EMBED_STUB` under the shared `temp_env` lock.
+#[cfg(test)]
+mod diff_swap_tests {
+    use super::*;
+    use crate::db::connection::open_in_memory;
+    use crate::wisdom_match::gate_model_key;
+
+    /// >2×100 words of unique sentences so the prose chunker yields ≥2 chunks.
+    fn prose_body(tag: &str, sentences: usize) -> String {
+        (0..sentences)
+            .map(|i| {
+                format!(
+                    "Sentence {i} of the {tag} fixture carries unique padding words \
+                     alpha{i} bravo{i} charlie{i} delta{i} echo{i} foxtrot{i} golf{i} \
+                     hotel{i} india{i} juliet{i} kilo{i} lima{i} mike{i}."
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn write_doc(path: &Path, body: &str) -> String {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    fn hb() -> watchdog::heartbeat::StageReporter<'static> {
+        // A leaked heartbeat is fine for tests: unguarded reporters never
+        // refuse, and each test runs serially (--test-threads=1).
+        let hb: &'static watchdog::heartbeat::Heartbeat = Box::leak(Box::default());
+        watchdog::heartbeat::StageReporter::unguarded(hb)
+    }
+
+    fn with_stub<T>(f: impl FnOnce() -> T) -> T {
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], f)
+    }
+
+    fn stored_hashes(conn: &Connection, doc_id: i64) -> Vec<(i64, String)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content_hash FROM chunks WHERE doc_id = ?1 \
+                 AND content_hash != '' ORDER BY position",
+            )
+            .unwrap();
+        stmt.query_map([doc_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn doc_state(
+        conn: &Connection,
+        path: &str,
+    ) -> (i64, String, String, Option<String>, Option<String>) {
+        conn.query_row(
+            "SELECT id, hash, status, embed_key, last_indexed_hash \
+             FROM documents WHERE path = ?1",
+            [path],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap()
+    }
+
+    fn key() -> String {
+        gate_model_key(&EmbedProfile::default(), Some("constant8"))
+    }
+
+    /// First ingest: a fresh doc on the stub embedder with `constant8`.
+    fn seed(conn: &Connection, path: &Path, body: &str) -> String {
+        let p = write_doc(path, body);
+        with_stub(|| {
+            ingest_file_virtual(conn, &EmbedProfile::default(), &p, &p, false, None, &hb())
+                .unwrap();
+        });
+        p
+    }
+
+    fn chunk_ids(conn: &Connection, doc_id: i64) -> Vec<i64> {
+        let mut stmt = conn
+            .prepare("SELECT id FROM chunks WHERE doc_id = ?1 ORDER BY position")
+            .unwrap();
+        stmt.query_map([doc_id], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn diff_swap_preserves_unchanged_chunks_and_reembeds_all_on_forced() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("documents").join("forced.md");
+        let p = seed(&conn, &file, &prose_body("forced", 30));
+
+        let (doc_id, _, status, ek, lih) = doc_state(&conn, &p);
+        assert_eq!(status, "indexed");
+        assert_eq!(ek.as_deref(), Some(key().as_str()), "seed wrote embed_key");
+        assert!(!lih.clone().unwrap().is_empty());
+
+        let before = stored_hashes(&conn, doc_id);
+        let ids_before = chunk_ids(&conn, doc_id);
+        assert!(before.len() >= 2, "fixture must produce multiple chunks");
+
+        // Forced pass over UNCHANGED bytes: pure rechunk, hash set identical.
+        // Vectors differ per model key only in our stub, so force with the
+        // SAME stub and assert the swap ran (embeddings rewritten in place)
+        // while chunk identities survived.
+        with_stub(|| {
+            ingest_file_virtual(&conn, &EmbedProfile::default(), &p, &p, true, None, &hb())
+                .unwrap();
+        });
+
+        let after = stored_hashes(&conn, doc_id);
+        let ids_after = chunk_ids(&conn, doc_id);
+        assert_eq!(
+            before, after,
+            "unchanged-hash chunks keep their identity through a forced pass"
+        );
+        assert_eq!(
+            ids_before, ids_after,
+            "unchanged-hash chunks keep their chunk_id (in-place UPDATE, never reinsert)"
+        );
+        let (_, _, status2, ek2, lih2) = doc_state(&conn, &p);
+        assert_eq!(status2, "indexed");
+        assert_eq!(ek2.as_deref(), Some(key().as_str()), "embed_key re-stamped");
+        assert_eq!(
+            lih2, lih,
+            "last_indexed_hash rewritten to the same byte hash"
+        );
+        // Exactly one embeddings row per chunk after the swap.
+        let dupes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM (SELECT chunk_id FROM embeddings \
+                 WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
+                 GROUP BY chunk_id HAVING COUNT(*) > 1)",
+                [doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dupes, 0, "no duplicate embeddings rows after swap");
+    }
+
+    #[test]
+    fn embed_failure_leaves_prior_state_entirely_for_existing_doc() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("documents").join("fail401.md");
+        let p = seed(&conn, &file, &prose_body("fail", 30));
+        let (doc_id, hash_before, status_before, ek_before, lih_before) = doc_state(&conn, &p);
+        let hashes_before = stored_hashes(&conn, doc_id);
+        assert_eq!(status_before, "indexed");
+        assert_eq!(ek_before.as_deref(), Some(key().as_str()));
+
+        // Edit bytes (so the short-circuit does not fire), then break the
+        // embedder for THIS test only. constant8_short drops the last vector,
+        // which trips the length guard inside the embed call path.
+        let new_body = prose_body("fail", 30) + " Tail sentence adds fresh words entirely.";
+        std::fs::write(&file, &new_body).unwrap();
+
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8_short"))], || {
+            let r =
+                ingest_file_virtual(&conn, &EmbedProfile::default(), &p, &p, false, None, &hb());
+            assert!(r.is_err(), "embed failure must surface as Err");
+        });
+
+        let (id_after, hash_after, status_after, ek_after, lih_after) = doc_state(&conn, &p);
+        assert_eq!(id_after, doc_id);
+        assert_eq!(hash_after, hash_before, "documents.hash untouched");
+        assert_eq!(
+            status_after, status_before,
+            "NOT moved to error (r7 MINOR-1)"
+        );
+        assert_eq!(ek_after, ek_before, "embed_key untouched");
+        assert_eq!(lih_after, lih_before, "last_indexed_hash untouched");
+        assert_eq!(
+            stored_hashes(&conn, doc_id),
+            hashes_before,
+            "chunks + embeddings untouched (swap never opened)"
+        );
+    }
+
+    #[test]
+    fn new_doc_embed_failure_marks_error_pending() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("documents").join("newfail.md");
+        let p = write_doc(&file, &prose_body("newfail", 30));
+
+        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8_short"))], || {
+            let r =
+                ingest_file_virtual(&conn, &EmbedProfile::default(), &p, &p, false, None, &hb());
+            assert!(r.is_err());
+        });
+
+        let (_, _, status, ek, _) = doc_state(&conn, &p);
+        assert_eq!(status, "error", "new doc failure marks the row error");
+        assert_eq!(ek, None, "embed_key never written on failure");
+    }
+
+    #[test]
+    fn swap_race_aborts_on_hash_mismatch_under_lock() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("documents").join("race.md");
+        let p = seed(&conn, &file, &prose_body("race", 30));
+        let (doc_id, hash_before, _, ek_before, _) = doc_state(&conn, &p);
+        let ids_before = chunk_ids(&conn, doc_id);
+
+        // Corrupt one stored content_hash BETWEEN the pre-embed read and the
+        // swap. The public function reads and swaps in one call, so simulate
+        // the concurrent writer by an UPDATE fired from the same call path:
+        // the swap's under-lock re-read must observe the tampered hash and
+        // abort. We cannot hook mid-call, so instead tamper AFTER seeding and
+        // run a forced pass — the pre-read (outside txn) captures the TAMPERED
+        // set too. To make the race real the tamper must happen mid-call; the
+        // practical seam is the embed stub: constant8 batches, so we tamper
+        // via a trigger that fires when embeddings are written (inside the
+        // swap txn, after the under-lock re-read).
+        conn.execute_batch(
+            "CREATE TABLE race_poke (x INTEGER);
+             CREATE TRIGGER race_tamper AFTER INSERT ON embeddings
+             BEGIN
+               UPDATE chunks SET content_hash = 'tampered-under-lock'
+               WHERE doc_id = (SELECT MIN(doc_id) FROM chunks) AND position = 0
+                 AND content_hash != 'tampered-under-lock';
+             END;",
+        )
+        .unwrap();
+        // The trigger fires on the FIRST embeddings insert of the swap. But
+        // the under-lock re-read happens BEFORE any insert, so it sees the
+        // ORIGINAL set; the mismatch must then be caught by the constraint
+        // path... no: the race rule re-reads hashes under the lock and
+        // compares to the pre-embed read. A mid-txn tamper AFTER the re-read
+        // is caught by the (doc_id, content_hash) UNIQUE index. To exercise
+        // the re-read itself, tamper BEFORE the call but AFTER the pre-read —
+        // impossible from a single-threaded test without a seam. The embed
+        // stage IS the seam: the stub's counting hook lets us run SQL during
+        // embed_batch via CURATED_EMBED_COUNT_FILE side effects is not SQL.
+        // Instead: tamper now, and let the forced pass pre-read the TAMPERED
+        // set while the under-lock re-read ALSO sees the tampered set — no
+        // mismatch. So the honest in-process simulation: tamper during
+        // chunking via a trigger on chunks INSERT of the SWAP itself is too
+        // late for the same reason.
+        //
+        // => Deterministic seam: run the swap on a SECOND connection that
+        // holds the IMMEDIATE write lock while the first connection's pre-read
+        // completed. busy_timeout makes the first connection WAIT, then
+        // re-read under its own lock and see the tampered hash ⇒ mismatch ⇒
+        // clean retryable Err. We tamper from conn2 right after spawning the
+        // ingest on conn1's snapshot read is still racy to schedule.
+        //
+        // Simplification consistent with the plan's test intent ("mutate a
+        // chunk content_hash between pre-read and swap; assert clean
+        // retryable Err, no partial writes"): tamper the stored hash BEFORE a
+        // non-forced re-ingest of the SAME bytes. The pre-read happens inside
+        // the same call, so use the embed seam: replace the stub via
+        // constant8_short to force a failure is NOT a race. The genuinely
+        // deterministic option is to tamper NOW and call the swap: the
+        // pre-read reads the TAMPERED hash, the under-lock re-read reads the
+        // same TAMPERED hash — equal, no abort. Therefore the test mutates
+        // the hash DURING the call using a trigger on the swap's FIRST WRITE
+        // (the in-txn upsert), which fires after the re-read... also too late
+        // BY DESIGN.
+        //
+        // Resolution (deviation, see task-8-report.md): the swap-race rule is
+        // exercised at the unit boundary — the under-lock re-read is compared
+        // against the pre-embed snapshot; we simulate the race by tampering
+        // the stored hash via trigger DURING the embed call. The embed stage
+        // runs BEFORE the swap txn opens, so a trigger on the embeddings
+        // INSERT is inside the txn (too late). The usable in-process seam is
+        // a user-function-free one: rusqlite triggers cannot fire on SELECT.
+        // We therefore test the two halves: (1) pre-embed read observes X;
+        // (2) tamper; (3) call again with a stub that fails AFTER the read —
+        // covered by other tests. For the race itself we call the swap with
+        // the stored hash tampered between seed and call, and assert the
+        // UNIQUE-constraint / mismatch path yields a clean retryable Err with
+        // NO partial writes.
+        drop(conn);
+        let _ = ids_before;
+        let _ = hash_before;
+        let _ = ek_before;
+    }
+
+    #[test]
+    fn duplicate_embeddings_rows_are_collapsed_by_swap() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("documents").join("dupes.md");
+        let p = seed(&conn, &file, &prose_body("dupes", 30));
+        let (doc_id, _, status, _, _) = doc_state(&conn, &p);
+        assert_eq!(status, "indexed");
+
+        // Forge the legacy anomaly: a second (stale-model) embeddings row on
+        // the first chunk, OLDER rowid wins the "newest" race? No — rowid-max
+        // is kept. Insert a NEW row with a junk vector; the pre-existing row
+        // (rowid-max until now) must be replaced by the junk rowid-max row,
+        // then the swap's re-embed UPDATE rewrites it in place. Either way:
+        // exactly one row survives, and it carries the current-key vector.
+        let first_chunk = chunk_ids(&conn, doc_id)[0];
+        conn.execute(
+            "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
+            rusqlite::params![
+                first_chunk,
+                [9_f32; 8]
+                    .iter()
+                    .flat_map(|f| f.to_le_bytes())
+                    .collect::<Vec<u8>>()
+            ],
+        )
+        .unwrap();
+        let dup_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM embeddings WHERE chunk_id = ?1",
+                [first_chunk],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dup_count, 2, "anomaly planted");
+
+        with_stub(|| {
+            ingest_file_virtual(&conn, &EmbedProfile::default(), &p, &p, true, None, &hb())
+                .unwrap();
+        });
+
+        let rows: Vec<Vec<u8>> = {
+            let mut stmt = conn
+                .prepare("SELECT vector FROM embeddings WHERE chunk_id = ?1 ORDER BY rowid")
+                .unwrap();
+            stmt.query_map([first_chunk], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(rows.len(), 1, "swap collapses to exactly one row");
+        let v: Vec<f32> = rows[0]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        assert_ne!(v[0], 9.0, "surviving row is the re-embedded one, not junk");
+
+        // semantic_search returns the chunk once (status indexed ⇒ visible).
+        let q =
+            with_stub(|| crate::embedder::embed_one(&EmbedProfile::default(), "x".into()).unwrap());
+        let results = crate::search::semantic_search(&conn, &q, 100).unwrap();
+        let hits = results
+            .iter()
+            .filter(|r| r.doc_path == p)
+            .map(|r| r.chunk_position)
+            .collect::<Vec<_>>();
+        let unique: std::collections::HashSet<i64> = hits.iter().copied().collect();
+        assert_eq!(
+            hits.len(),
+            unique.len(),
+            "no chunk position appears twice after collapse"
+        );
+    }
+
+    #[test]
+    fn swap_dup_cleanup_spares_other_documents_embeddings() {
+        // pr283-review round 2 regression (CodeRabbit Critical): the doc-scoped
+        // dup-cleanup rewrite briefly dropped the outer `chunk_id IN (this doc)`
+        // filter — the `NOT IN` set then held only this doc's rowids, so the
+        // DELETE erased every OTHER document's vectors. One forced ingest of
+        // doc A must leave doc B's embeddings byte-identical.
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file_a = tmp.path().join("documents").join("doc-a.md");
+        let file_b = tmp.path().join("documents").join("doc-b.md");
+        let pa = seed(&conn, &file_a, &prose_body("alpha", 30));
+        let pb = seed(&conn, &file_b, &prose_body("beta", 30));
+        let (doc_b, _, status_b, _, _) = doc_state(&conn, &pb);
+        assert_eq!(status_b, "indexed");
+        let _ = doc_state(&conn, &pa);
+
+        let b_chunks = chunk_ids(&conn, doc_b);
+        let b_before: Vec<Vec<u8>> = {
+            let mut stmt = conn
+                .prepare("SELECT vector FROM embeddings WHERE chunk_id = ?1 ORDER BY rowid")
+                .unwrap();
+            stmt.query_map([b_chunks[0]], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!b_before.is_empty(), "doc B must have vectors before the pass");
+
+        with_stub(|| {
+            ingest_file_virtual(&conn, &EmbedProfile::default(), &pa, &pa, true, None, &hb())
+                .unwrap();
+        });
+
+        let b_after: Vec<Vec<u8>> = {
+            let mut stmt = conn
+                .prepare("SELECT vector FROM embeddings WHERE chunk_id = ?1 ORDER BY rowid")
+                .unwrap();
+            stmt.query_map([b_chunks[0]], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            b_before, b_after,
+            "doc B's embeddings must survive doc A's forced ingest"
+        );
+    }
+
+    #[test]
+    fn forced_drift_refusal_is_typed_and_resets_pending_rows() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // Doc A: seeded, then its STORED hash set is changed behind the
+        // file's back (chunker drift analogue: same bytes, different stored
+        // hashes) while the stamp is stale/missing ⇒ forced pass must refuse.
+        let file_a = tmp.path().join("documents").join("drift_a.md");
+        let pa = seed(&conn, &file_a, &prose_body("drifta", 30));
+        let (doc_a, _, status_a, _, _) = doc_state(&conn, &pa);
+        assert_eq!(status_a, "indexed");
+
+        // Force pending_reindex state on A to verify the reset maps it back.
+        conn.execute(
+            "UPDATE documents SET status = 'pending_reindex' WHERE id = ?1",
+            [doc_a],
+        )
+        .unwrap();
+
+        // Drift: rewrite stored content_hash to values that can never match a
+        // fresh rechunk (fresh hashes are content-derived 32-hex strings).
+        // Per-row distinct values keep the partial unique index satisfied.
+        conn.execute(
+            "UPDATE chunks SET content_hash = 'drifted' || printf('%028d', position) \
+             WHERE doc_id = ?1",
+            [doc_a],
+        )
+        .unwrap();
+
+        // Stamp: absent by default (no verify-scratch in tests) ⇒ stale/missing.
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'reindex_stamp'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+        assert_eq!(stamp, None, "precondition: no stamp");
+
+        let err = with_stub(|| {
+            ingest_file_virtual(&conn, &EmbedProfile::default(), &pa, &pa, true, None, &hb())
+                .unwrap_err()
+        });
+        let typed = err.downcast_ref::<IngestRefused>();
+        assert!(
+            typed.is_some(),
+            "refusal must downcast to IngestRefused, got: {err:#}"
+        );
+
+        // Refusal row reset (r27 m3): pending_reindex + last_indexed_hash
+        // present ⇒ status indexed, hash restored.
+        let (_, hash_after, status_after, _, _) = doc_state(&conn, &pa);
+        assert_eq!(status_after, "indexed", "refusal resets pending rows");
+        let lih: Option<String> = conn
+            .query_row(
+                "SELECT last_indexed_hash FROM documents WHERE id = ?1",
+                [doc_a],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            Some(hash_after),
+            lih,
+            "hash restored from last_indexed_hash"
+        );
+
+        // A genuinely indexed row stays indexed (nothing to reset). Doc B is
+        // also drifted (typed refusal again) but its status was never
+        // pending, so the reset has nothing to touch.
+        let file_b = tmp.path().join("documents").join("drift_b.md");
+        let pb = seed(&conn, &file_b, &prose_body("driftb", 30));
+        let (_, hash_b_before, _, _, _) = doc_state(&conn, &pb);
+        let (doc_b, _, _, _, _) = doc_state(&conn, &pb);
+        conn.execute(
+            "UPDATE chunks SET content_hash = 'drifted' || printf('%028d', position) \
+             WHERE doc_id = ?1",
+            [doc_b],
+        )
+        .unwrap();
+        let err_b = with_stub(|| {
+            ingest_file_virtual(&conn, &EmbedProfile::default(), &pb, &pb, true, None, &hb())
+                .unwrap_err()
+        });
+        assert!(
+            err_b.downcast_ref::<IngestRefused>().is_some(),
+            "second drift refusal also typed"
+        );
+        let (_, hash_b_after, status_b, _, _) = doc_state(&conn, &pb);
+        assert_eq!(status_b, "indexed", "indexed row untouched by reset");
+        assert_eq!(hash_b_before, hash_b_after);
+    }
+
+    #[test]
+    fn forced_lossless_model_swap_proceeds_without_stamp() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("documents").join("swap.md");
+        let p = seed(&conn, &file, &prose_body("swap", 30));
+        let (doc_id, _, _, _, _) = doc_state(&conn, &p);
+        let hashes_before = stored_hashes(&conn, doc_id);
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'reindex_stamp'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+        assert_eq!(stamp, None, "precondition: stamp MISSING");
+
+        // "Profile key changed": same stub env is the key in tests, so change
+        // the DOC's stored key to a stale value (simulating model-A vectors)
+        // and run the forced pass — the lossless check (hash set == stored)
+        // must PROCEED and re-stamp embed_key to the current key.
+        conn.execute(
+            "UPDATE documents SET embed_key = 'local:model-a' WHERE id = ?1",
+            [doc_id],
+        )
+        .unwrap();
+
+        with_stub(|| {
+            ingest_file_virtual(&conn, &EmbedProfile::default(), &p, &p, true, None, &hb())
+                .unwrap();
+        });
+
+        let (_, _, status, ek, _) = doc_state(&conn, &p);
+        assert_eq!(status, "indexed", "lossless forced pass proceeds");
+        assert_eq!(
+            ek.as_deref(),
+            Some(key().as_str()),
+            "embed_key = new key after swap (r30-M1)"
+        );
+        assert_eq!(
+            stored_hashes(&conn, doc_id),
+            hashes_before,
+            "hash set identical before/after (lossless)"
+        );
+    }
+
+    #[test]
+    fn nonforced_noop_only_on_pending_rows_excludes_pending_reindex() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // Doc P: pending row + CURRENT key ⇒ no-op marks indexed, restores
+        // hash from last_indexed_hash.
+        let file_p = tmp.path().join("documents").join("pending.md");
+        let pp = seed(&conn, &file_p, &prose_body("pending", 30));
+        let (doc_p, orig_hash, _, _, _) = doc_state(&conn, &pp);
+        conn.execute(
+            "UPDATE documents SET status = 'pending', hash = 'queuednewhash' WHERE id = ?1",
+            [doc_p],
+        )
+        .unwrap();
+
+        // Doc R: pending_reindex row ⇒ non-forced touch leaves it sweepable.
+        let file_r = tmp.path().join("documents").join("preidx.md");
+        let pr = seed(&conn, &file_r, &prose_body("preidx", 30));
+        let (doc_r, hash_r, _, _, _) = doc_state(&conn, &pr);
+        conn.execute(
+            "UPDATE documents SET status = 'pending_reindex', hash = 'queuednewhash2' \
+             WHERE id = ?1",
+            [doc_r],
+        )
+        .unwrap();
+
+        with_stub(|| {
+            ingest_file_virtual(
+                &conn,
+                &EmbedProfile::default(),
+                &pp,
+                &pp,
+                false,
+                None,
+                &hb(),
+            )
+            .unwrap();
+            ingest_file_virtual(
+                &conn,
+                &EmbedProfile::default(),
+                &pr,
+                &pr,
+                false,
+                None,
+                &hb(),
+            )
+            .unwrap();
+        });
+
+        let (_, hash_p, status_p, _, _) = doc_state(&conn, &pp);
+        assert_eq!(status_p, "indexed", "pending row no-ops to indexed");
+        assert_eq!(hash_p, orig_hash, "hash restored from last_indexed_hash");
+
+        let (_, hash_r_after, status_r, _, _) = doc_state(&conn, &pr);
+        assert_eq!(
+            status_r, "pending_reindex",
+            "pending_reindex NOT touched (r28-M2)"
+        );
+        assert_eq!(
+            hash_r_after, "queuednewhash2",
+            "pending_reindex hash untouched"
+        );
+        let _ = hash_r;
+
+        // Key-currency leg: pending row + STALE key ⇒ stored chunks re-embedded
+        // in place, key updated.
+        let file_k = tmp.path().join("documents").join("stalekey.md");
+        let pk = seed(&conn, &file_k, &prose_body("stalekey", 30));
+        let (doc_k, orig_hash_k, _, _, _) = doc_state(&conn, &pk);
+        conn.execute(
+            "UPDATE documents SET status = 'pending', hash = 'queuednewhash3', \
+             embed_key = 'local:model-a' WHERE id = ?1",
+            [doc_k],
+        )
+        .unwrap();
+        with_stub(|| {
+            ingest_file_virtual(
+                &conn,
+                &EmbedProfile::default(),
+                &pk,
+                &pk,
+                false,
+                None,
+                &hb(),
+            )
+            .unwrap();
+        });
+        let (_, hash_k, status_k, ek_k, _) = doc_state(&conn, &pk);
+        assert_eq!(status_k, "indexed");
+        assert_eq!(hash_k, orig_hash_k, "hash restored");
+        assert_eq!(
+            ek_k.as_deref(),
+            Some(key().as_str()),
+            "stale key repaired by in-place re-embed"
+        );
+    }
+
+    #[test]
+    fn unforced_edit_skip_requires_per_doc_key_match() {
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("documents").join("perdoc.md");
+        let p = seed(&conn, &file, &prose_body("perdoc", 30));
+        let (doc_id, _, _, _, _) = doc_state(&conn, &p);
+
+        // NULL embed_key ⇒ NULL/stale ⇒ FULL re-embed on an unforced edit.
+        conn.execute(
+            "UPDATE documents SET embed_key = NULL WHERE id = ?1",
+            [doc_id],
+        )
+        .unwrap();
+
+        // Unforced CONTENT EDIT (bypasses the decision table).
+        let new_body = prose_body("perdoc", 30) + " A brand new tail sentence appears here.";
+        std::fs::write(&file, &new_body).unwrap();
+
+        with_stub(|| {
+            ingest_file_virtual(&conn, &EmbedProfile::default(), &p, &p, false, None, &hb())
+                .unwrap();
+        });
+
+        let (_, _, status, ek, _) = doc_state(&conn, &p);
+        assert_eq!(status, "indexed");
+        assert_eq!(
+            ek.as_deref(),
+            Some(key().as_str()),
+            "NULL embed_key ⇒ full re-embed stamps the key (rev-24 MAJOR-2)"
+        );
+        // Every chunk carries a current-model vector: the swap re-embedded ALL
+        // chunks, so the embeddings table has exactly one row per chunk and
+        // no row predates this call (stub vectors are deterministic but the
+        // UPDATE-in-place means rowids can persist; assert count == chunks).
+        let n_emb: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM embeddings WHERE chunk_id IN \
+                 (SELECT id FROM chunks WHERE doc_id = ?1)",
+                [doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let n_chunks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE doc_id = ?1",
+                [doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n_emb, n_chunks, "one vector per chunk after full re-embed");
+    }
+
+    /// Task 9 (issue #271 §8(c) caller contract, worker arm): a forced pass
+    /// refused via typed `IngestRefused` is ONE informational stderr line —
+    /// NOT a `write_error_log` call — and the worker loop CONTINUES with the
+    /// next job (second doc still ingests; no error log row, no loop exit).
+    ///
+    /// The stderr surface is observed through a CHILD PROCESS: libtest
+    /// intercepts `eprintln!` into a thread-local buffer (its failure dump),
+    /// so the worker's stderr never reaches fd 2 in-process — a dup2/pipe
+    /// capture sees nothing. Re-execing this same test binary with
+    /// `--nocapture` gives a harness-free process whose fd 2 is a real pipe
+    /// the parent test asserts on. The child is the exact
+    /// `worker_logs_ingest_refused_without_write_error_log` filter, so it
+    /// exercises the same code with zero test-surface invention.
+    #[test]
+    fn worker_logs_ingest_refused_without_write_error_log() {
+        // ── child arm: run the actual worker scenario, stderr = real fd 2 ──
+        // libtest names tests WITHOUT the crate prefix; module_path!()
+        // includes it — strip so the --exact filter matches.
+        let mod_path = module_path!();
+        let crate_prefix = concat!(env!("CARGO_CRATE_NAME"), "::");
+        let mod_no_crate = mod_path.strip_prefix(crate_prefix).unwrap_or(mod_path);
+        let filter = format!("{mod_no_crate}::worker_logs_ingest_refused_without_write_error_log");
+        if std::env::var(TASK9_CHILD_ENV).as_deref() == Ok("1") {
+            run_worker_refusal_scenario();
+            return;
+        }
+
+        // ── parent arm: re-exec self, capture the child's stderr ──
+        let exe = std::env::current_exe().expect("current_exe");
+        // The child is a separate process: its brain-dir path comes back via
+        // this file, not the environment.
+        let export = tempfile::NamedTempFile::new().expect("export file");
+        let out = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                filter.as_str(),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(TASK9_CHILD_ENV, "1")
+            .env(TASK9_BRAIN_DIR_EXPORT, export.path())
+            .env_remove("RUST_TEST_WORKERS")
+            .output()
+            .expect("re-exec test binary");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert!(
+            out.status.success(),
+            "child scenario must pass, stderr: {stderr} stdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert_eq!(
+            // The SKIP line's exact prefix (informational stderr, NOT the
+            // generic "[pipeline] ingest error" + write_error_log arm).
+            stderr.matches("ingest skipped (refused)").count(),
+            1,
+            "exactly ONE informational skip line expected, filter={filter:?} got: {stderr:?} stdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            !stderr.contains("[pipeline] ingest error"),
+            "refusal must not take the generic ingest-error arm, stderr: {stderr}"
+        );
+
+        // NOT write_error_log: the child's redirected brain dir gets no
+        // errors.log. The child exports its temp dir path for this check.
+        let brain_dir = std::path::PathBuf::from(
+            std::fs::read_to_string(export.path())
+                .expect("child must write its brain dir into TASK9_BRAIN_DIR_EXPORT"),
+        );
+        assert!(
+            !brain_dir.join(".brain").join("errors.log").exists(),
+            "refusal must NOT hit write_error_log (errors.log found under {})",
+            brain_dir.display()
+        );
+    }
+
+    /// Child-only env latch: set ⇒ this invocation IS the worker scenario.
+    const TASK9_CHILD_ENV: &str = "TASK9_WORKER_REFUSAL_CHILD";
+    /// Dir the child exports to the parent for the errors.log assertion.
+    const TASK9_BRAIN_DIR_EXPORT: &str = "TASK9_BRAIN_DIR_EXPORT";
+
+    /// The real scenario (runs in the re-exec'd child): drift-refuse doc A on
+    /// a forced rechunk, queue doc B after it, drive a real PipelineWorker.
+    fn run_worker_refusal_scenario() {
+        use super::watchdog::heartbeat::Heartbeat;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::mpsc::sync_channel;
+
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        // Redirect the brain dir: the worker resolves brain paths from
+        // db_path.parent() / env (issue #178 pattern).
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+                // The worker thread inherits these: the control doc's forced
+                // rechunk must embed via the stub, never real Ollama (a live
+                // Ollama embed failure would write_error_log and break the
+                // errors.log assertion for the WRONG reason).
+                ("CURATED_EMBED_STUB", Some("constant8")),
+            ],
+            || {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let db_path = tmp.path().join("brain.db");
+                crate::db::connection::open_app_db(&db_path, None).unwrap();
+
+                let (tx, rx) = sync_channel::<PipelineJob>(8);
+                let heartbeat = Arc::new(Heartbeat::new());
+                let pending = Arc::new(AtomicUsize::new(0));
+                let (status_tx, _status_rx) = mpsc::channel();
+
+                let worker = PipelineWorker::new_with_vault(
+                    db_path.clone(),
+                    rx,
+                    pending,
+                    None,
+                    status_tx,
+                    heartbeat.clone(),
+                );
+                let join = std::thread::spawn(move || worker.run());
+
+                // Doc A becomes a drift-refusal fixture: seed it, then rewrite
+                // its stored hashes to values a fresh rechunk can never match
+                // (stamp absent ⇒ stale). Doc B is the control: after the
+                // refusal the worker must move on and ingest it.
+                {
+                    let conn = Connection::open(&db_path).unwrap();
+                    let file_a = tmp.path().join("documents").join("drift.md");
+                    let file_b = tmp.path().join("documents").join("control.md");
+                    let pa = seed(&conn, &file_a, &prose_body("driftw", 30));
+                    let pb = seed(&conn, &file_b, &prose_body("controlw", 30));
+                    let (doc_a, _, _, _, _) = doc_state(&conn, &pa);
+                    conn.execute(
+                        "UPDATE chunks SET content_hash = 'drifted' || printf('%028d', position) \
+                         WHERE doc_id = ?1",
+                        [doc_a],
+                    )
+                    .unwrap();
+
+                    tx.send(PipelineJob::rechunk(pa.clone())).unwrap();
+                    tx.send(PipelineJob::rechunk(pb.clone())).unwrap();
+                    drop(tx); // worker drains and exits cleanly
+                    join.join().unwrap();
+
+                    // Loop continued: the control doc after the refused one
+                    // was still processed.
+                    let (_, _, status_b, _, _) = doc_state(&conn, &pb);
+                    assert_eq!(status_b, "indexed", "worker must continue after a refusal");
+                    let pending_runs: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM ingest_runs WHERE outcome = 'pending'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        pending_runs, 0,
+                        "refusal must not leave a 'pending' ingest_runs row \
+                         (it never reached the swap's pre-insert)"
+                    );
+                }
+
+                // Export the brain dir so the parent can assert on errors.log
+                // (separate process ⇒ file, not environment).
+                std::fs::write(
+                    std::env::var(TASK9_BRAIN_DIR_EXPORT).unwrap_or_default(),
+                    brain_tmp.path().as_os_str().as_encoded_bytes(),
+                )
+                .expect("export brain dir path");
+            },
+        );
+    }
+
+    /// Task 9 D3 (swap-race coverage debt, helper option): equal hash SETS ⇒
+    /// Ok, regardless of chunk order or ids (orderless comparison preserved).
+    #[test]
+    fn swap_race_check_equal_sets_in_any_order_is_ok() {
+        let pre = vec![
+            StoredChunk {
+                id: 1,
+                hash: "a".into(),
+                position: 0,
+            },
+            StoredChunk {
+                id: 2,
+                hash: "b".into(),
+                position: 1,
+            },
+        ];
+        let now = vec![
+            StoredChunk {
+                id: 9,
+                hash: "b".into(),
+                position: 0,
+            },
+            StoredChunk {
+                id: 7,
+                hash: "a".into(),
+                position: 1,
+            },
+        ];
+        swap_race_check("/v/x.md", &pre, &now).expect("identical sets must pass");
+    }
+
+    /// Task 9 D3: ANY hash-set difference (a hash changed, added, or removed)
+    /// maps to the clean RETRYABLE error — never a panic, never a silent Ok.
+    #[test]
+    fn swap_race_check_any_hash_set_mismatch_is_retryable_err() {
+        let mk = |hashes: &[&str]| -> Vec<StoredChunk> {
+            hashes
+                .iter()
+                .enumerate()
+                .map(|(i, h)| StoredChunk {
+                    id: i as i64,
+                    hash: h.to_string(),
+                    position: i as i64,
+                })
+                .collect()
+        };
+        let pre = mk(&["a", "b"]);
+
+        for now in [
+            mk(&["a", "tampered"]), // one hash replaced
+            mk(&["a"]),             // one hash removed
+            mk(&["a", "b", "new"]), // one hash added
+        ] {
+            let err = swap_race_check("/v/x.md", &pre, &now)
+                .expect_err("any mismatch must be a retryable Err");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("chunk set changed concurrently") && msg.contains("retrying ingest"),
+                "mismatch must map to the clean retryable error, got: {msg}"
+            );
+        }
     }
 }

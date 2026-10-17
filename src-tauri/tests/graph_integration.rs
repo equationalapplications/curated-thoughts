@@ -42,7 +42,7 @@ fn seed_five_hop_chain(
         "h",
     )
     .unwrap();
-    mark_document_indexed(conn, doc).unwrap();
+    mark_document_indexed(conn, doc, "seed-h").unwrap();
     let names = ["a", "b", "c", "d", "e", "f"];
     let ids: Vec<i64> = names
         .iter()
@@ -167,7 +167,7 @@ fn impact_radius_max_hops_clamped_to_five_by_command() {
     // Seed a 6-hop chain: n0→n1→…→n6
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
     let doc = upsert_document(&conn, "/vault/documents/deep_chain.rs", "h2").unwrap();
-    mark_document_indexed(&conn, doc).unwrap();
+    mark_document_indexed(&conn, doc, "seed-h").unwrap();
     let nodes: Vec<i64> = (0..7usize)
         .map(|i| {
             insert_chunk(

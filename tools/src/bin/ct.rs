@@ -111,6 +111,23 @@ enum Cmd {
         /// remaps, or watermark storage (requires --yes).
         #[arg(long, requires = "yes")]
         waive_drift: Option<String>,
+        /// Task 10 (spec §10): delete the breaker epoch timestamp, the shared
+        /// spent counter and both `breaker_L_*` keys (one IMMEDIATE
+        /// transaction) and exit WITHOUT running the heal — the operator
+        /// surface for a tripped breaker (requires --yes).
+        #[arg(long, requires = "yes", conflicts_with = "allow_bulk")]
+        reset_breaker: bool,
+        /// Task 10 (spec §10): skip the bulk-deletion breaker for THIS one
+        /// run — the only sanctioned way to run a full-population pass after
+        /// investigating (requires --yes).
+        #[arg(long, requires = "yes")]
+        allow_bulk: bool,
+    },
+    /// Reindex operations (issue #271 Task 12): repair stale/NULL-key
+    /// candidate docs from stored chunk text.
+    Reindex {
+        #[command(subcommand)]
+        cmd: ReindexCmd,
     },
     /// Approve, list, or revoke symlinks the ingest walker may follow.
     Trust {
@@ -285,6 +302,10 @@ enum EvidenceCmd {
         /// Confirm the destructive write (export + purge).
         #[arg(long)]
         yes: bool,
+        /// Task 10 (spec §10): skip the bulk-deletion breaker for THIS one
+        /// run (requires --yes).
+        #[arg(long, requires = "yes")]
+        allow_bulk: bool,
     },
 }
 
@@ -298,6 +319,43 @@ enum LibrarianCmd {
         /// Re-run every document, bypassing the synthesis watermark gate.
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReindexCmd {
+    /// Re-embed the STORED CHUNKS of every stale/NULL-key candidate doc
+    /// directly from the DB (spec 2026-10-09-issue271 §6 repair path): no
+    /// file read, no status/tier precondition, no stamp. Per doc ONE
+    /// IMMEDIATE transaction covers the in-place vector updates and the
+    /// `documents.embed_key` write; the chunk-id set is re-checked under
+    /// the lock (swap-race rule; a mismatch skips the doc — the next run
+    /// retries). Exit 0; per-doc verdicts + final coverage.
+    RepairEmbedKey {
+        /// Repair every stale/NULL-key candidate doc (the current and only
+        /// selection).
+        #[arg(long)]
+        stale: bool,
+    },
+    /// Bootstrap (spec 2026-10-09-issue271 §6): copy the live DB to a scratch
+    /// file, rechunk every doc CHUNK-ONLY under the current binary, and —
+    /// iff every live evidence hash ref resolves on the scratch rechunk AND
+    /// every gate-eligible entry stays hop-resolvable — write the
+    /// CHUNKER-ONLY stamp (`llm_wiki_meta`.`reindex_stamp` =
+    /// `CHUNKER_FINGERPRINT`) to the LIVE DB. A chunker bump FAILS the
+    /// check (the rechunk must be LOSSLESS) and writes no stamp. Sampled
+    /// backfill: per chunk-bearing doc the FIRST + LAST chunk are
+    /// re-embedded from STORED CHUNK TEXT and matched by cosine ≥ 1−1e−3;
+    /// on match `documents.embed_key` is backfilled under a GUARDED
+    /// per-doc IMMEDIATE transaction (r28-m6 chunk-set + key re-check;
+    /// `--dry-run` runs the SAME analysis (sample, scratch rechunk, lossless
+    /// checks, per-doc verdicts) with ALL live writes suppressed: nothing is
+    /// written to either DB, the stamp/refusal outcome is printed as WOULD-be.
+    /// Per-doc verdicts + final candidate-set coverage; exit 0 or 1.
+    VerifyScratch {
+        /// Print-only: no stamp, no embed_key, nothing on either DB.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 #[derive(Subcommand)]
@@ -360,6 +418,16 @@ enum WisdomCmd {
         /// Fact id already in the caller's context (repeatable; use the --exclude=<id> form).
         #[arg(long = "exclude", value_parser = parse_fact_id, action = clap::ArgAction::Append)]
         exclude: Vec<String>,
+        /// Force the two-stage retrieval path (issue #271 §5). Mutually
+        /// exclusive with --single-stage. Until the calibrated two-stage
+        /// floors land (Task 15), this degrades to the v1 path with the
+        /// seven-field `wisdom_two_stage_audit` stderr line.
+        #[arg(long = "two-stage", group = "stage_sel")]
+        two_stage: bool,
+        /// Force the plain v1 path (issue #271 §5 off-switch). Mutually
+        /// exclusive with --two-stage.
+        #[arg(long = "single-stage", group = "stage_sel")]
+        single_stage: bool,
         /// The message to match. Only accepted after `--`.
         #[arg(last = true, required = true)]
         text: Vec<String>,
@@ -644,7 +712,9 @@ fn run(cmd: Cmd) -> Result<i32> {
             ),
         },
         Cmd::Evidence { cmd } => match cmd {
-            EvidenceCmd::Regrade { yes } => cli_common::evidence_regrade_cmd(yes),
+            EvidenceCmd::Regrade { yes, allow_bulk } => {
+                cli_common::evidence_regrade_cmd(yes, allow_bulk)
+            }
         },
         Cmd::Proposals { cmd } => match cmd {
             ProposalsCmd::List { json } => proposals_list(json),
@@ -703,6 +773,8 @@ fn run(cmd: Cmd) -> Result<i32> {
                 json,
                 max,
                 exclude,
+                two_stage,
+                single_stage,
                 text,
             } => {
                 if exclude.len() > tauri_app_lib::wisdom_match::MAX_EXCLUDES {
@@ -711,7 +783,14 @@ fn run(cmd: Cmd) -> Result<i32> {
                         tauri_app_lib::wisdom_match::MAX_EXCLUDES
                     );
                 }
-                cli_common::wisdom_match_cmd(&text.join(" "), max, &exclude, json)
+                let mode = if two_stage {
+                    cli_common::WisdomStageMode::TwoStage
+                } else if single_stage {
+                    cli_common::WisdomStageMode::SingleStage
+                } else {
+                    cli_common::WisdomStageMode::Auto
+                };
+                cli_common::wisdom_match_cmd(&text.join(" "), max, &exclude, json, mode)
             }
             WisdomCmd::Scheme { cmd } => match cmd {
                 SchemeCmd::Status { json } => cli_common::wisdom_scheme_status_cmd(json),
@@ -722,10 +801,23 @@ fn run(cmd: Cmd) -> Result<i32> {
             },
         },
         Cmd::Drift { json } => curated_thoughts_tools::drift::drift_cmd(json),
+        Cmd::Reindex { cmd } => match cmd {
+            ReindexCmd::RepairEmbedKey { stale } => {
+                if !stale {
+                    bail!("`ct reindex repair-embed-key` requires --stale (the only supported selection)");
+                }
+                curated_thoughts_tools::reindex::repair_embed_key_stale()
+            }
+            ReindexCmd::VerifyScratch { dry_run } => {
+                curated_thoughts_tools::reindex::verify_scratch(dry_run)
+            }
+        },
         Cmd::Heal {
             yes,
             confirm_drift,
             waive_drift,
+            reset_breaker,
+            allow_bulk,
         } => {
             if !yes {
                 // Path-only resolution so a fresh brain (no brain.db yet)
@@ -787,7 +879,7 @@ fn run(cmd: Cmd) -> Result<i32> {
             // plan-p6-m1: the --yes arm returns the heal's own exit code —
             // an unconfirmed drift report or a refused ontology section is
             // exit 1 even though the source-heal above it succeeded.
-            cli_common::heal_run(confirm_drift, waive_drift)
+            cli_common::heal_run(confirm_drift, waive_drift, reset_breaker, allow_bulk)
         }
         Cmd::Trust { link, list, revoke } => trust_cmd(link, list, revoke),
         Cmd::Watch {
@@ -1220,5 +1312,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Task 10 (spec §10): `ct heal --reset-breaker` and `--allow-bulk` parse
+    /// against THIS clap definition, so the printed refusal/reset guidance
+    /// (and every script copying it) cannot drift from the real flags.
+    /// `--allow-bulk` requires `--yes` — it is a one-run skip for an operator
+    /// who has already confirmed the write, never a standalone bypass.
+    #[test]
+    fn heal_breaker_flags_parse() {
+        // reset-breaker requires --yes.
+        let parsed = Ct::try_parse_from(["ct", "heal", "--yes", "--reset-breaker"])
+            .expect("heal --yes --reset-breaker must parse");
+        let Cmd::Heal {
+            yes,
+            reset_breaker,
+            allow_bulk,
+            ..
+        } = parsed.cmd
+        else {
+            panic!("parsed as another command");
+        };
+        assert!(yes);
+        assert!(reset_breaker);
+        assert!(!allow_bulk);
+
+        // Without --yes the reset flag refuses to parse (the human gate holds).
+        assert!(
+            Ct::try_parse_from(["ct", "heal", "--reset-breaker"]).is_err(),
+            "--reset-breaker must require --yes"
+        );
+
+        // allow-bulk requires --yes and is distinct from the reset.
+        let parsed = Ct::try_parse_from(["ct", "heal", "--yes", "--allow-bulk"])
+            .expect("heal --yes --allow-bulk must parse");
+        let Cmd::Heal {
+            yes,
+            reset_breaker,
+            allow_bulk,
+            ..
+        } = parsed.cmd
+        else {
+            panic!("parsed as another command");
+        };
+        assert!(yes);
+        assert!(!reset_breaker);
+        assert!(allow_bulk);
+        assert!(Ct::try_parse_from(["ct", "heal", "--allow-bulk"]).is_err());
+
+        // regrade gains --allow-bulk (the breaker-skip on its destructive batch).
+        let parsed = Ct::try_parse_from(["ct", "evidence", "regrade", "--yes", "--allow-bulk"])
+            .expect("evidence regrade --yes --allow-bulk must parse");
+        let Cmd::Evidence {
+            cmd: EvidenceCmd::Regrade { yes, allow_bulk },
+        } = parsed.cmd
+        else {
+            panic!("parsed as another command");
+        };
+        assert!(yes);
+        assert!(allow_bulk);
+        assert!(
+            Ct::try_parse_from(["ct", "evidence", "regrade", "--allow-bulk"]).is_err(),
+            "regrade --allow-bulk must require --yes"
+        );
     }
 }

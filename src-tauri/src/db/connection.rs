@@ -8,7 +8,7 @@ use crate::db::schema::{
 use crate::hasher::hash_bytes;
 use crate::vault::VaultConfig;
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
 /// Outcome of one `v22_unify_documents_path` pass. Reported so the caller
@@ -830,6 +830,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // is re-read inside the helper after V24/V25/V26's inserts, mirroring
     // V25's re-read.
     apply_v27_embed_scheme(conn)?;
+    apply_v28_two_stage_columns(conn)?;
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
@@ -1016,6 +1017,141 @@ fn apply_v27_embed_scheme(conn: &Connection) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// V28 body (spec 2026-10-09-issue271 §6/§8(c)/§9 step 1): add
+/// `documents.embed_key TEXT` (model key whose vectors the doc's chunks carry;
+/// NULL/stale ⇒ excluded from stage 1 — written by the §8(a) swap transaction
+/// and ordinary ingests, NEVER by a migration backfill) and
+/// `documents.last_indexed_hash TEXT` (hash of the bytes actually chunked and
+/// embedded; written ONLY inside `mark_document_indexed`), with the ONE-SHOT
+/// `last_indexed_hash` backfill. Runs AFTER every versioned migration (the V15
+/// rebuild of `documents` copies an explicit column list and would drop the
+/// columns otherwise). Stamp gated on V22 like V23–V27.
+fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()> {
+    // Unlocked pre-check keeps the steady state (both columns present) from
+    // taking the write lock on every open — the V24/V27 pattern.
+    let existing = crate::db::ddl_compat::existing_columns(conn, "documents")?;
+    let missing_embed_key = !existing.iter().any(|c| c == "embed_key");
+    let missing_lih = !existing.iter().any(|c| c == "last_indexed_hash");
+    let missing_cols = missing_embed_key || missing_lih;
+    // Fresh-brain marker machinery (spec §8, "Fresh brain" defined): a
+    // COUNT(*)=0 check cannot implement "no rows EVER" — rows leave via
+    // regrade/prune/clear hard deletes — so the marker is a persistent
+    // `llm_wiki_meta` row armed by an AFTER INSERT trigger on
+    // `librarian_evidence` and backfilled for any brain that has rows today.
+    // All probes below are read-only (no write lock taken to evaluate them);
+    // the LOCK is entered only when work is actually pending:
+    // - pre-V18 replica (`librarian_evidence` absent, V18 not yet run): skip
+    //   everything WITHOUT error — SQLite rejects CREATE TRIGGER … ON a
+    //   missing table; the machinery lands on a later open after V18's DDL.
+    // - trigger missing (table present): create it (one lock, then steady).
+    // - backfill pending (rows exist AND marker absent): arm the marker
+    //   (one lock, then steady — nothing in production deletes the key, the
+    //   clear transaction keeps `llm_wiki_meta`). An empty-evidence brain
+    //   never re-locks for the backfill, so no per-open write-lock hazard
+    //   (V27 precedent); `INSERT OR IGNORE` keeps the write idempotent.
+    let evidence_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='librarian_evidence'",
+        [],
+        |r| r.get(0),
+    )?;
+    let has_evidence_table = evidence_table > 0;
+    let trigger_pending =
+        has_evidence_table && !trigger_exists(conn, "librarian_evidence_seen_trg")?;
+    let backfill_pending = has_evidence_table && {
+        let rows_exist: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM librarian_evidence)",
+            [],
+            |r| r.get::<_, i64>(0).map(|v| v > 0),
+        )?;
+        rows_exist
+            && conn
+                .query_row(
+                    "SELECT value FROM llm_wiki_meta
+                      WHERE key = 'librarian_evidence_seen'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .is_none()
+    };
+    if missing_cols || trigger_pending || backfill_pending {
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let applied = (|| -> Result<()> {
+            // Re-inspect UNDER the write lock (concurrent desktop/`--mcp` open).
+            let existing = crate::db::ddl_compat::existing_columns(conn, "documents")?;
+            if !existing.iter().any(|c| c == "embed_key") {
+                conn.execute("ALTER TABLE documents ADD COLUMN embed_key TEXT", [])?;
+            }
+            if !existing.iter().any(|c| c == "last_indexed_hash") {
+                conn.execute(
+                    "ALTER TABLE documents ADD COLUMN last_indexed_hash TEXT",
+                    [],
+                )?;
+                // ONE-SHOT backfill, inside the ALTER call only (V27 precedent,
+                // connection.rs:973-984): `pending` rows may already carry
+                // queue.rs's pre-written NEW hash (spec §8(c) B1); pending_reindex
+                // rows were staged from indexed with unchanged bytes ⇒ backfilled.
+                conn.execute(
+                    "UPDATE documents SET last_indexed_hash = hash
+                      WHERE status IN ('indexed','pending_reindex')",
+                    [],
+                )?;
+            }
+            if has_evidence_table {
+                // Idempotent both ways: `IF NOT EXISTS` + `INSERT OR IGNORE`
+                // body. Concurrent opens that both entered the lock re-run
+                // these harmlessly.
+                conn.execute_batch(
+                    "CREATE TRIGGER IF NOT EXISTS librarian_evidence_seen_trg
+                       AFTER INSERT ON librarian_evidence
+                     BEGIN
+                       INSERT OR IGNORE INTO llm_wiki_meta (key, value)
+                       VALUES ('librarian_evidence_seen', '1');
+                     END;",
+                )?;
+                if backfill_pending {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO llm_wiki_meta (key, value)
+                         SELECT 'librarian_evidence_seen', '1'
+                          WHERE EXISTS (SELECT 1 FROM librarian_evidence)",
+                        [],
+                    )?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = applied.and_then(|()| Ok(conn.execute_batch("COMMIT;")?)) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+    }
+    // Stamp last, gated on V22 (a rootless open must not mask a deferred V22).
+    let stamped_now: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped_now >= 22 {
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (28)",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// True when a trigger of the given name exists (any table). Used to decide
+/// whether the `librarian_evidence_seen_trg` creation still needs to run on a
+/// steady-state open.
+fn trigger_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name = ?1",
+        [name],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// Best-effort ensure failure logging (r8-m6). The open NEVER fails when
@@ -1707,6 +1843,288 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, 1, "idx_documents_dirty must survive the rebuild");
+    }
+
+    /// V28 — two-stage retrieval columns (spec 2026-10-09-issue271 §6/§8(c)):
+    /// `documents.embed_key` and `documents.last_indexed_hash` exist on every
+    /// open, and the `last_indexed_hash` backfill is ONE-SHOT (rides the ALTER
+    /// call's transaction only). embed_key gets NO migration backfill.
+    #[test]
+    fn v28_adds_embed_key_and_last_indexed_hash_with_one_shot_backfill() {
+        let conn = open_in_memory().unwrap();
+        // open_in_memory runs rootless, so V22+ stay unstamped (cap 21). Rewind
+        // and re-migrate with a resolvable root so the stamp ladder completes
+        // (same pattern as migrate_with_resolvable_vault_root_stamps_v22...):
+        // both columns exist and stamp 28 is present.
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
+        migrate(
+            &conn,
+            Some(VaultRoots {
+                configured: "/Users/kurt/vault".to_string(),
+                canonical: "/private/var/vault".to_string(),
+            }),
+            None,
+        )
+        .unwrap();
+        let cols = crate::db::ddl_compat::existing_columns(&conn, "documents").unwrap();
+        assert!(cols.iter().any(|c| c == "embed_key"));
+        assert!(cols.iter().any(|c| c == "last_indexed_hash"));
+        let v: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 28);
+
+        // One-shot backfill semantics: an indexed row was backfilled from `hash`;
+        // embed_key got NO migration backfill (NULL until a writer stamps it).
+        conn.execute(
+            "INSERT INTO documents (path, hash, status, tier) VALUES ('/v/a.md','h1','indexed','user_doc')",
+            [],
+        )
+        .unwrap();
+        // simulate a pre-upgrade pair by clearing the backfill on one row:
+        conn.execute("UPDATE documents SET last_indexed_hash = NULL", [])
+            .unwrap();
+        // Re-open is required to re-run migrate; use migrate_open_db directly:
+        crate::db::connection::migrate_open_db(&conn, None).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE last_indexed_hash IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "backfill must be ONE-SHOT: a second migrate must NOT re-run it"
+        );
+    }
+
+    /// embed_key has NO migration backfill — it is written by the §8(a) swap
+    /// transaction and ordinary ingests only (spec §6); a migration that
+    /// guessed a key would corrupt the stage-1 coverage check.
+    #[test]
+    fn v28_does_not_backfill_embed_key() {
+        let conn = open_in_memory().unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE embed_key IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "embed_key has NO migration backfill (writers only, spec §6)"
+        );
+    }
+
+    /// Pre-V15 brain upgraded on open (spec §9 step 1): a `documents` table
+    /// built by the REAL V1–V14 chain (the shape `MIGRATION_V15`'s rebuild
+    /// copies from — no SQL dump fixture exists under tests/fixtures/), then
+    /// pushed through the full migrate() ladder. The row survives the V15
+    /// rebuild and its `last_indexed_hash` is backfilled from `hash` because
+    /// status='indexed'.
+    #[test]
+    fn pre_v15_fixture_gains_v28_columns_on_open() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\n{}\n{}\nCOMMIT;",
+            MIGRATION_V1, MIGRATION_V2, MIGRATION_V3
+        ))
+        .unwrap();
+        conn.execute_batch(MIGRATION_V4).unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V5))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V6))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", okf_ddl::migration_v7_sql()))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V9))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V10))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V11))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V12))
+            .unwrap();
+        crate::db::ddl_compat::add_column_if_missing(
+            &conn,
+            "documents",
+            "quarantined_at",
+            "INTEGER",
+        )
+        .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V13))
+            .unwrap();
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATION_V14))
+            .unwrap();
+
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('/v/old.md', 'h-old', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+
+        crate::db::connection::migrate_open_db(&conn, None).unwrap();
+        let cols = crate::db::ddl_compat::existing_columns(&conn, "documents").unwrap();
+        assert!(cols.iter().any(|c| c == "embed_key"));
+        assert!(cols.iter().any(|c| c == "last_indexed_hash"));
+        // The pre-V15 row survived the rebuild chain and was backfilled (status='indexed').
+        let lih: Option<String> = conn
+            .query_row(
+                "SELECT last_indexed_hash FROM documents WHERE path='/v/old.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lih.as_deref(), Some("h-old"));
+    }
+
+    /// V28 — `librarian_evidence_seen` fresh-brain marker (spec
+    /// 2026-10-09-issue271 §8, "Fresh brain" defined): an `AFTER INSERT`
+    /// trigger on `librarian_evidence` arms the marker on every live insert,
+    /// and the migration backfills it once for any brain that has rows
+    /// today. A COUNT(*)=0 check cannot implement "no rows EVER" (rows leave
+    /// via regrade/prune/clear hard deletes), hence the persistent marker.
+    #[test]
+    fn evidence_seen_marker_armed_by_trigger_and_backfill() {
+        let conn = open_in_memory().unwrap();
+
+        // Trigger exists after migration (V18's DDL ran earlier in the chain).
+        let trg: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='trigger' AND name='librarian_evidence_seen_trg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(trg, 1, "the AFTER INSERT trigger must exist after open");
+
+        // A live evidence insert arms the marker (trigger path).
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+             VALUES ('e_seen', 'ent_seen', 't', 'b', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, created_at)
+             VALUES ('e_seen', 'prop_seen', '{\"evidence\":[],\"proposal_id\":\"prop_seen\"}', 1)",
+            [],
+        )
+        .unwrap();
+        let v: String = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'librarian_evidence_seen'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "1");
+
+        // Backfill arm: a brain with rows but a missing marker gets it on the
+        // next migrate — the one-shot backfill rides the ALTER-call
+        // transaction (V27 precedent) and `INSERT OR IGNORE` keeps it
+        // idempotent against the already-armed value.
+        conn.execute(
+            "DELETE FROM llm_wiki_meta WHERE key = 'librarian_evidence_seen'",
+            [],
+        )
+        .unwrap();
+        crate::db::connection::migrate_open_db(&conn, None).unwrap();
+        let backfilled: Option<String> = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'librarian_evidence_seen'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            backfilled.as_deref(),
+            Some("1"),
+            "the migration backfill must arm the marker for a brain with evidence rows"
+        );
+    }
+
+    /// Pre-V18 replica upgrade (spec §8 Trigger placement): `librarian_evidence`
+    /// does not exist yet, so migrate() must NOT fail creating the trigger —
+    /// the marker machinery is skipped and lands on a later open once V18's
+    /// DDL has run. Marker absent = fresh per definition.
+    #[test]
+    fn pre_v18_fixture_open_succeeds_and_arms_marker_on_upgrade() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = Connection::open(tmp.path().join("brain.db")).unwrap();
+        build_pre_v18_brain(&conn);
+
+        // First open: V18's DDL runs inside the same migrate pass, but the
+        // marker machinery must be harmless either way — no trigger failure,
+        // no marker (no evidence rows ever existed on this brain).
+        migrate(&conn, None, Some(tmp.path())).unwrap();
+        // The trigger count is informational here (the after-open phase
+        // below re-checks the machinery); the underscore prefix keeps the
+        // scoped `cargo check --tests` gate warning-free (Task 15's gate
+        // run surfaced this pre-existing warning from 2bedb35d).
+        let _trg: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='trigger' AND name='librarian_evidence_seen_trg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let marker: Option<String> = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'librarian_evidence_seen'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(marker, None, "no evidence rows ⇒ the marker stays absent");
+
+        // Now the brain gains V18's evidence table and live rows (as a real
+        // replica upgrade would), and the NEXT open must arm the machinery:
+        // trigger created (table now exists) and the one-shot backfill fires
+        // because rows exist today.
+        conn.execute_batch(crate::db::schema::MIGRATION_V18)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+             VALUES ('e_replica', 'ent_replica', 't', 'b', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, created_at)
+             VALUES ('e_replica', 'prop_replica',
+                     '{\"evidence\":[],\"proposal_id\":\"prop_replica\"}', 1)",
+            [],
+        )
+        .unwrap();
+
+        crate::db::connection::migrate_open_db(&conn, None).unwrap();
+        let trg: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='trigger' AND name='librarian_evidence_seen_trg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(trg, 1, "the trigger lands once librarian_evidence exists");
+        let v: String = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'librarian_evidence_seen'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "1", "the backfill arms the marker for existing rows");
     }
 
     /// Fresh-DB path: `open_in_memory` applies every migration, so the
@@ -2814,6 +3232,33 @@ mod tests {
             [],
         )
         .unwrap();
+        // Task 10: a live unanchored-but-GROUNDED companion keeps regrade's
+        // batch PARTIAL — `fact_orphan` alone would be regrade's ENTIRE
+        // selection (L=1, |doomed|=1) and the rev-34 breaker refuses the
+        // recovered pass outright. The companion counts toward L but anchors
+        // to the live chunk `seed_v18_damage` plants, so the recount keeps it.
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+                (id, entity_id, title, body, tags, confidence, source_type,
+                 source_ref, created_at, updated_at)
+             VALUES ('fact_companion', 'ent', 'companion', 'b', '[]', 'inferred',
+                     'librarian_inferred',
+                     'librarian-cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json,
+                 unanchored, created_at)
+             VALUES ('fact_companion', 'prop_companion', ?1, 1, 1)",
+            [{
+                let hash64 = "feedface00".to_string() + &"0".repeat(54);
+                format!(
+                    r#"{{"evidence":[{{"chunk_id":1,"content_hash":"{hash64}"}}],"proposal_id":"prop_companion"}}"#
+                )
+            }],
+        )
+        .unwrap();
         // Block the V20 export directory with a regular FILE so
         // create_dir_all/export fails with a non-DB error (full-disk proxy).
         std::fs::write(tmp.path().join("repair-export-phase2"), "not a dir").unwrap();
@@ -3373,8 +3818,8 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 27,
-            "V22 then V23 then V24 then V25 then V26 then V27 must be stamped \
+            version, 28,
+            "V22 then V23 then V24 then V25 then V26 then V27 then V28 must be stamped \
              when the migration runs"
         );
 
@@ -3419,9 +3864,9 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 27,
-            "rooted open stamps 26 (ontology gate wave) and 27 (embed scheme); \
-             MAX must be 27"
+            version, 28,
+            "rooted open stamps 26 (ontology gate wave), 27 (embed scheme) \
+             and 28 (two-stage columns); MAX must be 28"
         );
 
         let agents: String = conn
@@ -3610,8 +4055,8 @@ mod tests {
         );
         assert_eq!(
             max_version(&conn),
-            27,
-            "rooted open stamps 22, then 23/24/25/26/27 (the latter gated on V22)"
+            28,
+            "rooted open stamps 22, then 23/24/25/26/27/28 (the latter gated on V22)"
         );
     }
 

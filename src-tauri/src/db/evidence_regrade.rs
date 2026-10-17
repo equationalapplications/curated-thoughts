@@ -105,11 +105,45 @@ pub fn export_doomed_rows(_conn: &Connection, doomed: &[DoomedRow], dir: &Path) 
 /// #158 contract).
 ///
 /// Returns `(purged, skipped_destructive)`.
+///
+/// Task 10 (spec §10): breaker-governed. The pre-delete breaker check runs
+/// INSIDE the (now IMMEDIATE) purge transaction; a refusal deletes NOTHING
+/// (all-or-nothing), cleans the just-written export FILES for the current
+/// doomed set (the shared dir itself, and prior runs' backups, stay —
+/// pr283-review finding 7), commits the breaker bookkeeping (the trip
+/// marker must reach every writer — pr283-review finding 6), leaves the
+/// shared counter untouched, and reports `skipped_destructive`. A permitted
+/// purge spends the SHARED counter inside the same transaction.
 pub fn purge_doomed_rows(
     conn: &Connection,
     doomed: &[DoomedRow],
     export_dir: &Path,
     now_ms: i64,
+) -> Result<(usize, bool)> {
+    let doomed_ids: std::collections::HashSet<String> =
+        doomed.iter().map(|r| r.entry_id.clone()).collect();
+    purge_doomed_rows_opts(
+        conn,
+        doomed,
+        &doomed_ids,
+        export_dir,
+        now_ms,
+        RegradeOpts::default(),
+    )
+}
+
+/// [`purge_doomed_rows`] with explicit [`RegradeOpts`] (the `--allow-bulk`
+/// path). `doomed_ids` is the PRE-transaction doomed ID SET (rev 8, Opus r6
+/// m3 — the id set always exists): the in-transaction recount re-runs the
+/// classification under the lock and ABORTS on any mismatch with it rather
+/// than deleting a different set.
+pub fn purge_doomed_rows_opts(
+    conn: &Connection,
+    doomed: &[DoomedRow],
+    doomed_ids: &std::collections::HashSet<String>,
+    export_dir: &Path,
+    now_ms: i64,
+    opts: RegradeOpts,
 ) -> Result<(usize, bool)> {
     let missing: Vec<&str> = doomed
         .iter()
@@ -131,18 +165,119 @@ pub fn purge_doomed_rows(
         return Ok((0, true));
     }
 
-    let tx = conn.unchecked_transaction()?;
+    // IMMEDIATE (rev 4, Opus r2 m2): the pre-delete count and budget read
+    // serialize against concurrent heal writers inside the same lock.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+
+    // Task 10 (spec §10): the breaker is a single pre-delete check on
+    // `|doomed|` against regrade's OWN threshold, evaluated INSIDE the
+    // transaction so no concurrent writer can spend between the check and
+    // the deletes. `--allow-bulk` skips it for this one run.
+    if !opts.allow_bulk {
+        let l = crate::db::breaker::regrade_denominator(&tx)?;
+        let threshold = crate::db::breaker::regrade_threshold(&tx)?;
+        match crate::db::breaker::breaker_check(
+            &tx,
+            doomed.len(),
+            l,
+            threshold,
+            crate::db::breaker::BREAKER_L_REGRADE,
+        )? {
+            crate::db::breaker::BreakerVerdict::Allow => {}
+            crate::db::breaker::BreakerVerdict::Refuse { reason } => {
+                // ALL-OR-NOTHING: delete nothing, drop the just-written
+                // export (a partial backup behind a refusal would let a
+                // later pass mistake the refusal for a completed backup),
+                // leave the shared counter untouched.
+                //
+                // pr283-review finding 6: COMMIT the check transaction on
+                // the refusal path too. `breaker_check` persists
+                // `breaker_tripped` (and the epoch bookkeeping) through the
+                // caller's transaction; rolling it back here erased the
+                // trip marker for every OTHER writer — heal.rs commits its
+                // check txn, regrade must not differ. Committing is safe:
+                // nothing was deleted in this transaction.
+                tx.commit()?;
+                remove_run_export_files(export_dir, doomed_ids);
+                eprintln!("[ct::repair WARN] #186 V20 re-grade SKIPPED: {reason}");
+                return Ok((0, true));
+            }
+        }
+    }
+
     // The shared hard-delete ceremony (outbox Delete + entry DELETE + paired
     // evidence delete + batched edge sweep, one transaction — see
     // `commit::hard_delete_entries`): this path must never drift from the
     // other three hard-delete sites again (issue #132 class).
+    //
+    // Task 10 (spec §10, rev 7 Opus r5 MINOR-1 / rev 8 Opus r6 m3): the
+    // in-transaction recount RE-RUNS the classification (it needs the per-row
+    // `evidence_has_live_chunk` verdicts, not a SQL COUNT) under the lock and
+    // compares against the PRE-transaction doomed ID SET — ABORT on any
+    // mismatch rather than delete a different set (swap-race rule). The
+    // recount may perform further re-anchors (do NOT make it read-only — it
+    // must agree with what the purge would delete); re-anchor writes commit
+    // regardless of the breaker verdict (rev 9).
+    let mut recount_doomed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT le.entry_id, le.evidence_json
+               FROM librarian_evidence le
+               JOIN llm_wiki_entries e ON e.id = le.entry_id
+              WHERE le.unanchored = 1 AND e.deleted_at IS NULL",
+        )?;
+        let flagged: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (entry_id, evidence_json) in flagged {
+            if !crate::db::commit::evidence_has_live_chunk(&tx, &evidence_json)? {
+                recount_doomed.insert(entry_id);
+            } else {
+                tx.execute(
+                    "UPDATE librarian_evidence SET unanchored = 0 WHERE entry_id = ?1",
+                    [&entry_id],
+                )?;
+            }
+        }
+    }
+    if &recount_doomed != doomed_ids {
+        tx.commit()?; // re-anchors are recovery actions — keep them (rev 9)
+        remove_run_export_files(export_dir, doomed_ids);
+        eprintln!(
+            "[ct::repair WARN] #186 V20 re-grade SKIPPED: the in-transaction \
+             recount disagrees with the pre-transaction doomed set ({} then vs \
+             {} now) — a concurrent writer changed the classification; \
+             nothing was deleted, re-run `ct evidence regrade`",
+            doomed_ids.len(),
+            recount_doomed.len()
+        );
+        return Ok((0, true));
+    }
+
     let doomed_pairs: Vec<(String, String)> = doomed
         .iter()
         .map(|r| (r.entry_id.clone(), r.entity_id.clone()))
         .collect();
     crate::db::commit::hard_delete_entries(&tx, &doomed_pairs, now_ms)?;
+    // Task 10 (spec §10): regrade's hard-deletes spend the SAME shared
+    // budget (rev 6, Opus r4 m3) — inside this IMMEDIATE transaction.
+    crate::db::breaker::breaker_spend(&tx, doomed.len() as i64)?;
     tx.commit()?;
     Ok((doomed.len(), false))
+}
+
+/// Prune ONLY this run's export files — one `<id>.json` per doomed id —
+/// and keep the directory. The export dir is a FIXED, shared location
+/// (`repair-export-phase2/`): `remove_dir_all` on a refusal/mismatch also
+/// destroyed PRIOR runs' surviving backups (pr283-review finding 7). A
+/// refused run's own files must still go — a partial backup behind a
+/// refusal would let a later pass mistake the refusal for a completed
+/// backup — so this deletes exactly the current doomed set's files. Best
+/// effort: a failed cleanup must never mask the refusal itself.
+fn remove_run_export_files(export_dir: &Path, doomed_ids: &std::collections::HashSet<String>) {
+    for id in doomed_ids {
+        let _ = std::fs::remove_file(export_dir.join(format!("{id}.json")));
+    }
 }
 
 /// One-shot re-grade of the live unanchored stock (issue #186 §2.4).
@@ -154,6 +289,25 @@ pub fn regrade_unanchored(
     conn: &Connection,
     db_dir: Option<&Path>,
     now_ms: i64,
+) -> Result<RegradeReport> {
+    regrade_unanchored_opts(conn, db_dir, now_ms, RegradeOpts::default())
+}
+
+/// Per-run options for the regrade (Task 10, spec §10).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RegradeOpts {
+    /// Skip the bulk-deletion breaker for THIS one run (the pinned
+    /// `--allow-bulk` escape). Nothing else changes.
+    pub allow_bulk: bool,
+}
+
+/// [`regrade_unanchored`] with explicit [`RegradeOpts`] (the `ct evidence
+/// regrade --allow-bulk` path).
+pub fn regrade_unanchored_opts(
+    conn: &Connection,
+    db_dir: Option<&Path>,
+    now_ms: i64,
+    opts: RegradeOpts,
 ) -> Result<RegradeReport> {
     let mut report = RegradeReport::default();
 
@@ -244,6 +398,9 @@ pub fn regrade_unanchored(
 
     // 5. Brain-completeness gate: a partial brain must not be mistaken for a
     //    brain full of orphans. Re-grades stand; the doomed rows stay.
+    //    Task 10: the doomed ID SET snapshotted HERE is what the in-transaction
+    //    recount (inside the purge txn) must still classify as doomed — any
+    //    mismatch aborts the destructive phase (swap-race rule, spec §10).
     if !crate::db::evidence_repair::brain_is_complete(conn)? {
         eprintln!(
             "[ct::repair WARN] #186 V20 re-grade SKIPPED: database is not \
@@ -253,6 +410,8 @@ pub fn regrade_unanchored(
         report.skipped_destructive = true;
         return Ok(report);
     }
+    let doomed_ids: std::collections::HashSet<String> =
+        doomed.iter().map(|r| r.entry_id.clone()).collect();
 
     // 6. Purge — its disk-derived recount gate owns the final completeness
     //    check (spec I1). Unreachable with db_dir = None (step 4 early-returns
@@ -268,7 +427,8 @@ pub fn regrade_unanchored(
         return Ok(report);
     };
     let export_dir = dir.join(REGRADE_EXPORT_DIR);
-    let (purged, skipped) = purge_doomed_rows(conn, &doomed, &export_dir, now_ms)?;
+    let (purged, skipped) =
+        purge_doomed_rows_opts(conn, &doomed, &doomed_ids, &export_dir, now_ms, opts)?;
     report.purged = purged;
     report.skipped_destructive = skipped;
 
@@ -279,6 +439,7 @@ pub fn regrade_unanchored(
 mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
+    use std::path::PathBuf;
 
     const ANCHOR_HASH: &str = "feedface00000000000000000000000000000000000000000000000000000000";
 
@@ -597,6 +758,353 @@ mod tests {
         assert_eq!(
             edges, 0,
             "edges anchored on a hard-deleted id must be swept"
+        );
+    }
+
+    /// Fix round (task-reviewer IMPORTANT 2): the in-transaction
+    /// classification recount must ABORT on a mismatch against the PRE-txn
+    /// doomed ID SET: deletes aborted, re-anchor UPDATEs still committed (rev
+    /// 9), no row hard-deleted. The mismatch is forced directly: the harness
+    /// mutates the classification (grounds one flagged row via a live chunk)
+    /// between the caller's snapshot and the purge, so the in-lock recount
+    /// disagrees with the snapshot set. RED instrumentation (fix round): the
+    /// mismatch arm of `purge_doomed_rows_opts` had NO coverage — this
+    /// assertion proves the abort path is actually entered.
+    #[test]
+    fn recount_mismatch_against_pre_txn_doomed_set_aborts_deletes_but_keeps_re_anchors() {
+        let conn = open_in_memory().unwrap();
+        // One ANCHORED flagged row: the pre-txn snapshot will classify it as
+        // doomed (it carries no live chunk YET), the in-txn recount will
+        // re-classify it as anchored (the chunk exists by then) and re-anchor
+        // it — exactly one mismatch, plus a re-anchor that must commit.
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('/v/notes.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        // The live chunk is seeded but the evidence does NOT reference it
+        // yet, so the snapshot classification (shared SQL) says doomed.
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, entity_id, content_hash)
+             VALUES (1, 'c', 0, 'ent', ?1)",
+            [ANCHOR_HASH],
+        )
+        .unwrap();
+        seed_flagged(&conn, "fact_flip", false, None);
+
+        // PRE-txn classification (mirrors regrade_unanchored step 2): with
+        // no chunk reference in its evidence blob, `fact_flip` is doomed.
+        // Snapshot taken HERE, before the "concurrent writer" mutates the
+        // classification below.
+        let doomed_ids: std::collections::HashSet<String> =
+            ["fact_flip".to_string()].into_iter().collect();
+
+        // Export the doomed row (as regrade_unanchored step 4 would).
+        let doomed = vec![DoomedRow {
+            entry_id: "fact_flip".into(),
+            entity_id: "ent".into(),
+            title: "t".into(),
+            body: "b".into(),
+            source_ref: None,
+            created_at: 1,
+            evidence_json: r#"{"evidence":[],"proposal_id":"prop_flip"}"#.into(),
+            proposal_id: "prop_flip".into(),
+        }];
+        let dir = tempfile::TempDir::new().unwrap();
+        let export_dir = dir.path().join(REGRADE_EXPORT_DIR);
+        assert_eq!(export_doomed_rows(&conn, &doomed, &export_dir).unwrap(), 1);
+
+        // THE CONCURRENT WRITER: between the snapshot and the purge, the
+        // classification flips — the evidence now anchors the live chunk we
+        // seeded. (This is the exact mutation the recount exists to catch:
+        // without the abort, `hard_delete_entries` would hard-delete a row
+        // the recount just re-anchored.)
+        conn.execute(
+            "UPDATE librarian_evidence
+             SET evidence_json = ?1
+             WHERE entry_id = 'fact_flip'",
+            [format!(
+                r#"{{"evidence":[{{"chunk_id":1,"content_hash":"{ANCHOR_HASH}"}}],"proposal_id":"prop_flip"}}"#
+            )],
+        )
+        .unwrap();
+
+        // Mismatch is now unavoidable: the pre-txn set says {fact_flip} is
+        // doomed, the in-txn recount will classify it anchored. RED proof the
+        // abort arm is genuinely reached: check the outcome below asserts
+        // deletion was aborted — if the mismatch arm never existed, the purge
+        // would proceed and hard-delete the re-anchored row.
+        let (purged, skipped) = purge_doomed_rows_opts(
+            &conn,
+            &doomed,
+            &doomed_ids,
+            &export_dir,
+            1_000,
+            // The recount-mismatch abort is independent of the breaker; skip
+            // it so a |doomed|>=L full-population refusal can't mask the arm
+            // under test (L=1 here — the single live flagged row IS the
+            // whole selection).
+            RegradeOpts { allow_bulk: true },
+        )
+        .unwrap();
+
+        assert_eq!(purged, 0, "a recount mismatch must abort ALL hard-deletes");
+        assert!(
+            skipped,
+            "the abort must be reported as a skipped destructive phase"
+        );
+        // No rows hard-deleted — the entry AND its evidence survive.
+        let entries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id = 'fact_flip'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(entries, 1, "no rows may be hard-deleted on a mismatch");
+        // Re-anchor UPDATEs still committed (rev 9: they are recovery
+        // actions) — the recount cleared the (now false) unanchored flag.
+        let unanchored: i64 = conn
+            .query_row(
+                "SELECT unanchored FROM librarian_evidence WHERE entry_id = 'fact_flip'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unanchored, 0,
+            "re-anchor UPDATEs must commit even though the deletes aborted"
+        );
+        // Export cleaned by the abort (no stale backup may masquerade as a
+        // completed one behind a skipped destructive phase). pr283-review
+        // finding 7: only THIS run's doomed files are removed — the shared
+        // dir itself stays (prior runs' backups survive).
+        let leftovers = std::fs::read_dir(&export_dir)
+            .map(|rd| rd.count())
+            .unwrap_or(0);
+        assert_eq!(
+            leftovers, 0,
+            "the aborted destructive phase must clean THIS run's export files"
+        );
+    }
+
+    // ── Task 10 (spec §10): the shared cross-process breaker on the purge ────
+
+    /// Seed `n` UNANCHORED live flagged rows (all classified doomed) plus one
+    /// anchored row so `regrade_unanchored` reaches the destructive phase with
+    /// `|doomed| = n`.
+    fn seed_doomed_batch(conn: &Connection, n: usize) {
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('/v/notes.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        seed_flagged(conn, "fact_anchored", true, None);
+        for i in 0..n {
+            seed_flagged(conn, &format!("fact_doomed_{i}"), false, None);
+        }
+    }
+
+    /// Task 10 (spec §10): regrade's breaker is a single pre-delete check on
+    /// `|doomed|`; a batch flagged as doomed that is within the budget and
+    /// below L purges normally and spends the SHARED counter.
+    #[test]
+    fn purge_within_budget_proceeds_and_spends_shared_budget() {
+        let conn = open_in_memory().unwrap();
+        seed_doomed_batch(&conn, 2);
+        let dir = tempfile::TempDir::new().unwrap();
+        let report = regrade_unanchored(&conn, Some(dir.path()), 1_000).unwrap();
+        assert_eq!(report.purged, 2);
+        assert!(!report.skipped_destructive);
+        let spent: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM llm_wiki_meta WHERE key = 'breaker_spent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            spent, 2,
+            "each hard-deleted row spends the shared budget (rev 6, Opus r4 m3)"
+        );
+    }
+
+    /// Task 10 (spec §10 + §9 error-handling `skipped_destructive=true`
+    /// semantics): a TRIPPED breaker refuses the WHOLE destructive batch —
+    /// re-anchors commit (benign recovery actions, rev 9), NO row is deleted,
+    /// nothing further is spent, the refused export is CLEANED so a stale
+    /// backup cannot masquerade as a completed one, and
+    /// `skipped_destructive` is reported.
+    #[test]
+    fn purge_refuses_when_breaker_tripped_and_reports_skipped() {
+        let conn = open_in_memory().unwrap();
+        seed_doomed_batch(&conn, 5); // |doomed|=5 < L=6 and < budget 10 ⇒ size-legal...
+                                     // ...so exercise the refusal via the SHARED budget: another writer
+                                     // (heal) tripped the breaker first. Even a legal-size batch must
+                                     // refuse whole — one shared counter, two thresholds.
+        crate::db::breaker::breaker_spend(&conn, 10).unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let report = regrade_unanchored(&conn, Some(dir.path()), 1_000).unwrap();
+        assert!(
+            report.skipped_destructive,
+            "tripped breaker ⇒ destructive skipped"
+        );
+        assert_eq!(
+            report.purged, 0,
+            "the WHOLE batch must be refused, never partial"
+        );
+        let alive: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id LIKE 'fact_doomed_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(alive, 5, "doomed rows must ALL survive the refusal");
+        // Re-anchors are benign recovery actions and commit regardless (rev 9).
+        let anchored: i64 = conn
+            .query_row(
+                "SELECT unanchored FROM librarian_evidence WHERE entry_id = 'fact_anchored'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            anchored, 0,
+            "re-anchor UPDATEs commit regardless of the verdict"
+        );
+        // Export cleaned: THIS run's backup files are gone (pr283-review
+        // finding 7: only the current doomed set's files — the shared dir
+        // itself stays, since prior runs' backups must survive).
+        let leftovers = std::fs::read_dir(dir.path().join(REGRADE_EXPORT_DIR))
+            .map(|rd| rd.count())
+            .unwrap_or(0);
+        assert_eq!(
+            leftovers, 0,
+            "refused run's own export files must be cleaned up"
+        );
+        // Nothing was spent by the refused purge itself.
+        let spent: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM llm_wiki_meta WHERE key = 'breaker_spent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spent, 10, "the refused purge must not spend");
+    }
+
+    /// pr283-review finding 6: the refusal path must COMMIT the check
+    /// transaction so `breaker_tripped` persists — otherwise every OTHER
+    /// writer (heal.rs commits its check txn) misses the trip and runs on a
+    /// fresh budget. After a regrade refusal the marker must be set and the
+    /// next heal pass (no `--allow-bulk`) must refuse too.
+    #[test]
+    fn regrade_refusal_persists_breaker_trip_and_heal_refuses() {
+        let conn = open_in_memory().unwrap();
+        seed_doomed_batch(&conn, 5);
+        // Another writer spends the shared budget out first, so regrade's
+        // breaker check hits Rule 1 and writes the marker.
+        crate::db::breaker::breaker_spend(&conn, 10).unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let report = regrade_unanchored(&conn, Some(dir.path()), 1_000).unwrap();
+        assert!(report.skipped_destructive, "fixture: the purge must refuse");
+
+        let tripped: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM llm_wiki_meta WHERE key = 'breaker_tripped'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            tripped, 1,
+            "a regrade refusal must PERSIST breaker_tripped (the check txn commits)"
+        );
+
+        // The persisted marker must refuse the next heal pass too. Heal
+        // fixture: ONE ungrounded librarian_inferred row + 201 grounded
+        // companions. heal's own threshold from L=202 is 11 > spent 10, so
+        // the budget rule does NOT refuse — ONLY the persisted trip marker
+        // does (this isolates finding 6: pre-fix the rolled-back marker let
+        // the heal proceed).
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('documents/a.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+               (id, entity_id, title, body, source_type, source_ref, created_at, updated_at, embedding_blob)
+             VALUES ('heal_lost', 'e1', 'T', 'B', 'librarian_inferred', 'documents/vanished.md', 0, 0, x'00')",
+            [],
+        )
+        .unwrap();
+        for i in 0..201 {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries
+                   (id, entity_id, title, body, source_type, source_ref, created_at, updated_at, embedding_blob)
+                 VALUES (?1, 'e1', 'T', 'B', 'librarian_inferred', 'documents/a.md', 0, 0, x'00')",
+                [&format!("heal_live_{i}")],
+            )
+            .unwrap();
+        }
+        let mut heal_conn = conn;
+        let summary =
+            crate::db::heal::heal_invalid_sources_conn(&mut heal_conn, PathBuf::from("/vault"))
+                .unwrap();
+        assert_eq!(
+            summary.soft_deleted, 0,
+            "a tripped breaker (persisted by regrade's refusal) must refuse the heal pass"
+        );
+    }
+
+    /// pr283-review finding 7: the export dir is a FIXED shared location;
+    /// a refusal/mismatch cleanup must remove ONLY the current run's doomed
+    /// files — a prior run's surviving backups stay.
+    #[test]
+    fn refusal_cleanup_keeps_prior_runs_backups() {
+        let conn = open_in_memory().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let export_dir = dir.path().join(REGRADE_EXPORT_DIR);
+
+        // Run 1: a doomed row that purges normally (an anchored companion
+        // keeps L=2 > |doomed|=1, clear of the rev-34 Small-L rule); its
+        // backup SURVIVES the successful purge (backups are never cleaned on
+        // success).
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('/v/notes.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        seed_flagged(&conn, "fact_run1_kept", true, None);
+        seed_flagged(&conn, "fact_run1", false, None);
+        let report1 = regrade_unanchored(&conn, Some(dir.path()), 1_000).unwrap();
+        assert_eq!(report1.purged, 1, "fixture: run 1 must purge");
+        assert!(
+            export_dir.join("fact_run1.json").exists(),
+            "run 1's backup must exist after its purge"
+        );
+
+        // Run 2: a NEW doomed row, refused via the shared budget — run 1's
+        // backup must survive the cleanup.
+        seed_flagged(&conn, "fact_run2", false, None);
+        crate::db::breaker::breaker_spend(&conn, 10).unwrap();
+        let report2 = regrade_unanchored(&conn, Some(dir.path()), 1_000).unwrap();
+        assert!(report2.skipped_destructive, "fixture: run 2 must refuse");
+        assert!(
+            export_dir.join("fact_run1.json").exists(),
+            "run 1's backup must SURVIVE run 2's refusal cleanup"
+        );
+        assert!(
+            !export_dir.join("fact_run2.json").exists(),
+            "run 2's own export file must be cleaned on refusal"
         );
     }
 }
