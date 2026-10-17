@@ -1128,7 +1128,9 @@ fn ingest_file_virtual(
         // doc's chunk ids — an unfiltered GROUP BY over the whole embeddings
         // table turned every ingest into a full-table scan.
         tx.execute(
-            "DELETE FROM embeddings WHERE rowid NOT IN \
+            "DELETE FROM embeddings \
+             WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
+             AND rowid NOT IN \
              (SELECT MAX(rowid) FROM embeddings \
               WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
               GROUP BY chunk_id)",
@@ -1217,7 +1219,9 @@ fn repair_embed_key_in_place(
     // pr283-review finding 12: same doc-scoped dup-cleanup shape as the
     // swap (no whole-table GROUP BY per ingest).
     tx.execute(
-        "DELETE FROM embeddings WHERE rowid NOT IN \
+        "DELETE FROM embeddings \
+         WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
+         AND rowid NOT IN \
          (SELECT MAX(rowid) FROM embeddings \
           WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
           GROUP BY chunk_id)",
@@ -2035,6 +2039,55 @@ mod diff_swap_tests {
             hits.len(),
             unique.len(),
             "no chunk position appears twice after collapse"
+        );
+    }
+
+    #[test]
+    fn swap_dup_cleanup_spares_other_documents_embeddings() {
+        // pr283-review round 2 regression (CodeRabbit Critical): the doc-scoped
+        // dup-cleanup rewrite briefly dropped the outer `chunk_id IN (this doc)`
+        // filter — the `NOT IN` set then held only this doc's rowids, so the
+        // DELETE erased every OTHER document's vectors. One forced ingest of
+        // doc A must leave doc B's embeddings byte-identical.
+        let conn = open_in_memory().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file_a = tmp.path().join("documents").join("doc-a.md");
+        let file_b = tmp.path().join("documents").join("doc-b.md");
+        let pa = seed(&conn, &file_a, &prose_body("alpha", 30));
+        let pb = seed(&conn, &file_b, &prose_body("beta", 30));
+        let (doc_b, _, status_b, _, _) = doc_state(&conn, &pb);
+        assert_eq!(status_b, "indexed");
+        let _ = doc_state(&conn, &pa);
+
+        let b_chunks = chunk_ids(&conn, doc_b);
+        let b_before: Vec<Vec<u8>> = {
+            let mut stmt = conn
+                .prepare("SELECT vector FROM embeddings WHERE chunk_id = ?1 ORDER BY rowid")
+                .unwrap();
+            stmt.query_map([b_chunks[0]], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!b_before.is_empty(), "doc B must have vectors before the pass");
+
+        with_stub(|| {
+            ingest_file_virtual(&conn, &EmbedProfile::default(), &pa, &pa, true, None, &hb())
+                .unwrap();
+        });
+
+        let b_after: Vec<Vec<u8>> = {
+            let mut stmt = conn
+                .prepare("SELECT vector FROM embeddings WHERE chunk_id = ?1 ORDER BY rowid")
+                .unwrap();
+            stmt.query_map([b_chunks[0]], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            b_before, b_after,
+            "doc B's embeddings must survive doc A's forced ingest"
         );
     }
 

@@ -84,13 +84,19 @@ if ! coverage_is_full; then
 fi
 echo "coverage 100% — cleared for calibration"
 
+# pr283-review round 2: each run gets a FRESH grid dir — stale cell-*.json
+# from a previous run with a different cell set would make `pick --grid`
+# see a mixed campaign.
+GRID_DIR="$OUT_DIR/grid-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$GRID_DIR"
+
 echo "== step 3/3: paired calibration run, ONE per grid cell (§9 step 3 grid) =="
 for cell in "${CELLS[@]}"; do
   rule="${cell%%:*}"
   rest="${cell#*:}"
   floor="${rest%%:*}"
   k="${rest##*:}"
-  artifact="$OUT_DIR/cell-${rule}-${floor}-${k}.json"
+  artifact="$GRID_DIR/cell-${rule}-${floor}-${k}.json"
   echo "-- cell rule=$rule floor=$floor k=$k → $artifact"
   CAL --probes "$PROBES" --baseline-key "$BASELINE_KEY" \
       --rule "$rule" --floor "$floor" --k "$k" \
@@ -98,24 +104,26 @@ for cell in "${CELLS[@]}"; do
 done
 
 echo "== step 3/4: grid pick over the per-cell artifacts (tie-break per GLM r1 minor-5) =="
-CAL pick --grid "$OUT_DIR" --json-out "$OUT_DIR/pick-report.json"
+CAL pick --grid "$GRID_DIR" --json-out "$GRID_DIR/pick-report.json"
 
 # Identify the WINNING cell's artifact (flip takes ONE artifact): match the
 # pick report's winner (rule, floor, k) against each per-cell artifact's
 # recorded candidate cell. Floor compared numerically (awk) — "0.35" vs
 # "0.350" must match.
-winner_rule=$(sed -n 's/^    "rule": "\(.*\)",\?$/\1/p' "$OUT_DIR/pick-report.json" | head -1)
-winner_floor=$(sed -n 's/^    "floor": \([0-9.]*\),\?$/\1/p' "$OUT_DIR/pick-report.json" | head -1)
-winner_k=$(sed -n 's/^    "k": \([0-9]*\),\?$/\1/p' "$OUT_DIR/pick-report.json" | head -1)
+winner_rule=$(sed -n 's/^    "rule": "\(.*\)",\?$/\1/p' "$GRID_DIR/pick-report.json" | head -1)
+winner_floor=$(sed -n 's/^    "floor": \([0-9.]*\),\?$/\1/p' "$GRID_DIR/pick-report.json" | head -1)
+winner_k=$(sed -n 's/^    "k": \([0-9]*\),\?$/\1/p' "$GRID_DIR/pick-report.json" | head -1)
 [[ -n "$winner_rule" && -n "$winner_floor" && -n "$winner_k" ]] || {
-  echo "could not parse the winner from $OUT_DIR/pick-report.json" >&2
+  echo "could not parse the winner from $GRID_DIR/pick-report.json" >&2
   exit 1
 }
 WINNING_ARTIFACT=""
-for artifact in "$OUT_DIR"/cell-*.json; do
-  a_rule=$(sed -n 's/^    "rule": "\(.*\)",\?$/\1/p' "$artifact" | head -1)
-  a_k=$(sed -n 's/^    "k": \([0-9]*\),\?$/\1/p' "$artifact" | head -1)
-  a_floor=$(sed -n 's/^    "floor": \([0-9.]*\),\?$/\1/p' "$artifact" | head -1)
+for artifact in "$GRID_DIR"/cell-*.json; do
+  # Scope extraction to the candidate block — the baseline block also has a
+  # 4-space "floor" and it is NOT the candidate's (first-match bug).
+  a_rule=$(sed -n '/"candidate"/,/}/s/^ *"rule": "\(.*\)",\?$/\1/p' "$artifact" | head -1)
+  a_k=$(sed -n '/"candidate"/,/}/s/^ *"k": \([0-9]*\),\?$/\1/p' "$artifact" | head -1)
+  a_floor=$(sed -n '/"candidate"/,/}/s/^ *"floor": \([0-9.]*\),\?$/\1/p' "$artifact" | head -1)
   [[ "$a_rule" == "$winner_rule" && "$a_k" == "$winner_k" ]] || continue
   if awk -v a="$a_floor" -v b="$winner_floor" 'BEGIN { exit !(a == b) }'; then
     WINNING_ARTIFACT="$artifact"

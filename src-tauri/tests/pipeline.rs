@@ -296,9 +296,12 @@ fn zero_chunk_reingest_updates_documents_hash_for_short_circuit() {
 /// removes the dead chunks.
 #[test]
 fn unforced_edit_that_only_removes_chunks_skips_the_embed_round_trip() {
-    let counts = std::env::temp_dir().join("ct_pipeline_embed_count_finding10");
-    std::fs::remove_file(&counts).ok();
     let tmp = TempDir::new().unwrap();
+    // pr283-review round 2: the count file lives in THIS test's unique
+    // TempDir — a fixed shared temp path collides with parallel tests that
+    // also embed between the n_seed and n_after reads.
+    let counts = tmp.path().join("embed-counts.log");
+    std::fs::remove_file(&counts).ok();
     let docs_dir = tmp.path().join("documents");
     std::fs::create_dir_all(&docs_dir).unwrap();
     let doc = docs_dir.join("shrink.rs");
