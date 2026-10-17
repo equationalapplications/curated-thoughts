@@ -337,6 +337,24 @@ enum ReindexCmd {
         #[arg(long)]
         stale: bool,
     },
+    /// Bootstrap (spec 2026-10-09-issue271 §6): copy the live DB to a scratch
+    /// file, rechunk every doc CHUNK-ONLY under the current binary, and —
+    /// iff every live evidence hash ref resolves on the scratch rechunk AND
+    /// every gate-eligible entry stays hop-resolvable — write the
+    /// CHUNKER-ONLY stamp (`llm_wiki_meta`.`reindex_stamp` =
+    /// `CHUNKER_FINGERPRINT`) to the LIVE DB. A chunker bump FAILS the
+    /// check (the rechunk must be LOSSLESS) and writes no stamp. Sampled
+    /// backfill: per chunk-bearing doc the FIRST + LAST chunk are
+    /// re-embedded from STORED CHUNK TEXT and matched by cosine ≥ 1−1e−3;
+    /// on match `documents.embed_key` is backfilled under a GUARDED
+    /// per-doc IMMEDIATE transaction (r28-m6 chunk-set + key re-check;
+    /// skip on mismatch). `--dry-run` writes NOTHING to either DB.
+    /// Per-doc verdicts + final candidate-set coverage; exit 0 or 1.
+    VerifyScratch {
+        /// Print-only: no stamp, no embed_key, nothing on either DB.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 #[derive(Subcommand)]
 enum WisdomCmd {
@@ -787,6 +805,9 @@ fn run(cmd: Cmd) -> Result<i32> {
                     bail!("`ct reindex repair-embed-key` requires --stale (the only supported selection)");
                 }
                 curated_thoughts_tools::reindex::repair_embed_key_stale()
+            }
+            ReindexCmd::VerifyScratch { dry_run } => {
+                curated_thoughts_tools::reindex::verify_scratch(dry_run)
             }
         },
         Cmd::Heal {
