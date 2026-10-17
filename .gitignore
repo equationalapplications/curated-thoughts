@@ -43,5 +43,7 @@ dist/
 # target/ a tool creates under a member crate. rust-analyzer's flycheck writes
 # src-tauri/target/flycheck0 regardless of the workspace layout.
 target/
+# Canonical shared cargo build cache (see AGENTS.md — ONE build location only).
+.cargo-shared-target/
 .aider*
 tools/tests/fixtures/

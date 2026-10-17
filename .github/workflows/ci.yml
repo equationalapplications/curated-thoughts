@@ -134,6 +134,21 @@ jobs:
       - name: Engine source_ref acceptance gate
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server --test engine_source_ref_gate -- --ignored --test-threads=1
 
+      # Plan 2026-10-15-issue271 §Task 6 / Global Constraints: any #[ignore]d
+      # test gets an explicit CI step. `replay_two_stage` stays ignored until
+      # Task 15's calibration flip-to-default lands the composite key in
+      # WISDOM_GATE_FLOORS — until then the run is expected to FAIL and is
+      # allow-listed with the || true guard below (which itself fails if the
+      # marker line vanishes, so the tripwire can never rot silently). Once
+      # the flip lands the test passes, the marker is found, and — on the
+      # follow-up — the `|| true` + grep guard is removed so the test blocks.
+      - name: Wisdom gate bench freeze coverage
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --features slow-tests --test wisdom_gate_bench -- --test-threads=1 --ignored 2>&1 \
+            | tee /tmp/two_stage_replay.log || true
+          grep -q "replay_two_stage" /tmp/two_stage_replay.log
+
       - name: Outbox Postgres integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server --lib outbox -- --test-threads=1
         env:

@@ -43,6 +43,89 @@ fn wisdom_gate_floor_still_holds_instr1() {
     );
 }
 
+/// Projected two-stage composite floor key (spec §3 shape:
+/// `embed_scheme::floor_key_for(model, scheme) + ":two-stage:" + rule`).
+/// PLACEHOLDER until Task 15's paired calibration picks the winning rule and
+/// flips the key into [`tauri_app_lib::wisdom_match::WISDOM_GATE_FLOORS`]; if
+/// chunk-hop wins, Task 15 renames this const together with the freeze dir.
+const TWO_STAGE_GATE_KEY: &str = "external:qwen/qwen3-embedding-4b:two-stage:restricted-cosine";
+
+/// Floor key → freeze dir. The two calibrated v1 snapshots keep their
+/// historical dir names (`wisdom_gate`, `wisdom_gate_instr1`); every key
+/// calibrated later — the Task-15 composite two-stage key included — follows
+/// the sanitized-key convention under `tests/fixtures/wisdom_gate_bench/`
+/// (plan §Task 6).
+fn freeze_dir_for(key: &str) -> String {
+    let base = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+    match key {
+        "external:qwen/qwen3-embedding-4b" => format!("{base}/wisdom_gate"),
+        "external:qwen/qwen3-embedding-4b:instr1" => format!("{base}/wisdom_gate_instr1"),
+        other => format!(
+            "{base}/wisdom_gate_bench/{}",
+            other.replace(':', "_").replace('/', "_")
+        ),
+    }
+}
+
+#[test]
+fn every_non_stub_floor_key_has_a_freeze_dir() {
+    // Stub keys are excluded by design: they live in test-only floor slices
+    // (`WISDOM_GATE_FLOORS_TEST`, cfg(test)) and stub-backed dev runs — they
+    // are never calibrated, so they never get a snapshot. Every real floor
+    // row must have its freeze dir on disk: a floor can never ship without
+    // the snapshot dir that justifies it.
+    let missing: Vec<&str> = tauri_app_lib::wisdom_match::WISDOM_GATE_FLOORS
+        .iter()
+        .map(|(k, _)| *k)
+        .filter(|k| !k.starts_with("stub:"))
+        .filter(|k| !std::path::Path::new(&format!("{}/expected.json", freeze_dir_for(k))).exists())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "WISDOM_GATE_FLOORS keys without a freeze dir under tests/fixtures: {missing:?} — \
+         run `calibrate_wisdom_gate --freeze <DIR>` (or create the placeholder dir for a \
+         not-yet-calibrated key, plan §Task 6)"
+    );
+}
+
+#[test]
+#[ignore = "BLOCKER (Task 15, 2026-10-17): the composite key is still absent from `WISDOM_GATE_FLOORS` because NO live calibration has run — `two_stage_passes` is unknown, so the letter-gated flip (`calibrate_two_stage flip`) cannot proceed and the shipped tree stays opt-in. The artifact is pending the Task-16 ordered runbook (verify-scratch → repair-embed-key → paired run → pick → flip). Un-ignore ONLY when a real passing artifact's flip package has landed BOTH the `WISDOM_GATE_FLOORS` row AND the freeze snapshot (expected.json AND vectors.json.gz — expected.json alone cannot satisfy the asserts below)."]
+fn replay_two_stage() {
+    let dir = freeze_dir_for(TWO_STAGE_GATE_KEY);
+    let expected_path = format!("{dir}/expected.json");
+    assert!(
+        std::path::Path::new(&expected_path).exists(),
+        "no two-stage freeze snapshot in {dir}; run the Task-15 paired calibration \
+         and commit expected.json + vectors.json.gz"
+    );
+    let expected: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&expected_path).unwrap()).unwrap();
+    let floor = expected["floor"].as_f64().unwrap() as f32;
+    // THE flip-to-default tripwire: the composite-key lookup itself is
+    // unchanged (spec §3) — until Task 15 adds the row, gate_floor misses
+    // and this assert fails.
+    assert_eq!(
+        tauri_app_lib::wisdom_match::gate_floor(TWO_STAGE_GATE_KEY),
+        Some(floor),
+        "WISDOM_GATE_FLOORS[{TWO_STAGE_GATE_KEY}] must match the calibration snapshot in {dir}"
+    );
+    assert!(
+        std::path::Path::new(&format!("{dir}/vectors.json.gz")).exists(),
+        "partial freeze: expected.json and vectors.json.gz must be committed together"
+    );
+    println!(
+        "two-stage freeze {} @ {floor}: rule {}, k {} ({} probes) — snapshot schema OK",
+        TWO_STAGE_GATE_KEY,
+        expected["rule"].as_str().unwrap(),
+        expected["k"].as_u64().unwrap(),
+        expected["probes"].as_array().map(|p| p.len()).unwrap_or(0),
+    );
+    // Task 15 extends this body: replay frozen["facts"]/["probes"] through
+    // the two-stage path at expected["k"] under expected["rule"] with the
+    // same hit@2 / FP assertions `replay` makes. The composite-key floor
+    // assertion above is what gates this test on the calibration flip.
+}
+
 /// Replays one frozen snapshot. `freeze_dir` holds vectors.json.gz +
 /// expected.json; `fixtures_dir` holds facts.jsonl/probes.jsonl. `gate_key` is
 /// the `WISDOM_GATE_FLOORS` key the snapshot was calibrated under — raw keys

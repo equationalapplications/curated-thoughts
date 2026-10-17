@@ -92,7 +92,7 @@ fn seed_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
     let profile = EmbedProfile::default();
     let v = embed_one(&profile, "q".into())?;
     insert_embedding(conn, cid, &v)?;
-    mark_document_indexed(conn, doc_id)?;
+    mark_document_indexed(conn, doc_id, "seed-h")?;
 
     let doc_b = upsert_document(conn, "/fixtures/mcp_other.md", "h_b")?;
     let chunk_b = Chunk {
@@ -106,7 +106,7 @@ fn seed_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
     let cid_b = insert_chunk(conn, doc_b, &chunk_b, 0, "tier_fact", "")?;
     let v_b = embed_one(&profile, chunk_b.text.clone())?;
     insert_embedding(conn, cid_b, &v_b)?;
-    mark_document_indexed(conn, doc_b)?;
+    mark_document_indexed(conn, doc_b, "seed-h")?;
     Ok(())
 }
 
@@ -476,7 +476,7 @@ fn seed_curated_fixture(conn: &rusqlite::Connection) -> anyhow::Result<()> {
     let cid = insert_chunk(conn, doc_id, &chunk, 0, "ent_curated", "")?;
     let v = vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     insert_embedding(conn, cid, &v)?;
-    mark_document_indexed(conn, doc_id)?;
+    mark_document_indexed(conn, doc_id, "seed-h")?;
     Ok(())
 }
 

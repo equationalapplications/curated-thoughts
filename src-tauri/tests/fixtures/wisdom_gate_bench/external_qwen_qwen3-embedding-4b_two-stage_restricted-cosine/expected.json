@@ -1,0 +1,7 @@
+{
+  "floor": 0.0,
+  "k": 8,
+  "probes": [],
+  "rule": "restricted-cosine",
+  "schema_note": "PLACEHOLDER — Task 15 (paired calibration flip-to-default) replaces every value here: floor comes from the calibration artifact, rule is the winning rule (restricted-cosine | chunk-hop), k is TWO_STAGE_K's default, probes lists the calibrated probe ids, and vectors.json.gz lands beside this file in the same commit. The dir name mirrors the composite floor key external:qwen/qwen3-embedding-4b:two-stage:restricted-cosine with ':' and '/' sanitized to '_' (see freeze_dir_for in wisdom_gate_bench.rs)."
+}

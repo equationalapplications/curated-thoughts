@@ -20,7 +20,7 @@ fn resolve_chunk_overlay_is_invocable_by_frontend_name() {
 
 fn seed_doc_with_hashed_chunk(conn: &rusqlite::Connection, path: &str) -> String {
     let doc_id = upsert_document(conn, path, "h").unwrap();
-    mark_document_indexed(conn, doc_id).unwrap();
+    mark_document_indexed(conn, doc_id, "seed-h").unwrap();
     insert_chunk(
         conn,
         doc_id,

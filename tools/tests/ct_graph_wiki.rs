@@ -40,7 +40,7 @@ fn seed_graph_brain(brain_path: &std::path::Path) -> (i64, i64) {
     let helper_id =
         insert_chunk(&db.0, doc_id, &make_chunk("helper_fn"), 1, ENTITY_ID, "").unwrap();
     insert_relationship(&db.0, caller_id, helper_id, "CALLS", "helper_fn", ENTITY_ID).unwrap();
-    mark_document_indexed(&db.0, doc_id).unwrap();
+    mark_document_indexed(&db.0, doc_id, "seed-h").unwrap();
 
     db.0
         .execute(

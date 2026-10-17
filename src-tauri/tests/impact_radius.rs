@@ -20,7 +20,7 @@ fn make_def_chunk(name: &str) -> Chunk {
 fn impact_radius_caps_at_five_hops() {
     let conn = open_in_memory().expect("open in-memory database");
     let doc_id = upsert_document(&conn, "/vault/documents/deep_chain.rs", "h").expect("upsert doc");
-    mark_document_indexed(&conn, doc_id).expect("mark document indexed");
+    mark_document_indexed(&conn, doc_id, "seed-h").expect("mark document indexed");
 
     let mut chunks = Vec::new();
     for idx in 0..7 {
@@ -67,7 +67,7 @@ fn impact_radius_caps_at_five_hops() {
 fn impact_radius_traverses_recursive_call_graphs_in_both_directions() {
     let conn = open_in_memory().expect("open in-memory database");
     let doc_id = upsert_document(&conn, "/vault/documents/recursive.rs", "h").expect("upsert doc");
-    mark_document_indexed(&conn, doc_id).expect("mark document indexed");
+    mark_document_indexed(&conn, doc_id, "seed-h").expect("mark document indexed");
 
     let a = insert_chunk(&conn, doc_id, &make_def_chunk("a"), 0, "tier_fact", "")
         .expect("insert chunk a");
