@@ -1,5 +1,14 @@
 # Handoff — issue271 two-stage retrieval implementation (Task 1 done, Task 2 next)
 
+> **SUPERSEDED (pr283-review finding 3):** this is a Task-1-era snapshot kept
+> for history — it is NOT current state. The AUTHORITATIVE status surfaces are
+> the plan's adjudication notes
+> (`docs/superpowers/plans/2026-10-15-issue271-two-stage-retrieval.md`,
+> per-task checkbox + ledger annotations) and the session ledger
+> (`.superpowers/sdd/2026-10-15-issue271-two-stage-retrieval/progress.md`).
+> All absolute local-home paths below are historical scratch paths, not repo
+> references.
+
 **Date:** 2026-10-15 · **Branch:** `spec/issue271-two-stage-retrieval-impl` (repo: `equationalapplications/curated-thoughts`)
 **Plan:** `docs/superpowers/plans/2026-10-15-issue271-two-stage-retrieval.md` (17 tasks)
 **Spec:** `docs/superpowers/specs/2026-10-09-issue271-two-stage-retrieval-design.md` (rev 34, Approved)
@@ -51,6 +60,7 @@
   bootstrap are **Task 2+ / step-2** scope — do NOT touch in Task 2.
 - Spec rev 34 r28-m3: pre-V28/RO brains need a `documents` column probe ⇒ coverage 0
   ⇒ v1 fallback (relevant from Task 5 onward, both CLI + Tauri sides).
-- Survey findings with verified file:line refs live at
-  `/home/kv-thinkpad-t420-ubuntu/.hermes/cache/scratch/ct-271-impl 2026-10-15/survey-271/findings.md`
-  (scratch prunes after 24h idle — may be gone; re-verify refs if needed).
+- Survey findings with verified file:line refs lived in an agent scratch dir
+  (agent cache scratch, `ct-271-impl 2026-10-15/survey-271/findings.md`;
+  pr283-review finding 3: no absolute home path in the repo — scratch prunes
+  after 24h idle and may be gone; re-verify refs if needed).
