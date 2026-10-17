@@ -108,10 +108,12 @@ pub fn export_doomed_rows(_conn: &Connection, doomed: &[DoomedRow], dir: &Path) 
 ///
 /// Task 10 (spec §10): breaker-governed. The pre-delete breaker check runs
 /// INSIDE the (now IMMEDIATE) purge transaction; a refusal deletes NOTHING
-/// (all-or-nothing), cleans the just-written export dir so a stale backup
-/// cannot masquerade as a completed one, leaves the shared counter untouched,
-/// and reports `skipped_destructive`. A permitted purge spends the SHARED
-/// counter inside the same transaction.
+/// (all-or-nothing), cleans the just-written export FILES for the current
+/// doomed set (the shared dir itself, and prior runs' backups, stay —
+/// pr283-review finding 7), commits the breaker bookkeeping (the trip
+/// marker must reach every writer — pr283-review finding 6), leaves the
+/// shared counter untouched, and reports `skipped_destructive`. A permitted
+/// purge spends the SHARED counter inside the same transaction.
 pub fn purge_doomed_rows(
     conn: &Connection,
     doomed: &[DoomedRow],
@@ -187,7 +189,16 @@ pub fn purge_doomed_rows_opts(
                 // export (a partial backup behind a refusal would let a
                 // later pass mistake the refusal for a completed backup),
                 // leave the shared counter untouched.
-                let _ = std::fs::remove_dir_all(export_dir);
+                //
+                // pr283-review finding 6: COMMIT the check transaction on
+                // the refusal path too. `breaker_check` persists
+                // `breaker_tripped` (and the epoch bookkeeping) through the
+                // caller's transaction; rolling it back here erased the
+                // trip marker for every OTHER writer — heal.rs commits its
+                // check txn, regrade must not differ. Committing is safe:
+                // nothing was deleted in this transaction.
+                tx.commit()?;
+                remove_run_export_files(export_dir, doomed_ids);
                 eprintln!("[ct::repair WARN] #186 V20 re-grade SKIPPED: {reason}");
                 return Ok((0, true));
             }
@@ -231,7 +242,7 @@ pub fn purge_doomed_rows_opts(
     }
     if &recount_doomed != doomed_ids {
         tx.commit()?; // re-anchors are recovery actions — keep them (rev 9)
-        let _ = std::fs::remove_dir_all(export_dir);
+        remove_run_export_files(export_dir, doomed_ids);
         eprintln!(
             "[ct::repair WARN] #186 V20 re-grade SKIPPED: the in-transaction \
              recount disagrees with the pre-transaction doomed set ({} then vs \
@@ -253,6 +264,20 @@ pub fn purge_doomed_rows_opts(
     crate::db::breaker::breaker_spend(&tx, doomed.len() as i64)?;
     tx.commit()?;
     Ok((doomed.len(), false))
+}
+
+/// Prune ONLY this run's export files — one `<id>.json` per doomed id —
+/// and keep the directory. The export dir is a FIXED, shared location
+/// (`repair-export-phase2/`): `remove_dir_all` on a refusal/mismatch also
+/// destroyed PRIOR runs' surviving backups (pr283-review finding 7). A
+/// refused run's own files must still go — a partial backup behind a
+/// refusal would let a later pass mistake the refusal for a completed
+/// backup — so this deletes exactly the current doomed set's files. Best
+/// effort: a failed cleanup must never mask the refusal itself.
+fn remove_run_export_files(export_dir: &Path, doomed_ids: &std::collections::HashSet<String>) {
+    for id in doomed_ids {
+        let _ = std::fs::remove_file(export_dir.join(format!("{id}.json")));
+    }
 }
 
 /// One-shot re-grade of the live unanchored stock (issue #186 §2.4).
@@ -414,6 +439,7 @@ pub fn regrade_unanchored_opts(
 mod tests {
     use super::*;
     use crate::db::connection::open_in_memory;
+    use std::path::PathBuf;
 
     const ANCHOR_HASH: &str = "feedface00000000000000000000000000000000000000000000000000000000";
 
@@ -850,11 +876,16 @@ mod tests {
             unanchored, 0,
             "re-anchor UPDATEs must commit even though the deletes aborted"
         );
-        // Export dir cleaned by the abort (no stale backup may masquerade as
-        // a completed one behind a skipped destructive phase).
-        assert!(
-            !export_dir.exists(),
-            "the aborted destructive phase must clean its export dir"
+        // Export cleaned by the abort (no stale backup may masquerade as a
+        // completed one behind a skipped destructive phase). pr283-review
+        // finding 7: only THIS run's doomed files are removed — the shared
+        // dir itself stays (prior runs' backups survive).
+        let leftovers = std::fs::read_dir(&export_dir)
+            .map(|rd| rd.count())
+            .unwrap_or(0);
+        assert_eq!(
+            leftovers, 0,
+            "the aborted destructive phase must clean THIS run's export files"
         );
     }
 
@@ -945,10 +976,15 @@ mod tests {
             anchored, 0,
             "re-anchor UPDATEs commit regardless of the verdict"
         );
-        // Export dir cleaned: a stale backup must not survive a refusal.
-        assert!(
-            !dir.path().join(REGRADE_EXPORT_DIR).exists(),
-            "refused export must be cleaned up"
+        // Export cleaned: THIS run's backup files are gone (pr283-review
+        // finding 7: only the current doomed set's files — the shared dir
+        // itself stays, since prior runs' backups must survive).
+        let leftovers = std::fs::read_dir(dir.path().join(REGRADE_EXPORT_DIR))
+            .map(|rd| rd.count())
+            .unwrap_or(0);
+        assert_eq!(
+            leftovers, 0,
+            "refused run's own export files must be cleaned up"
         );
         // Nothing was spent by the refused purge itself.
         let spent: i64 = conn
@@ -959,5 +995,116 @@ mod tests {
             )
             .unwrap();
         assert_eq!(spent, 10, "the refused purge must not spend");
+    }
+
+    /// pr283-review finding 6: the refusal path must COMMIT the check
+    /// transaction so `breaker_tripped` persists — otherwise every OTHER
+    /// writer (heal.rs commits its check txn) misses the trip and runs on a
+    /// fresh budget. After a regrade refusal the marker must be set and the
+    /// next heal pass (no `--allow-bulk`) must refuse too.
+    #[test]
+    fn regrade_refusal_persists_breaker_trip_and_heal_refuses() {
+        let conn = open_in_memory().unwrap();
+        seed_doomed_batch(&conn, 5);
+        // Another writer spends the shared budget out first, so regrade's
+        // breaker check hits Rule 1 and writes the marker.
+        crate::db::breaker::breaker_spend(&conn, 10).unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let report = regrade_unanchored(&conn, Some(dir.path()), 1_000).unwrap();
+        assert!(report.skipped_destructive, "fixture: the purge must refuse");
+
+        let tripped: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM llm_wiki_meta WHERE key = 'breaker_tripped'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            tripped, 1,
+            "a regrade refusal must PERSIST breaker_tripped (the check txn commits)"
+        );
+
+        // The persisted marker must refuse the next heal pass too. Heal
+        // fixture: ONE ungrounded librarian_inferred row + 201 grounded
+        // companions. heal's own threshold from L=202 is 11 > spent 10, so
+        // the budget rule does NOT refuse — ONLY the persisted trip marker
+        // does (this isolates finding 6: pre-fix the rolled-back marker let
+        // the heal proceed).
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('documents/a.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+               (id, entity_id, title, body, source_type, source_ref, created_at, updated_at, embedding_blob)
+             VALUES ('heal_lost', 'e1', 'T', 'B', 'librarian_inferred', 'documents/vanished.md', 0, 0, x'00')",
+            [],
+        )
+        .unwrap();
+        for i in 0..201 {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries
+                   (id, entity_id, title, body, source_type, source_ref, created_at, updated_at, embedding_blob)
+                 VALUES (?1, 'e1', 'T', 'B', 'librarian_inferred', 'documents/a.md', 0, 0, x'00')",
+                [&format!("heal_live_{i}")],
+            )
+            .unwrap();
+        }
+        let mut heal_conn = conn;
+        let summary =
+            crate::db::heal::heal_invalid_sources_conn(&mut heal_conn, PathBuf::from("/vault"))
+                .unwrap();
+        assert_eq!(
+            summary.soft_deleted, 0,
+            "a tripped breaker (persisted by regrade's refusal) must refuse the heal pass"
+        );
+    }
+
+    /// pr283-review finding 7: the export dir is a FIXED shared location;
+    /// a refusal/mismatch cleanup must remove ONLY the current run's doomed
+    /// files — a prior run's surviving backups stay.
+    #[test]
+    fn refusal_cleanup_keeps_prior_runs_backups() {
+        let conn = open_in_memory().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let export_dir = dir.path().join(REGRADE_EXPORT_DIR);
+
+        // Run 1: a doomed row that purges normally (an anchored companion
+        // keeps L=2 > |doomed|=1, clear of the rev-34 Small-L rule); its
+        // backup SURVIVES the successful purge (backups are never cleaned on
+        // success).
+        conn.execute(
+            "INSERT INTO documents (path, hash, tier, status)
+             VALUES ('/v/notes.md', 'h', 'user_doc', 'indexed')",
+            [],
+        )
+        .unwrap();
+        seed_flagged(&conn, "fact_run1_kept", true, None);
+        seed_flagged(&conn, "fact_run1", false, None);
+        let report1 = regrade_unanchored(&conn, Some(dir.path()), 1_000).unwrap();
+        assert_eq!(report1.purged, 1, "fixture: run 1 must purge");
+        assert!(
+            export_dir.join("fact_run1.json").exists(),
+            "run 1's backup must exist after its purge"
+        );
+
+        // Run 2: a NEW doomed row, refused via the shared budget — run 1's
+        // backup must survive the cleanup.
+        seed_flagged(&conn, "fact_run2", false, None);
+        crate::db::breaker::breaker_spend(&conn, 10).unwrap();
+        let report2 = regrade_unanchored(&conn, Some(dir.path()), 1_000).unwrap();
+        assert!(report2.skipped_destructive, "fixture: run 2 must refuse");
+        assert!(
+            export_dir.join("fact_run1.json").exists(),
+            "run 1's backup must SURVIVE run 2's refusal cleanup"
+        );
+        assert!(
+            !export_dir.join("fact_run2.json").exists(),
+            "run 2's own export file must be cleaned on refusal"
+        );
     }
 }
