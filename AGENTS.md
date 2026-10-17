@@ -12,8 +12,9 @@ inconsistently-set `CARGO_TARGET_DIR`. Follow these rules exactly.
   A RELATIVE value resolves against the current directory — running from
   `tools/` or `src-tauri/` with a bare `.cargo-shared-target` silently creates a
   second multi-GB tree. Always use the absolute path.
-- **Pre-flight**: `df -h /` must show ≥30G free before launching full test
-  suites; fresh builds reach tens of GB.
+- **Pre-flight**: `df -h "$(dirname "$CARGO_TARGET_DIR")"` must show ≥30G free before
+  launching full test suites (check the filesystem that actually holds the build
+  cache, not `/`); fresh builds reach tens of GB.
 - **On linker `Bus error` (signal 7) or `ENOSPC` / `os error 122`**: the disk
   hit 100% under the build — this is an environment failure. STOP and report.
   NEVER delete caches to unblock yourself; cache deletion is a controller
