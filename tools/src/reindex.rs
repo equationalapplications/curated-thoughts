@@ -389,7 +389,10 @@ fn print_coverage(conn: &rusqlite::Connection, key: &str, _now_ms: i64) -> Resul
     Ok(())
 }
 
-fn now_ms_at() -> i64 {
+/// Wall-clock `now_ms` for eligibility/coverage probes. `pub` for the Task-14
+/// calibration driver (`tools/src/bin/calibrate_two_stage.rs`), which reuses
+/// the Task-13 helper instead of re-deriving wall-clock time.
+pub fn now_ms_at() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
