@@ -39,6 +39,17 @@
 //! The harness SHIPS; the live run itself is §9 step 3, manual. The offline
 //! logic (letter verdict, artifact shape, stratified splits, refusals) is
 //! tested by `tools/tests/calibrate_two_stage_harness.rs`.
+//!
+//! Task 15 adds the OFFLINE decision machinery (spec §9 step 3, §7): `pick
+//! --grid <dir>` sweeps per-cell paired artifacts, applies the pinned
+//! tie-break (GLM r1 minor-5: higher hit@2 → lower FP → rule (i)) and emits
+//! the winning `(rule, floor, k)` + a ready-to-apply patch snippet;
+//! `flip --artifact <path>` proceeds ONLY on a passing artifact current for
+//! this build (refusing otherwise, printing the letter numbers) and writes
+//! the flip package. Neither subcommand runs the flip: `WISDOM_GATE_FLOORS`
+//! gains the winning composite key ONLY when a real passing artifact's
+//! package is applied after the live calibration (§7; until then the
+//! shipped tree stays opt-in).
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -47,7 +58,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use curated_thoughts_tools::reindex::now_ms_at;
@@ -79,29 +90,36 @@ const HELDOUT_SEED: u64 = 271_828;
 
 #[derive(Parser)]
 struct Args {
+    /// `pick` sweeps a grid of per-cell artifacts; `flip` applies the
+    /// letter-gated flip package. Omitted = the paired LIVE run (§9 step 3).
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
     /// Probe JSONL in the EXISTING `calibrate_wisdom_gate` format (serde
     /// `Probe`: `text`, `expect` = relevant-fact ids, optional `vector`),
     /// one line per probe. Do NOT invent a new schema.
+    ///
+    /// Flat run args are `Option` ONLY so `pick`/`flip` stay parseable —
+    /// `main` enforces them (with clap-shaped errors) on the live-run path.
     #[arg(long)]
-    probes: PathBuf,
+    probes: Option<PathBuf>,
     /// The calibrated two-stage rule: `restricted-cosine` (rule i) or
     /// `chunk-hop` (rule ii).
     #[arg(long)]
-    rule: String,
+    rule: Option<String>,
     /// The candidate two-stage floor (the rule's OWN decision variable:
     /// restricted fact cosine for rule i, member-CHUNK score for rule ii).
     #[arg(long)]
-    floor: f32,
+    floor: Option<f32>,
     /// Stage-1 chunk breadth for rule (ii) (the `TWO_STAGE_K` knob, default
     /// 8 — k is NOT a floor key). Ignored under `restricted-cosine` (rule i
     /// scores the whole rule-reachable set; stage-1 breadth does not apply).
     #[arg(long)]
-    k: usize,
+    k: Option<usize>,
     /// The v1 baseline's model/scheme key — must equal the LIVE
     /// `floor_key_for(gate_model_key(profile), scheme)` key (Opus r1 M3:
     /// baseline named BEFORE the run, no post-hoc arm picking).
     #[arg(long)]
-    baseline_key: String,
+    baseline_key: Option<String>,
     /// Write the artifact JSON here (default: stdout).
     #[arg(long)]
     json_out: Option<PathBuf>,
@@ -112,6 +130,38 @@ struct Args {
         default_value = r#"{"type":"external","base_url":"https://openrouter.ai/api/v1","model":"qwen/qwen3-embedding-4b"}"#
     )]
     profile: String,
+}
+
+/// The OFFLINE subcommands (Task 15). The paired live run is the default
+/// (no subcommand) — same interface as Task 14 shipped.
+#[derive(clap::Subcommand)]
+enum Cmd {
+    /// Sweep the (rule × floor × k) grid from per-cell paired artifacts in
+    /// DIR, apply the pinned tie-break (GLM r1 minor-5), and emit the
+    /// winning (rule, floor, k) + a ready-to-apply patch snippet for
+    /// `WISDOM_GATE_FLOORS`/`TWO_STAGE_K` (§9 step 3).
+    Pick {
+        /// Directory holding one `CalibrationArtifact` JSON per grid cell
+        /// (each written by a separate paired-driver invocation).
+        #[arg(long)]
+        grid: PathBuf,
+        /// Write the pick report JSON here (default: stdout only).
+        #[arg(long)]
+        json_out: Option<PathBuf>,
+    },
+    /// Load a calibration artifact and — ONLY if `two_stage_passes == true`
+    /// AND the artifact is current for THIS build (§7) — write the flip
+    /// package (freeze-dir `expected.json` + ready-to-apply patch snippet).
+    /// Refuses otherwise, printing the letter numbers.
+    Flip {
+        /// The paired-run artifact to flip on.
+        #[arg(long)]
+        artifact: PathBuf,
+        /// Output directory for the flip package (default: the artifact's
+        /// own directory).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 /// Probe schema: byte-compatible with `calibrate_wisdom_gate`'s `Probe`
@@ -460,6 +510,391 @@ pub struct CalibrationArtifact {
     pub stale_embed_key_total: i64,
 }
 
+// ── Task 15: grid picker + letter-gated flip (spec §9 step 3, §7, GLM r1 minor-5) ──
+
+/// Composite two-stage floor key (spec §3): `<v1 schemed key>:two-stage:<rule>`
+/// — exactly the key `two_stage_rule_floor` resolves and the flip adds to
+/// `WISDOM_GATE_FLOORS`. The artifact's `baseline.key` IS the v1 schemed
+/// floor key (`floor_key_for(model, scheme)`, named before the run, Opus r1
+/// M3), so the composite key derives offline from the artifact alone.
+pub fn composite_floor_key(artifact: &CalibrationArtifact) -> String {
+    format!(
+        "{}:two-stage:{}",
+        artifact.baseline.key, artifact.candidate.rule
+    )
+}
+
+/// Freeze dir (relative to `src-tauri/tests/fixtures`) for a floor key —
+/// mirrors `freeze_dir_for`'s `other` arm in `wisdom_gate_bench.rs` (plan
+/// §Task 6): ':' and '/' → '_' under `wisdom_gate_bench/`. The two
+/// historical v1 keys keep their dedicated dirs and never route through
+/// here (the flip only ever writes composite two-stage keys).
+pub fn freeze_relative_dir(key: &str) -> String {
+    format!(
+        "wisdom_gate_bench/{}",
+        key.replace(':', "_").replace('/', "_")
+    )
+}
+
+/// Campaign homogeneity + integrity checks over a grid (§7: one paired run,
+/// baseline named before the run, `cells = 1` per invocation). The picker
+/// refuses to compare across campaigns or to trust an artifact whose
+/// recorded letter verdict contradicts its own numbers.
+pub fn check_grid(cells: &[CalibrationArtifact]) -> Result<()> {
+    if cells.is_empty() {
+        bail!(
+            "no calibration artifacts in the grid — run the paired driver once per \
+             (rule × floor × k) cell first (§7: one invocation measures ONE cell)"
+        );
+    }
+    let first = &cells[0];
+    for c in cells {
+        if c.schema != 1 {
+            bail!(
+                "unsupported artifact schema {} in the grid (expected 1)",
+                c.schema
+            );
+        }
+        if c.baseline.key != first.baseline.key
+            || c.baseline.floor != first.baseline.floor
+            || c.baseline.scheme != first.baseline.scheme
+        {
+            bail!(
+                "grid mixes baseline arms ({:?} vs {:?}) — the picker only compares cells \
+                 of the SAME paired campaign (§7: same paired run for both arms; the \
+                 baseline is named before the run, Opus r1 M3)",
+                first.baseline.key,
+                c.baseline.key
+            );
+        }
+        if c.probes.sha256 != first.probes.sha256 {
+            bail!(
+                "grid mixes probe sets ({:?} vs {:?}) — all cells must come from the same \
+                 paired run over the same probe set (§7)",
+                first.probes.sha256,
+                c.probes.sha256
+            );
+        }
+        if c.candidate.rule != "restricted-cosine" && c.candidate.rule != "chunk-hop" {
+            bail!("unknown two-stage rule {:?} in the grid", c.candidate.rule);
+        }
+        let recorded = letter_verdict(
+            c.two_stage.hit2,
+            c.two_stage.fp,
+            c.single_stage.hit2,
+            c.single_stage.fp,
+        );
+        if recorded != c.two_stage_passes {
+            bail!(
+                "artifact rule={} floor={} k={} records two_stage_passes={} but its own \
+                 numbers contradict it (the letter says {recorded}) — refusing to pick \
+                 from an inconsistent or tampered artifact",
+                c.candidate.rule,
+                c.candidate.floor,
+                c.candidate.k,
+                c.two_stage_passes
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The pinned tie-break (GLM r1 minor-5): among PASSING cells — higher
+/// hit@2, then lower FP, then rule (i) (the simpler path). Two DOCUMENTED
+/// EXTENSIONS make the pinned order total (the spec pins only three keys):
+/// full metric+rule ties prefer the stricter (higher) floor — the measured
+/// letter is identical and a higher floor admits strictly fewer marginal
+/// opens — then the smaller k. `two_stage_passes == false` cells are NEVER
+/// eligible.
+pub fn pick_winner(cells: &[CalibrationArtifact]) -> Result<CalibrationArtifact> {
+    check_grid(cells)?;
+    let rule_rank = |rule: &str| {
+        if rule == "restricted-cosine" {
+            0usize
+        } else {
+            1
+        }
+    };
+    let mut passing: Vec<&CalibrationArtifact> =
+        cells.iter().filter(|c| c.two_stage_passes).collect();
+    if passing.is_empty() {
+        let mut all: Vec<&CalibrationArtifact> = cells.iter().collect();
+        all.sort_by(|a, b| {
+            b.two_stage
+                .hit2
+                .partial_cmp(&a.two_stage.hit2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.two_stage.fp.cmp(&b.two_stage.fp))
+        });
+        let best = all[0];
+        bail!(
+            "no grid cell passes the acceptance letter (§7) — two-stage does NOT flip. \
+             Best cell rule={} floor={} k={}: ts_hit2={} ts_fp={} vs ss_hit2={} ss_fp={}",
+            best.candidate.rule,
+            best.candidate.floor,
+            best.candidate.k,
+            best.two_stage.hit2,
+            best.two_stage.fp,
+            best.single_stage.hit2,
+            best.single_stage.fp
+        );
+    }
+    passing.sort_by(|a, b| {
+        b.two_stage
+            .hit2
+            .partial_cmp(&a.two_stage.hit2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.two_stage.fp.cmp(&b.two_stage.fp))
+            .then_with(|| rule_rank(&a.candidate.rule).cmp(&rule_rank(&b.candidate.rule)))
+            .then_with(|| {
+                b.candidate
+                    .floor
+                    .partial_cmp(&a.candidate.floor)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.candidate.k.cmp(&b.candidate.k))
+    });
+    Ok(passing[0].clone())
+}
+
+/// The ready-to-apply patch snippet for the winner (plan §Task 15
+/// Interfaces): the `WISDOM_GATE_FLOORS` composite row, plus the
+/// `TWO_STAGE_K` row under rule (ii) ONLY — rule (i) scores the whole
+/// rule-reachable set, stage-1 breadth does not apply, k is inert.
+pub fn patch_snippet(winner: &CalibrationArtifact) -> String {
+    let key = composite_floor_key(winner);
+    let mut out = format!(
+        "// WISDOM_GATE_FLOORS (src-tauri/src/wisdom_match.rs) — add:\n    (\"{key}\", {}),\n",
+        winner.candidate.floor
+    );
+    if winner.candidate.rule == "chunk-hop" {
+        out.push_str(&format!(
+            "// TWO_STAGE_K (src-tauri/src/wisdom_match.rs) — add (rule (ii) only; \
+             rule (i) never uses stage-1 breadth):\n    (\"{}\", {}),\n",
+            winner.baseline.key, winner.candidate.k
+        ));
+    }
+    out
+}
+
+/// The winning cell of a grid sweep, in reportable shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PickWinner {
+    pub rule: String,
+    pub floor: f32,
+    pub k: usize,
+    /// Composite `WISDOM_GATE_FLOORS` key the flip adds (spec §3 shape).
+    pub gate_key: String,
+}
+
+/// `pick`'s output: the winner, the sweep's shape, and the patch snippet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PickReport {
+    pub schema: u32,
+    pub winner: PickWinner,
+    pub cells_considered: usize,
+    pub passing_cells: usize,
+    /// The pinned tie-break order, recorded for the audit trail.
+    pub tie_break: String,
+    pub patch_snippet: String,
+}
+
+/// Sweep a grid and emit the winner report (§9 step 3: pick rule + floor;
+/// the flip is a SEPARATE letter-gated step).
+pub fn pick_report(cells: &[CalibrationArtifact]) -> Result<PickReport> {
+    let winner = pick_winner(cells)?;
+    Ok(PickReport {
+        schema: 1,
+        winner: PickWinner {
+            rule: winner.candidate.rule.clone(),
+            floor: winner.candidate.floor,
+            k: winner.candidate.k,
+            gate_key: composite_floor_key(&winner),
+        },
+        cells_considered: cells.len(),
+        passing_cells: cells.iter().filter(|c| c.two_stage_passes).count(),
+        tie_break: "higher hit@2 → lower FP → rule (i) (GLM r1 minor-5); \
+                    full ties → stricter floor → smaller k (documented extension)"
+            .to_string(),
+        patch_snippet: patch_snippet(&winner),
+    })
+}
+
+/// Every parseable `CalibrationArtifact` JSON in `dir` — one per grid cell.
+/// Unparseable or non-artifact JSON files are SKIPPED with a stderr note
+/// (the grid dir may legitimately hold the previous pick's report or the
+/// flip package); zero parseable artifacts ⇒ refuse.
+pub fn grid_cells(dir: &Path) -> Result<Vec<CalibrationArtifact>> {
+    if !dir.is_dir() {
+        bail!("grid dir {} does not exist", dir.display());
+    }
+    let mut cells = Vec::new();
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("read grid dir {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    entries.sort();
+    for path in entries {
+        match std::fs::read(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|raw| {
+                serde_json::from_slice::<CalibrationArtifact>(&raw).map_err(anyhow::Error::from)
+            }) {
+            Ok(artifact) => cells.push(artifact),
+            Err(e) => eprintln!(
+                "note: skipping {} (not a calibration artifact: {e})",
+                path.display()
+            ),
+        }
+    }
+    if cells.is_empty() {
+        bail!(
+            "no calibration artifacts in {} — run the paired driver once per \
+             (rule × floor × k) cell first (§7)",
+            dir.display()
+        );
+    }
+    Ok(cells)
+}
+
+/// Load one artifact file (the `flip` entry point).
+pub fn load_artifact(path: &Path) -> Result<CalibrationArtifact> {
+    let raw = std::fs::read(path).with_context(|| {
+        format!(
+            "read calibration artifact {} — no such file",
+            path.display()
+        )
+    })?;
+    serde_json::from_slice(&raw)
+        .with_context(|| format!("parse calibration artifact {}", path.display()))
+}
+
+/// The flip decision output: everything the operator applies to flip the
+/// two-stage default (§9 step 3: flip-to-default IF the letter passes).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlipPlan {
+    /// Composite `WISDOM_GATE_FLOORS` key (spec §3 shape).
+    pub gate_key: String,
+    pub rule: String,
+    pub floor: f32,
+    pub k: usize,
+    /// Freeze dir relative to `src-tauri/tests/fixtures` (bench convention,
+    /// plan §Task 6).
+    pub freeze_relative_dir: String,
+    pub patch_snippet: String,
+    /// The freeze-dir `expected.json` content, derived from the artifact.
+    pub expected_json: String,
+}
+
+/// The letter-gated flip decision (plan §Task 15): the flip proceeds ONLY on
+/// a passing artifact current for THIS build. Refusals, in order: unknown
+/// schema; artifact without code provenance (unversioned build — cannot be
+/// tied to a real calibration run); STALE artifact (produced by a different
+/// build than the one asked to flip); recorded verdict contradicting the
+/// artifact's own numbers; FAILING letter (prints the letter numbers, §7).
+///
+/// NOTE the honest scope: this returns the flip PACKAGE (freeze-dir
+/// `expected.json` + patch snippet). It does not edit source: the shipped
+/// tree stays UNFLIPPED until a real passing artifact exists, and
+/// `replay_two_stage` cannot un-ignore on `expected.json` alone —
+/// `vectors.json.gz` only comes from the freeze-producing live run.
+pub fn flip_plan(artifact: &CalibrationArtifact, current_sha: &str) -> Result<FlipPlan> {
+    if artifact.schema != 1 {
+        bail!(
+            "unknown artifact schema {} — refusing to flip (expected 1)",
+            artifact.schema
+        );
+    }
+    if artifact.code_sha == "unversioned" {
+        bail!(
+            "artifact lacks code provenance (built without CT_BUILD_SHA) — refusing to \
+             flip an artifact that cannot be tied to a versioned calibration build"
+        );
+    }
+    if current_sha == "unversioned" {
+        bail!(
+            "this build is unversioned (no CT_BUILD_SHA) — refusing to flip: cannot \
+             verify artifact {} is current for this build",
+            artifact.code_sha
+        );
+    }
+    if artifact.code_sha != current_sha {
+        bail!(
+            "STALE artifact: produced by build {} but this is build {} — re-run the \
+             paired calibration before flipping",
+            artifact.code_sha,
+            current_sha
+        );
+    }
+    let recorded = letter_verdict(
+        artifact.two_stage.hit2,
+        artifact.two_stage.fp,
+        artifact.single_stage.hit2,
+        artifact.single_stage.fp,
+    );
+    if recorded != artifact.two_stage_passes {
+        bail!(
+            "artifact records two_stage_passes={} but its own numbers contradict it \
+             (the letter says {recorded}) — refusing to flip",
+            artifact.two_stage_passes
+        );
+    }
+    if !artifact.two_stage_passes {
+        bail!(
+            "the acceptance letter does NOT pass — refusing to flip (§7: two-stage \
+             passes iff not worse than single-stage): ts_hit2={} ts_fp={} vs \
+             ss_hit2={} ss_fp={}",
+            artifact.two_stage.hit2,
+            artifact.two_stage.fp,
+            artifact.single_stage.hit2,
+            artifact.single_stage.fp
+        );
+    }
+    let gate_key = composite_floor_key(artifact);
+    let expected = serde_json::json!({
+        "schema": 1,
+        "gate_key": gate_key,
+        "rule": artifact.candidate.rule,
+        "floor": artifact.candidate.floor,
+        "k": artifact.candidate.k,
+        "probe_count": artifact.probes.count,
+        "probes_sha256": artifact.probes.sha256,
+        "baseline_key": artifact.baseline.key,
+        "baseline_floor": artifact.baseline.floor,
+        "source_artifact_code_sha": artifact.code_sha,
+        "note": "Floor/rule/k derived from the paired calibration artifact. \
+                 replay_two_stage additionally requires vectors.json.gz, which ONLY \
+                 the freeze-producing live run writes; never hand-edit this file.",
+    });
+    Ok(FlipPlan {
+        gate_key,
+        rule: artifact.candidate.rule.clone(),
+        floor: artifact.candidate.floor,
+        k: artifact.candidate.k,
+        freeze_relative_dir: freeze_relative_dir(&composite_floor_key(artifact)),
+        patch_snippet: patch_snippet(artifact),
+        expected_json: serde_json::to_string_pretty(&expected)?,
+    })
+}
+
+/// Write the flip package into `out_dir`: the freeze-dir `expected.json` at
+/// the bench-convention path and the ready-to-apply patch snippet beside it.
+/// Returns the written paths.
+pub fn write_flip_package(plan: &FlipPlan, out_dir: &Path) -> Result<Vec<PathBuf>> {
+    let freeze_dir = out_dir.join(&plan.freeze_relative_dir);
+    std::fs::create_dir_all(&freeze_dir)
+        .with_context(|| format!("create freeze dir {}", freeze_dir.display()))?;
+    let expected_path = freeze_dir.join("expected.json");
+    std::fs::write(&expected_path, &plan.expected_json)
+        .with_context(|| format!("write {}", expected_path.display()))?;
+    let patch_path = out_dir.join("two-stage-flip.patch");
+    std::fs::write(&patch_path, &plan.patch_snippet)
+        .with_context(|| format!("write {}", patch_path.display()))?;
+    Ok(vec![expected_path, patch_path])
+}
+
 // ── Live driver (not exercised offline; the live run is §9 step 3, manual) ──
 
 fn parse_rule(s: &str) -> Result<TwoStageRule> {
@@ -799,24 +1234,100 @@ fn code_sha() -> String {
         .to_string()
 }
 
+fn cmd_pick(grid: &Path, json_out: Option<&Path>) -> Result<()> {
+    let cells = grid_cells(grid)?;
+    let report = pick_report(&cells)?;
+    println!(
+        "picker: {} cells considered, {} pass the letter",
+        report.cells_considered, report.passing_cells
+    );
+    println!(
+        "winner: rule={} floor={} k={} → gate_key={}",
+        report.winner.rule, report.winner.floor, report.winner.k, report.winner.gate_key
+    );
+    println!("tie-break: {}", report.tie_break);
+    print!("{}", report.patch_snippet);
+    if let Some(out) = json_out {
+        std::fs::write(out, serde_json::to_string_pretty(&report)?)
+            .with_context(|| format!("write pick report {}", out.display()))?;
+        println!("report written to {}", out.display());
+    }
+    Ok(())
+}
+
+fn cmd_flip(artifact_path: &Path, out: Option<&Path>) -> Result<()> {
+    let artifact = load_artifact(artifact_path)?;
+    let plan = flip_plan(&artifact, &code_sha())?;
+    // Default flip-package output: the artifact's own directory (Task 16's
+    // runbook runs `flip --artifact artifact.json` in the grid dir).
+    let out_dir = out
+        .map(|p| p.to_path_buf())
+        .or_else(|| artifact_path.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let written = write_flip_package(&plan, &out_dir)?;
+    println!("LETTER PASSES — flip package written:");
+    for p in &written {
+        println!("  {}", p.display());
+    }
+    print!("{}", plan.patch_snippet);
+    println!(
+        "next: apply the snippet, run the freeze-producing live calibration \
+         (`calibrate_wisdom_gate --freeze`) so the freeze dir gains vectors.json.gz, \
+         un-ignore replay_two_stage, run the gates — THEN commit the flip \
+         (§9 step 3 / plan §Task 15). The shipped tree stays UNFLIPPED until then."
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
-    check_embed_stub(std::env::var_os("CURATED_EMBED_STUB").as_deref())?;
-    let rule = parse_rule(&args.rule)?;
-    if !args.floor.is_finite() || !(0.0..1.0).contains(&args.floor) {
+    match args.cmd {
+        Some(Cmd::Pick { grid, json_out }) => return cmd_pick(&grid, json_out.as_deref()),
+        Some(Cmd::Flip { artifact, out }) => return cmd_flip(&artifact, out.as_deref()),
+        None => {}
+    }
+    // Live-run path: the flat args are required here (clap can't express
+    // "required unless subcommand" for grouped args, so main enforces it).
+    fn missing(name: &str, v: &Option<impl Sized>) -> Option<String> {
+        v.is_none().then(|| name.to_string())
+    }
+    let mut absent: Vec<String> = [
+        missing("--probes", &args.probes),
+        missing("--rule", &args.rule),
+        missing("--floor", &args.floor),
+        missing("--k", &args.k),
+        missing("--baseline-key", &args.baseline_key),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !absent.is_empty() {
+        absent.sort();
         bail!(
-            "--floor must be a finite cosine floor in (0, 1), got {}",
-            args.floor
+            "the following required arguments were not provided: {} \
+             (the paired live run needs --probes/--rule/--floor/--k/--baseline-key; \
+             `pick` and `flip` are subcommands)",
+            absent.join(", ")
         );
     }
-    if args.k == 0 {
+    let probes_path = args.probes.clone().expect("checked above");
+    let rule = args.rule.clone().expect("checked above");
+    let floor = args.floor.expect("checked above");
+    let k = args.k.expect("checked above");
+    let baseline_key = args.baseline_key.clone().expect("checked above");
+    check_embed_stub(std::env::var_os("CURATED_EMBED_STUB").as_deref())?;
+    let rule = parse_rule(&rule)?;
+    if !floor.is_finite() || !(0.0..1.0).contains(&floor) {
+        bail!("--floor must be a finite cosine floor in (0, 1), got {floor}",);
+    }
+    if k == 0 {
         bail!("--k must be >= 1");
     }
     let profile: EmbedProfile = serde_json::from_str(&args.profile).context("--profile")?;
     let profile_key = gate_model_key(&profile, None);
-    let (probes, probes_sha) = read_jsonl::<Probe>(&args.probes)?;
+    let (probes, probes_sha) = read_jsonl::<Probe>(&probes_path)?;
     if probes.is_empty() {
-        bail!("no probes in {}", args.probes.display());
+        bail!("no probes in {}", probes_path.display());
     }
     let n_rel = probes.iter().filter(|p| !p.expect.is_empty()).count();
     let n_fp = probes.len() - n_rel;
@@ -829,20 +1340,20 @@ fn main() -> Result<()> {
     // Opus r1 M3: the baseline is the CURRENTLY SHIPPED default. A
     // --baseline-key that does not name the live cell would allow post-hoc
     // arm picking — refuse.
-    if args.baseline_key != scheme_key {
+    if baseline_key != scheme_key {
         bail!(
             "--baseline-key {:?} does not name the LIVE single-stage key {:?} \
              (profile {profile_key} under scheme {}); the baseline must be the \
              currently shipped default, named before the run (Opus r1 M3)",
-            args.baseline_key,
+            baseline_key,
             scheme_key,
             scheme.as_str(),
         );
     }
-    let v1_floor = gate_floor(&args.baseline_key).with_context(|| {
+    let v1_floor = gate_floor(&baseline_key).with_context(|| {
         format!(
             "--baseline-key {} has no registered floor in WISDOM_GATE_FLOORS",
-            args.baseline_key
+            baseline_key
         )
     })?;
 
@@ -906,7 +1417,7 @@ fn main() -> Result<()> {
         let ss = wisdom_match_in_scheme(
             &conn,
             &schemed_vecs[i],
-            &args.baseline_key,
+            &baseline_key,
             scheme,
             HIT_K,
             &[],
@@ -931,7 +1442,7 @@ fn main() -> Result<()> {
                     &schemed_vecs[i],
                     scheme,
                     Some(v1_floor),
-                    Some(args.floor),
+                    Some(floor),
                     HIT_K,
                     &HashSet::new(),
                     &HashSet::new(),
@@ -952,8 +1463,8 @@ fn main() -> Result<()> {
                     &schemed_vecs[i],
                     scheme,
                     Some(v1_floor),
-                    args.floor,
-                    args.k,
+                    floor,
+                    k,
                     HIT_K,
                     now,
                     &cands,
@@ -991,8 +1502,8 @@ fn main() -> Result<()> {
                 &schemed_vecs[i],
                 scheme,
                 Some(v1_floor),
-                args.floor,
-                args.k,
+                floor,
+                k,
                 HIT_K,
                 now,
                 &cands,
@@ -1042,7 +1553,7 @@ fn main() -> Result<()> {
 
     let ablation = if rule == TwoStageRule::ChunkHop {
         Some(TopKAblation {
-            k: args.k,
+            k: k,
             top1: ts_metrics.clone(),
             topk: arm_metrics(&ablation_verdicts, &labels),
         })
@@ -1055,27 +1566,27 @@ fn main() -> Result<()> {
         code_sha: code_sha(),
         generated_utc: chrono::Utc::now().to_rfc3339(),
         probes: ProbeSetInfo {
-            path: args.probes.display().to_string(),
+            path: probes_path.display().to_string(),
             sha256: probes_sha,
             count: probes.len(),
             relevant: n_rel,
             fp: n_fp,
         },
         baseline: BaselineArm {
-            key: args.baseline_key.clone(),
+            key: baseline_key.clone(),
             floor: v1_floor,
             scheme: scheme.as_str().to_string(),
         },
         candidate: CandidateCell {
             rule: rule.as_str().to_string(),
-            floor: args.floor,
-            k: args.k,
+            floor: floor,
+            k: k,
         },
         grid: GridInfo {
             cells: 1,
             rule: rule.as_str().to_string(),
-            floor: args.floor,
-            k: args.k,
+            floor: floor,
+            k: k,
         },
         coverage,
         single_stage: ss_metrics.clone(),
@@ -1132,7 +1643,7 @@ fn main() -> Result<()> {
         ss_metrics.hit2,
         ss_metrics.fp,
         rule.as_str(),
-        args.floor,
+        floor,
         ts_metrics.hit2,
         ts_metrics.fp
     );

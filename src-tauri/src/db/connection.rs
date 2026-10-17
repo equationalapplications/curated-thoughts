@@ -2065,7 +2065,11 @@ mod tests {
         // marker machinery must be harmless either way — no trigger failure,
         // no marker (no evidence rows ever existed on this brain).
         migrate(&conn, None, Some(tmp.path())).unwrap();
-        let trg: i64 = conn
+        // The trigger count is informational here (the after-open phase
+        // below re-checks the machinery); the underscore prefix keeps the
+        // scoped `cargo check --tests` gate warning-free (Task 15's gate
+        // run surfaced this pre-existing warning from 2bedb35d).
+        let _trg: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master
                   WHERE type='trigger' AND name='librarian_evidence_seen_trg'",

@@ -89,7 +89,7 @@ fn every_non_stub_floor_key_has_a_freeze_dir() {
 }
 
 #[test]
-#[ignore = "unignored by Task 15's flip-to-default (plan §Task 6 Step 2): the composite key is absent from `WISDOM_GATE_FLOORS` pre-calibration, so the floor assertion below cannot hold. CI runs it explicitly via the guarded \"Wisdom gate bench freeze coverage\" step the moment the flip lands."]
+#[ignore = "BLOCKER (Task 15, 2026-10-17): the composite key is still absent from `WISDOM_GATE_FLOORS` because NO live calibration has run — `two_stage_passes` is unknown, so the letter-gated flip (`calibrate_two_stage flip`) cannot proceed and the shipped tree stays opt-in. The artifact is pending the Task-16 ordered runbook (verify-scratch → repair-embed-key → paired run → pick → flip). Un-ignore ONLY when a real passing artifact's flip package has landed BOTH the `WISDOM_GATE_FLOORS` row AND the freeze snapshot (expected.json AND vectors.json.gz — expected.json alone cannot satisfy the asserts below)."]
 fn replay_two_stage() {
     let dir = freeze_dir_for(TWO_STAGE_GATE_KEY);
     let expected_path = format!("{dir}/expected.json");
