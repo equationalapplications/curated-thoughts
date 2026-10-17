@@ -90,24 +90,68 @@ fn test_race_mutate_chunks(conn: &rusqlite::Connection, doc_id: i64) {
 /// to docs whose `embed_key` differs from the current gate key (NULL counts
 /// as stale). Read on a plain connection — the under-lock re-check below
 /// makes any staleness between this read and the repair harmless.
-fn stale_candidates(conn: &rusqlite::Connection, key: &str, now_ms: i64) -> Result<Vec<StaleDoc>> {
+fn stale_candidates(
+    conn: &rusqlite::Connection,
+    brain: &write::Brain,
+    key: &str,
+    now_ms: i64,
+) -> Result<Vec<StaleDoc>> {
     let cands = two_stage::candidate_set(conn, now_ms, None)?
         .context("two-stage candidate probe unavailable (schema skew)")?;
+    // TEST SEAM ONLY (review fix round): between candidate-set discovery and
+    // the per-doc read, delete a doc on a SECOND (rw) connection. The
+    // discovery query and the per-doc read are two separate statements on
+    // the WAL read conn — no shared snapshot — so the per-doc read then hits
+    // no rows exactly as it would when a concurrent writer removes the doc.
+    // Invoked when `CURATED_REPAIR_TEST_DELETE_DOC` names a doc id —
+    // production never sets it.
+    if let Ok(del) = std::env::var("CURATED_REPAIR_TEST_DELETE_DOC") {
+        if let Ok(del_id) = del.trim().parse::<i64>() {
+            let rw = write::open_rw(brain).context("race seam: open rw")?;
+            test_race_delete_doc(&rw, del_id);
+        }
+    }
     if cands.doc_ids.is_empty() {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
-    for id in cands.doc_ids {
-        let (path, embed_key): (String, Option<String>) = conn.query_row(
+    for (i, id) in cands.doc_ids.iter().enumerate() {
+        let (path, embed_key): (String, Option<String>) = match conn.query_row(
             "SELECT path, embed_key FROM documents WHERE id = ?1",
             rusqlite::params![id],
             |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        ) {
+            Ok(row) => row,
+            // Discovery-time race (fix round): the doc was deleted between
+            // candidate-set discovery and this read. Skip it with a note —
+            // never abort the whole pass (exit-0/skip contract).
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                eprintln!(
+                    "[{}/{}] skip (doc deleted since candidate discovery): doc_id={id}",
+                    i + 1,
+                    cands.doc_ids.len()
+                );
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
         if embed_key.as_deref() != Some(key) {
-            out.push(StaleDoc { id, path });
+            out.push(StaleDoc { id: *id, path });
         }
     }
     Ok(out)
+}
+
+/// TEST SEAM ONLY: delete one doc row (see `stale_candidates` for why this
+/// models the discovery-time race). `chunks.doc_id`'s `ON DELETE CASCADE`
+/// never fires here — CT connections never enable `PRAGMA foreign_keys` —
+/// which is fine: the doc is gone; its orphaned chunks are simply unreachable.
+fn test_race_delete_doc(conn: &rusqlite::Connection, doc_id: i64) {
+    conn.execute(
+        "DELETE FROM documents WHERE id = ?1",
+        rusqlite::params![doc_id],
+    )
+    .expect("race seam: delete doc");
 }
 
 /// Stored chunks of one doc: (chunk_id, chunk_text), id order — the id set
@@ -150,7 +194,7 @@ pub fn repair_embed_key_stale() -> Result<i32> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    let docs = stale_candidates(&conn, &key, now_ms)?;
+    let docs = stale_candidates(&conn, &brain, &key, now_ms)?;
 
     if docs.is_empty() {
         println!("repair-embed-key: no stale/NULL-key candidate docs.");
@@ -161,7 +205,9 @@ pub fn repair_embed_key_stale() -> Result<i32> {
     let mut rw = write::open_rw(&brain).context("open brain read-write")?;
     let mut repaired = 0usize;
     let mut skipped = 0usize;
-    for (i, doc) in docs.iter().enumerate() {
+    // `doc_pass` label: the per-chunk rows_affected guard rolls back and
+    // skips to the next doc from inside the chunk loop.
+    'doc_pass: for (i, doc) in docs.iter().enumerate() {
         // Pre-read (outside the txn): the chunks we intend to re-embed.
         let pre = match stored_chunks(&conn, doc.id) {
             Ok(p) => p,
@@ -267,11 +313,28 @@ pub fn repair_embed_key_stale() -> Result<i32> {
         let mut wrote = false;
         for ((chunk_id, _), vec) in pre.iter().zip(vectors.iter()) {
             let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
-            tx.execute(
-                "UPDATE embeddings SET vector = ?1 WHERE chunk_id = ?2",
-                rusqlite::params![bytes, chunk_id],
-            )
-            .with_context(|| format!("update embedding for chunk {chunk_id}"))?;
+            // rows_affected guard (review fix round): every pre-read chunk
+            // must have its embeddings row updated EXACTLY once — a 0 here
+            // would silently no-op while the doc still got stamped repaired.
+            // Roll back and skip (consistent with skip semantics).
+            let updated = tx
+                .execute(
+                    "UPDATE embeddings SET vector = ?1 WHERE chunk_id = ?2",
+                    rusqlite::params![bytes, chunk_id],
+                )
+                .with_context(|| format!("update embedding for chunk {chunk_id}"))?;
+            if updated != 1 {
+                tx.rollback().ok();
+                eprintln!(
+                    "[{}/{}] skip (embeddings UPDATE hit {} rows for chunk {chunk_id}, expected 1): {}",
+                    i + 1,
+                    docs.len(),
+                    updated,
+                    doc.path
+                );
+                skipped += 1;
+                continue 'doc_pass;
+            }
             wrote = true;
         }
         if !wrote {

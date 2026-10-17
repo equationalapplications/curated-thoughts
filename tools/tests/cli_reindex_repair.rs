@@ -189,8 +189,11 @@ fn repair_embed_key_stale_fixes_unreachable_doc() {
 ///
 /// The mutation rides the command's own test seam
 /// (`CURATED_REPAIR_TEST_RACE=<doc_id>`): the pre-read → txn window drops
-/// the doc's first chunk and re-inserts an equivalent one, so the id set
-/// differs under the lock.
+/// the doc's HIGHEST-ID chunk and re-inserts an equivalent one, so the id
+/// set differs under the lock. (Highest-id, not first: the FIRST chunk's
+/// `content_hash` is the evidence edge that makes the doc a candidate —
+/// deleting it would remove the doc from the candidate set instead of
+/// racing it.)
 #[test]
 fn repair_rechecks_chunk_ids_under_lock() {
     with_seeded_brain(|| {
@@ -269,6 +272,45 @@ fn repair_rechecks_chunk_ids_under_lock() {
             Some((1, 1)),
             "coverage 100% after the retry"
         );
+    });
+}
+
+/// Review fix round: a doc deleted between candidate-set discovery and the
+/// per-doc read (two separate statements on the WAL read conn — no shared
+/// snapshot) must SKIP with a printed note and exit 0, never abort the whole
+/// pass with an error. Without the fix, `stale_candidates` propagates
+/// `QueryReturnedNoRows` and the command exits 1 — an exit-contract
+/// violation. The seam (`CURATED_REPAIR_TEST_DELETE_DOC=<doc_id>`) deletes
+/// the doc on a second rw connection exactly between the two reads;
+/// production never sets it.
+#[test]
+fn repair_skips_doc_deleted_since_discovery() {
+    with_seeded_brain(|| {
+        wire_doc_into_candidate_set();
+        let id = doc_id();
+
+        let doc_id_s = id.to_string();
+        let out = run_ct_with_env(
+            ["reindex", "repair-embed-key", "--stale"].as_slice(),
+            [("CURATED_REPAIR_TEST_DELETE_DOC", doc_id_s.as_str())],
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "a discovery-time deletion is a skip, never an error; stderr={}",
+            stderr(&out)
+        );
+        assert!(
+            stderr(&out).contains("deleted since candidate discovery"),
+            "skip note must print; stderr={}",
+            stderr(&out)
+        );
+        // The doc is gone; nothing was written on top of the race.
+        let conn = brain_db();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "the raced doc stays deleted; no partial rewrite");
     });
 }
 
