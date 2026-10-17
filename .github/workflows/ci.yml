@@ -120,7 +120,9 @@ jobs:
       # that the step above never compiles. Single-threaded like the main
       # suite — the CLI tests own CURATED_BRAIN_DIR and the watcher tests
       # own ports/locks. The rust-macos leg keeps its own separate "Tests"
-      # step (src-tauri only) and intentionally gets nothing extra.
+      # step (src-tauri only) and gets nothing extra from this suite except
+      # the single drift target the mac leg runs below (#272: macOS
+      # canonicalization regression coverage, kept to one target on purpose).
       - name: Tests (tools)
         run: cargo test --manifest-path tools/Cargo.toml -- --test-threads=1
 
@@ -190,6 +192,16 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1
         env:
           CURATED_MCP_INTEGRATION_TESTS: "1"
+
+      # #272: drift_walk_identity_with_ingest failed only on macOS (tempdirs
+      # under /var canonicalize to /private/var, so a raw-seeded gone row
+      # never matched the walked list). Fixed in 3c84d15c, but the rust-ubuntu
+      # tools suite is the only CI leg that exercised the fix. This leg
+      # deliberately skips the tools suite (comment above), so run the single
+      # drift target here to keep the macOS regression covered without adding
+      # the whole tools suite to this leg.
+      - name: Drift test (tools)
+        run: cargo test --manifest-path tools/Cargo.toml --test drift -- --test-threads=1
 
   frontend:
     runs-on: ubuntu-latest
