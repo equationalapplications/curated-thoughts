@@ -250,12 +250,16 @@ pub fn repair_embed_key_stale() -> Result<i32> {
         // not per-embed.
         let vectors = match embed_batch(&profile, texts) {
             Ok(v) => v,
-            Err(e) => {
+            Err(_) => {
                 // Skip semantics (Task 9 §8(c) shape): one informational
                 // line, the pass continues. `IngestRefused` can never reach
                 // this DB-only path, so a plain skip note is the contract.
+                // pr283-review finding 1 (CodeQL cleartext-logging): the
+                // error is tainted by `resolved_api_key()` via the request
+                // path, so it is NEVER printed — this line names the fix,
+                // not the failure detail.
                 eprintln!(
-                    "[{}/{}] skip (embed error): {}: {e}",
+                    "[{}/{}] skip (embed error — check the profile/EMBED_API_KEY): {}",
                     i + 1,
                     docs.len(),
                     doc.path

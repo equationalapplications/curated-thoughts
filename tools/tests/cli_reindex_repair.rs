@@ -320,3 +320,60 @@ fn now_ms() -> i64 {
         .unwrap()
         .as_millis() as i64
 }
+
+/// pr283-review finding 1 (CodeQL cleartext-logging): the embed-error skip
+/// line must NEVER print the raw embedder error — the error is tainted by
+/// `resolved_api_key()` through the request path. The repair runs with an
+/// external profile whose `api_key` is a known fake secret and an
+/// unreachable base_url: the output must contain the skip line and the
+/// secret NOWHERE.
+#[test]
+fn embed_error_skip_line_never_prints_secret_material() {
+    with_seeded_brain(|| {
+        wire_doc_into_candidate_set();
+        let secret = "sk-pr283-fake-secret-0123456789abcdef";
+        let paths = retrieval::resolve_brain_paths();
+        std::fs::write(
+            &paths.config_path,
+            serde_json::json!({
+                "embed_profile": {
+                    "type": "external",
+                    "base_url": "http://127.0.0.1:9",
+                    "model": "fake-model",
+                    "api_key": secret,
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Stub OFF so the real (external) profile runs and the embed fails
+        // fast on the closed loopback port.
+        let out = run_ct_with_env(
+            &["reindex", "repair-embed-key", "--stale"],
+            [("CURATED_EMBED_STUB", "")],
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "skip semantics: exit 0 despite the embed error, stderr={}",
+            stderr(&out)
+        );
+        let combined = format!("{}{}", stdout(&out), stderr(&out));
+        assert!(
+            combined.contains("skip (embed error"),
+            "the doc must be skipped with the embed-error line, output: {combined}"
+        );
+        assert!(
+            !combined.contains(secret),
+            "NO key material may reach the log, output: {combined}"
+        );
+        // The error path preserves the doc: the key stays NULL (still a
+        // candidate for the next run).
+        assert_eq!(
+            embed_key(&brain_db()),
+            None,
+            "a skipped doc keeps its NULL embed_key"
+        );
+    });
+}
