@@ -897,7 +897,7 @@ fn chunker_fingerprint_is_stable_and_nonempty() {
 ```
 
 - [x] **Step 2: Verify FAIL** (constant missing).
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 /// Stable identity of the chunking algorithm + parameters. Written into the
