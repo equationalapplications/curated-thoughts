@@ -430,10 +430,17 @@ pub struct TopKAblation {
 /// verdict, grid size, informational held-out splits, coverage fraction at
 /// run time, embed count + latency (r25 E6), rule-(ii) injection volume
 /// (r24 E7), merge attribution (r27 E4), v1-merge latency/volume (r31 E7),
-/// top-1 vs top-k ablation columns (r31 E5).
+/// top-1 vs top-k ablation columns (r31 E5), and the producing build's
+/// code provenance (`code_sha`, task-14-fix M-3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CalibrationArtifact {
     pub schema: u32,
+    /// Code provenance (task-14-fix M-3): the git rev of the build that
+    /// produced this artifact, injected at compile time via
+    /// `CT_BUILD_SHA` (controller recipe); `unversioned` when unset
+    /// (offline/dev builds). A drifted side-core rebuild is auditable
+    /// from the artifact the human reviews.
+    pub code_sha: String,
     pub generated_utc: String,
     pub probes: ProbeSetInfo,
     pub baseline: BaselineArm,
@@ -468,12 +475,15 @@ fn embed_all_timed(
     texts: Vec<String>,
 ) -> Result<(Vec<Vec<f32>>, Vec<f64>)> {
     let mut out = Vec::with_capacity(texts.len());
-    let mut batch_ms: Vec<f64> = Vec::new();
+    // Per-message averages ONLY (task-14-fix M-2): the whole-batch total is
+    // a different unit and must not mix into this sample — `EmbedStats`'s
+    // doc promises "per-message averages of the batched embed calls", and
+    // the artifact percentiles are computed from this vector verbatim.
+    let mut per_message_ms: Vec<f64> = Vec::new();
     for chunk in texts.chunks(BATCH) {
         let t0 = Instant::now();
         let got = embed_batch(profile, chunk.to_vec())
             .context("live embed call failed — calibration needs real embeddings")?;
-        batch_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         if got.len() != chunk.len() {
             bail!(
                 "embed backend returned {} vectors for {}",
@@ -485,10 +495,10 @@ fn embed_all_timed(
         let per = (t0.elapsed().as_secs_f64() * 1000.0) / chunk.len() as f64;
         out.extend(got);
         for _ in chunk {
-            batch_ms.push(per);
+            per_message_ms.push(per);
         }
     }
-    Ok((out, batch_ms))
+    Ok((out, per_message_ms))
 }
 
 fn percentile(values: &mut [f64], p: f64) -> f64 {
@@ -518,12 +528,14 @@ fn verdict_of(entries: &[WisdomItem], open: bool, probe: &Probe) -> ProbeVerdict
 /// `valid_to` exist). Mirrors the core's `temporal_columns` column probe —
 /// the driver needs the shape to rebuild the shared eligibility predicate
 /// for its driver-side rule-(ii) arm (see `eligibility_where`).
-struct TemporalShape {
-    has_superseded_by: bool,
-    has_valid_to: bool,
+/// `pub` for the harness's parity tests (`calibrate_two_stage_harness.rs`,
+/// task-14-fix I-1).
+pub struct TemporalShape {
+    pub has_superseded_by: bool,
+    pub has_valid_to: bool,
 }
 
-fn temporal_shape(conn: &Connection) -> Result<TemporalShape> {
+pub fn temporal_shape(conn: &Connection) -> Result<TemporalShape> {
     let mut stmt = conn.prepare("PRAGMA table_info(llm_wiki_entries)")?;
     let names: Vec<String> = stmt
         .query_map([], |r| r.get::<_, String>(1))?
@@ -541,7 +553,7 @@ fn temporal_shape(conn: &Connection) -> Result<TemporalShape> {
 /// scheme filter, and the not-yet-in-effect supersession/expiry arms.
 /// Keep in sync with the core — the parity tests in `wisdom_match.rs` are
 /// the authority.
-fn eligibility_where(shape: &TemporalShape, scheme: Scheme) -> String {
+pub fn eligibility_where(shape: &TemporalShape, scheme: Scheme) -> String {
     let scheme_filter = tauri_app_lib::embed_scheme::scheme_filter_sql(Some(scheme));
     let mut sql = format!(
         "e.deleted_at IS NULL \
@@ -562,8 +574,20 @@ fn eligibility_where(shape: &TemporalShape, scheme: Scheme) -> String {
 /// `raw < floor` drop, weighted-cosine (raw × tier weight) sort, truncate
 /// to `max`. Rule (ii) passes `floor = None` (r25-M4 / r26 m2: NO
 /// fact-level floor — the chunk-score floor is the ONLY abstention test).
+///
+/// Declared edge deviations from the core (task-14 review M-1; none can
+/// alter hit@2/FP on a live OKF brain):
+/// - NULL `entity_id` is kept here at tier weight 1.0
+///   (`unwrap_or("")`), while the core's `CandidateRow` types it as
+///   `String` and SKIPS such a row. Unreachable in production: `okf_ddl`
+///   declares `entity_id TEXT NOT NULL`.
+/// - A malformed row (bad types in the mapped columns) PROPAGATES the
+///   error here, while the core skips it and continues. Stricter, not
+///   looser — acceptable for a calibration harness.
+/// - `text` is `truncate_text(&body)` here vs the core's raw `body`.
+///   Cosmetic: verdicts compare entry IDS only (`probe_hit`).
 #[allow(clippy::too_many_arguments)]
-fn score_entries(
+pub fn score_entries(
     conn: &Connection,
     query_vec: &[f32],
     floor: Option<f32>,
@@ -763,6 +787,16 @@ fn chunk_hop_arm(
 
 fn median(values: &mut [f64]) -> f64 {
     percentile(values, 50.0)
+}
+
+/// Code provenance for the artifact (task-14-fix M-3): the compile-time
+/// `CT_BUILD_SHA` git rev, or `unversioned` when the build did not inject
+/// one. Serde backward-compat is irrelevant — no artifacts exist in the
+/// wild yet (task-14-fix brief).
+fn code_sha() -> String {
+    option_env!("CT_BUILD_SHA")
+        .unwrap_or("unversioned")
+        .to_string()
 }
 
 fn main() -> Result<()> {
@@ -1018,6 +1052,7 @@ fn main() -> Result<()> {
 
     let artifact = CalibrationArtifact {
         schema: 1,
+        code_sha: code_sha(),
         generated_utc: chrono::Utc::now().to_rfc3339(),
         probes: ProbeSetInfo {
             path: args.probes.display().to_string(),
