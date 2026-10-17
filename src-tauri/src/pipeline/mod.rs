@@ -730,6 +730,34 @@ fn swap_race_check(
     Ok(())
 }
 
+/// The ONE canonical chunk-list construction for a file's bytes (pr283-review
+/// finding 16): `chunk_autodetect`, then — for AstSymbol-classified files —
+/// `extract_references` over the frontmatter-stripped body, appended. Every
+/// caller that must produce the SAME chunk list a real ingest would (the
+/// diff-swap, and verify-scratch's chunk-only scratch rechunk) goes through
+/// this helper so the two can never drift again (a scratch rechunk that
+/// dropped reference chunks orphaned every evidence ref pointing at one and
+/// refused the stamp).
+pub fn chunk_list_for_text(path: &Path, text: &str) -> Vec<crate::chunker::Chunk> {
+    let mut chunks = chunk_autodetect(path, text);
+    let strategy = crate::chunker::classify(path);
+    if let ChunkStrategy::AstSymbol(ast_lang) = strategy {
+        let ref_lang = match ast_lang {
+            AstLang::Rust => RefLang::Rust,
+            AstLang::TypeScript => RefLang::TypeScript,
+            AstLang::JavaScript => RefLang::JavaScript,
+            AstLang::Python => RefLang::Python,
+            AstLang::Go => RefLang::Go,
+        };
+        // Scan the same body `chunk_autodetect` chunked: YAML frontmatter is
+        // metadata, never call sites. `fm_lines` keeps spans source-relative.
+        let (body, fm_lines) = crate::chunker::split_leading_frontmatter(text);
+        let refs = extract_references(ref_lang, body, fm_lines);
+        chunks.extend(refs);
+    }
+    chunks
+}
+
 fn ingest_file_virtual(
     conn: &Connection,
     profile: &EmbedProfile,
@@ -808,24 +836,7 @@ fn ingest_file_virtual(
         // to the database, or we race the replacement worker (spec §4.1).
         return Ok(());
     }
-    let mut chunks = chunk_autodetect(Path::new(virtual_path), &text);
-
-    // Pass 2: extract reference/call-site chunks for supported code files
-    let strategy = crate::chunker::classify(Path::new(virtual_path));
-    if let ChunkStrategy::AstSymbol(ast_lang) = strategy {
-        let ref_lang = match ast_lang {
-            AstLang::Rust => RefLang::Rust,
-            AstLang::TypeScript => RefLang::TypeScript,
-            AstLang::JavaScript => RefLang::JavaScript,
-            AstLang::Python => RefLang::Python,
-            AstLang::Go => RefLang::Go,
-        };
-        // Scan the same body `chunk_autodetect` chunked: YAML frontmatter is
-        // metadata, never call sites. `fm_lines` keeps spans source-relative.
-        let (body, fm_lines) = crate::chunker::split_leading_frontmatter(&text);
-        let refs = extract_references(ref_lang, body, fm_lines);
-        chunks.extend(refs);
-    }
+    let chunks = chunk_list_for_text(Path::new(virtual_path), &text);
 
     // ── §8(c) four-row funnel decision table ─────────────────────────────
     // Zero-chunk docs bypass the whole table (nothing to lose); content
@@ -916,11 +927,23 @@ fn ingest_file_virtual(
 
     if chunks.is_empty() {
         // Zero-chunk docs bypass the table entirely: drop any legacy chunks
-        // and mark indexed against the bytes just read.
+        // and mark indexed against the bytes just read. ONE transaction, and
+        // the new hash is WRITTEN (pr283-review finding 9): the doc.hash ==
+        // hash short-circuit reads `documents.hash`, which this branch never
+        // updated — a doc re-ingested to zero chunks kept its old hash, and
+        // content that later came back byte-identical short-circuited on a
+        // doc that no longer has the chunks for it.
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
         if existing_doc.is_some() {
-            delete_document_chunks(conn, doc_id)?;
+            delete_document_chunks(&tx, doc_id)?;
         }
-        mark_document_indexed(conn, doc_id, &hash)?;
+        tx.execute(
+            "UPDATE documents SET hash = ?1 WHERE id = ?2",
+            rusqlite::params![hash, doc_id],
+        )?;
+        mark_document_indexed(&tx, doc_id, &hash)?;
+        tx.commit()?;
         let _ = crate::pipeline::watchdog::recovery::clear_strikes(conn, virtual_path);
         return Ok(());
     }
@@ -961,19 +984,31 @@ fn ingest_file_virtual(
         return Ok(());
     }
     let texts: Vec<String> = need_embed.iter().map(|&i| chunks[i].text.clone()).collect();
-    let vectors = match embed_batch(profile, texts) {
-        Ok(v) => v,
-        Err(e) => {
-            // Embed failure BEFORE the swap opens: an EXISTING doc keeps its
-            // prior state ENTIRELY (rev 9, Opus r7 MINOR-1 — NOT moved to
-            // error; an indexed doc with intact chunks stays reachable for
-            // the retry pass); a NEW doc's row is mark_document_errored.
-            if existing_doc.is_none() {
-                let _ = mark_document_error(conn, doc_id);
-            } else {
-                eprintln!("[pipeline] embed failed for {virtual_path}; prior state kept: {e:#}");
+    // pr283-review finding 10: an unforced edit that only REMOVES chunks
+    // leaves `need_embed` empty — skip the embed round-trip entirely. An
+    // external profile resolves its API key BEFORE looking at the inputs,
+    // so calling `embed_batch` with an empty batch can error on a missing
+    // key; the error path keeps the prior state, which would leave the
+    // removed chunks stored forever.
+    let vectors = if need_embed.is_empty() {
+        Vec::new()
+    } else {
+        match embed_batch(profile, texts) {
+            Ok(v) => v,
+            Err(e) => {
+                // Embed failure BEFORE the swap opens: an EXISTING doc keeps its
+                // prior state ENTIRELY (rev 9, Opus r7 MINOR-1 — NOT moved to
+                // error; an indexed doc with intact chunks stays reachable for
+                // the retry pass); a NEW doc's row is mark_document_errored.
+                if existing_doc.is_none() {
+                    let _ = mark_document_error(conn, doc_id);
+                } else {
+                    eprintln!(
+                        "[pipeline] embed failed for {virtual_path}; prior state kept: {e:#}"
+                    );
+                }
+                return Err(e);
             }
-            return Err(e);
         }
     };
     let vectors: Vec<Vec<f32>> = {
@@ -1053,6 +1088,27 @@ fn ingest_file_virtual(
                     rusqlite::params![bytes, doc_id, hash_i],
                 )?;
             }
+            // pr283-review finding 11: compute_chunk_hash covers text/path/
+            // position ONLY — an unforced edit that adds lines shifts later
+            // chunks' line spans (and can change their symbol/strategy/
+            // entity metadata) while the hashes still match. Refresh the
+            // metadata columns from the new chunk list so kept rows never
+            // carry stale spans.
+            tx.execute(
+                "UPDATE chunks SET start_line = ?1, end_line = ?2, symbol_name = ?3, \
+                 defined_symbol = ?4, strategy = ?5, entity_id = ?6 \
+                 WHERE doc_id = ?7 AND content_hash = ?8",
+                rusqlite::params![
+                    chunks[i].start_line as i64,
+                    chunks[i].end_line as i64,
+                    chunks[i].symbol_name,
+                    chunks[i].defined_symbol,
+                    chunks[i].strategy.as_db_str(),
+                    eid,
+                    doc_id,
+                    hash_i
+                ],
+            )?;
         } else {
             // NEW/CHANGED chunk: insert (new (doc_id, content_hash) identity —
             // an UPDATE cannot represent them).
@@ -1068,10 +1124,14 @@ fn ingest_file_virtual(
         // Duplicate-embeddings guard (CodeRabbit rev-33): enforce the
         // at-most-one-row-per-chunk invariant the in-place UPDATE relies on;
         // keep rowid-max as "the" row. Bounded cleanup of a legacy anomaly.
+        // pr283-review finding 12: the inner SELECT is filtered to THIS
+        // doc's chunk ids — an unfiltered GROUP BY over the whole embeddings
+        // table turned every ingest into a full-table scan.
         tx.execute(
             "DELETE FROM embeddings WHERE rowid NOT IN \
-             (SELECT MAX(rowid) FROM embeddings GROUP BY chunk_id) \
-             AND chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1)",
+             (SELECT MAX(rowid) FROM embeddings \
+              WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
+              GROUP BY chunk_id)",
             [doc_id],
         )?;
     }
@@ -1154,10 +1214,13 @@ fn repair_embed_key_in_place(
             rusqlite::params![bytes, id],
         )?;
     }
+    // pr283-review finding 12: same doc-scoped dup-cleanup shape as the
+    // swap (no whole-table GROUP BY per ingest).
     tx.execute(
         "DELETE FROM embeddings WHERE rowid NOT IN \
-         (SELECT MAX(rowid) FROM embeddings GROUP BY chunk_id) \
-         AND chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1)",
+         (SELECT MAX(rowid) FROM embeddings \
+          WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1) \
+          GROUP BY chunk_id)",
         [doc_id],
     )?;
     tx.execute(
