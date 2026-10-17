@@ -550,7 +550,13 @@ fn scratch_rechunk_doc(
         Ok(t) => t,
         Err(e) => return Err(anyhow::anyhow!("read {}: {e}", read_path.display())),
     };
-    let chunks = tauri_app_lib::chunker::chunk_autodetect(Path::new(doc_path), &text);
+    // pr283-review finding 16: the rechunk must produce the SAME chunk list
+    // a real ingest would — `chunk_autodetect` PLUS the extracted reference
+    // chunks for AstSymbol files (`pipeline::chunk_list_for_text`, the
+    // canonical construction). Bare `chunk_autodetect` dropped reference
+    // chunks, orphaning every evidence ref that pointed at one and refusing
+    // the stamp.
+    let chunks = tauri_app_lib::chunk_list_for_text(Path::new(doc_path), &text);
     if chunks.is_empty() {
         return Ok(None);
     }
@@ -704,14 +710,18 @@ fn evidence_refs_resolve(scratch: &rusqlite::Connection) -> Result<(usize, usize
 /// Task 3's hop SQL (candidate-set leg 1 — the evidence-hash hop) evaluated
 /// against the scratch copy: the eligible entries (shared Task-2 predicate)
 /// joined to live chunk hashes through `librarian_evidence` must ALL be
-/// reachable. `two_stage::candidate_set` on the scratch conn yields the
-/// hop-populated doc set; an entry is hop-resolvable iff its hash-hop edge
-/// still lands (candidate_set leg 1 non-empty for the doc its evidence
-/// anchors) — equivalently: the count of eligible entries WITH a resolving
-/// hash-hop edge equals the count of eligible entries that had one BEFORE
-/// the rechunk. Simpler and stricter (the spec's baseline shape 365/365):
-/// EVERY eligible entry that anchors evidence must resolve its hop on
-/// scratch. Returns (resolved, total, first_missing_entry).
+/// reachable. pr283-review finding 17 (ADJUDICATED — documented rebuttal, no
+/// redesign): the spec §6 bootstrap pins this as an ABSOLUTE-state check —
+/// "every gate-eligible entry stays hop-resolvable (baseline: 365/365)" is
+/// the same absolute census as the 406/406 evidence-ref check, and the
+/// shipped live run satisfied exactly that shape (365/365, 406/406 on
+/// 2026-10-17). It is deliberately stricter than a before/after delta (a
+/// pre-existing orphan refuses the stamp too — fail-safe: "can only succeed
+/// if the rechunk is actually lossless"), and the eligible population is the
+/// spec's own pinned shape (on the live brain every eligible entry anchors
+/// evidence, which is what 365/365 asserts). One statement per entry — the
+/// populations are small and this runs once. Returns (resolved, total,
+/// first_missing_entry).
 fn gate_eligible_hops_resolve(
     scratch: &rusqlite::Connection,
     now_ms: i64,

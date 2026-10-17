@@ -348,3 +348,116 @@ fn guarded_live_write_skips_on_chunk_set_change() {
         );
     });
 }
+
+/// pr283-review finding 16: verify-scratch's chunk-only scratch rechunk must
+/// produce the SAME chunk list a real ingest does — `chunk_autodetect` PLUS
+/// the extracted reference chunks for AstSymbol-classified files. The old
+/// `scratch_rechunk_doc` used bare `chunk_autodetect`: it dropped the ref
+/// chunk, so an evidence row anchored on the ref chunk's hash orphaned on
+/// the scratch copy and the stamp was refused.
+#[test]
+fn verify_scratch_preserves_reference_chunks_for_ast_symbol_docs() {
+    let brain = tempdir().unwrap();
+    let brain_path = brain.path().to_path_buf();
+    let brain_path_str = brain_path.to_str().unwrap().to_string();
+    with_vars(
+        [
+            ("CURATED_BRAIN_DIR", Some(brain_path_str.as_str())),
+            ("CURATED_EMBED_STUB", Some("constant8")),
+        ],
+        || {
+            std::fs::write(brain_path.join("config.json"), b"{}\n").unwrap();
+            let paths = retrieval::resolve_brain_paths();
+            let db = AppDb::open_with_config(&paths.db_path, &paths.config_path)
+                .expect("writable brain db open");
+            let profile = retrieval::load_embed_profile(&paths.config_path).unwrap();
+
+            // A Rust source doc WITH a cross-function call — the shape a
+            // real ingest chunks into defs + an appended ref chunk.
+            let file_path = brain_path.join("with_refs.rs");
+            let text = "fn alpha() { todo!() }\n\nfn beta() { alpha() }\n";
+            std::fs::write(&file_path, text).unwrap();
+            let doc_path = file_path.to_str().unwrap().to_string();
+
+            // The canonical two-step chunk list (pipeline's construction,
+            // replicated here so the fixture pins the CONTRACT, not the
+            // helper).
+            use tauri_app_lib::chunker::{classify, split_leading_frontmatter};
+            use tauri_app_lib::indexer::{extract_references, RefLang};
+            let mut chunks = chunk_autodetect(std::path::Path::new(&doc_path), text);
+            assert!(
+                !chunks.is_empty(),
+                "fixture: autodetect must produce the def chunks"
+            );
+            assert!(
+                matches!(
+                    classify(std::path::Path::new(&doc_path)),
+                    tauri_app_lib::chunker::ChunkStrategy::AstSymbol(_)
+                ),
+                "fixture: a .rs file must classify as AstSymbol"
+            );
+            let (body, fm_lines) = split_leading_frontmatter(text);
+            assert_eq!(fm_lines, 0);
+            let refs = extract_references(RefLang::Rust, body, fm_lines);
+            assert!(
+                !refs.is_empty(),
+                "fixture: beta() calling alpha() must yield a reference chunk"
+            );
+            let ref_hash = {
+                // The ref chunk's position in the FULL list: appended last.
+                let pos = chunks.len();
+                let h = compute_chunk_hash(&refs[0].text, &doc_path, pos);
+                chunks.extend(refs);
+                h
+            };
+
+            let doc_id = upsert_document(&db.0, &doc_path, "h_refs").unwrap();
+            for (i, ch) in chunks.iter().enumerate() {
+                let h = compute_chunk_hash(&ch.text, &doc_path, i);
+                let chunk_id = insert_chunk(&db.0, doc_id, ch, i, "ent_fixture", &h).unwrap();
+                let v = embed_one(&profile, ch.text.clone()).unwrap();
+                insert_embedding(&db.0, chunk_id, &v).unwrap();
+            }
+            mark_document_indexed(&db.0, doc_id, "seed-h").unwrap();
+
+            // One eligible entry whose evidence anchors the REF chunk's
+            // real hash — exactly the ref the old scratch rechunk orphaned.
+            let blob = [0u8; 8];
+            db.0
+                .execute(
+                    "INSERT INTO llm_wiki_entries
+                       (id, entity_id, title, body, source_type, created_at, updated_at, embedding_blob)
+                     VALUES ('f_ref', 'ent_ref', 'T', 'B', 'librarian_inferred', 0, 0, ?1)",
+                    rusqlite::params![blob],
+                )
+                .unwrap();
+            db.0.execute(
+                "INSERT INTO librarian_evidence
+                       (entry_id, proposal_id, evidence_json, created_at)
+                     VALUES ('f_ref', 'p_ref', ?1, 0)",
+                rusqlite::params![format!(
+                    r#"{{"evidence":[{{"content_hash":"{}"}}]}}"#,
+                    ref_hash
+                )],
+            )
+            .unwrap();
+            drop(db);
+
+            // The scratch rechunk must keep the ref chunk ⇒ the evidence ref
+            // resolves ⇒ the stamp is written (exit 0).
+            let out = run_ct(&["reindex", "verify-scratch"]);
+            assert!(
+                out.status.success(),
+                "a lossless rechunk that PRESERVES reference chunks must pass \
+                 verify-scratch\nstdout:\n{}\nstderr:\n{}",
+                stdout(&out),
+                stderr(&out)
+            );
+            assert_eq!(
+                stamp().as_deref(),
+                Some(CHUNKER_FINGERPRINT),
+                "the chunker-only stamp must be written when the ref chunk survives"
+            );
+        },
+    );
+}
