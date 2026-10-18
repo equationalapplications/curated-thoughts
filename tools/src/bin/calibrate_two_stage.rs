@@ -74,8 +74,8 @@ use tauri_app_lib::two_stage::{
 };
 use tauri_app_lib::wiki_graph::tier_weight;
 use tauri_app_lib::wisdom_match::{
-    gate_floor, gate_model_key, provenance_for, truncate_text, two_stage_entries,
-    wisdom_match_in_scheme, TwoStageRule, WisdomItem,
+    find_corrections_public, gate_floor, gate_model_key, provenance_for, truncate_text,
+    two_stage_entries, wisdom_match_in_scheme, TwoStageRule, WisdomItem,
 };
 
 /// `hit@2`: both arms run with `max = 2` — a relevant probe hits iff any of
@@ -1315,6 +1315,7 @@ fn chunk_hop_arm(
     shape: &TemporalShape,
     top_k_opening: bool,
     provenance_filter: Option<&str>,
+    corrections_absent: &HashSet<String>,
 ) -> Result<ChunkHopRun> {
     // Stage 1 with the RAW vector, breadth = the calibrated k.
     let hits = stage1_search(conn, query_raw, cands, k)?;
@@ -1341,6 +1342,12 @@ fn chunk_hop_arm(
     let mut seen: HashSet<String> = HashSet::new();
     for h in &opened {
         for id in evidence_facts_of_doc(conn, h.doc_id)? {
+            // Issue #282 review: the correction heads are applied to the
+            // fact-entry set exactly as the caller's skip set applies them —
+            // a head must never surface as a scored entry.
+            if corrections_absent.contains(&id) {
+                continue;
+            }
             if seen.insert(id.clone()) {
                 fact_ids.push(id);
             }
@@ -1365,7 +1372,11 @@ fn chunk_hop_arm(
     let mut merged: Vec<(f32, WisdomItem)> = Vec::new();
     let mut v1merged = 0usize;
     if let Some(vf) = v1_floor {
-        let complement = complement_entry_ids(conn, cands, "chunk-hop", now_ms, Some(scheme))?;
+        let complement: Vec<String> =
+            complement_entry_ids(conn, cands, "chunk-hop", now_ms, Some(scheme))?
+                .into_iter()
+                .filter(|id| !corrections_absent.contains(id))
+                .collect();
         let merge_scored = score_entries(
             conn,
             query_schemed,
@@ -1617,6 +1628,14 @@ fn main() -> Result<()> {
     // same for every probe at this now_ms).
     let cands = candidate_set(&conn, now, Some(scheme))?
         .context("candidate set unavailable between the coverage probe and the run")?;
+    // Issue #282 review: ONE correction-head set for BOTH arms, from the
+    // PRODUCTION resolver (`find_corrections_public`, the r29-m2 resolver).
+    // The harness passes no excludes today, so this is empty — threading it
+    // keeps the arms head-symmetric if excludes are ever introduced.
+    let corrections_absent: HashSet<String> = find_corrections_public(&conn, &[], now, scheme)?
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
     let complement: HashSet<String> =
         complement_entry_ids(&conn, &cands, rule.as_str(), now, Some(scheme))?
             .into_iter()
@@ -1675,7 +1694,7 @@ fn main() -> Result<()> {
                     Some(floor),
                     HIT_K,
                     &HashSet::new(),
-                    &HashSet::new(),
+                    &corrections_absent,
                     now,
                     &profile_key,
                     kind,
@@ -1702,6 +1721,7 @@ fn main() -> Result<()> {
                     &shape,
                     false, // the arm opens TOP-1 (pinned r30-m1)
                     if activity { Some("user_stated") } else { None },
+                    &corrections_absent,
                 )?;
                 merge_ms.push(run.merge_ms);
                 let open = !run.entries.is_empty();
@@ -1742,6 +1762,7 @@ fn main() -> Result<()> {
                 &shape,
                 true, // top-k member-chunk opening
                 if activity { Some("user_stated") } else { None },
+                &corrections_absent,
             )?;
             ablation_verdicts.push(verdict_of(&run.entries, !run.entries.is_empty(), probe));
         }

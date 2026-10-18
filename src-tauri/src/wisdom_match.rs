@@ -1308,7 +1308,11 @@ pub fn wisdom_match_two_stage_with_v1(
 
 /// Corrections for the two-stage ran-path: the same resolver the v1 path
 /// uses, under the same scheme (r29-m2 — identical corrections both paths).
-fn find_corrections_public(
+/// `pub` for the calibration harness (issue #282 review: the paired arms
+/// must derive their correction-head set from THIS production resolver, so
+/// the baseline and both two-stage arms can never disagree about which
+/// heads are skipped).
+pub fn find_corrections_public(
     conn: &Connection,
     exclude: &[String],
     now_ms: i64,
@@ -2110,18 +2114,8 @@ mod tests {
             .collect();
         assert_eq!(after_skip, vec!["b".to_string()]);
         // v1 path with the same oversize skip set:
-        let gated = gated_entries(
-            &conn,
-            &Q,
-            Some(0.0),
-            10,
-            &skip,
-            NOW,
-            &temporal,
-            None,
-            None,
-        )
-        .unwrap();
+        let gated =
+            gated_entries(&conn, &Q, Some(0.0), 10, &skip, NOW, &temporal, None, None).unwrap();
         assert_eq!(
             gated.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
             vec!["b".to_string()]
@@ -2387,9 +2381,8 @@ mod tests {
             [],
         )
         .unwrap();
-        let pre =
-            two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW, QueryKind::Message)
-                .unwrap();
+        let pre = two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW, QueryKind::Message)
+            .unwrap();
         assert!(pre.v1_floor_present);
         assert!(
             pre.ts_floor_present,
@@ -2413,9 +2406,8 @@ mod tests {
     #[test]
     fn precheck_cell4_full_coverage_plans_stage1_embed_raw_reuse() {
         let conn = fixture();
-        let pre =
-            two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW, QueryKind::Message)
-                .unwrap();
+        let pre = two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW, QueryKind::Message)
+            .unwrap();
         assert!(pre.v1_floor_present);
         assert!(pre.ts_floor_present);
         assert_eq!(pre.projected_cell, 4);
@@ -2436,9 +2428,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE documents (id INTEGER PRIMARY KEY, path TEXT);")
             .unwrap();
-        let pre =
-            two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW, QueryKind::Message)
-                .unwrap();
+        let pre = two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW, QueryKind::Message)
+            .unwrap();
         assert!(pre.coverage_probe_miss);
         assert_eq!(
             pre.projected_cell, 1,
@@ -2780,8 +2771,8 @@ mod tests {
             &unit_vec(1),
             &unit_vec(1),
             Scheme::Raw,
-            None,               // v1_floor: NO v1 `:activity` row ever ships
-            Some(0.40),         // the activity composite floor (test table)
+            None,       // v1_floor: NO v1 `:activity` row ever ships
+            Some(0.40), // the activity composite floor (test table)
             8,
             &HashSet::new(),
             &HashSet::new(),
@@ -2909,7 +2900,9 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
         assert!(
-            !entries.iter().any(|e| e.provenance.as_deref() != Some("user_stated")),
+            !entries
+                .iter()
+                .any(|e| e.provenance.as_deref() != Some("user_stated")),
             "aperture: every delivered entry is user_stated"
         );
         // The message path on the same vectors is UNFILTERED (f1 delivered):

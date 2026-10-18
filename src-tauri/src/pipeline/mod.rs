@@ -2069,7 +2069,10 @@ mod diff_swap_tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert!(!b_before.is_empty(), "doc B must have vectors before the pass");
+        assert!(
+            !b_before.is_empty(),
+            "doc B must have vectors before the pass"
+        );
 
         with_stub(|| {
             ingest_file_virtual(&conn, &EmbedProfile::default(), &pa, &pa, true, None, &hb())
