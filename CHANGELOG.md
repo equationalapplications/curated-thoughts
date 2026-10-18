@@ -1,3 +1,13 @@
+## [3.7.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.6.0...v3.7.0) (2026-10-18)
+
+### Features
+
+* **wisdom-gate:** flip two-stage default — chunk-hop @ 0.65 (letter PASSED) ([4008632](https://github.com/equationalapplications/curated-thoughts/commit/400863236fc6abd8e44a9334f54f2792191aed52)), closes [#271](https://github.com/equationalapplications/curated-thoughts/issues/271) [#265](https://github.com/equationalapplications/curated-thoughts/issues/265) [#265](https://github.com/equationalapplications/curated-thoughts/issues/265)
+
+### Bug Fixes
+
+* **clippy:** iter_cloned_collect → to_vec in the harness paste simulation ([6c32fba](https://github.com/equationalapplications/curated-thoughts/commit/6c32fba307bff939213d145aaccbdda094e52ebf))
+
 ## [3.6.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.5.1...v3.6.0) (2026-10-17)
 
 ### Features
