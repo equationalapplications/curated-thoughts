@@ -1,10 +1,10 @@
 # Activity query mode for the wisdom gate: paths and commands reach concept rules (issue #282)
 
-**Date:** 2026-10-18 (rev 6 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
-GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6 the Tier-4 Fable
-gate: 1 blocker + 3 majors + 4 minors).
-**Status:** Draft — Tier 4 gate ran (Changes requested at rev 5); rev 6 folds it;
-re-gate next, then Kurt's explicit approval before implementation.
+**Date:** 2026-10-18 (rev 7 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
+GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6 Tier-4 gate round
+1; rev 7 Tier-4 re-gate round 1: 0 blockers, 3 text-only majors + 4 minors).
+**Status:** Draft — in Tier-4 convergence loop; then Kurt's explicit approval before
+implementation.
 **Branch:** `spec/issue282-activity-query-mode`
 **Priority:** High — the integrations' autonomous-work delivery (plugin 0.7.x) is live
 and shipping the bare target to the message path until this lands.
@@ -25,7 +25,29 @@ production floors in this spec are RAW.
 
 ## Revision history (compressed)
 
-- **rev 6 (this rev):** Tier-4 Fable gate (REQUEST CHANGES at rev 5; $3.46, 36 turns;
+- **rev 7 (this rev):** Tier-4 re-gate round 1 (REQUEST CHANGES, ZERO blockers; $2.38;
+  full review `~/.local/state/tessera/issue282/tier4-delta-review.md` — every rev-6
+  fold verified holding against the code, item by item). Folded: **M1** — the
+  empty-target TESTING bullet still carried the retracted rev-5 wording; replaced
+  with byte-identical-to-reference (the two tests for `--two-stage --path=` could
+  not both pass). **M2** — the named harness has NO hit@1 metric (`ArmMetrics`
+  carries only `hit2`; `letter_verdict` gates on hit2; best-cell sorts by hit2;
+  the artifact letter string is hard-coded hit2): `--query-kind` now also adds
+  `hit1` to `ArmMetrics`, switches `letter_verdict` AND best-cell ordering to
+  hit1 for activity cells, and writes the activity letter string into the
+  artifact (hit2 kept as a recorded column; message-mode runs unchanged).
+  **M3** — §8 steps 2 and 6 still pointed at the pre-rev-6 constructions (four
+  sites; composite-key label) — updated to five sites and the v1-shaped label.
+  **m1** — `Some(v1_floor)` is passed at THREE harness sites (`two_stage_entries`
+  `:1512`, `chunk_hop_arm` `:1533`/`:1572`) — the `v1_floor = None` rule binds
+  all three; the harness's direct `two_stage_entries` call site (`:1507`) is named
+  in step 7 (the `QueryKind` signature change touches it). **m2** — history line
+  aligned ("implies all three"). **m3** — §3.1 parenthetical un-conflated:
+  `scheme_key` is `floor_key_for(profile_key, scheme)`; the LABEL is prefix + that
+  key. **m4** — no "closed gate"/cheap phrasing for the empty two-stage case
+  anywhere (the reference call still runs the precheck and probe — that IS
+  today's behavior).
+- **rev 6:** Tier-4 Fable gate (REQUEST CHANGES at rev 5; $3.46, 36 turns;
   full review `~/.local/state/tessera/issue282/tier4-fable-review.md`; all prior-tier
   fixes verified holding). Folded: **B1** — a FIFTH floor-key resolution site: the
   rule-attribution block inside `two_stage_entries` recomputes
@@ -49,7 +71,7 @@ production floors in this spec are RAW.
   (no merge — matching production), the harness scoring applies the SAME
   `user_stated` pre-truncation aperture, and positives are drawn from `user_stated`
   facts (gated hit@1 reported on that subset; the aperture's cost reported
-  separately); `--query-kind` implies both. **m2** — audit `open` is post-aperture;
+  separately); `--query-kind` implies all three (rev-7 m2 alignment). **m2** — audit `open` is post-aperture;
   `top` stays the rule's own decision variable (chunk score under rule ii — the
   aperture cannot move it). **m3** — `two_stage::coverage` has THREE unsuffixed
   call sites (`:727` inside `two_stage_entries`, `:1073`, `:1160`). **m4** — the
@@ -243,11 +265,11 @@ in `tools/src/bin/ct.rs`):
   four-field `wisdom_gate_decision` stderr line (timestamp, read_scheme,
   open|closed, count) is UNCHANGED — it carries no gate label today and gains none.
   Pinned label strings, byte-exact:
-  - two-stage arm (the ONLY active arm — §3.3): `semantic-v2-two-stage:{scheme_key}`
-    where `scheme_key` is the EXISTING label construction
-    (`{TWO_STAGE_LABEL_PREFIX}{floor_key_for(profile_key, scheme)}` — the v1-shaped
-    key, NO composite segment) with the `:activity` suffix folded in via
-    `QueryKind`: pinned byte-exact as
+  - two-stage arm (the ONLY active arm — §3.3): the label is
+    `{TWO_STAGE_LABEL_PREFIX}{scheme_key}` where `scheme_key` =
+    `floor_key_for(profile_key, scheme)` (the v1-shaped key, NO composite
+    segment; the prefix lives in the label construction, not the key), with the
+    `:activity` suffix folded in via `QueryKind`: pinned byte-exact as
     `semantic-v2-two-stage:external:qwen/qwen3-embedding-4b:activity` (rev-6 M1;
     the rev-3..5 string with `:two-stage:chunk-hop` appended was WRONG — appending
     the composite at the label site would change the MESSAGE two-stage label too,
@@ -467,7 +489,15 @@ Message mode and the fallback path are untouched.
 - **Primary metric: hit@1** — the integrations fetch `--max 1` and deliver one fact
   per step (rev-3 m5), so hit@1 IS both the fetch and the delivery depth, and the
   generic-vs-actionable failure mode is a TOP-1 failure; hit@2 is recorded, not
-  gated. Baseline (rev-4 M1′, pinned): `ct wisdom match --max 1 -- <target>` —
+  gated. HARNESS REQUIREMENT (rev-7 M2): the named harness today has NO hit@1 —
+  `ArmMetrics` carries only `hit2`, `letter_verdict` gates on hit2, best-cell
+  selection sorts by `two_stage.hit2`, and the artifact's letter string is
+  hard-coded hit2. `--query-kind` therefore ALSO (a) adds `hit1` to `ArmMetrics`,
+  (b) switches `letter_verdict` and best-cell ordering to hit1 for activity cells
+  (a floor that wins on hit@2 but loses on hit@1 must not be selected), and
+  (c) writes the activity letter string (`act_hit1 ≥ base_hit1 && act_fp ≤
+  base_fp`) into the artifact, with hit2 kept as a recorded column. Message-mode
+  runs keep hit2 unchanged. Baseline (rev-4 M1′, pinned): `ct wisdom match --max 1 -- <target>` —
   no stage flag, which on current main is the v1 path (today's shipped behavior).
   The comparison is therefore mode-vs-mode (activity two-stage + aperture vs
   message v1), not floor-vs-floor; a secondary v1-arm activity ablation (harness
@@ -497,8 +527,9 @@ Message mode and the fallback path are untouched.
 
 1. Clap surface: three flags + `activity_target` group + `text` `required` removal +
    doc-comment update (`ct.rs`), with usage-error tests.
-2. `QueryKind` threading + key construction at the four resolution sites, with
-   `profile_key` unsuffixed for coverage/k (`wisdom_match.rs`, `queries.rs`).
+2. `QueryKind` threading + key construction at the FIVE resolution sites (§3.3 —
+   including the attribution block in `two_stage_entries`), with `profile_key`
+   unsuffixed for coverage/k (`wisdom_match.rs`, `queries.rs`).
 3. Composite stub row in `WISDOM_GATE_FLOORS_TEST` (rev-3 M4); NO v1 `:activity`
    row anywhere in production tables (rev-4 M2′).
 4. Healthy-path-only activation (cell-4 predicate, §3.3) + the fallback rule (§4),
@@ -508,12 +539,17 @@ Message mode and the fallback path are untouched.
    two-stage paths into a helper that takes pre-computed vectors and owns ALL
    printing; byte-identical stderr then has exactly one print site to test.
 5. `user_stated` aperture pre-truncation filter (§5) on the activity-active path.
-6. Gate label per §3.1 (composite scheme key carries `:activity`; no v1 activity
-   label — v1 is not an active arm).
+6. Gate label per §3.1 (v1-shaped scheme key + `:activity`, NO composite segment;
+   no v1 activity label — v1 is not an active arm).
 7. Calibration harness extension: `--query-kind` (message|path|command|pattern) —
-   implying `v1_floor = None`, the `user_stated` aperture in scoring, and
-   `user_stated`-only positives (rev-6 M3) — plus the instr1 instruction-ablation
-   cell (harness-side prefix text).
+   implying (rev-6 M3) `v1_floor = None` at ALL THREE harness pass-sites
+   (`two_stage_entries` `:1512` AND `chunk_hop_arm` `:1533`/`:1572`; the shipping
+   cell is chunk-hop, so `chunk_hop_arm` binds first), (rev-6 M3) the
+   `user_stated` aperture in scoring with `user_stated`-only positives, and
+   (rev-7 M2) the hit@1 metric/letter/ordering changes — plus the instr1
+   instruction-ablation cell (harness-side prefix text). NAMED CALL SITE: the
+   `QueryKind` signature change to `two_stage_entries` touches the harness's
+   direct call at its activity-cell site (rev-7 m1).
 8. Tests (§ Testing), docs, CHANGELOG.
 
 ## Error handling
@@ -537,8 +573,13 @@ Message mode and the fallback path are untouched.
     unconditional "empty" assertion). The reference passes the target as ONE argv
     element after `--` (rev-6 m4: the positional is `Vec<String>` joined with a
     space; a multi-space target must not produce a false parity failure).
-  - empty target (`--path=`): closed gate, exit 0, no embed, ahead of key
-    resolution (rev-3 m4).
+  - empty target (`--path=` / `--command=` / `--pattern=`): byte-identical to the
+    reference message call with the same flags and `-- ""`; no embed on either arm
+    (the v1 arm checks emptiness at its own early site; the two-stage arm's
+    reference still runs the pre-embed check + coverage probe and prints its audit
+    line — that IS today's behavior, and the spec never describes the empty
+    two-stage case as cheap or "closed gate"); exit 0 (rev-7 M1, superseding the
+    rev-3 m4 wording rev-6 M2 retracted).
   - `--help` advertises all three flags (integrations' capability probe).
   - `user_stated` filter: a non-`user_stated` fact that opens in message mode is
     withheld in activity mode; a `user_stated` fact ranked below two filtered
