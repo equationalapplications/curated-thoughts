@@ -912,33 +912,6 @@ fn grid_cells_reads_artifacts_and_skips_unparseable_files() {
         std::fs::write(dir.path().join(name), serde_json::to_string(&cell).unwrap())
             .expect("write cell");
     }
-
-    /// Issue #282 (rev-8 m5 / CodeRabbit PR-288 Major 2): an ACTIVITY
-    /// artifact's composite key inserts `:activity` AFTER the schemed base —
-    /// `model:activity:two-stage:<rule>` under raw,
-    /// `model:instr1:activity:two-stage:<rule>` under instr1. Message
-    /// artifacts keep the #271 shape.
-    #[test]
-    fn activity_artifact_composite_key_carries_the_activity_segment() {
-        let mut a = fixture_artifact();
-        a.query_kind = "path".to_string();
-        a.baseline.key = "external:qwen/qwen3-embedding-4b".to_string(); // raw
-        assert_eq!(
-            composite_floor_key(&a),
-            "external:qwen/qwen3-embedding-4b:activity:two-stage:chunk-hop"
-        );
-        a.baseline.key = "external:qwen/qwen3-embedding-4b:instr1".to_string(); // instr1
-        assert_eq!(
-            composite_floor_key(&a),
-            "external:qwen/qwen3-embedding-4b:instr1:activity:two-stage:chunk-hop"
-        );
-        // Message artifact: unchanged #271 shape (regression guard).
-        let msg = fixture_artifact();
-        assert_eq!(
-            composite_floor_key(&msg),
-            "external:qwen/qwen3-embedding-4b:instr1:two-stage:chunk-hop"
-        );
-    }
     std::fs::write(dir.path().join("garbage.json"), "{not json").expect("write garbage");
     std::fs::write(dir.path().join("notes.txt"), "not json at all").expect("write txt");
     let cells = grid_cells(dir.path()).expect("grid");
@@ -1312,5 +1285,32 @@ fn baseline_gate_key_round_trips_through_floor_key_for() {
         floor_key_for(&schemed, Scheme::Instr1),
         format!("{schemed}:instr1"),
         "passing the already-schemed key double-suffixes it"
+    );
+}
+
+/// Issue #282 (rev-8 m5 / CodeRabbit PR-288 Major 2): an ACTIVITY
+/// artifact's composite key inserts `:activity` AFTER the schemed base —
+/// `model:activity:two-stage:<rule>` under raw,
+/// `model:instr1:activity:two-stage:<rule>` under instr1. Message
+/// artifacts keep the #271 shape.
+#[test]
+fn activity_artifact_composite_key_carries_the_activity_segment() {
+    let mut a = fixture_artifact();
+    a.query_kind = "path".to_string();
+    a.baseline.key = "external:qwen/qwen3-embedding-4b".to_string(); // raw
+    assert_eq!(
+        composite_floor_key(&a),
+        "external:qwen/qwen3-embedding-4b:activity:two-stage:chunk-hop"
+    );
+    a.baseline.key = "external:qwen/qwen3-embedding-4b:instr1".to_string(); // instr1
+    assert_eq!(
+        composite_floor_key(&a),
+        "external:qwen/qwen3-embedding-4b:instr1:activity:two-stage:chunk-hop"
+    );
+    // Message artifact: unchanged #271 shape (regression guard).
+    let msg = fixture_artifact();
+    assert_eq!(
+        composite_floor_key(&msg),
+        "external:qwen/qwen3-embedding-4b:instr1:two-stage:chunk-hop"
     );
 }

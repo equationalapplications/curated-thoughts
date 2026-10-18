@@ -264,12 +264,45 @@ fn target_of(out: &std::process::Output) -> String {
 fn activity_target_group_rejects_every_mix() {
     with_seeded_brain(|| {
         for args in [
-            vec!["wisdom", "match", "--json", "--path=a.rs", "--command=pnpm test"],
+            vec![
+                "wisdom",
+                "match",
+                "--json",
+                "--path=a.rs",
+                "--command=pnpm test",
+            ],
             vec!["wisdom", "match", "--json", "--path=a.rs", "--pattern=*.ts"],
-            vec!["wisdom", "match", "--json", "--command=pnpm test", "--pattern=*.ts"],
-            vec!["wisdom", "match", "--json", "--path=a.rs", "--", "a message"],
-            vec!["wisdom", "match", "--json", "--command=pnpm test", "--", "a message"],
-            vec!["wisdom", "match", "--json", "--pattern=*.ts", "--", "a message"],
+            vec![
+                "wisdom",
+                "match",
+                "--json",
+                "--command=pnpm test",
+                "--pattern=*.ts",
+            ],
+            vec![
+                "wisdom",
+                "match",
+                "--json",
+                "--path=a.rs",
+                "--",
+                "a message",
+            ],
+            vec![
+                "wisdom",
+                "match",
+                "--json",
+                "--command=pnpm test",
+                "--",
+                "a message",
+            ],
+            vec![
+                "wisdom",
+                "match",
+                "--json",
+                "--pattern=*.ts",
+                "--",
+                "a message",
+            ],
         ] {
             let out = run_ct(&args);
             assert_ne!(
@@ -310,12 +343,7 @@ fn activity_no_flag_fallback_is_byte_identical_to_the_message_call() {
     with_seeded_brain(|| {
         seed_fact("fact_a");
         let reference = run_ct(&["wisdom", "match", "--json", "--", "how do I deploy"]);
-        let activity = run_ct(&[
-            "wisdom",
-            "match",
-            "--json",
-            "--path=how do I deploy",
-        ]);
+        let activity = run_ct(&["wisdom", "match", "--json", "--path=how do I deploy"]);
         assert_eq!(activity.status.code(), Some(0));
         assert_eq!(
             target_of(&activity),
@@ -333,8 +361,14 @@ fn activity_no_flag_fallback_is_byte_identical_to_the_message_call() {
 fn activity_two_stage_fallback_is_byte_identical_to_the_message_two_stage_call() {
     with_seeded_brain(|| {
         seed_fact("fact_a");
-        let reference =
-            run_ct(&["wisdom", "match", "--json", "--two-stage", "--", "how do I deploy"]);
+        let reference = run_ct(&[
+            "wisdom",
+            "match",
+            "--json",
+            "--two-stage",
+            "--",
+            "how do I deploy",
+        ]);
         let activity = run_ct(&[
             "wisdom",
             "match",
@@ -364,14 +398,7 @@ fn empty_target_and_max_zero_delegate_to_the_message_call() {
         assert_eq!(target_of(&empty_act), target_of(&empty_ref));
 
         let max0_ref = run_ct(&["wisdom", "match", "--json", "--max", "0", "--", "deploy"]);
-        let max0_act = run_ct(&[
-            "wisdom",
-            "match",
-            "--json",
-            "--max",
-            "0",
-            "--path=deploy",
-        ]);
+        let max0_act = run_ct(&["wisdom", "match", "--json", "--max", "0", "--path=deploy"]);
         assert_eq!(max0_act.status.code(), Some(0));
         assert_eq!(target_of(&max0_act), target_of(&max0_ref));
     });

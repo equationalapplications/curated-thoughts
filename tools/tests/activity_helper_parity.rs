@@ -69,10 +69,8 @@ fn helper_v1_arm_equals_the_direct_call_on_identical_inputs() {
         .unwrap();
         assert!(outcome.is_none(), "v1 arm carries no two-stage outcome");
 
-        let direct = wm::wisdom_match_in_scheme(
-            &conn, &schemed, &key, read_scheme, 2, &[], now,
-        )
-        .unwrap();
+        let direct =
+            wm::wisdom_match_in_scheme(&conn, &schemed, &key, read_scheme, 2, &[], now).unwrap();
         assert_eq!(
             helper, direct,
             "the helper's returned match must equal the direct call on the same inputs"
@@ -100,7 +98,16 @@ fn helper_two_stage_arm_equals_the_direct_call_on_identical_inputs() {
         let now = 1_000_i64;
 
         let (helper, outcome) = curated_thoughts_tools::queries::run_message_path(
-            &conn, &key, read_scheme, &raw, &schemed, 2, &[], now, true, true,
+            &conn,
+            &key,
+            read_scheme,
+            &raw,
+            &schemed,
+            2,
+            &[],
+            now,
+            true,
+            true,
         )
         .unwrap();
 

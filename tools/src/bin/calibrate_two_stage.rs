@@ -1501,9 +1501,7 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| "message".to_string());
     let activity = query_kind_raw != "message";
     if !["message", "path", "command", "pattern"].contains(&query_kind_raw.as_str()) {
-        bail!(
-            "--query-kind must be one of message|path|command|pattern, got {query_kind_raw:?}"
-        );
+        bail!("--query-kind must be one of message|path|command|pattern, got {query_kind_raw:?}");
     }
     let kind = if activity {
         tauri_app_lib::wisdom_match::QueryKind::Activity
@@ -1554,7 +1552,11 @@ fn main() -> Result<()> {
             baseline_key
         )
     })?;
-    let v1_floor = if activity { None } else { Some(message_v1_floor) };
+    let v1_floor = if activity {
+        None
+    } else {
+        Some(message_v1_floor)
+    };
     // rev-6 M3: activity positives are drawn from `user_stated` facts ONLY —
     // a non-`user_stated` positive reachable by baseline v1 but never by the
     // activity aperture would read as "the floor bet failed" (rev-7 M3/M2).
@@ -1579,7 +1581,6 @@ fn main() -> Result<()> {
             }
         }
     }
-
 
     // §9 step 3a / §6: coverage BEFORE any embed; < 100% ⇒ abort (Task 13
     // then Task 12) — the pure gate records the fraction for the artifact.

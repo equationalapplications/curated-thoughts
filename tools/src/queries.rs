@@ -870,11 +870,9 @@ pub fn wisdom_match_cmd(
                     embed_one(&profile, text.to_string()).context("failed to embed query")?;
                 let schemed_vec = match read_scheme {
                     tauri_app_lib::embed_scheme::Scheme::Raw => raw_vec.clone(),
-                    tauri_app_lib::embed_scheme::Scheme::Instr1 => embed_one(
-                        &profile,
-                        query_text.clone(),
-                    )
-                    .context("failed to embed query")?,
+                    tauri_app_lib::embed_scheme::Scheme::Instr1 => {
+                        embed_one(&profile, query_text.clone()).context("failed to embed query")?
+                    }
                 };
                 let run = wm::wisdom_match_two_stage_with_v1(
                     &conn,
@@ -948,8 +946,13 @@ pub fn wisdom_match_cmd(
         // ---- Two-stage requested (§3 embed-skip, §4, §6 coverage-first):
         // the PUB precheck runs FIRST — floor resolution AND the §6 coverage
         // probe BEFORE any embed (fix-round Important #1).
-        let pre =
-            wm::two_stage_pre_embed_check(&conn, &key, read_scheme, now_ms, wm::QueryKind::Message)?;
+        let pre = wm::two_stage_pre_embed_check(
+            &conn,
+            &key,
+            read_scheme,
+            now_ms,
+            wm::QueryKind::Message,
+        )?;
         let skip_for_no_query = text.trim().is_empty() || max == 0;
         if skip_for_no_query {
             (Vec::new(), Vec::new())
@@ -965,11 +968,10 @@ pub fn wisdom_match_cmd(
                         embed_one(&profile, text.to_string()).context("failed to embed query")?;
                     let schemed = match read_scheme {
                         tauri_app_lib::embed_scheme::Scheme::Raw => raw.clone(),
-                        tauri_app_lib::embed_scheme::Scheme::Instr1 => embed_one(
-                            &profile,
-                            query_text.clone(),
-                        )
-                        .context("failed to embed query")?,
+                        tauri_app_lib::embed_scheme::Scheme::Instr1 => {
+                            embed_one(&profile, query_text.clone())
+                                .context("failed to embed query")?
+                        }
                     };
                     (raw, schemed)
                 }
@@ -993,10 +995,7 @@ pub fn wisdom_match_cmd(
 
 /// The pinned gate-decision stderr line (four fields — spec §3.1: it carries
 /// no gate label and gains none).
-fn print_gate_decision(
-    read_scheme: tauri_app_lib::embed_scheme::Scheme,
-    result: &wm::WisdomMatch,
-) {
+fn print_gate_decision(read_scheme: tauri_app_lib::embed_scheme::Scheme, result: &wm::WisdomMatch) {
     let ts = DateTime::<Utc>::from(std::time::SystemTime::now())
         .to_rfc3339_opts(SecondsFormat::Secs, true);
     eprintln!(
