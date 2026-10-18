@@ -1,8 +1,9 @@
 # Activity query mode for the wisdom gate: paths and commands reach concept rules (issue #282)
 
-**Date:** 2026-10-18 (rev 11 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
-GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6-10 Tier-4 gate
-rounds 1-5; rev 11 Tier-4 re-gate round 5: 0 blockers, 1 test-design major + 4 minors).
+**Date:** 2026-10-18 (rev 12 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
+GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6-11 Tier-4 gate
+rounds 1-6; rev 12 Tier-4 re-gate round 6: 0 blockers, 1 crate-placement major +
+2 minors).
 **Status:** Draft — in Tier-4 convergence loop; then Kurt's explicit approval before
 implementation.
 **Branch:** `spec/issue282-activity-query-mode`
@@ -25,7 +26,30 @@ production floors in this spec are RAW.
 
 ## Revision history (compressed)
 
-- **rev 11 (this rev):** Tier-4 re-gate round 5 (REQUEST CHANGES, zero blockers;
+- **rev 12 (this rev):** Tier-4 re-gate round 6 (REQUEST CHANGES, zero blockers;
+  $2.46; full review `~/.local/state/tessera/issue282/tier4-delta6-review.md` —
+  four of five rev-11 folds verified faithful; the M1 fold fixed the CLI hole but
+  reintroduced the same class on the lib side across a CRATE BOUNDARY: the
+  composite stub is visible only inside `src-tauri`'s test build, while the embed
+  step and the §8-step-4 helper live in `tools`, so "forced cell 4 + helper output
+  equality + embed count" cannot share one test). Folded — **option 1, split by
+  crate** (Fable-recommended, matches the rev-5 m4 helper design): the
+  post-embed-degradation LIB test moves to `src-tauri/src/wisdom_match.rs`
+  `mod tests` and asserts (a) `outcome.rule.is_none()` on the forced-then-degraded
+  cell-4 exits and (b) the attempt's `TwoStageRun.result` carries the `None`-arm
+  signature — `gate == GATE_UNCALIBRATED`, empty entries — which IS the
+  "never enters `gated_entries`" observable (rev-12 m1 names the proxy). The
+  tools-side HELPER test calls the helper with pre-computed vectors and asserts
+  its output equals the direct message call on the same vectors — needing NO
+  cell-4 projection. The embed-call COUNT assertion is DROPPED: a helper whose
+  signature takes pre-computed vectors cannot embed, so there is nothing to
+  count. §Testing's heading claim corrected: the attribution, active-path-label,
+  and degradation tests are `src-tauri` `mod tests` additions, NOT
+  `tools/tests/ct_wisdom_match.rs` (rev-12 M1). **m2** — the active-path label
+  test is stated as the orchestrator's `result.gate` in a lib test (existing
+  pattern `:2161`); the JSON `gate` claim is limited to the CLI-reachable
+  fallback case.
+- **rev 11:** Tier-4 re-gate round 5 (REQUEST CHANGES, zero blockers;
   $2.24; full review `~/.local/state/tessera/issue282/tier4-delta5-review.md` — all
   five rev-10 folds verified holding). Folded: **M1** — the post-embed-degradation
   TEST bullet promised CLI-observable stderr evidence that no build can produce
@@ -688,7 +712,11 @@ Message mode and the fallback path are untouched.
 
 ## Testing
 
-- `tools/tests/ct_wisdom_match.rs` additions:
+- Test placement (rev-12 M1): the CLI-surface tests below live in
+  `tools/tests/ct_wisdom_match.rs`; the attribution test, the active-path label
+  test, and the post-embed-degradation test are `src-tauri/src/wisdom_match.rs`
+  `mod tests` additions (crate boundary — see the split-by-crate bullets).
+  `tools/tests/ct_wisdom_match.rs` additions:
   - group exclusivity matrix (path+command, path+pattern, command+pattern,
     each + `-- text`): usage error.
   - fallback parity, per flags (rev-3 M6): `--path=X` output is byte-identical to
@@ -721,19 +749,30 @@ Message mode and the fallback path are untouched.
     `outcome.floor_key_used` is byte-exactly
     `stub:constant8:activity:two-stage:chunk-hop` and `rule == ChunkHop` —
     attribution exercised, not coincidental.
-  - label test (rev-6 M1): the JSON `gate` on the active path is exactly
+  - label test (rev-6 M1, restated rev-12 m2): a LIB test asserts the
+    orchestrator's `result.gate` on the active path is exactly
     `semantic-v2-two-stage:{scheme_key}:activity`-shaped (prefix + scheme key +
-    `:activity`, NO composite segment); the MESSAGE two-stage label is unchanged.
-  - post-embed degradation, LIB test (rev-11 M1 — the composite stub is
-    `#[cfg(test)]`, compiled out of the `ct` binary, so CLI-level stderr counts
-    are UNTESTABLE and are not asserted): with a stub cell-4 projection forced
-    then degraded, assert `outcome.rule.is_none()` on the reachable post-embed
-    exits (`candidate_set` → `None`; the in-core coverage re-probe, made
-    reproducible by inserting a stale candidate row between precheck and run),
-    that the attempt's `TwoStageRun.result` is DISCARDED (the fallback's returned
-    match equals the direct message call on the same vectors) and that the reused
-    vector was consumed (stub embed-call count — no second embed). The attempt
-    never enters `gated_entries` (lib-level assertion).
+    `:activity`, NO composite segment; existing pattern at
+    `wisdom_match.rs:2161`); the MESSAGE two-stage label is unchanged. The JSON
+    `gate` claim is limited to the CLI-reachable fallback case.
+  - SPLIT BY CRATE (rev-12 M1 — the composite stub is visible only inside
+    `src-tauri`'s test build; the helper lives in `tools`; one test cannot make
+    all assertions):
+    - `src-tauri/src/wisdom_match.rs` `mod tests` (NOT
+      `tools/tests/ct_wisdom_match.rs`): with the stub composite forcing a cell-4
+      projection then degraded (`candidate_set` → `None`; the in-core coverage
+      re-probe, made reproducible by inserting a stale candidate row between
+      precheck and run), assert `outcome.rule.is_none()` AND that the attempt's
+      `TwoStageRun.result` carries the `None`-arm signature —
+      `gate == GATE_UNCALIBRATED`, empty entries — which is the named proxy for
+      "the attempt never enters `gated_entries`" (rev-12 m1: with a non-empty
+      vector and `max > 0`, that signature is reachable ONLY through the `None`
+      arm that skips `gated_entries`).
+    - `tools` HELPER test: call the extracted helper with pre-computed vectors and
+      assert its output equals the direct message call on the same vectors — no
+      cell-4 projection needed. The embed-call COUNT assertion is dropped (a
+      helper whose signature takes pre-computed vectors cannot embed — nothing to
+      count).
   - stderr pins, BY CONSTRUCTION (rev-11 M1): exactly-once per-row warning and
     no-flag no-audit-line hold because the helper (rev-5 m4) is the SINGLE print
     site and the attempt has none — verified by the lib assertion above plus the
