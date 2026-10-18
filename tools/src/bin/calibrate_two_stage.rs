@@ -74,8 +74,8 @@ use tauri_app_lib::two_stage::{
 };
 use tauri_app_lib::wiki_graph::tier_weight;
 use tauri_app_lib::wisdom_match::{
-    gate_floor, gate_model_key, provenance_for, truncate_text, two_stage_entries,
-    wisdom_match_in_scheme, TwoStageRule, WisdomItem,
+    find_corrections_public, gate_floor, gate_model_key, provenance_for, truncate_text,
+    two_stage_entries, wisdom_match_in_scheme, TwoStageRule, WisdomItem,
 };
 
 /// `hit@2`: both arms run with `max = 2` — a relevant probe hits iff any of
@@ -123,6 +123,18 @@ struct Args {
     /// Write the artifact JSON here (default: stdout).
     #[arg(long)]
     json_out: Option<PathBuf>,
+    /// The query kind this probe set calibrates (issue #282 §7):
+    /// `message` (default — the #271 discipline) or one of the activity
+    /// kinds `path` / `command` / `pattern`. KIND SEMANTICS (rev-8 m4): the
+    /// kind changes probe-set labeling/filtering and the per-kind breakdown
+    /// ONLY — never the floor key (ONE shared `:activity` floor across all
+    /// three kinds, Kurt ruling 2026-10-18). An activity run ALSO implies:
+    /// `v1_floor = None` at every pass-site (the merge never runs in
+    /// activity mode), the `user_stated` aperture in scoring, and
+    /// `user_stated`-only positives (rev-6 M3) — plus hit@1 as the gated
+    /// metric (rev-7 M2).
+    #[arg(long)]
+    query_kind: Option<String>,
     /// EmbedProfile JSON, as in `calibrate_wisdom_gate` (production default:
     /// OpenRouter `qwen/qwen3-embedding-4b`).
     #[arg(
@@ -194,6 +206,61 @@ pub fn letter_verdict(ts_hit2: f64, ts_fp: usize, ss_hit2: f64, ss_fp: usize) ->
     ts_hit2 >= ss_hit2 && ts_fp <= ss_fp
 }
 
+/// The ACTIVITY letter (issue #282 §7): `act_hit1 ≥ base_hit1 && act_fp ≤
+/// base_fp` — hit@1 is the gated metric (the integrations fetch `--max 1`
+/// and the generic-vs-actionable failure mode is a TOP-1 failure); hit@2 is
+/// recorded, not gated.
+pub fn letter_verdict_hit1(act_hit1: f64, act_fp: usize, base_hit1: f64, base_fp: usize) -> bool {
+    act_hit1 >= base_hit1 && act_fp <= base_fp
+}
+
+/// Which metric a cell's letter was evaluated on (rev-7 M2: activity cells
+/// gate on hit@1; message cells keep the #271 hit@2 letter).
+pub fn letter_metric_of(artifact: &CalibrationArtifact) -> &'static str {
+    if artifact.letter_metric.as_deref() == Some("hit1") {
+        "hit1"
+    } else {
+        "hit2"
+    }
+}
+
+/// The cell's gated two-stage hit under its OWN letter metric.
+pub fn gated_hit(artifact: &CalibrationArtifact) -> f64 {
+    if letter_metric_of(artifact) == "hit1" {
+        artifact.two_stage.hit1
+    } else {
+        artifact.two_stage.hit2
+    }
+}
+
+/// The cell's baseline hit under its OWN letter metric.
+pub fn baseline_hit(artifact: &CalibrationArtifact) -> f64 {
+    if letter_metric_of(artifact) == "hit1" {
+        artifact.single_stage.hit1
+    } else {
+        artifact.single_stage.hit2
+    }
+}
+
+/// The recorded letter recomputed under the cell's own metric (check_grid).
+pub fn recorded_letter(artifact: &CalibrationArtifact) -> bool {
+    if letter_metric_of(artifact) == "hit1" {
+        letter_verdict_hit1(
+            artifact.two_stage.hit1,
+            artifact.two_stage.fp,
+            artifact.single_stage.hit1,
+            artifact.single_stage.fp,
+        )
+    } else {
+        letter_verdict(
+            artifact.two_stage.hit2,
+            artifact.two_stage.fp,
+            artifact.single_stage.hit2,
+            artifact.single_stage.fp,
+        )
+    }
+}
+
 /// Refuse to run with `CURATED_EMBED_STUB` set — real embeddings only
 /// (same rule as `calibrate_wisdom_gate`). Pure: the caller passes the env
 /// value so tests never mutate process env.
@@ -255,6 +322,9 @@ pub struct ProbeVerdict {
     /// Relevant probe: any of the top-2 entry ids is in the probe's
     /// relevant-fact set.
     pub hit: bool,
+    /// Relevant probe: the TOP-1 entry id is in the probe's relevant-fact
+    /// set (issue #282 §7 — the gated metric for activity cells).
+    pub hit1: bool,
     /// Gate-OPEN decision (r30-m5: the FINAL entries list is non-empty).
     pub open: bool,
     pub entries: usize,
@@ -265,6 +335,9 @@ pub struct ProbeVerdict {
 pub struct ArmMetrics {
     /// hits / relevant probes (steps of 1/40 = 0.025 on the live set, §7).
     pub hit2: f64,
+    /// TOP-1 hits / relevant probes (issue #282 §7 — the gated metric for
+    /// activity cells; recorded for message cells).
+    pub hit1: f64,
     /// FP probes (empty `expect`) where the gate OPENED.
     pub fp: usize,
     pub opens: usize,
@@ -284,11 +357,21 @@ pub fn arm_metrics(verdicts: &[ProbeVerdict], relevant: &[bool]) -> ArmMetrics {
         .count();
     let opens = verdicts.iter().filter(|v| v.open).count();
     let entries: usize = verdicts.iter().map(|v| v.entries).sum();
+    let hits1 = verdicts
+        .iter()
+        .zip(relevant)
+        .filter(|(v, &r)| r && v.hit1)
+        .count();
     ArmMetrics {
         hit2: if n_rel == 0 {
             0.0
         } else {
             hits as f64 / n_rel as f64
+        },
+        hit1: if n_rel == 0 {
+            0.0
+        } else {
+            hits1 as f64 / n_rel as f64
         },
         fp: verdicts
             .iter()
@@ -501,6 +584,16 @@ pub struct CalibrationArtifact {
     pub two_stage: ArmMetrics,
     pub two_stage_passes: bool,
     pub letter: String,
+    /// Which metric the letter gated on (issue #282 rev-7 M2): `Some("hit1")`
+    /// for activity cells, `None` (the #271 hit@2 letter) for message cells.
+    /// `#[serde(default)]` keeps pre-#282 artifacts readable.
+    #[serde(default)]
+    pub letter_metric: Option<String>,
+    /// The query kind this probe set calibrates (rev-8 m4): `message` or
+    /// `path`/`command`/`pattern`. Labeling/breakdown only — never a floor
+    /// key.
+    #[serde(default)]
+    pub query_kind: String,
     pub heldout: HeldOutInfo,
     pub embeds: EmbedStats,
     pub injection: InjectionStats,
@@ -518,10 +611,18 @@ pub struct CalibrationArtifact {
 /// floor key (`floor_key_for(model, scheme)`, named before the run, Opus r1
 /// M3), so the composite key derives offline from the artifact alone.
 pub fn composite_floor_key(artifact: &CalibrationArtifact) -> String {
-    format!(
-        "{}:two-stage:{}",
-        artifact.baseline.key, artifact.candidate.rule
-    )
+    // Issue #282 (CodeRabbit PR-288 Major 2): an ACTIVITY artifact's
+    // composite is `{schemed base}:activity:two-stage:{rule}` — the
+    // `:activity` segment lands AFTER the schemed base (raw base keys carry
+    // no scheme suffix; instr1 bases are `model:instr1`, giving the pinned
+    // `model:instr1:activity:two-stage:…` order, spec rev-8 m5). Message
+    // artifacts keep the #271 shape unchanged.
+    let base = if artifact.query_kind == "message" {
+        artifact.baseline.key.clone()
+    } else {
+        format!("{}:activity", artifact.baseline.key)
+    };
+    format!("{base}:two-stage:{}", artifact.candidate.rule)
 }
 
 /// Freeze dir (relative to `src-tauri/tests/fixtures`) for a floor key —
@@ -587,12 +688,7 @@ pub fn check_grid(cells: &[CalibrationArtifact]) -> Result<()> {
         if c.candidate.rule != "restricted-cosine" && c.candidate.rule != "chunk-hop" {
             bail!("unknown two-stage rule {:?} in the grid", c.candidate.rule);
         }
-        let recorded = letter_verdict(
-            c.two_stage.hit2,
-            c.two_stage.fp,
-            c.single_stage.hit2,
-            c.single_stage.fp,
-        );
+        let recorded = recorded_letter(c);
         if recorded != c.two_stage_passes {
             bail!(
                 "artifact rule={} floor={} k={} records two_stage_passes={} but its own \
@@ -629,29 +725,29 @@ pub fn pick_winner(cells: &[CalibrationArtifact]) -> Result<CalibrationArtifact>
     if passing.is_empty() {
         let mut all: Vec<&CalibrationArtifact> = cells.iter().collect();
         all.sort_by(|a, b| {
-            b.two_stage
-                .hit2
-                .partial_cmp(&a.two_stage.hit2)
+            gated_hit(b)
+                .partial_cmp(&gated_hit(a))
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.two_stage.fp.cmp(&b.two_stage.fp))
         });
         let best = all[0];
         bail!(
             "no grid cell passes the acceptance letter (§7) — two-stage does NOT flip. \
-             Best cell rule={} floor={} k={}: ts_hit2={} ts_fp={} vs ss_hit2={} ss_fp={}",
+             Best cell rule={} floor={} k={}: ts_{}={} ts_fp={} vs ss_{}={} ss_fp={}",
             best.candidate.rule,
             best.candidate.floor,
             best.candidate.k,
-            best.two_stage.hit2,
+            letter_metric_of(best),
+            gated_hit(best),
             best.two_stage.fp,
-            best.single_stage.hit2,
+            letter_metric_of(best),
+            baseline_hit(best),
             best.single_stage.fp
         );
     }
     passing.sort_by(|a, b| {
-        b.two_stage
-            .hit2
-            .partial_cmp(&a.two_stage.hit2)
+        gated_hit(b)
+            .partial_cmp(&gated_hit(a))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.two_stage.fp.cmp(&b.two_stage.fp))
             .then_with(|| rule_rank(&a.candidate.rule).cmp(&rule_rank(&b.candidate.rule)))
@@ -891,27 +987,29 @@ pub fn flip_plan(artifact: &CalibrationArtifact, current_sha: &str) -> Result<Fl
             current_sha
         );
     }
-    let recorded = letter_verdict(
-        artifact.two_stage.hit2,
-        artifact.two_stage.fp,
-        artifact.single_stage.hit2,
-        artifact.single_stage.fp,
-    );
+    // Metric-aware letter recompute (issue #282 rev-7 M2): activity cells
+    // gate on hit@1 (`letter_metric = Some("hit1")`), message cells keep the
+    // #271 hit@2 letter — CodeRabbit PR-288 Major 1: a hit@1-gated artifact
+    // must never be re-checked against the hit@2 letter here.
+    let recorded = recorded_letter(artifact);
     if recorded != artifact.two_stage_passes {
         bail!(
             "artifact records two_stage_passes={} but its own numbers contradict it \
-             (the letter says {recorded}) — refusing to flip",
-            artifact.two_stage_passes
+             (the {} letter says {recorded}) — refusing to flip",
+            artifact.two_stage_passes,
+            letter_metric_of(artifact)
         );
     }
     if !artifact.two_stage_passes {
         bail!(
-            "the acceptance letter does NOT pass — refusing to flip (§7: two-stage \
-             passes iff not worse than single-stage): ts_hit2={} ts_fp={} vs \
-             ss_hit2={} ss_fp={}",
-            artifact.two_stage.hit2,
+            "the acceptance letter does NOT pass — refusing to flip (§7: not worse \
+             than the baseline under the cell's own metric): ts_{}={} ts_fp={} vs \
+             ss_{}={} ss_fp={}",
+            letter_metric_of(artifact),
+            gated_hit(artifact),
             artifact.two_stage.fp,
-            artifact.single_stage.hit2,
+            letter_metric_of(artifact),
+            baseline_hit(artifact),
             artifact.single_stage.fp
         );
     }
@@ -1017,6 +1115,9 @@ fn probe_hit(entries: &[WisdomItem], probe: &Probe) -> bool {
 fn verdict_of(entries: &[WisdomItem], open: bool, probe: &Probe) -> ProbeVerdict {
     ProbeVerdict {
         hit: probe_hit(entries, probe),
+        hit1: entries
+            .first()
+            .is_some_and(|e| probe.expect.iter().any(|id| id == &e.id)),
         open: open && !entries.is_empty(),
         entries: entries.len(),
     }
@@ -1094,6 +1195,7 @@ pub fn score_entries(
     shape: &TemporalShape,
     scheme: Scheme,
     now_ms: i64,
+    provenance_filter: Option<&str>,
 ) -> Result<Vec<(f32, WisdomItem)>> {
     if ids.is_empty() || query_vec.is_empty() {
         return Ok(Vec::new());
@@ -1137,6 +1239,14 @@ pub fn score_entries(
         if let Some(f) = floor {
             if raw < f {
                 continue; // the core's `raw < floor` drop
+            }
+        }
+        // The delivery aperture (rev-6 M3): BEFORE the arm-internal
+        // truncate — a top-N of filtered-out facts must never shadow a
+        // `user_stated` fact ranked below it.
+        if let Some(want) = provenance_filter {
+            if provenance_for(source_type.as_deref()).as_deref() != Some(want) {
+                continue;
             }
         }
         let weighted = raw * tier_weight(entity_id.as_deref().unwrap_or(""));
@@ -1204,6 +1314,8 @@ fn chunk_hop_arm(
     cands: &CandidateSet,
     shape: &TemporalShape,
     top_k_opening: bool,
+    provenance_filter: Option<&str>,
+    corrections_absent: &HashSet<String>,
 ) -> Result<ChunkHopRun> {
     // Stage 1 with the RAW vector, breadth = the calibrated k.
     let hits = stage1_search(conn, query_raw, cands, k)?;
@@ -1230,6 +1342,12 @@ fn chunk_hop_arm(
     let mut seen: HashSet<String> = HashSet::new();
     for h in &opened {
         for id in evidence_facts_of_doc(conn, h.doc_id)? {
+            // Issue #282 review: the correction heads are applied to the
+            // fact-entry set exactly as the caller's skip set applies them —
+            // a head must never surface as a scored entry.
+            if corrections_absent.contains(&id) {
+                continue;
+            }
             if seen.insert(id.clone()) {
                 fact_ids.push(id);
             }
@@ -1245,6 +1363,7 @@ fn chunk_hop_arm(
         shape,
         scheme,
         now_ms,
+        provenance_filter,
     )?;
     // §3 v1-merge over the STRUCTURAL complement, v1 floor, then ONE
     // weighted re-rank + truncate (r28-m2: schemed vector; r27-M1/r29-M1:
@@ -1253,7 +1372,11 @@ fn chunk_hop_arm(
     let mut merged: Vec<(f32, WisdomItem)> = Vec::new();
     let mut v1merged = 0usize;
     if let Some(vf) = v1_floor {
-        let complement = complement_entry_ids(conn, cands, "chunk-hop", now_ms, Some(scheme))?;
+        let complement: Vec<String> =
+            complement_entry_ids(conn, cands, "chunk-hop", now_ms, Some(scheme))?
+                .into_iter()
+                .filter(|id| !corrections_absent.contains(id))
+                .collect();
         let merge_scored = score_entries(
             conn,
             query_schemed,
@@ -1263,6 +1386,7 @@ fn chunk_hop_arm(
             shape,
             scheme,
             now_ms,
+            provenance_filter,
         )?;
         v1merged = merge_scored.len();
         merged = merge_scored;
@@ -1379,6 +1503,22 @@ fn main() -> Result<()> {
     let k = args.k.expect("checked above");
     let baseline_key = args.baseline_key.clone().expect("checked above");
     check_embed_stub(std::env::var_os("CURATED_EMBED_STUB").as_deref())?;
+    // Issue #282 §7: the query kind (message default). Activity kinds imply
+    // v1_floor=None, the user_stated aperture, user_stated-only positives,
+    // and the hit@1 letter.
+    let query_kind_raw = args
+        .query_kind
+        .clone()
+        .unwrap_or_else(|| "message".to_string());
+    let activity = query_kind_raw != "message";
+    if !["message", "path", "command", "pattern"].contains(&query_kind_raw.as_str()) {
+        bail!("--query-kind must be one of message|path|command|pattern, got {query_kind_raw:?}");
+    }
+    let kind = if activity {
+        tauri_app_lib::wisdom_match::QueryKind::Activity
+    } else {
+        tauri_app_lib::wisdom_match::QueryKind::Message
+    };
     let rule = parse_rule(&rule)?;
     if !floor.is_finite() || !(0.0..1.0).contains(&floor) {
         bail!("--floor must be a finite cosine floor in (0, 1), got {floor}",);
@@ -1413,12 +1553,45 @@ fn main() -> Result<()> {
             scheme.as_str(),
         );
     }
-    let v1_floor = gate_floor(&baseline_key).with_context(|| {
+    // rev-6 M3 / rev-8 m1: under activity the merge NEVER runs —
+    // `v1_floor = None` at ALL THREE pass-sites (two_stage_entries +
+    // chunk_hop_arm's two merge legs). The baseline floor itself is still
+    // demanded for the message baseline arm.
+    let message_v1_floor = gate_floor(&baseline_key).with_context(|| {
         format!(
             "--baseline-key {} has no registered floor in WISDOM_GATE_FLOORS",
             baseline_key
         )
     })?;
+    let v1_floor = if activity {
+        None
+    } else {
+        Some(message_v1_floor)
+    };
+    // rev-6 M3: activity positives are drawn from `user_stated` facts ONLY —
+    // a non-`user_stated` positive reachable by baseline v1 but never by the
+    // activity aperture would read as "the floor bet failed" (rev-7 M3/M2).
+    if activity {
+        let mut stmt = conn
+            .prepare("SELECT source_type FROM llm_wiki_entries WHERE id = ?1")
+            .context("preparing the provenance gate")?;
+        for probe in &probes {
+            for id in &probe.expect {
+                let source: Option<String> = stmt
+                    .query_row([id], |r| r.get(0))
+                    .with_context(|| format!("positive fact {id} not found in llm_wiki_entries"))?;
+                if provenance_for(source.as_deref()).as_deref() != Some("user_stated") {
+                    bail!(
+                        "probe {:?} expects fact {id} with provenance {:?} — activity runs \
+                         calibrate the `user_stated` aperture (rev-6 M3): regenerate the \
+                         probe set from `user_stated` facts only",
+                        probe.text,
+                        source
+                    );
+                }
+            }
+        }
+    }
 
     // §9 step 3a / §6: coverage BEFORE any embed; < 100% ⇒ abort (Task 13
     // then Task 12) — the pure gate records the fraction for the artifact.
@@ -1455,6 +1628,14 @@ fn main() -> Result<()> {
     // same for every probe at this now_ms).
     let cands = candidate_set(&conn, now, Some(scheme))?
         .context("candidate set unavailable between the coverage probe and the run")?;
+    // Issue #282 review: ONE correction-head set for BOTH arms, from the
+    // PRODUCTION resolver (`find_corrections_public`, the r29-m2 resolver).
+    // The harness passes no excludes today, so this is empty — threading it
+    // keeps the arms head-symmetric if excludes are ever introduced.
+    let corrections_absent: HashSet<String> = find_corrections_public(&conn, &[], now, scheme)?
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
     let complement: HashSet<String> =
         complement_entry_ids(&conn, &cands, rule.as_str(), now, Some(scheme))?
             .into_iter()
@@ -1509,13 +1690,14 @@ fn main() -> Result<()> {
                     &raw_vecs[i],
                     &schemed_vecs[i],
                     scheme,
-                    Some(v1_floor),
+                    v1_floor,
                     Some(floor),
                     HIT_K,
                     &HashSet::new(),
-                    &HashSet::new(),
+                    &corrections_absent,
                     now,
                     &profile_key,
+                    kind,
                 )?;
                 (
                     entries,
@@ -1530,7 +1712,7 @@ fn main() -> Result<()> {
                     &raw_vecs[i],
                     &schemed_vecs[i],
                     scheme,
-                    Some(v1_floor),
+                    v1_floor,
                     floor,
                     k,
                     HIT_K,
@@ -1538,6 +1720,8 @@ fn main() -> Result<()> {
                     &cands,
                     &shape,
                     false, // the arm opens TOP-1 (pinned r30-m1)
+                    if activity { Some("user_stated") } else { None },
+                    &corrections_absent,
                 )?;
                 merge_ms.push(run.merge_ms);
                 let open = !run.entries.is_empty();
@@ -1569,7 +1753,7 @@ fn main() -> Result<()> {
                 &raw_vecs[i],
                 &schemed_vecs[i],
                 scheme,
-                Some(v1_floor),
+                v1_floor,
                 floor,
                 k,
                 HIT_K,
@@ -1577,20 +1761,40 @@ fn main() -> Result<()> {
                 &cands,
                 &shape,
                 true, // top-k member-chunk opening
+                if activity { Some("user_stated") } else { None },
+                &corrections_absent,
             )?;
             ablation_verdicts.push(verdict_of(&run.entries, !run.entries.is_empty(), probe));
         }
     }
 
-    // ---- Letter (§7, pinned): not worse on BOTH axes. ----
+    // ---- Letter: message cells keep the #271 hit@2 letter; ACTIVITY cells
+    // gate on hit@1 (issue #282 §7, rev-7 M2) — hit@2 is recorded, not
+    // gated. ----
     let ss_metrics = arm_metrics(&ss_verdicts, &labels);
     let ts_metrics = arm_metrics(&ts_verdicts, &labels);
-    let passes = letter_verdict(
-        ts_metrics.hit2,
-        ts_metrics.fp,
-        ss_metrics.hit2,
-        ss_metrics.fp,
-    );
+    let letter_metric = if activity { Some("hit1") } else { None };
+    let (passes, letter) = if activity {
+        (
+            letter_verdict_hit1(
+                ts_metrics.hit1,
+                ts_metrics.fp,
+                ss_metrics.hit1,
+                ss_metrics.fp,
+            ),
+            "act_hit1 >= base_hit1 && act_fp <= base_fp".to_string(),
+        )
+    } else {
+        (
+            letter_verdict(
+                ts_metrics.hit2,
+                ts_metrics.fp,
+                ss_metrics.hit2,
+                ss_metrics.fp,
+            ),
+            "two_stage_passes = ts_hit2 >= ss_hit2 && ts_fp <= ss_fp".to_string(),
+        )
+    };
 
     // ---- Informational held-out splits (r24 m7/E5) over the SAME run. ----
     let splits = stratified_splits(&labels, HELDOUT_SPLITS, HELDOUT_SEED);
@@ -1642,7 +1846,7 @@ fn main() -> Result<()> {
         },
         baseline: BaselineArm {
             key: baseline_key.clone(),
-            floor: v1_floor,
+            floor: message_v1_floor,
             scheme: scheme.as_str().to_string(),
         },
         candidate: CandidateCell {
@@ -1660,7 +1864,9 @@ fn main() -> Result<()> {
         single_stage: ss_metrics.clone(),
         two_stage: ts_metrics.clone(),
         two_stage_passes: passes,
-        letter: "two_stage_passes = ts_hit2 >= ss_hit2 && ts_fp <= ss_fp".to_string(),
+        letter: letter.clone(),
+        letter_metric: letter_metric.map(str::to_string),
+        query_kind: query_kind_raw.clone(),
         heldout: HeldOutInfo {
             splits: HELDOUT_SPLITS,
             half_size: probes.len() / 2,

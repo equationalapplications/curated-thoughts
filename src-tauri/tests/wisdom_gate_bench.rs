@@ -126,6 +126,42 @@ fn replay_two_stage() {
     // assertion above is what gates this test on the calibration flip.
 }
 
+/// Issue #282 (spec rev-9 m3): a replay test FOR THE ACTIVITY COMPOSITE
+/// KEY, parallel to [`replay_two_stage`], with its own sanitized-key freeze
+/// dir. `#[ignore]`d until the #282 calibration run commits the snapshot
+/// (spec §7: the grid evidence dir + freeze snapshot land with the
+/// calibration; the activity floor row ships in `WISDOM_GATE_FLOORS` only
+/// after the hit@1 letter passes — so the flip-gated floor assertion below
+/// is meaningless until then, exactly like `replay_two_stage` pre-#287).
+#[test]
+#[ignore = "activity freeze dir lands with the #282 calibration run (spec rev-9 m3)"]
+fn replay_activity_two_stage() {
+    let key = "external:qwen/qwen3-embedding-4b:activity:two-stage:chunk-hop";
+    let dir = freeze_dir_for(key);
+    let expected_path = format!("{dir}/expected.json");
+    assert!(
+        std::path::Path::new(&expected_path).exists(),
+        "no activity freeze snapshot in {dir}; run the #282 paired calibration \
+         (calibrate_two_stage --query-kind ...) and commit expected.json + \
+         vectors.json.gz"
+    );
+    let expected: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&expected_path).unwrap()).unwrap();
+    let floor = expected["floor"].as_f64().unwrap() as f32;
+    // The flip-to-default tripwire, activity edition: the composite-key
+    // lookup itself is unchanged (spec §3.3) — until the calibrated activity
+    // row lands, gate_floor misses and this assert fails.
+    assert_eq!(
+        tauri_app_lib::wisdom_match::gate_floor(key),
+        Some(floor),
+        "WISDOM_GATE_FLOORS[{key}] must match the calibration snapshot in {dir}"
+    );
+    assert!(
+        std::path::Path::new(&format!("{dir}/vectors.json.gz")).exists(),
+        "partial freeze: expected.json and vectors.json.gz must be committed together"
+    );
+}
+
 /// Replays one frozen snapshot. `freeze_dir` holds vectors.json.gz +
 /// expected.json; `fixtures_dir` holds facts.jsonl/probes.jsonl. `gate_key` is
 /// the `WISDOM_GATE_FLOORS` key the snapshot was calibrated under — raw keys

@@ -240,3 +240,182 @@ fn unresolvable_brain_exits_1() {
         },
     );
 }
+
+// ===================== Issue #282: activity query mode =====================
+// NOTE (spec §Testing, rev-12 M1): the `ct` binary compiles the lib WITHOUT
+// `cfg(test)`, so it can never see the stub activity composite row — every
+// CLI activity call here is a §4 FALLBACK. The active-path behavior is
+// pinned by the src-tauri `mod tests` (attribution, label, aperture,
+// degradation); these tests pin the CLI surface: the clap group, the
+// capability probe, the never-worse fallback parity, and the fallback's
+// label/exit discipline.
+
+fn target_of(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// rev-2 M-1 / rev-13: the `activity_target` group owns exactly-one — every
+/// mixing combination is a clap usage error (non-zero exit).
+#[test]
+fn activity_target_group_rejects_every_mix() {
+    with_seeded_brain(|| {
+        for args in [
+            vec![
+                "wisdom",
+                "match",
+                "--json",
+                "--path=a.rs",
+                "--command=pnpm test",
+            ],
+            vec!["wisdom", "match", "--json", "--path=a.rs", "--pattern=*.ts"],
+            vec![
+                "wisdom",
+                "match",
+                "--json",
+                "--command=pnpm test",
+                "--pattern=*.ts",
+            ],
+            vec![
+                "wisdom",
+                "match",
+                "--json",
+                "--path=a.rs",
+                "--",
+                "a message",
+            ],
+            vec![
+                "wisdom",
+                "match",
+                "--json",
+                "--command=pnpm test",
+                "--",
+                "a message",
+            ],
+            vec![
+                "wisdom",
+                "match",
+                "--json",
+                "--pattern=*.ts",
+                "--",
+                "a message",
+            ],
+        ] {
+            let out = run_ct(&args);
+            assert_ne!(
+                out.status.code(),
+                Some(0),
+                "mixed targets must be a usage error: {args:?}"
+            );
+        }
+    });
+}
+
+/// rev-9 m4: the zero-target case (no target at all) is ALSO a clap
+/// group-required error — the group satisfies the arg-required contract.
+#[test]
+fn zero_target_is_a_group_usage_error() {
+    with_seeded_brain(|| {
+        let out = run_ct(&["wisdom", "match", "--json"]);
+        assert_ne!(out.status.code(), Some(0));
+    });
+}
+
+/// Fable D1: `--help` advertises all three activity flags — the
+/// integrations' capability probe.
+#[test]
+fn help_advertises_the_three_activity_flags() {
+    let out = run_ct(&["wisdom", "match", "--help"]);
+    assert_eq!(out.status.code(), Some(0));
+    let help = String::from_utf8_lossy(&out.stdout);
+    for flag in ["--path", "--command", "--pattern"] {
+        assert!(help.contains(flag), "--help must advertise {flag}");
+    }
+}
+
+/// §4 never-worse fallback (rev-3 M6, no-flag arm): `--path=X` is
+/// byte-identical to `ct wisdom match -- X` (stdout AND stderr), exit 0.
+#[test]
+fn activity_no_flag_fallback_is_byte_identical_to_the_message_call() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let reference = run_ct(&["wisdom", "match", "--json", "--", "how do I deploy"]);
+        let activity = run_ct(&["wisdom", "match", "--json", "--path=how do I deploy"]);
+        assert_eq!(activity.status.code(), Some(0));
+        assert_eq!(
+            target_of(&activity),
+            target_of(&reference),
+            "no-flag fallback must be byte-identical to the message call"
+        );
+    });
+}
+
+/// §4 (rev-3 M6, --two-stage arm): `--two-stage --path=X` is byte-identical
+/// to `ct wisdom match --two-stage -- X` — including the audit line the
+/// message two-stage call prints (r29-m4). The target passes as ONE argv
+/// element after `--` (rev-6 m4).
+#[test]
+fn activity_two_stage_fallback_is_byte_identical_to_the_message_two_stage_call() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let reference = run_ct(&[
+            "wisdom",
+            "match",
+            "--json",
+            "--two-stage",
+            "--",
+            "how do I deploy",
+        ]);
+        let activity = run_ct(&[
+            "wisdom",
+            "match",
+            "--json",
+            "--two-stage",
+            "--path=how do I deploy",
+        ]);
+        assert_eq!(activity.status.code(), Some(0));
+        assert_eq!(
+            target_of(&activity),
+            target_of(&reference),
+            "--two-stage fallback must be byte-identical to the message two-stage call \
+             (including the audit line)"
+        );
+    });
+}
+
+/// §4 (rev-6 M2 / rev-11 m3): an empty target AND `--max 0` delegate to the
+/// message call with NO activity precheck — byte-identical, exit 0.
+#[test]
+fn empty_target_and_max_zero_delegate_to_the_message_call() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let empty_ref = run_ct(&["wisdom", "match", "--json", "--", ""]);
+        let empty_act = run_ct(&["wisdom", "match", "--json", "--path="]);
+        assert_eq!(empty_act.status.code(), Some(0));
+        assert_eq!(target_of(&empty_act), target_of(&empty_ref));
+
+        let max0_ref = run_ct(&["wisdom", "match", "--json", "--max", "0", "--", "deploy"]);
+        let max0_act = run_ct(&["wisdom", "match", "--json", "--max", "0", "--path=deploy"]);
+        assert_eq!(max0_act.status.code(), Some(0));
+        assert_eq!(target_of(&max0_act), target_of(&max0_ref));
+    });
+}
+
+/// rev-13 m2: the CLI can only ever see the FALLBACK, whose `gate` carries
+/// NO `:activity` (the active-path label is a src-tauri lib assertion).
+#[test]
+fn fallback_gate_label_has_no_activity_suffix() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let out = run_ct(&["wisdom", "match", "--json", "--path=how do I deploy"]);
+        let v = json_of(&out);
+        let gate = v["gate"].as_str().expect("gate is a string");
+        assert!(
+            !gate.contains(":activity"),
+            "fallback label must not claim the activity floor: {gate}"
+        );
+    });
+}

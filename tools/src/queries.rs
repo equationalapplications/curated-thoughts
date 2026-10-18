@@ -809,13 +809,12 @@ pub fn print_two_stage_audit(o: &wm::TwoStageOutcome) {
 /// every error propagates (exit 1). Never returns EXIT_NO_RESULTS.
 pub fn wisdom_match_cmd(
     text: &str,
+    kind: wm::QueryKind,
     max: usize,
     exclude: &[String],
     json_mode: bool,
     stage_mode: WisdomStageMode,
 ) -> Result<i32> {
-    use tauri_app_lib::wisdom_match as wm;
-
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
     let profile = retrieval::load_embed_profile(&brain.paths.config_path)
@@ -838,114 +837,228 @@ pub fn wisdom_match_cmd(
     // meta: a cutover landing during the embed round-trip can never pair
     // this query with the other scheme's floor or rows.
     let key = wm::gate_model_key(&profile, stub.as_deref());
+    let kill = tauri_app_lib::embedder::single_stage_env_kill();
 
-    // Stage selection (issue #271 §5): --two-stage XOR --single-stage XOR
-    // env kill-switch XOR Auto (= plain v1 until an explicit flip changes
-    // the default; pr283-review finding 15 — Auto previously enabled the
-    // two-stage path, contradicting §5's opt-in promise).
-    // Intended §5 semantics: the env kill-switch DOMINATES an explicit
-    // --two-stage flag (pinned by
-    // cli_wisdom_two_stage::env_kill_switch_dominates_explicit_two_stage_flag).
+    // ---- The ACTIVITY path (issue #282): active ONLY on the fully healthy
+    // two-stage cell (cell 4 — spec §3.3); EVERY other state is the
+    // never-worse fallback: the message call with the SAME stage flags (§4),
+    // computed below. No v1 `:activity` row ships in this PR (rev-4 M2′), so
+    // there is no activity v1 arm.
+    let activity_two_stage_selected = match stage_mode {
+        WisdomStageMode::TwoStage => !kill,
+        WisdomStageMode::SingleStage => false,
+        // Absent a flag an activity target prefers two-stage; the env
+        // kill-switch dominates (parity with message mode, rev-7 m1).
+        WisdomStageMode::Auto => !kill,
+    };
+    if kind == wm::QueryKind::Activity && activity_two_stage_selected {
+        // rev-6 M2: an empty target or `--max 0` delegates to the message
+        // call with NO activity precheck — that call's own embed
+        // short-circuit applies (no embed on either arm), exit 0.
+        let skip_no_query = text.trim().is_empty() || max == 0;
+        if !skip_no_query {
+            let pre = wm::two_stage_pre_embed_check(
+                &conn,
+                &key,
+                read_scheme,
+                now_ms,
+                wm::QueryKind::Activity,
+            )?;
+            if pre.projected_cell == 4 {
+                // THE attempt: RawAndSchemed embeds (spec rev-3 I-3).
+                let raw_vec =
+                    embed_one(&profile, text.to_string()).context("failed to embed query")?;
+                let schemed_vec = match read_scheme {
+                    tauri_app_lib::embed_scheme::Scheme::Raw => raw_vec.clone(),
+                    tauri_app_lib::embed_scheme::Scheme::Instr1 => {
+                        embed_one(&profile, query_text.clone()).context("failed to embed query")?
+                    }
+                };
+                let run = wm::wisdom_match_two_stage_with_v1(
+                    &conn,
+                    &raw_vec,
+                    &schemed_vec,
+                    read_scheme,
+                    max,
+                    exclude,
+                    now_ms,
+                    &key,
+                    wm::QueryKind::Activity,
+                )?;
+                if run.ran {
+                    // The ACTIVE path's whole stderr: the audit line, then
+                    // the pinned gate-decision line — nothing else
+                    // (rev-4 B1′ audit suppression).
+                    print_two_stage_audit(&run.outcome);
+                    print_gate_decision(read_scheme, &run.result);
+                    print_wisdom_match(&run.result, json_mode);
+                    return Ok(0);
+                }
+                // Post-embed degradation (rev-8/9/10 M1): the attempt's
+                // `TwoStageRun.result` is DISCARDED, never printed; the
+                // fallback re-runs the message path the stage flags select
+                // on the REUSED vectors (raw: schemed == raw clone).
+                let _ = run_message_path(
+                    &conn,
+                    &key,
+                    read_scheme,
+                    &raw_vec,
+                    &schemed_vec,
+                    max,
+                    exclude,
+                    now_ms,
+                    matches!(stage_mode, WisdomStageMode::TwoStage),
+                    json_mode,
+                )?;
+                return Ok(0);
+            }
+            // Cell != 4 (uncalibrated / degraded BEFORE any embed): fall
+            // through — the message call below embeds for itself per its own
+            // plan, so output stays byte-identical to the reference.
+        }
+        // Empty target / --max 0: fall through (see above).
+    }
+    // v1-arm selection (--single-stage, or the kill-switch) ALWAYS falls
+    // back to the message call below: the activity v1 arm does not exist in
+    // this PR.
+
+    // ---- The MESSAGE path (byte-identical to pre-#282; the fallback
+    // target for every activity state). ----
     let two_stage_requested = match stage_mode {
         WisdomStageMode::TwoStage => true,
         WisdomStageMode::SingleStage => false,
         WisdomStageMode::Auto => false,
     };
-    let two_stage_active = two_stage_requested && !tauri_app_lib::embedder::single_stage_env_kill();
-
-    if !two_stage_active {
-        // ---- The v1 path, byte-identical to the pre-#271 behavior. ----
-        // Embed only when entries can actually be produced: an uncalibrated
-        // gate, --max 0, or an empty text never needs the embedding backend.
-        let query_vec =
+    let two_stage_active = two_stage_requested && !kill;
+    let (raw_vec, schemed_vec) = if !two_stage_active {
+        // ---- The v1 path: embed only when entries can actually be
+        // produced (uncalibrated gate, --max 0, empty text never need the
+        // embedding backend).
+        (
+            Vec::new(),
             if text.trim().is_empty() || max == 0 || wm::gate_floor(&scheme_key).is_none() {
                 Vec::new()
             } else {
                 embed_one(&profile, query_text).context("failed to embed query")?
-            };
-        let result =
-            wm::wisdom_match_in_scheme(&conn, &query_vec, &key, read_scheme, max, exclude, now_ms)?;
-        let ts = DateTime::<Utc>::from(std::time::SystemTime::now())
-            .to_rfc3339_opts(SecondsFormat::Secs, true);
-        eprintln!(
-            "wisdom_gate_decision\t{}\t{}\t{}\t{}",
-            ts,
-            read_scheme.as_str(),
-            if result.entries.is_empty() {
-                "closed"
-            } else {
-                "open"
             },
-            result.entries.len(),
-        );
-        print_wisdom_match(&result, json_mode);
-        return Ok(0);
-    }
-
-    // ---- Two-stage requested (§3 embed-skip, §4, §6 coverage-first). ----
-    // Fix-round Important #1: the PUB precheck runs FIRST — floor resolution
-    // AND the §6 coverage probe happen BEFORE any embed, so a coverage veto
-    // (§4 cell 3) or an uncalibrated call (cell 2) costs ZERO embedder
-    // round-trips. This fn is the shared §3 embed-skip authority — the CLI
-    // branches its embed logic on the plan it returns (Task 14/15 callers do
-    // the same instead of reimplementing the skip).
-    let v1_key = key.clone();
-    let pre = wm::two_stage_pre_embed_check(&conn, &v1_key, read_scheme, now_ms)?;
-
-    // §3 embed-skip: embed EXACTLY what the precheck's plan names. Empty
-    // text or `--max 0` never needs a vector on any path (same short-circuit
-    // the v1 path applies).
-    let skip_for_no_query = text.trim().is_empty() || max == 0;
-    let (raw_vec, schemed_vec) = if skip_for_no_query {
-        (Vec::new(), Vec::new())
+        )
     } else {
-        match pre.embed_plan {
-            wm::TwoStageEmbedPlan::None => (Vec::new(), Vec::new()),
-            wm::TwoStageEmbedPlan::SchemedOnly => (
-                Vec::new(),
-                embed_one(&profile, query_text).context("failed to embed query")?,
-            ),
-            wm::TwoStageEmbedPlan::RawAndSchemed => {
-                let raw = embed_one(&profile, text.to_string()).context("failed to embed query")?;
-                let schemed = match read_scheme {
-                    tauri_app_lib::embed_scheme::Scheme::Raw => raw.clone(),
-                    tauri_app_lib::embed_scheme::Scheme::Instr1 => {
-                        embed_one(&profile, query_text.clone()).context("failed to embed query")?
-                    }
-                };
-                (raw, schemed)
+        // ---- Two-stage requested (§3 embed-skip, §4, §6 coverage-first):
+        // the PUB precheck runs FIRST — floor resolution AND the §6 coverage
+        // probe BEFORE any embed (fix-round Important #1).
+        let pre = wm::two_stage_pre_embed_check(
+            &conn,
+            &key,
+            read_scheme,
+            now_ms,
+            wm::QueryKind::Message,
+        )?;
+        let skip_for_no_query = text.trim().is_empty() || max == 0;
+        if skip_for_no_query {
+            (Vec::new(), Vec::new())
+        } else {
+            match pre.embed_plan {
+                wm::TwoStageEmbedPlan::None => (Vec::new(), Vec::new()),
+                wm::TwoStageEmbedPlan::SchemedOnly => (
+                    Vec::new(),
+                    embed_one(&profile, query_text).context("failed to embed query")?,
+                ),
+                wm::TwoStageEmbedPlan::RawAndSchemed => {
+                    let raw =
+                        embed_one(&profile, text.to_string()).context("failed to embed query")?;
+                    let schemed = match read_scheme {
+                        tauri_app_lib::embed_scheme::Scheme::Raw => raw.clone(),
+                        tauri_app_lib::embed_scheme::Scheme::Instr1 => {
+                            embed_one(&profile, query_text.clone())
+                                .context("failed to embed query")?
+                        }
+                    };
+                    (raw, schemed)
+                }
             }
         }
     };
-
-    let run = wm::wisdom_match_two_stage_with_v1(
+    let _ = run_message_path(
         &conn,
+        &key,
+        read_scheme,
         &raw_vec,
         &schemed_vec,
-        read_scheme,
         max,
         exclude,
         now_ms,
-        &v1_key,
+        two_stage_active,
+        json_mode,
     )?;
-    // The audit line on EVERY two-stage-requested path (r29-m4) — BEFORE the
-    // pinned gate-decision line so each line type stays greppable in order.
-    print_two_stage_audit(&run.outcome);
+    Ok(0)
+}
+
+/// The pinned gate-decision stderr line (four fields — spec §3.1: it carries
+/// no gate label and gains none).
+fn print_gate_decision(read_scheme: tauri_app_lib::embed_scheme::Scheme, result: &wm::WisdomMatch) {
     let ts = DateTime::<Utc>::from(std::time::SystemTime::now())
         .to_rfc3339_opts(SecondsFormat::Secs, true);
     eprintln!(
         "wisdom_gate_decision\t{}\t{}\t{}\t{}",
         ts,
         read_scheme.as_str(),
-        if run.result.entries.is_empty() {
+        if result.entries.is_empty() {
             "closed"
         } else {
             "open"
         },
-        run.result.entries.len(),
+        result.entries.len(),
     );
+}
+
+/// The MESSAGE-path executor (spec §8 step 4 — rev-5 m4 / rev-13 M2 /
+/// rev-14 m2): the SINGLE owner of all message-path printing, so
+/// byte-identical stderr has exactly one print site to test. Takes
+/// pre-computed vectors and NEVER embeds (`embed_one` is not called here);
+/// the caller — `wisdom_match_cmd` — owns the brain, the clock and every
+/// embed decision. Returns the `WisdomMatch` it printed plus the
+/// `Option<TwoStageOutcome>` for the audit line (print + return, NOT a bare
+/// exit code — a unit test cannot read `println!` back), so the helper test
+/// compares the returned `WisdomMatch` against the direct library call with
+/// byte-identical inputs. `pub` for that test via
+/// `curated_thoughts_tools::queries` (rev-13 m1).
+#[allow(clippy::too_many_arguments)]
+pub fn run_message_path(
+    conn: &Connection,
+    key: &str,
+    read_scheme: tauri_app_lib::embed_scheme::Scheme,
+    raw_vec: &[f32],
+    schemed_vec: &[f32],
+    max: usize,
+    exclude: &[String],
+    now_ms: i64,
+    two_stage_active: bool,
+    json_mode: bool,
+) -> Result<(wm::WisdomMatch, Option<wm::TwoStageOutcome>)> {
+    if !two_stage_active {
+        let result =
+            wm::wisdom_match_in_scheme(conn, schemed_vec, key, read_scheme, max, exclude, now_ms)?;
+        print_gate_decision(read_scheme, &result);
+        print_wisdom_match(&result, json_mode);
+        return Ok((result, None));
+    }
+    // The audit line on EVERY two-stage-requested path (r29-m4) — BEFORE the
+    // pinned gate-decision line so each line type stays greppable in order.
+    let run = wm::wisdom_match_two_stage_with_v1(
+        conn,
+        raw_vec,
+        schemed_vec,
+        read_scheme,
+        max,
+        exclude,
+        now_ms,
+        key,
+        wm::QueryKind::Message,
+    )?;
+    print_two_stage_audit(&run.outcome);
+    print_gate_decision(read_scheme, &run.result);
     print_wisdom_match(&run.result, json_mode);
-    Ok(0)
+    Ok((run.result, Some(run.outcome)))
 }
 
 /// Shared stdout rendering (JSON contract or the human lines) — identical

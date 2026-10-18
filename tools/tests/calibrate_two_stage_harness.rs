@@ -119,18 +119,22 @@ fn fixture_artifact() -> CalibrationArtifact {
         },
         single_stage: ArmMetrics {
             hit2: 0.5,
+            hit1: 0.5,
             fp: 2,
             opens: 30,
             entries_per_open: 1.5,
         },
         two_stage: ArmMetrics {
             hit2: 0.5,
+            hit1: 0.5,
             fp: 2,
             opens: 28,
             entries_per_open: 2.0,
         },
         two_stage_passes: letter_verdict(0.5, 2, 0.5, 2),
         letter: "two_stage_passes = ts_hit2 >= ss_hit2 && ts_fp <= ss_fp".to_string(),
+        letter_metric: None,
+        query_kind: "message".to_string(),
         heldout: HeldOutInfo {
             splits: 5,
             half_size: 75,
@@ -167,12 +171,14 @@ fn fixture_artifact() -> CalibrationArtifact {
             k: 8,
             top1: ArmMetrics {
                 hit2: 0.5,
+                hit1: 0.5,
                 fp: 2,
                 opens: 28,
                 entries_per_open: 2.0,
             },
             topk: ArmMetrics {
                 hit2: 0.525,
+                hit1: 0.525,
                 fp: 3,
                 opens: 31,
                 entries_per_open: 2.25,
@@ -260,21 +266,25 @@ fn arm_metrics_derive_hit2_and_fp_from_labels_and_opens() {
     let verdicts = vec![
         ProbeVerdict {
             hit: true,
+            hit1: true,
             open: true,
             entries: 2,
         },
         ProbeVerdict {
             hit: false,
+            hit1: false,
             open: true,
             entries: 1,
         },
         ProbeVerdict {
             hit: false,
+            hit1: false,
             open: true,
             entries: 1,
         }, // FP: open on an FP probe
         ProbeVerdict {
             hit: false,
+            hit1: false,
             open: false,
             entries: 0,
         },
@@ -616,6 +626,7 @@ fn score_entries_parity_with_core_gated_entries() {
         &shape,
         Scheme::Raw,
         NOW_MS,
+        None,
     )
     .expect("driver score_entries");
     let core = wisdom_match_with_floor(
@@ -679,6 +690,7 @@ fn score_entries_parity_with_core_gated_entries() {
         &shape,
         Scheme::Raw,
         NOW_MS,
+        None,
     )
     .expect("driver score_entries (max 2)");
     let core_top2 = wisdom_match_with_floor(
@@ -1273,5 +1285,32 @@ fn baseline_gate_key_round_trips_through_floor_key_for() {
         floor_key_for(&schemed, Scheme::Instr1),
         format!("{schemed}:instr1"),
         "passing the already-schemed key double-suffixes it"
+    );
+}
+
+/// Issue #282 (rev-8 m5 / CodeRabbit PR-288 Major 2): an ACTIVITY
+/// artifact's composite key inserts `:activity` AFTER the schemed base —
+/// `model:activity:two-stage:<rule>` under raw,
+/// `model:instr1:activity:two-stage:<rule>` under instr1. Message
+/// artifacts keep the #271 shape.
+#[test]
+fn activity_artifact_composite_key_carries_the_activity_segment() {
+    let mut a = fixture_artifact();
+    a.query_kind = "path".to_string();
+    a.baseline.key = "external:qwen/qwen3-embedding-4b".to_string(); // raw
+    assert_eq!(
+        composite_floor_key(&a),
+        "external:qwen/qwen3-embedding-4b:activity:two-stage:chunk-hop"
+    );
+    a.baseline.key = "external:qwen/qwen3-embedding-4b:instr1".to_string(); // instr1
+    assert_eq!(
+        composite_floor_key(&a),
+        "external:qwen/qwen3-embedding-4b:instr1:activity:two-stage:chunk-hop"
+    );
+    // Message artifact: unchanged #271 shape (regression guard).
+    let msg = fixture_artifact();
+    assert_eq!(
+        composite_floor_key(&msg),
+        "external:qwen/qwen3-embedding-4b:instr1:two-stage:chunk-hop"
     );
 }
