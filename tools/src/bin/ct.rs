@@ -408,7 +408,12 @@ enum WisdomCmd {
         json: bool,
     },
     /// Relevance-gated, read-only match of wisdom facts against a message
-    /// (issue #265; consumer: CTI live delivery). The text goes after `--`.
+    /// OR an activity target (issues #265 + #282; consumer: CTI live
+    /// delivery). The message goes after `--`; an activity target goes in
+    /// `--path=`/`--command=`/`--pattern=` (exactly one of the four — the
+    /// `activity_target` group owns the rule). Callers MUST use the `=`
+    /// form for activity targets so values beginning with `-` stay
+    /// unambiguous (caller convention, not enforceable).
     Match {
         #[arg(long)]
         json: bool,
@@ -421,15 +426,31 @@ enum WisdomCmd {
         /// Force the two-stage retrieval path (issue #271 §5). Mutually
         /// exclusive with --single-stage. Until the calibrated two-stage
         /// floors land (Task 15), this degrades to the v1 path with the
-        /// seven-field `wisdom_two_stage_audit` stderr line.
+        /// seven-field `wisdom_two_stage_audit` stderr line. On an activity
+        /// target this is the DEFAULT (issue #282 §3.3).
         #[arg(long = "two-stage", group = "stage_sel")]
         two_stage: bool,
         /// Force the plain v1 path (issue #271 §5 off-switch). Mutually
         /// exclusive with --two-stage.
         #[arg(long = "single-stage", group = "stage_sel")]
         single_stage: bool,
-        /// The message to match. Only accepted after `--`.
-        #[arg(last = true, required = true)]
+        /// Activity target: a relative file path, sent VERBATIM as the bare
+        /// target (issue #282). Exactly one of {this, --command, --pattern,
+        /// the positional message}.
+        #[arg(long = "path", group = "activity_target")]
+        path: Option<String>,
+        /// Activity target: a program-plus-subcommand string, sent VERBATIM
+        /// (issue #282). Exactly one of the four target forms.
+        #[arg(long = "command", group = "activity_target")]
+        command: Option<String>,
+        /// Activity target: a search pattern, sent VERBATIM (issue #282).
+        /// Exactly one of the four target forms.
+        #[arg(long = "pattern", group = "activity_target")]
+        pattern: Option<String>,
+        /// The message to match. Only accepted after `--`. Optional: the
+        /// `activity_target` arg group satisfies the exactly-one rule when
+        /// an activity flag is used (rev-3 m3).
+        #[arg(last = true, group = "activity_target")]
         text: Vec<String>,
     },
     /// Embed-scheme administration (issue #265 cutover): status / sweep / activate.
@@ -775,6 +796,9 @@ fn run(cmd: Cmd) -> Result<i32> {
                 exclude,
                 two_stage,
                 single_stage,
+                path,
+                command,
+                pattern,
                 text,
             } => {
                 if exclude.len() > tauri_app_lib::wisdom_match::MAX_EXCLUDES {
@@ -790,7 +814,35 @@ fn run(cmd: Cmd) -> Result<i32> {
                 } else {
                     cli_common::WisdomStageMode::Auto
                 };
-                cli_common::wisdom_match_cmd(&text.join(" "), max, &exclude, json, mode)
+                // Issue #282: the `activity_target` group guarantees
+                // AT-MOST-one of the four forms (clap implicit groups cannot
+                // be `required`), so the exactly-one rule finishes here:
+                // zero targets is a usage error, same as a mix.
+                let target_count = path.is_some() as usize
+                    + command.is_some() as usize
+                    + pattern.is_some() as usize
+                    + (!text.is_empty()) as usize;
+                if target_count != 1 {
+                    bail!(
+                        "exactly one target required: --path=<path> | --command=<cmd> | \
+                         --pattern=<pattern> | a message after `--`"
+                    );
+                }
+                // Map the activity kinds to their bare target (passed
+                // through VERBATIM — no normalization, no quoting repair).
+                let (kind, target) = if let Some(t) = path {
+                    (tauri_app_lib::wisdom_match::QueryKind::Activity, t)
+                } else if let Some(t) = command {
+                    (tauri_app_lib::wisdom_match::QueryKind::Activity, t)
+                } else if let Some(t) = pattern {
+                    (tauri_app_lib::wisdom_match::QueryKind::Activity, t)
+                } else {
+                    (
+                        tauri_app_lib::wisdom_match::QueryKind::Message,
+                        text.join(" "),
+                    )
+                };
+                cli_common::wisdom_match_cmd(&target, kind, max, &exclude, json, mode)
             }
             WisdomCmd::Scheme { cmd } => match cmd {
                 SchemeCmd::Status { json } => cli_common::wisdom_scheme_status_cmd(json),

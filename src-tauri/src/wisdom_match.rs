@@ -51,6 +51,35 @@ pub const PROVENANCE_VOCAB: &[&str] = &[
     "immutable_document",
 ];
 
+/// Which shape of query text this call carries (issue #282): a user message
+/// (prose) or an activity target (`--path=`/`--command=`/`--pattern=` — a
+/// bare path, command or search pattern). The kind selects the ACTIVITY
+/// floor-key suffix — ONE shared `:activity` floor across all three target
+/// kinds (Kurt ruling 2026-10-18) — and, on the active path, the
+/// `user_stated` delivery aperture (§5 of the #282 spec). Message mode is
+/// byte-for-byte untouched: `QueryKind::Message` reproduces today's keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryKind {
+    Message,
+    Activity,
+}
+
+impl QueryKind {
+    /// The floor-key BASE: the profile key for message queries, the profile
+    /// key + `:activity` for activity queries. Composite suffixes
+    /// (`:two-stage:<rule>`) land AFTER this base — never at the composite's
+    /// end (spec rev-6 B1: resolver and calibration table must never drift).
+    /// Site-4 note (rev-10 m1): callers pass this base as `gate_key`, so BOTH
+    /// arms of `match_with_resolved_floor` (schemed and scheme-`None`) carry
+    /// the suffix; `QueryKind::Activity` never resolves a floor there.
+    pub fn floor_base_key(self, profile_key: &str) -> String {
+        match self {
+            QueryKind::Message => profile_key.to_string(),
+            QueryKind::Activity => format!("{profile_key}:activity"),
+        }
+    }
+}
+
 /// Abstention floors, one per embedding model (CT INTENT rule 7). RAW-cosine
 /// keys (`<model-key>[:scheme]`) abstain on the entry's RAW cosine; a
 /// `…:two-stage:chunk-hop` key abstains on a CHUNK score instead — never on
@@ -123,6 +152,11 @@ const WISDOM_GATE_FLOORS_TEST: &[(&str, f32)] = &[
     ("stub:constant8:two-stage:chunk-hop", 0.45),
     ("stub:constant8:instr1:two-stage:restricted-cosine", 0.5),
     ("stub:constant8:instr1:two-stage:chunk-hop", 0.45),
+    // Issue #282: the ACTIVITY composite (rev-3 M4 — test-only, like its
+    // message twin). The value is deliberately DIFFERENT from the message
+    // stub's 0.45 so the attribution test exercises value-equality
+    // attribution instead of passing by coincidence (rev-6 B1).
+    ("stub:constant8:activity:two-stage:chunk-hop", 0.40),
 ];
 
 /// cfg(test) floor lookup: [`gate_floor`] over the production table, plus
@@ -369,6 +403,7 @@ fn wisdom_match_impl(
                 now_ms,
                 &temporal,
                 None,
+                None,
             )?
         }
         _ => Vec::new(),
@@ -465,6 +500,7 @@ fn gated_entries(
     now_ms: i64,
     temporal: &Temporal,
     id_filter: Option<&[String]>,
+    provenance_filter: Option<&str>,
 ) -> Result<Vec<WisdomItem>> {
     // THE shared eligibility predicate (spec §3.2) — the same fragment
     // `eligible_entry_ids` (and Task 3's stage-1 SQL) consumes, so the v1
@@ -537,6 +573,16 @@ fn gated_entries(
         };
         if blob.len() != dim * 4 {
             continue;
+        }
+        // The delivery aperture (issue #282 §5): `Some("user_stated")` on the
+        // activity-active path admits ONLY Kurt-stated facts, BEFORE the
+        // arm-internal truncate (`:565` below) — a top-N of filtered-out
+        // facts must never shadow a `user_stated` fact ranked below it.
+        // Message mode and the merge pass `None` (unchanged).
+        if let Some(want) = provenance_filter {
+            if provenance_for(source_type.as_deref()).as_deref() != Some(want) {
+                continue;
+            }
         }
         let raw = cosine_similarity(query_vec, &bytes_to_f32(&blob));
         if let Some(floor) = floor {
@@ -684,9 +730,18 @@ pub fn two_stage_entries(
     corrections_absent_ids: &HashSet<String>,
     now_ms: i64,
     profile_key: &str,
+    kind: QueryKind,
 ) -> Result<TwoStageResult> {
     let max = max.min(MAX_ENTRIES);
     let k = two_stage_k(profile_key);
+    // The delivery aperture rides with the kind (issue #282 §5): activity
+    // admits `user_stated` only; message never filters. The v1-merge is dead
+    // under activity (its `v1_floor` is `None` — no v1 `:activity` row ships),
+    // so the filter below is inert there by construction.
+    let provenance_filter = match kind {
+        QueryKind::Message => None,
+        QueryKind::Activity => Some("user_stated"),
+    };
     // One skip set for ALL selections ("one id, one list"):
     let mut skip: HashSet<String> = exclude.iter().cloned().collect();
     skip.extend(corrections_absent_ids.iter().cloned());
@@ -762,7 +817,13 @@ pub fn two_stage_entries(
     // caller's composite key convention. We derive it from which rule's
     // mechanics the caller wants by checking both composite keys: the one
     // matching `two_stage_floor` is the calibrated rule.
-    let scheme_key = floor_key_for(profile_key, scheme);
+    // Site 5 of the floor-key resolution chain (spec rev-6 B1): the
+    // attribution block derives its OWN scheme key — from the kind-carrying
+    // base, so an activity floor attributes against the activity composites,
+    // never the message ones. Without this, a calibrated activity floor (≠
+    // the message value) attributes NOTHING and the tie-break default
+    // RestrictedCosine would run against a chunk-hop-calibrated floor.
+    let scheme_key = floor_key_for(&kind.floor_base_key(profile_key), scheme);
     let rule;
     let mut attributed = true;
     if two_stage_rule_floor(&format!("{scheme_key}:two-stage:restricted-cosine"))
@@ -824,6 +885,7 @@ pub fn two_stage_entries(
                 now_ms,
                 &temporal,
                 Some(&restricted),
+                provenance_filter,
             )?;
             let best = scored
                 .iter()
@@ -867,6 +929,7 @@ pub fn two_stage_entries(
                         now_ms,
                         &temporal,
                         Some(&ids),
+                        provenance_filter,
                     )?;
                     (scored, Some(best_member.score))
                 }
@@ -890,6 +953,7 @@ pub fn two_stage_entries(
             now_ms,
             &temporal,
             Some(&complement),
+            provenance_filter,
         )?;
         // Counts complement rows ABOVE the v1 floor BEFORE the final
         // truncate(max) — i.e. the raw merge yield, not the shipped count.
@@ -1059,9 +1123,13 @@ pub fn two_stage_pre_embed_check(
     profile_key: &str,
     scheme: Scheme,
     now_ms: i64,
+    kind: QueryKind,
 ) -> Result<TwoStagePreEmbed> {
-    // Floor resolution — mirrors `wisdom_match_two_stage_with_v1` exactly.
-    let scheme_key = floor_key_for(profile_key, scheme);
+    // Floor resolution — mirrors `wisdom_match_two_stage_with_v1` exactly
+    // (site 2 of the resolution chain; the kind selects the `:activity`
+    // base). `two_stage::coverage` stays on the UNSUFFIXED profile key
+    // (coverage is keyed per model, never per query kind).
+    let scheme_key = floor_key_for(&kind.floor_base_key(profile_key), scheme);
     let v1_floor_present = gate_floor(&scheme_key).is_some();
     let ts_floor_present =
         two_stage_rule_floor(&format!("{scheme_key}:two-stage:restricted-cosine"))
@@ -1140,13 +1208,22 @@ pub fn wisdom_match_two_stage_with_v1(
     exclude: &[String],
     now_ms: i64,
     profile_key: &str,
+    kind: QueryKind,
 ) -> Result<TwoStageRun> {
-    let v1_key = profile_key.to_string();
+    // Site 3 of the resolution chain (spec rev-8 M1 — the OPPOSITE of moot):
+    // the base key carries the kind's `:activity` suffix, which (a) makes
+    // `v1_floor` `None` under activity (no v1 `:activity` row ships ⇒ the
+    // §3 v1-merge is dead, exactly as the spec pins) and (b) builds the
+    // ran-path label `semantic-v2-two-stage:{scheme_key}` with the `:activity`
+    // suffix and NO composite segment (rev-6 M1). Resolving `v1_floor` from
+    // the message key here is FORBIDDEN — it would run the merge on the
+    // message floor inside the activity attempt.
+    let v1_key = kind.floor_base_key(profile_key);
     // Floor resolution (plan Step 3.2): v1 floor under the resolved scheme;
     // the composite two-stage floors in PINNED rule order. The composite
     // lookup goes through `two_stage_rule_floor` so test builds see the
     // test-only slice — mirroring the core's attribution exactly.
-    let scheme_key = floor_key_for(profile_key, scheme);
+    let scheme_key = floor_key_for(&v1_key, scheme);
     let v1_floor = gate_floor(&scheme_key);
     let ts_floor = two_stage_rule_floor(&format!("{scheme_key}:two-stage:restricted-cosine"))
         .or_else(|| two_stage_rule_floor(&format!("{scheme_key}:two-stage:chunk-hop")));
@@ -1179,6 +1256,7 @@ pub fn wisdom_match_two_stage_with_v1(
         &HashSet::new(),
         now_ms,
         profile_key,
+        kind,
     )?;
     let ran = outcome.rule.is_some();
     debug_assert!(
@@ -1191,6 +1269,11 @@ pub fn wisdom_match_two_stage_with_v1(
     // path, so both paths emit identical corrections (r29-m2). The v1 vector
     // is the SCHEMED one — `wisdom_match_in_scheme`'s own contract.
     if !ran {
+        // `v1_key` already carries the activity suffix (above), so this call
+        // resolves NO floor (rev-9/rev-10 M1): `wisdom_match_impl` takes its
+        // `None` arm (`:374`), `gated_entries` is NEVER entered inside the
+        // activity attempt — no v1 scan, no per-row stderr warnings. The
+        // activity caller DISCARDS this result and re-runs the message path.
         let v1_result = wisdom_match_in_scheme(
             conn,
             query_vec_schemed,
@@ -1985,6 +2068,7 @@ mod tests {
             NOW,
             &temporal,
             None,
+            None,
         )
         .unwrap();
         let gated_ids: HashSet<String> = gated.iter().map(|e| e.id.clone()).collect();
@@ -2026,7 +2110,18 @@ mod tests {
             .collect();
         assert_eq!(after_skip, vec!["b".to_string()]);
         // v1 path with the same oversize skip set:
-        let gated = gated_entries(&conn, &Q, Some(0.0), 10, &skip, NOW, &temporal, None).unwrap();
+        let gated = gated_entries(
+            &conn,
+            &Q,
+            Some(0.0),
+            10,
+            &skip,
+            NOW,
+            &temporal,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             gated.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
             vec!["b".to_string()]
@@ -2074,6 +2169,7 @@ mod tests {
             &HashSet::new(),
             TS_NOW,
             TS_KEY,
+            QueryKind::Message,
         )
         .unwrap()
     }
@@ -2169,6 +2265,7 @@ mod tests {
             &[],
             TS_NOW,
             TS_KEY,
+            QueryKind::Message,
         )
         .unwrap();
         assert!(
@@ -2204,6 +2301,7 @@ mod tests {
             &[],
             TS_NOW,
             "external:never-calibrated-model",
+            QueryKind::Message,
         )
         .unwrap();
         assert!(!run.ran);
@@ -2232,6 +2330,7 @@ mod tests {
             "external:qwen/qwen3-embedding-4b",
             Scheme::Raw,
             TS_NOW,
+            QueryKind::Message,
         )
         .unwrap();
         assert!(pre.v1_floor_present, "qwen raw key has a v1 floor (0.70)");
@@ -2267,6 +2366,7 @@ mod tests {
             "external:never-calibrated-model",
             Scheme::Raw,
             TS_NOW,
+            QueryKind::Message,
         )
         .unwrap();
         assert!(!pre.v1_floor_present);
@@ -2287,7 +2387,9 @@ mod tests {
             [],
         )
         .unwrap();
-        let pre = two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW).unwrap();
+        let pre =
+            two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW, QueryKind::Message)
+                .unwrap();
         assert!(pre.v1_floor_present);
         assert!(
             pre.ts_floor_present,
@@ -2311,7 +2413,9 @@ mod tests {
     #[test]
     fn precheck_cell4_full_coverage_plans_stage1_embed_raw_reuse() {
         let conn = fixture();
-        let pre = two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW).unwrap();
+        let pre =
+            two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW, QueryKind::Message)
+                .unwrap();
         assert!(pre.v1_floor_present);
         assert!(pre.ts_floor_present);
         assert_eq!(pre.projected_cell, 4);
@@ -2332,7 +2436,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE documents (id INTEGER PRIMARY KEY, path TEXT);")
             .unwrap();
-        let pre = two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW).unwrap();
+        let pre =
+            two_stage_pre_embed_check(&conn, TS_KEY, Scheme::Raw, TS_NOW, QueryKind::Message)
+                .unwrap();
         assert!(pre.coverage_probe_miss);
         assert_eq!(
             pre.projected_cell, 1,
@@ -2446,6 +2552,7 @@ mod tests {
             &HashSet::new(),
             TS_NOW,
             TS_KEY,
+            QueryKind::Message,
         )
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
@@ -2581,6 +2688,7 @@ mod tests {
             &HashSet::from(["f-old".to_string()]),
             TS_NOW,
             TS_KEY,
+            QueryKind::Message,
         )
         .unwrap();
         // Parity: v1's corrections shape == the two-stage caller's contract —
@@ -2651,5 +2759,202 @@ mod tests {
         assert_eq!(two_stage_k("external:qwen/qwen3-embedding-4b:instr1"), 8);
         assert_eq!(two_stage_k("anything-else"), 8);
         assert!(gate_floor("default").is_none(), "k is NOT a floor key");
+    }
+
+    // ===================== Issue #282: activity query mode =====================
+
+    /// rev-6 B1 ATTRIBUTION test: with a stub ACTIVITY composite value
+    /// DIFFERENT from the message stub's 0.45, the active path must
+    /// attribute ChunkHop via the activity composite row and report
+    /// `floor_key_used` byte-exactly `…:activity:two-stage:chunk-hop`.
+    /// Without the site-5 QueryKind threading, the attribution block would
+    /// look up the MESSAGE composite (0.45 ≠ 0.40), attribute nothing, and
+    /// fall back to RestrictedCosine on a chunk-hop-calibrated floor.
+    #[test]
+    fn activity_composite_attributes_chunk_hop_with_its_own_floor_value() {
+        let conn = fixture();
+        // u1 vs u4: chunk c1 (member of doc1, whose evidence names f1) is a
+        // 1.0 hit under the raw vector; f1 is rule-(ii) reachable.
+        let (entries, outcome) = two_stage_entries(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            None,               // v1_floor: NO v1 `:activity` row ever ships
+            Some(0.40),         // the activity composite floor (test table)
+            8,
+            &HashSet::new(),
+            &HashSet::new(),
+            TS_NOW,
+            TS_KEY,
+            QueryKind::Activity,
+        )
+        .unwrap();
+        assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
+        assert_eq!(
+            outcome.floor_key_used,
+            format!("{TS_KEY}:activity:two-stage:chunk-hop")
+        );
+        // The fixture's only rule-(ii)-reachable fact is f1
+        // (`librarian_inferred`), so the `user_stated` aperture filters the
+        // delivery to empty — which is exactly the §5 contract on this
+        // brain (the aperture test below pins both sides of it).
+        assert!(
+            entries.is_empty(),
+            "aperture: f1 (librarian_inferred) must not be delivered"
+        );
+    }
+
+    /// rev-6 M1 LABEL test: the ran-path label is
+    /// `{TWO_STAGE_LABEL_PREFIX}{scheme_key}` with the kind-carrying scheme
+    /// key — `…:activity`, NO composite segment; the MESSAGE label is
+    /// unchanged.
+    #[test]
+    fn activity_ran_label_is_scheme_key_plus_activity_no_composite_segment() {
+        let conn = fixture();
+        let run = wisdom_match_two_stage_with_v1(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            8,
+            &[],
+            TS_NOW,
+            TS_KEY,
+            QueryKind::Activity,
+        )
+        .unwrap();
+        assert!(run.ran, "stub activity composite + full coverage ⇒ ran");
+        assert_eq!(
+            run.result.gate,
+            format!("{TWO_STAGE_LABEL_PREFIX}{TS_KEY}:activity")
+        );
+        // The message label is unchanged (regression guard):
+        let msg = wisdom_match_two_stage_with_v1(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            8,
+            &[],
+            TS_NOW,
+            TS_KEY,
+            QueryKind::Message,
+        )
+        .unwrap();
+        assert_eq!(msg.result.gate, format!("{TWO_STAGE_LABEL_PREFIX}{TS_KEY}"));
+    }
+
+    /// rev-8 M1 / rev-9 M1 / rev-10 M1: under the activity kind the
+    /// orchestrator's `!ran` v1 pass resolves NO floor (no v1 `:activity`
+    /// row ships), so the attempt's discarded result carries the
+    /// `GATE_UNCALIBRATED` + empty-entries signature — `gated_entries` is
+    /// never entered inside the attempt (no v1 scan, no per-row stderr).
+    /// The proxy is DISCRIMINATING: an un-threaded `QueryKind` would resolve
+    /// the stub v1 row and label `semantic-v1:stub:constant8`.
+    #[test]
+    fn activity_attempt_degraded_run_carries_none_arm_signature() {
+        let conn = fixture();
+        // Coverage veto (stale embed keys) ⇒ the core cannot run ⇒ `!ran`:
+        conn.execute(
+            "UPDATE documents SET embed_key = 'old-model' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let run = wisdom_match_two_stage_with_v1(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            8,
+            &[],
+            TS_NOW,
+            TS_KEY,
+            QueryKind::Activity,
+        )
+        .unwrap();
+        assert!(!run.ran);
+        assert_eq!(run.result.gate, GATE_UNCALIBRATED);
+        assert!(run.result.entries.is_empty());
+        assert!(run.outcome.rule.is_none());
+    }
+
+    /// rev-13 M1 APERTURE (lib, active path only): with the activity
+    /// composite forcing a cell-4 run, the delivered entries contain NO
+    /// non-`user_stated` fact even though rule (ii) opens doc1 (whose fact
+    /// f1 is `librarian_inferred`); corrections are NOT aperture-filtered
+    /// (rev-13 M1: corrections bypass the aperture); `open` reflects the
+    /// post-aperture list. The message call on the same vectors still
+    /// delivers f1 (message mode is untouched).
+    #[test]
+    fn activity_aperture_delivers_user_stated_only_on_the_active_path() {
+        let conn = fixture();
+        // f1 (librarian_inferred) is the only rule-(ii)-reachable fact; f2
+        // (user_stated) is NOT rule-reachable, so the activity-active run
+        // opens on f1's doc and the aperture filters f1 away entirely.
+        let (entries, outcome) = two_stage_entries(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            None,
+            Some(0.40),
+            8,
+            &HashSet::new(),
+            &HashSet::new(),
+            TS_NOW,
+            TS_KEY,
+            QueryKind::Activity,
+        )
+        .unwrap();
+        assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
+        assert!(
+            !entries.iter().any(|e| e.provenance.as_deref() != Some("user_stated")),
+            "aperture: every delivered entry is user_stated"
+        );
+        // The message path on the same vectors is UNFILTERED (f1 delivered):
+        // The MESSAGE control uses the message composite value (0.45 — the
+        // attribution table is per-kind, rev-6 B1) and NO aperture: f1 is
+        // delivered, proving message mode is untouched by the aperture.
+        let (msg_entries, msg_outcome) = two_stage_entries(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            None,
+            Some(0.45),
+            8,
+            &HashSet::new(),
+            &HashSet::new(),
+            TS_NOW,
+            TS_KEY,
+            QueryKind::Message,
+        )
+        .unwrap();
+        assert_eq!(msg_outcome.rule, Some(TwoStageRule::ChunkHop));
+        assert!(
+            msg_entries.iter().any(|e| e.id == "f1"),
+            "message mode unchanged: f1 (librarian_inferred) delivered"
+        );
+    }
+
+    /// rev-8 M2 / spec §4: `QueryKind::Activity` + explicit `--single-stage`
+    /// selection never reaches a v1-activity arm in THIS PR — the CLI falls
+    /// back to the message call (its own pin). Here we pin the CORE side:
+    /// the activity v1 floor key resolves to None even though the message
+    /// stub v1 floor exists.
+    #[test]
+    fn activity_v1_floor_key_resolves_none_despite_message_stub_floor() {
+        assert!(gate_floor(&format!("{TS_KEY}:activity")).is_none());
+        assert!(gate_floor(TS_KEY).is_some(), "message stub v1 floor exists");
+    }
+
+    /// rev-11 m2 RECORDED DEVIATION guard: the no-flag + message-floor-absent
+    /// embed-failure divergence is unreachable — the message v1 row always
+    /// exists in production and under the stub. Pinned here so a future table
+    /// edit that removes it must revisit the spec §Error-handling deviation.
+    #[test]
+    fn message_v1_stub_floor_exists_deviation_guard() {
+        assert!(gate_floor(TS_KEY).is_some());
     }
 }
