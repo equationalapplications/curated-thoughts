@@ -1,3 +1,9 @@
+## [3.8.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.8.0...v3.8.1) (2026-10-18)
+
+### Bug Fixes
+
+* **deps:** revert [@tauri-apps](https://github.com/tauri-apps) npm minors to the crate-aligned set that built v3.6.0 ([7aaef71](https://github.com/equationalapplications/curated-thoughts/commit/7aaef71d10211667e2987eb369bbcd395828d196)), closes [#281](https://github.com/equationalapplications/curated-thoughts/issues/281)
+
 ## [3.8.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.7.0...v3.8.0) (2026-10-18)
 
 ### Features
