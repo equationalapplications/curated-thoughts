@@ -1,11 +1,10 @@
 # Activity query mode for the wisdom gate: paths and commands reach concept rules (issue #282)
 
-**Date:** 2026-10-18 (rev 3 — rev 1 folded the step-0 Fable guidance memo and Kurt's
-three rulings; rev 2 folded the Tier-2 GLM 5.3 review; rev 3 folds the Tier-3 Opus
-review: 2 blockers + 6 majors + 5 minors, all adjudicated REAL).
-**Status:** Draft — Tier 2 (GLM 5.3) and Tier 3 (Opus) done; awaiting re-review
-convergence, then the Tier-4 Fable gate; Kurt's explicit approval required before
-implementation.
+**Date:** 2026-10-18 (rev 4 — rev 1 folded the step-0 Fable memo + Kurt's rulings;
+rev 2 the Tier-2 GLM 5.3 review; rev 3 the Tier-3 Opus review; rev 4 the Tier-3 delta
+re-review: 1 blocker + 2 majors + 3 minors).
+**Status:** Draft — in Tier-3 convergence loop; then the Tier-4 Fable gate; Kurt's
+explicit approval required before implementation.
 **Branch:** `spec/issue282-activity-query-mode`
 **Priority:** High — the integrations' autonomous-work delivery (plugin 0.7.x) is live
 and shipping the bare target to the message path until this lands.
@@ -26,7 +25,35 @@ production floors in this spec are RAW.
 
 ## Revision history (compressed)
 
-- **rev 3 (this rev):** Tier-3 Opus review (REQUEST CHANGES; full review
+- **rev 4 (this rev):** Tier-3 delta re-review (REQUEST CHANGES; full review
+  `~/.local/state/tessera/issue282/tier3-delta-review.md`, $0.57). Fixes:
+  **B1′** — the healthy cell is CELL 4, not cell 1 (cell 1 is "ts floor missing →
+  v1 fallback", `wisdom_match.rs:715/:1163`; cell 4 is "ts present + cov 100% →
+  two-stage runs", `:741/:1110/:1167`). Active predicate pinned code-anchored:
+  BEFORE embedding `pre.projected_cell == 4`; AFTER the run
+  `run.outcome.rule.is_some()` (because `candidate_set` returning `None` — schema
+  skew after the coverage probe, `:742-751` — can degrade the run post-embed); the
+  after-run fallback REUSES `raw_vec` (under raw the vector is identical — no
+  second embed); the abandoned activity attempt prints NOTHING (the audit line the
+  fallback's message two-stage call prints is the only one on stderr), keeping
+  stderr byte-identical. **M1′** — false premise removed: `Auto` is STILL v1 in
+  main (`queries.rs:852`; #287 flipped the chunk-hop floor row, NOT the stage
+  default); the integrations get v1 today; the letter baseline is PINNED to
+  `ct wisdom match --max 1 -- X` (no stage flag = v1); recorded that the default
+  activity path therefore changes BOTH arm and floor (activity two-stage + aperture
+  vs message v1) — a mode-vs-mode comparison, stated as such. **M2′** — the v1
+  arm is dropped as an ACTIVE path: no v1 `:activity` production row, no v1
+  activity label, no v1 active-path test; v1 `:activity` survives only as the
+  §7 harness ablation cell; re-admitting it requires a spec rev with its own
+  never-worse rule. **m1** — "folded into the key chain in one place" reworded to
+  the QueryKind threading. **m2** — the `--max 1` claim was verified by the
+  controller directly (grep of `ct_wisdom_live.py`: argv at line 125 is
+  `[ct_path, "wisdom", "match", "--json", "--max", str(max_n)]`; the delivery doc
+  line 20 says "start `ct wisdom match --max 1`"), now cited in §3.1.
+  **m3** — framing sentence added (§2): under raw, activity mode IS message
+  two-stage with a different composite floor + the aperture; the separate
+  typed-query floor is the whole bet; the honesty clause covers its failure.
+- **rev 3:** Tier-3 Opus review (REQUEST CHANGES; full review
   `~/.local/state/tessera/issue282/tier3-opus-review.md`, $0.89). Fixes:
   **B1** — scheme of record is RAW (see header block): activity floor keys are
   raw-keyed (`external:qwen/qwen3-embedding-4b:activity`,
@@ -103,6 +130,14 @@ Keep the #265 contract and machinery; add an **activity query mode** to the exis
    behavior is **provably not worse than today**: the message-mode invocation with
    the same stage flags (§4) — exactly what the integrations see now.
 
+Framing (rev-4 m3): under the raw scheme of record, an activity-active call IS a
+message two-stage call with (a) a different composite floor row and (b) the
+aperture — embeds byte-identical, stage-1 gating keyed only on chunk scores. The
+separate typed-query floor is therefore THE WHOLE BET of this issue; §1's evidence
+that "lowering the message floor does not fix it" is exactly why the floor must be
+its own calibrated row, and the §7 honesty clause covers the case where the bet
+fails.
+
 ### 2.1. The activity instruction is calibration-cell material (rev 3: B1, M1, m1)
 
 The issue asks for activity mode to have "its own instruction" (request 2). Under the
@@ -152,25 +187,27 @@ in `tools/src/bin/ct.rs`):
   repeatable with `parse_fact_id`, corrections always delivered as extra, JSON schema
   unchanged, **exit 0 on zero matches AND on any fallback; errors propagate (exit
   1)** — the #265 discipline (the exit site in `wisdom_match_cmd`,
-  `tools/src/queries.rs`). Note the integrations call with `--max 1` (rev-3 m5:
-  `ct_wisdom_live.py:125`; delivery doc line 20) — fetch depth 1, deliver depth 1.
+  `tools/src/queries.rs`). Note the integrations call with `--max 1` (rev-4 m2, controller-verified:
+  `ct_wisdom_live.py:125` builds argv
+  `[ct_path, "wisdom", "match", "--json", "--max", str(max_n)]` and the delivery
+  doc line 20 says "start `ct wisdom match --max 1`") — fetch depth 1, deliver
+  depth 1.
 - Audit surface (rev-2 I-1, pinned per arm): the gate label lives on STDOUT — the
   JSON `gate` field and the human `gate:` line (`print_wisdom_match`). The
   four-field `wisdom_gate_decision` stderr line (timestamp, read_scheme,
   open|closed, count) is UNCHANGED — it carries no gate label today and gains none.
   Pinned label strings, byte-exact:
-  - v1 arm: `semantic-v1:{gate_key}:activity` — e.g.
-    `semantic-v1:external:qwen/qwen3-embedding-4b:activity`. Graft point: the v1
-    label is built at the `wisdom_match_impl` gate-key formatting site from the
-    UNSCHEMED `gate_key`, so `:activity` is appended there via the threaded
-    `QueryKind`, not folded into the key chain.
-  - two-stage arm: `semantic-v2-two-stage:{scheme_key}` with the scheme key carrying
-    the activity suffix — e.g.
+  - two-stage arm (the ONLY active arm — §3.3):
+    `semantic-v2-two-stage:{scheme_key}` with the scheme key carrying the activity
+    suffix — e.g.
     `semantic-v2-two-stage:external:qwen/qwen3-embedding-4b:activity:two-stage:chunk-hop`.
+  - v1 arm: NOT an active arm in this PR (rev-4 M2′), so it has no activity label.
+    If a future rev re-admits it, its label is `semantic-v1:{gate_key}:activity`,
+    grafted at the `wisdom_match_impl` gate-key formatting site via `QueryKind`.
   The two-stage audit line's `floor=` token picks the composite up for free once the
-  suffix is folded into the key chain in one place (§3.3). NO new JSON field, NO
-  `mode` field — the label is the audit surface (Fable D1). The activity target is
-  never echoed to stderr beyond what the message path echoes of message text today.
+  suffix is folded in at the §3.3 resolution sites. NO new JSON field, NO `mode`
+  field — the label is the audit surface (Fable D1). The activity target is never
+  echoed to stderr beyond what the message path echoes of message text today.
 
 ### 2. What gets embedded (D2 — resolved: bare target, byte parity with message mode)
 
@@ -189,13 +226,19 @@ in `tools/src/bin/ct.rs`):
 
 ### 3. Gate arm (D3 — resolved: healthy two-stage only, its own floor keys)
 
-- Activity mode is ACTIVE only on the fully healthy two-stage path — cell 1 of the
-  #271 §4 decision table: the composite `:activity` floor row RESOLVED, coverage
-  100% (`two_stage_pre_embed_check`), and the coverage probe HIT. Any other state —
-  uncalibrated row, coverage below 100%, probe miss, cells 2/3/4 — is a FALLBACK
-  (§4). This is the rev-3 B2 fix: the never-worse guarantee must hold in every state
-  the core can reach, and the only states where activity-specific floors and the
-  aperture are calibrated are healthy-path states.
+- Activity mode is ACTIVE only on the fully healthy two-stage path — CELL 4 of the
+  #271 §4 decision table (rev-4 B1′: cell 1 is "ts floor missing → v1 fallback";
+  cell 4 is "ts present + cov 100% → two-stage runs"). Code-anchored predicate:
+  - BEFORE embedding: the `two_stage_pre_embed_check` projection returns
+    `projected_cell == 4` (composite `:activity` row resolved, coverage 100%,
+    probe HIT).
+  - AFTER the run: `run.outcome.rule.is_some()` — because `candidate_set` can
+    return `None` (schema skew after the coverage probe) and degrade the run
+    AFTER the embed has happened.
+  Any other state — uncalibrated row, coverage below 100%, probe miss, cells 1/2/3,
+  or a post-embed degradation — is a FALLBACK (§4). The never-worse guarantee must
+  hold in every state the core can reach, and the only states where
+  activity-specific floors and the aperture are calibrated are healthy-path states.
 - Stage selection: the explicit `--two-stage`/`--single-stage` flag wins SELECTION
   (parity with message mode; the calibration harness needs to walk both arms).
   Absent a flag, an activity target prefers two-stage. Under rev 3 the arm matters
@@ -207,8 +250,9 @@ in `tools/src/bin/ct.rs`):
   degrades).
 - Floor keys (rev-3 B1, raw-keyed; these strings go into `WISDOM_GATE_FLOORS` and
   the resolver must agree):
-  - v1 arm: `external:qwen/qwen3-embedding-4b:activity` (floor = TBD by calibration;
-    grid/ablation cell — not shipped pre-calibration).
+  - v1 arm: NO `:activity` row ships (rev-4 M2′ — v1 activity is never an active
+    path, §3.3/§4; the key `external:qwen/qwen3-embedding-4b:activity` exists only
+    as a §7 harness ablation cell).
   - two-stage arm (composite): 
     `external:qwen/qwen3-embedding-4b:activity:two-stage:chunk-hop` — the
     `:activity` suffix is folded into the scheme key BEFORE the composite suffix;
@@ -231,11 +275,15 @@ in `tools/src/bin/ct.rs`):
   The sites that must stay UNSUFFIXED: `two_stage::coverage` (both call sites) and
   `two_stage_k` — k is SHARED with message mode, keyed on the unschemed profile
   key, and NOT re-calibrated for activity mode (rev-2 M-4).
-- Deployment-lag honesty: the two-stage flip lives in main but the deployed 3.6.0
-  dpkg predates it (`Auto => false` in the stage-selection match). All `:activity`
-  calibration numbers MUST come from a post-flip build (the same build that ships
-  this mode); the spec bans quoting message-mode probe numbers in any `:activity`
-  row comment.
+- Stage-default honesty (rev-4 M1′): `WisdomStageMode::Auto => false` IN MAIN —
+  #287 flipped the chunk-hop floor row, NOT the stage default; with no stage flag
+  the integrations run plain v1 today. All `:activity` calibration numbers MUST
+  come from a build containing the #287 floor rows AND this PR's code; the spec
+  bans quoting message-mode probe numbers in any `:activity` row comment. Because
+  the no-flag activity path prefers two-stage while the no-flag message path is
+  v1, the default-path comparison changes BOTH arm and floor — the letter (§7)
+  pins the baseline and states the comparison as mode-vs-mode, not
+  floor-vs-floor.
 
 ### 4. Fallback semantics — the never-worse rule (rev-3 B2/M6)
 
@@ -245,11 +293,18 @@ code). Per-state table:
 
 | State | Behavior |
 |---|---|
-| `:activity` row for the selected arm ABSENT | message call, same flags |
-| coverage < 100% or probe MISS (composite present) | message call, same flags |
-| two-stage cells 2/3/4 reached for any reason | message call, same flags |
+| composite `:activity` row ABSENT (would-be cell 1) | message call, same flags |
+| coverage < 100% or probe MISS (composite present; cells 2/3) | message call, same flags |
+| projected_cell != 4 for any other reason | message call, same flags |
+| post-embed degradation (`candidate_set` → `None`, `run.outcome.rule` absent) | message call, same flags, REUSING `raw_vec` (under raw the vector is identical — no second embed) |
 | kill-switch active | message call with the v1 message floor |
 | empty target (`--path=`) | TODAY'S empty-text short-circuit wins FIRST — closed gate, exit 0, no embed, before key resolution and before fallback (rev-3 m4) |
+
+Audit-line suppression (rev-4 B1′): the ABANDONED activity attempt prints NOTHING —
+the activity code path emits no `print_two_stage_audit` before delegating, so the
+only audit line on stderr is the one the fallback's message two-stage call prints.
+Without this pin stderr would not be byte-identical in the `--two-stage` fallback
+case.
 
 - The fallback reference is per flags: `--path=X` alone falls back to
   `ct wisdom match -- X`; `--two-stage --path=X` falls back to
@@ -266,7 +321,7 @@ code). Per-state table:
   complement on the message row (the unsuffixed scheme key), scoring the activity
   key against the message floor is forbidden (§3.3), and an activity-keyed merge
   floor is uncalibrated. Rather than silently disable the merge inside a running
-  two-stage pass, activity mode simply never leaves cell 1 — a deliberate, recorded
+  two-stage pass, activity mode simply never leaves cell 4 — a deliberate, recorded
   DEVIATION from message-mode shape parity. Extending activity mode to degraded
   cells with its own merge floor is future work, only if the calibration data shows
   the healthy path is not enough.
@@ -337,8 +392,11 @@ Message mode and the fallback path are untouched.
 - **Primary metric: hit@1** — the integrations fetch `--max 1` and deliver one fact
   per step (rev-3 m5), so hit@1 IS both the fetch and the delivery depth, and the
   generic-vs-actionable failure mode is a TOP-1 failure; hit@2 is recorded, not
-  gated. Baseline: the SAME build's message path on the SAME targets with the
-  message floor (today's shipped behavior).
+  gated. Baseline (rev-4 M1′, pinned): `ct wisdom match --max 1 -- <target>` —
+  no stage flag, which on current main is the v1 path (today's shipped behavior).
+  The comparison is therefore mode-vs-mode (activity two-stage + aperture vs
+  message v1), not floor-vs-floor; a secondary v1-arm activity ablation (harness
+  floors, not shipped rows) records how much of the delta is the arm change.
 - **Letter (freeze before the run):** activity mode flips to its own floor row iff
   `act_hit1 ≥ base_hit1 && act_fp ≤ base_fp` — not worse on recall of the
   actionable rule, not worse on false opens — with FP counted per target over all
@@ -353,7 +411,8 @@ Message mode and the fallback path are untouched.
   the scope-globs roadmap, not a spec failure. Numbers canonical source: the ISSUE
   body (the step-0 memo's quoted scores differ slightly — the issue wins).
 - **Grid cells (minimum):** composite-floor sweep on the raw two-stage arm (the
-  shipping cell); the v1 `:activity` row as ablation; the instr1 activity
+  shipping cell); the v1 `:activity` arm as HARNESS-ONLY ablation (explicit
+  floors; never a shipped row — rev-4 M2′); the instr1 activity
   instruction ablation (§2.1 — harness-side prefix text; also records the
   instructed-passages asymmetry); component-split input variant; an OPTIONAL
   exploratory cell with the stage-1 vector prefixed (requires a new embed plan —
@@ -365,11 +424,13 @@ Message mode and the fallback path are untouched.
    doc-comment update (`ct.rs`), with usage-error tests.
 2. `QueryKind` threading + key construction at the four resolution sites, with
    `profile_key` unsuffixed for coverage/k (`wisdom_match.rs`, `queries.rs`).
-3. v1 `:activity` stub row in `WISDOM_GATE_FLOORS`; composite stub row in
-   `WISDOM_GATE_FLOORS_TEST` (rev-3 M4).
-4. Healthy-path-only activation + the fallback rule (§4) in `wisdom_match_cmd`.
+3. Composite stub row in `WISDOM_GATE_FLOORS_TEST` (rev-3 M4); NO v1 `:activity`
+   row anywhere in production tables (rev-4 M2′).
+4. Healthy-path-only activation (cell-4 predicate, §3.3) + the fallback rule (§4)
+   in `wisdom_match_cmd`, including audit-line suppression and `raw_vec` reuse.
 5. `user_stated` aperture pre-truncation filter (§5) on the activity-active path.
-6. Gate labels per §3.1 (v1 graft at the formatting site; composite scheme key).
+6. Gate label per §3.1 (composite scheme key carries `:activity`; no v1 activity
+   label — v1 is not an active arm).
 7. Calibration harness extension: `--query-kind` (message|path|command|pattern) +
    the instr1 instruction-ablation cell (harness-side prefix text).
 8. Tests (§ Testing), docs, CHANGELOG.
@@ -401,10 +462,14 @@ Message mode and the fallback path are untouched.
     entries IS delivered (pre-truncation order, rev-3 M5); corrections of any
     provenance still delivered.
   - audit `open=`/top reflect post-aperture delivery (rev-3 M5).
-  - stub v1 row active-path test via the production table; the ACTIVE two-stage
-    path (composite) is exercised through lib tests / the harness's explicit
-    floors — the composite stub lives in `WISDOM_GATE_FLOORS_TEST`, and CLI tests
-    can and must see the fallback fire for an uncalibrated composite (rev-3 M4).
+  - the ACTIVE path (composite, cell 4) is exercised through lib tests / the
+    harness's explicit floors — the composite stub lives in
+    `WISDOM_GATE_FLOORS_TEST`, and CLI tests can and must see the fallback fire
+    for an uncalibrated composite (rev-3 M4); there is NO v1-activity row or
+    active-path test (rev-4 M2′).
+  - post-embed degradation: `candidate_set` → `None` after a cell-4 projection →
+    fallback fires, reuses the raw vector (no second embed), and the abandoned
+    attempt leaves NO stderr output of its own (rev-4 B1′).
 - One CLI test per JSON field: schema unchanged, `:activity` label only on the
   active path.
 
