@@ -36,9 +36,11 @@ for (i, ...) {
 }
 ```
 
-**Arming.** The guard (`doc.hash == hash && doc.status == "indexed"`) means only
-docs whose content changed OR whose status is not `indexed` re-enter this code.
-The issue was filed during "routine post-edit vault re-ingests", so the armed
+**Arming.** The guard (`!force_rechunk && doc.hash == hash && doc.status == "indexed"`)
+means only docs whose content changed OR whose status is not `indexed` re-enter
+this code at the default `force_rechunk == false`; a `--force`/rechunk pass
+arms EVERY doc, including unchanged indexed ones. The issue was filed during
+"routine post-edit vault re-ingests", so the armed
 population on each run is: newly edited docs, plus every doc a PREVIOUS racy
 run left in a non-indexed state (a failed run updates `documents.hash` via
 `upsert_document` but leaves status `error`/`pending` with a partial or foreign
@@ -122,6 +124,15 @@ That is the closure basis: the defect class is removed by construction, and
 the strongest reproducible-today interference main shows is a clean retryable
 refusal — never a partial state or a constraint crash.
 
+**Scope of the guarantee.** It holds only for writers running the fixed path
+(≥3.6.0, i.e. post-`4517f860`). A legacy writer (≤3.5.0, e.g. a not-yet-upgraded
+sidecar or watcher process) still runs the old autocommit delete → embed →
+insert shape and can interleave with a current-transaction writer — the mixed
+state is exactly what the unique index then rejects. **Every writer sharing a
+brain must be upgraded/restarted onto ≥3.6.0 before relying on this guarantee**
+(deploy the 3.6.0 sidecar and restart it before scripted multi-actor ingest
+against that brain).
+
 ## 6. Conclusion + disposition
 
 **Issue #264 is fixed on main** by the same PR-#283 wave that delivered #271 —
@@ -129,7 +140,9 @@ the report (filed against 3.2.0 on Oct 5/6; the installed dpkg was 3.5.0 at
 investigation time) predates the fix by 12 days, and the racy shape is
 verified present at v3.5.0 and absent on main. Disposition:
 
-1. Close #264 citing this doc, `4517f860`, and the verification table above.
+1. #264 was closed (2026-10-18) with a comment citing this doc, `4517f860`,
+   and the verification table above; this investigation is linked from the
+   issue as its record.
 2. **Operational note for Kurt:** upgrade the installed dpkg (3.5.0) to 3.6.0
    (release commit `91b77baf`) to retire the behavior on the installed CLI.
 3. Hardening idea, NOT needed for closure: a `ct doctor`-style census that
