@@ -611,10 +611,18 @@ pub struct CalibrationArtifact {
 /// floor key (`floor_key_for(model, scheme)`, named before the run, Opus r1
 /// M3), so the composite key derives offline from the artifact alone.
 pub fn composite_floor_key(artifact: &CalibrationArtifact) -> String {
-    format!(
-        "{}:two-stage:{}",
-        artifact.baseline.key, artifact.candidate.rule
-    )
+    // Issue #282 (CodeRabbit PR-288 Major 2): an ACTIVITY artifact's
+    // composite is `{schemed base}:activity:two-stage:{rule}` — the
+    // `:activity` segment lands AFTER the schemed base (raw base keys carry
+    // no scheme suffix; instr1 bases are `model:instr1`, giving the pinned
+    // `model:instr1:activity:two-stage:…` order, spec rev-8 m5). Message
+    // artifacts keep the #271 shape unchanged.
+    let base = if artifact.query_kind == "message" {
+        artifact.baseline.key.clone()
+    } else {
+        format!("{}:activity", artifact.baseline.key)
+    };
+    format!("{base}:two-stage:{}", artifact.candidate.rule)
 }
 
 /// Freeze dir (relative to `src-tauri/tests/fixtures`) for a floor key —
@@ -979,27 +987,29 @@ pub fn flip_plan(artifact: &CalibrationArtifact, current_sha: &str) -> Result<Fl
             current_sha
         );
     }
-    let recorded = letter_verdict(
-        artifact.two_stage.hit2,
-        artifact.two_stage.fp,
-        artifact.single_stage.hit2,
-        artifact.single_stage.fp,
-    );
+    // Metric-aware letter recompute (issue #282 rev-7 M2): activity cells
+    // gate on hit@1 (`letter_metric = Some("hit1")`), message cells keep the
+    // #271 hit@2 letter — CodeRabbit PR-288 Major 1: a hit@1-gated artifact
+    // must never be re-checked against the hit@2 letter here.
+    let recorded = recorded_letter(artifact);
     if recorded != artifact.two_stage_passes {
         bail!(
             "artifact records two_stage_passes={} but its own numbers contradict it \
-             (the letter says {recorded}) — refusing to flip",
-            artifact.two_stage_passes
+             (the {} letter says {recorded}) — refusing to flip",
+            artifact.two_stage_passes,
+            letter_metric_of(artifact)
         );
     }
     if !artifact.two_stage_passes {
         bail!(
-            "the acceptance letter does NOT pass — refusing to flip (§7: two-stage \
-             passes iff not worse than single-stage): ts_hit2={} ts_fp={} vs \
-             ss_hit2={} ss_fp={}",
-            artifact.two_stage.hit2,
+            "the acceptance letter does NOT pass — refusing to flip (§7: not worse \
+             than the baseline under the cell's own metric): ts_{}={} ts_fp={} vs \
+             ss_{}={} ss_fp={}",
+            letter_metric_of(artifact),
+            gated_hit(artifact),
             artifact.two_stage.fp,
-            artifact.single_stage.hit2,
+            letter_metric_of(artifact),
+            baseline_hit(artifact),
             artifact.single_stage.fp
         );
     }
