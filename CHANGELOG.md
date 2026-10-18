@@ -1,3 +1,15 @@
+## [3.8.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.7.0...v3.8.0) (2026-10-18)
+
+### Features
+
+* **wisdom:** activity query mode for the wisdom gate (issue [#282](https://github.com/equationalapplications/curated-thoughts/issues/282), spec rev-14) ([51d8d3a](https://github.com/equationalapplications/curated-thoughts/commit/51d8d3a5d5d247b152fc5c59cdbfbb9b5ca1a968))
+
+### Bug Fixes
+
+* **calibration:** CodeRabbit PR-288 — flip_plan letter recompute is metric-aware (recorded_letter); composite_floor_key derives :activity from query_kind (rev-8 m5 order); regression tests ([32dc457](https://github.com/equationalapplications/curated-thoughts/commit/32dc457850bc88211f461728a27e805815c5a630))
+* **calibration:** one correction-head set for both arms, from the production resolver (find_corrections_public now pub) — CodeRabbit PR-288 minor ([fb37c72](https://github.com/equationalapplications/curated-thoughts/commit/fb37c7272f18b308f1a0f0195819089c0d472f09))
+* **wisdom:** clippy nit (is_some_and) + harness test fixtures for the hit1/letter_metric/query_kind fields ([909e6e4](https://github.com/equationalapplications/curated-thoughts/commit/909e6e4c41b6cadc609e3e479a6f86319f380597))
+
 ## [3.7.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.6.0...v3.7.0) (2026-10-18)
 
 ### Features
