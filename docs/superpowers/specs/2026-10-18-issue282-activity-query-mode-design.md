@@ -1,8 +1,8 @@
 # Activity query mode for the wisdom gate: paths and commands reach concept rules (issue #282)
 
-**Date:** 2026-10-18 (rev 9 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
-GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6-8 Tier-4 gate
-rounds 1-3; rev 9 Tier-4 re-gate round 3: 0 blockers, 1 convergence major + 5 minors).
+**Date:** 2026-10-18 (rev 10 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
+GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6-9 Tier-4 gate
+rounds 1-4; rev 10 Tier-4 re-gate round 4: 0 blockers, 1 text-only major + 4 minors).
 **Status:** Draft — in Tier-4 convergence loop; then Kurt's explicit approval before
 implementation.
 **Branch:** `spec/issue282-activity-query-mode`
@@ -25,7 +25,31 @@ production floors in this spec are RAW.
 
 ## Revision history (compressed)
 
-- **rev 9 (this rev):** Tier-4 re-gate round 3 (REQUEST CHANGES, zero blockers; $2.73;
+- **rev 10 (this rev):** Tier-4 re-gate round 4 (REQUEST CHANGES, zero blockers;
+  $2.40; full review `~/.local/state/tessera/issue282/tier4-delta4-review.md` —
+  all six rev-9 folds verified holding). Folded: **M1** — the degradation row's
+  mechanism was `--two-stage`-only wording; applied to the NO-FLAG call (the
+  integrations' exact shape) it would print an audit line and a two-stage label
+  where the pinned reference (`ct wisdom match -- X`, the v1 path) prints neither.
+  Fixed: the helper re-runs the MESSAGE PATH THE STAGE FLAGS SELECT — no flag →
+  message v1 (`wisdom_match_in_scheme`, message key, `raw_vec` reused as the
+  schemed vector; the helper's v1 arm takes the vector as given, never
+  re-evaluates the embed-skip, never calls `embed_one`; safe even with the message
+  floor absent — `wisdom_match_impl` returns no entries for `floor = None`
+  regardless of vector); `--two-stage` → the message two-stage orchestrator on the
+  reused vectors. The `gated_entries` pin is SCOPED: never entered BY THE ACTIVITY
+  ATTEMPT; the fallback's message call enters it exactly as the reference does.
+  **m1** — the `:activity` suffix applies in BOTH arms of
+  `match_with_resolved_floor` (the temporal-scheme-`None` arm resolves
+  `gate_floor(gate_key)` unsuffixed today); `QueryKind::Activity` never resolves a
+  floor at site 4, regardless of the coverage probe. **m2** — the aperture
+  mechanism NAMED: a filter parameter on `gated_entries`, defaulting to no filter
+  (message mode and the merge untouched; the `:363`/`:818`/`:884` call shapes
+  undisturbed). **m3** — the `None`-arm citation corrected to `:374` (the `match
+  floor` head is `:358`). **m4** — the degradation test covers ALL THREE
+  `rule: None` exits, with the in-core coverage re-probe made reproducible by
+  inserting a stale candidate row between the precheck and the run.
+- **rev 9:** Tier-4 re-gate round 3 (REQUEST CHANGES, zero blockers; $2.73;
   full review `~/.local/state/tessera/issue282/tier4-delta3-review.md` — all six
   rev-8 folds plus every standing code claim verified in a table). Folded:
   **M1** — the `!ran` question is answered, option (b) PINNED: `QueryKind::Activity`
@@ -394,7 +418,10 @@ in `tools/src/bin/ct.rs`):
      the merge is dead) and yields the pinned `:activity` label. Resolving
      `v1_floor` from the message key at this site is FORBIDDEN — it would run
      the v1-merge on the message floor inside the activity attempt,
-  4. `match_with_resolved_floor`,
+  4. `match_with_resolved_floor` — in BOTH arms (rev-10 m1): the schemed arm and
+     the temporal-scheme-`None` arm (which resolves `gate_floor(gate_key)`
+     unsuffixed today via the pre-V27 degradation); `QueryKind::Activity` NEVER
+     resolves a floor at this site, whatever the probe said,
   5. the RULE-ATTRIBUTION block inside `two_stage_entries` (rev-6 B1): it
      recomputes `scheme_key = floor_key_for(profile_key, scheme)` and picks the
      rule whose composite table value EQUALS the passed `ts_floor` — without
@@ -428,7 +455,7 @@ code). Per-state table:
 | composite `:activity` row ABSENT (projects CELL 2 under the activity key — `v1_floor_present` is always false there, so `(false, false)`; probe miss / cov<100% project CELL 3; CELL 1 is unreachable in activity mode) | message call, same flags |
 | coverage < 100% or probe MISS (composite present; cells 2/3) | message call, same flags |
 | projected_cell != 4 for any other reason | message call, same flags |
-| post-embed degradation (ANY `rule: None` exit after the embed — `candidate_set` → `None`, the in-core coverage re-probe dropping below 100%, or `ts_floor` absent — all caught by `run.outcome.rule.is_some()`) | message call, same flags, REUSING `raw_vec` (under raw the vector is identical — no second embed). MECHANISM PINNED (rev-9 M1, option b): `QueryKind::Activity` is passed into the orchestrator's `!ran` `wisdom_match_in_scheme` call, so site 4 resolves `gate_floor("…:activity")` → `None`, `wisdom_match_impl` takes its `None` arm, and `gated_entries` is NEVER entered inside the activity attempt — no v1 scan, no per-row "skipping unreadable wiki row" stderr warnings, no wasted scan. The activity attempt's own `TwoStageRun.result` is DISCARDED, never printed; the helper re-runs the message two-stage orchestrator on the reused vectors. NO v1 scan runs inside the activity attempt; `gated_entries` is not entered on any activity fallback path. RAW-ONLY shortcut: if a future rev ships instr1 activity rows, the fallback must RE-EMBED `query_text` — the reuse argument does not survive a scheme change |
+| post-embed degradation (ANY `rule: None` exit after the embed — `candidate_set` → `None`, the in-core coverage re-probe dropping below 100%, or `ts_floor` absent — all caught by `run.outcome.rule.is_some()`) | message call, same flags, REUSING `raw_vec` (under raw the vector is identical — no second embed). MECHANISM PINNED (rev-9 M1, option b): `QueryKind::Activity` is passed into the orchestrator's `!ran` `wisdom_match_in_scheme` call, so site 4 resolves `gate_floor("…:activity")` → `None`, `wisdom_match_impl` takes its `None` arm (`:374`; the `match floor` head is `:358`), and `gated_entries` is NEVER entered inside the activity attempt — no v1 scan, no per-row "skipping unreadable wiki row" stderr warnings, no wasted scan. The activity attempt's own `TwoStageRun.result` is DISCARDED, never printed. The helper then re-runs the MESSAGE PATH THE STAGE FLAGS SELECT, on the reused vectors (rev-10 M1): NO FLAG → the message v1 call (`wisdom_match_in_scheme`, message key, `raw_vec` reused as the schemed vector — identical under raw; the helper's v1 arm takes the vector as given, never re-evaluates the embed-skip check, never calls `embed_one`; safe even when the message v1 floor is absent — `wisdom_match_impl` returns no entries for `floor = None` regardless of vector, matching the reference's empty-vector call); `--two-stage` → the message two-stage orchestrator on the reused raw/schemed vectors. `gated_entries` is never entered BY THE ACTIVITY ATTEMPT; the fallback's message call enters it exactly as the reference call does. RAW-ONLY shortcut: if a future rev ships instr1 activity rows, the fallback must RE-EMBED `query_text` — the reuse argument does not survive a scheme change |
 | `--single-stage` selected, or kill-switch active | message call, same flags — NO activity attempt at all (the v1 arm is not an active path, §3.3; no `two_stage_pre_embed_check` is reached, so no cell logic applies) |
 | empty target (`--path=`) | immediate delegation to the message call with the same flags — NO activity precheck; that call's own empty-text handling applies (no embed on either arm), exit 0 (rev-6 M2: on the two-stage path the empty check runs AFTER the pre-embed check today, so "before key resolution" was false) |
 
@@ -475,9 +502,11 @@ Placement (rev-2 I-5 + rev-3 M5):
 1. NOT inside the shared `entry_eligibility_where` fragment (it feeds v1
    `gated_entries`, stage-1 candidate SQL, AND the complement — touching it would
    change message mode).
-2. The filter runs BEFORE truncation to `--max` — specifically (rev-8 m3) the
-   provenance predicate ENTERS THE RULE ARM's scoring, before ANY arm-internal
-   `truncate(max)` (the arm-side truncation point), reading the
+2. The filter runs BEFORE truncation to `--max` — specifically (rev-8 m3, with
+   the mechanism NAMED by rev-10 m2) as a FILTER PARAMETER ON `gated_entries`,
+   defaulting to NO FILTER (message mode and the v1-merge call sites —
+   `:363`/`:818`/`:884` shapes — are undisturbed), so the predicate sits inside
+   the arm's scoring BEFORE its arm-internal `truncate(max)`, reading the
    `WisdomItem.provenance` field. Filtering at the combined-list truncation is
    TOO LATE for rule (i) (its arm has already truncated), and filtering after any
    truncation costs hit@1 for no FP benefit — forbidden. A top-N made of
@@ -591,9 +620,11 @@ Message mode and the fallback path are untouched.
 3. Composite stub row in `WISDOM_GATE_FLOORS_TEST` (rev-3 M4); NO v1 `:activity`
    row anywhere in production tables (rev-4 M2′).
 4. Healthy-path-only activation (cell-4 predicate, §3.3) + the fallback rule (§4),
-   including audit-line suppression, `raw_vec` reuse, and the rev-9 M1 mechanism
-   (`QueryKind::Activity` through the `!ran` call — `gated_entries` never entered
-   inside the activity attempt; no v1 scan on any activity fallback path). NAMED PREREQUISITE
+   including audit-line suppression, `raw_vec` reuse, and the rev-9/rev-10 M1
+   mechanism (`QueryKind::Activity` through the `!ran` call — `gated_entries`
+   never entered BY THE ACTIVITY ATTEMPT; the fallback's message call enters it
+   exactly as the reference does, and routes by the stage flags: no flag →
+   message v1, `--two-stage` → message two-stage). NAMED PREREQUISITE
    (rev-5 m4): the fallback is inline in `wisdom_match_cmd` today — embeds and
    prints in the same place — so this step FIRST extracts the message v1 and
    two-stage paths into a helper that takes pre-computed vectors and owns ALL
@@ -662,12 +693,19 @@ Message mode and the fallback path are untouched.
   - label test (rev-6 M1): the JSON `gate` on the active path is exactly
     `semantic-v2-two-stage:{scheme_key}:activity`-shaped (prefix + scheme key +
     `:activity`, NO composite segment); the MESSAGE two-stage label is unchanged.
-  - post-embed degradation: `candidate_set` → `None` after a cell-4 projection →
+  - post-embed degradation: ANY `rule: None` exit after a cell-4 projection →
     fallback fires, reuses the raw vector (no second embed), and the abandoned
-    attempt leaves NO stderr output of its own (rev-4 B1′) — INCLUDING with a
-    malformed wiki row present (rev-9 M1: `gated_entries` is never entered inside
-    the attempt, so its per-row warning cannot print; without the pin the
-    reference prints the warning once and the attempt+fallback prints it twice).
+    attempt leaves NO stderr output of its own (rev-4 B1′). The test covers ALL
+    THREE exits (rev-10 m4): `candidate_set` → `None`; `ts_floor` absent
+    (uncalibrated composite); the in-core coverage re-probe dropping below 100% —
+    made reproducible by inserting a stale candidate row between the precheck and
+    the run. INCLUDING with a malformed wiki row present (rev-9 M1: `gated_entries`
+    is never entered inside the attempt, so its per-row warning cannot print;
+    without the pin the reference prints the warning once and the
+    attempt+fallback prints it twice). NO-FLAG variant (rev-10 M1): reference
+    `ct wisdom match -- <target>` prints the warning once (message v1 scan), the
+    attempt+fallback prints it exactly once, and NO audit line appears on either
+    side.
   - zero-target case (`ct wisdom match` with no target at all): clap's
     group-required error, message pinned (rev-9 m4).
 - One CLI test per JSON field: schema unchanged, `:activity` label only on the
