@@ -1,8 +1,8 @@
 # Activity query mode for the wisdom gate: paths and commands reach concept rules (issue #282)
 
-**Date:** 2026-10-18 (rev 7 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
-GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6 Tier-4 gate round
-1; rev 7 Tier-4 re-gate round 1: 0 blockers, 3 text-only majors + 4 minors).
+**Date:** 2026-10-18 (rev 8 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
+GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6-7 Tier-4 gate
+rounds 1-2; rev 8 Tier-4 re-gate round 2: 0 blockers, 1 major + 5 minors).
 **Status:** Draft — in Tier-4 convergence loop; then Kurt's explicit approval before
 implementation.
 **Branch:** `spec/issue282-activity-query-mode`
@@ -25,7 +25,28 @@ production floors in this spec are RAW.
 
 ## Revision history (compressed)
 
-- **rev 7 (this rev):** Tier-4 re-gate round 1 (REQUEST CHANGES, ZERO blockers; $2.38;
+- **rev 8 (this rev):** Tier-4 re-gate round 2 (REQUEST CHANGES, zero blockers; $2.74;
+  full review `~/.local/state/tessera/issue282/tier4-delta2-review.md` — every rev-7
+  fold verified holding, plus clap/provenance/stub claims independently confirmed).
+  Folded: **M1** — §3.3 item 3 was NOT moot: `wisdom_match_two_stage_with_v1`
+  resolves `v1_floor` (the merge's only input) AND builds the ran-path label —
+  threading `QueryKind` there is precisely what forces `v1_floor = None` and yields
+  the pinned label; resolving `v1_floor` from the message key is FORBIDDEN (it
+  would run the merge on the message floor inside the activity attempt). Also
+  pinned: in the post-embed-degradation fallback the activity attempt's own
+  `TwoStageRun.result` (the orchestrator's `!ran` v1 pass on the UNSUFFIXED key) is
+  DISCARDED, never printed — the helper re-runs the message two-stage orchestrator
+  on the reused vectors. **m1** — cell numbering under the activity key: with no
+  v1 `:activity` row, `v1_floor_present` is always false, so a missing composite
+  projects CELL 2 (probe miss / cov<100% project cell 3); cell 1 is unreachable in
+  activity mode. **m2** — the harness call site is the existing rule-(i) arm call,
+  not an "activity cell" (none exists yet). **m3** — the aperture predicate enters
+  the RULE ARM's scoring BEFORE any arm-internal `truncate(max)` (the combined-list
+  truncation is too late for rule (i)); it reads `WisdomItem.provenance`. **m4** —
+  `--query-kind` changes probe-set labeling/filtering and the per-kind breakdown
+  ONLY — never per-kind floors (Kurt's one-floor ruling). **m5** — the grid-only
+  instr1 composite key order pinned: `model:instr1:activity:two-stage:chunk-hop`.
+- **rev 7:** Tier-4 re-gate round 1 (REQUEST CHANGES, ZERO blockers; $2.38;
   full review `~/.local/state/tessera/issue282/tier4-delta-review.md` — every rev-6
   fold verified holding against the code, item by item). Folded: **M1** — the
   empty-target TESTING bullet still carried the retracted rev-5 wording; replaced
@@ -331,7 +352,10 @@ in `tools/src/bin/ct.rs`):
     the suffix-at-end form `…:two-stage:chunk-hop:activity` is FORBIDDEN (resolver
     and calibration table must never drift).
   - instr1 `:activity` rows (both arms) are GRID CELLS ONLY (§2.1, §7) — never
-    shipped in `WISDOM_GATE_FLOORS` in this PR.
+    shipped in `WISDOM_GATE_FLOORS` in this PR; the grid-only composite key order
+    follows the same rule as production (rev-8 m5):
+    `external:qwen/qwen3-embedding-4b:instr1:activity:two-stage:chunk-hop`
+    (`floor_key_for` output, then `:activity`, then the composite suffix).
   - Same exact-find-then-abstain lookup in `gate_floor`; the message rows are NOT
     consulted for `:activity` keys (an activity query never opens on the message
     floor — that would silently re-create the uncalibrated-floor bug this mode
@@ -341,8 +365,13 @@ in `tools/src/bin/ct.rs`):
   itself is NEVER suffixed):
   1. the CLI cmd's floor resolution in `wisdom_match_cmd` (`tools/src/queries.rs`),
   2. `two_stage_pre_embed_check`,
-  3. `wisdom_match_two_stage_with_v1` (moot in activity mode — the merge never
-     runs, §4 — but the parameter is threaded for type-honesty),
+  3. `wisdom_match_two_stage_with_v1` — the OPPOSITE of moot (rev-8 M1): it
+     resolves `v1_floor` via `gate_floor(&scheme_key)` (the merge's only input)
+     and builds the ran-path label from the same `scheme_key`. Threading
+     `QueryKind` HERE is what makes `v1_floor = None` (no v1 `:activity` row →
+     the merge is dead) and yields the pinned `:activity` label. Resolving
+     `v1_floor` from the message key at this site is FORBIDDEN — it would run
+     the v1-merge on the message floor inside the activity attempt,
   4. `match_with_resolved_floor`,
   5. the RULE-ATTRIBUTION block inside `two_stage_entries` (rev-6 B1): it
      recomputes `scheme_key = floor_key_for(profile_key, scheme)` and picks the
@@ -374,10 +403,10 @@ code). Per-state table:
 
 | State | Behavior |
 |---|---|
-| composite `:activity` row ABSENT (would-be cell 1) | message call, same flags |
+| composite `:activity` row ABSENT (projects CELL 2 under the activity key — `v1_floor_present` is always false there, so `(false, false)`; probe miss / cov<100% project CELL 3; CELL 1 is unreachable in activity mode) | message call, same flags |
 | coverage < 100% or probe MISS (composite present; cells 2/3) | message call, same flags |
 | projected_cell != 4 for any other reason | message call, same flags |
-| post-embed degradation (`candidate_set` → `None`, `run.outcome.rule` absent) | message call, same flags, REUSING `raw_vec` (under raw the vector is identical — no second embed). RAW-ONLY shortcut: if a future rev ships instr1 activity rows, the fallback must RE-EMBED `query_text` — the reuse argument does not survive a scheme change |
+| post-embed degradation (`candidate_set` → `None`, `run.outcome.rule` absent) | message call, same flags, REUSING `raw_vec` (under raw the vector is identical — no second embed). The activity attempt's OWN `TwoStageRun.result` — the orchestrator's `!ran` v1 pass on the UNSUFFIXED key — is DISCARDED, never printed; the helper re-runs the message two-stage orchestrator on the reused vectors. RAW-ONLY shortcut: if a future rev ships instr1 activity rows, the fallback must RE-EMBED `query_text` — the reuse argument does not survive a scheme change |
 | `--single-stage` selected, or kill-switch active | message call, same flags — NO activity attempt at all (the v1 arm is not an active path, §3.3; no `two_stage_pre_embed_check` is reached, so no cell logic applies) |
 | empty target (`--path=`) | immediate delegation to the message call with the same flags — NO activity precheck; that call's own empty-text handling applies (no embed on either arm), exit 0 (rev-6 M2: on the two-stage path the empty check runs AFTER the pre-embed check today, so "before key resolution" was false) |
 
@@ -424,11 +453,13 @@ Placement (rev-2 I-5 + rev-3 M5):
 1. NOT inside the shared `entry_eligibility_where` fragment (it feeds v1
    `gated_entries`, stage-1 candidate SQL, AND the complement — touching it would
    change message mode).
-2. The filter runs BEFORE truncation to `--max` — a provenance predicate passed
-   into the entry-selection/scoring layer (or an equivalent pre-truncation filter
-   in the scoring loop), so a top-N made of non-`user_stated` facts does not shadow
-   a `user_stated` fact ranked below it. Filtering after truncation costs hit@1 for
-   no FP benefit and is forbidden.
+2. The filter runs BEFORE truncation to `--max` — specifically (rev-8 m3) the
+   provenance predicate ENTERS THE RULE ARM's scoring, before ANY arm-internal
+   `truncate(max)` (the arm-side truncation point), reading the
+   `WisdomItem.provenance` field. Filtering at the combined-list truncation is
+   TOO LATE for rule (i) (its arm has already truncated), and filtering after any
+   truncation costs hit@1 for no FP benefit — forbidden. A top-N made of
+   non-`user_stated` facts must not shadow a `user_stated` fact ranked below it.
 3. Stage-1 candidate DOCS stay unfiltered — chunks are not facts; the aperture
    constrains delivery, not retrieval.
 4. Chunk-hop rule (ii) opens (evidence-hash join, no fact-level floor): the opened
@@ -546,10 +577,13 @@ Message mode and the fallback path are untouched.
    (`two_stage_entries` `:1512` AND `chunk_hop_arm` `:1533`/`:1572`; the shipping
    cell is chunk-hop, so `chunk_hop_arm` binds first), (rev-6 M3) the
    `user_stated` aperture in scoring with `user_stated`-only positives, and
-   (rev-7 M2) the hit@1 metric/letter/ordering changes — plus the instr1
-   instruction-ablation cell (harness-side prefix text). NAMED CALL SITE: the
-   `QueryKind` signature change to `two_stage_entries` touches the harness's
-   direct call at its activity-cell site (rev-7 m1).
+   (rev-7 M2) the hit@1 metric/letter/ordering changes. KIND SEMANTICS (rev-8 m4):
+   the kind changes probe-set labeling/filtering and the per-kind breakdown ONLY —
+   never the floor key (Kurt's one-floor ruling: all three kinds resolve the same
+   `:activity` key). Plus the instr1 instruction-ablation cell (harness-side
+   prefix text). NAMED CALL SITE (rev-8 m2): the `QueryKind` signature change to
+   `two_stage_entries` touches the harness's EXISTING rule-(i) arm call inside
+   its per-probe loop — no activity cell exists in the harness yet.
 8. Tests (§ Testing), docs, CHANGELOG.
 
 ## Error handling
