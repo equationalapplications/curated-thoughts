@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "code_sha": "05dfe7bb97411fe7909307698930737528326424",
+  "generated_utc": "2026-10-18T14:13:27.385927218+00:00",
+  "probes": {
+    "path": "/home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/records/investigations/2026-10-17-issue271-flip-prep/probes-150-final.jsonl",
+    "sha256": "92942cffaad12911dd9110cb076c39e47a7fcbc8e841b546c79e76ce01b9fdd0",
+    "count": 150,
+    "relevant": 7,
+    "fp": 143
+  },
+  "baseline": {
+    "key": "external:qwen/qwen3-embedding-4b",
+    "floor": 0.7,
+    "scheme": "raw"
+  },
+  "candidate": {
+    "rule": "chunk-hop",
+    "floor": 0.35,
+    "k": 8
+  },
+  "grid": {
+    "cells": 1,
+    "rule": "chunk-hop",
+    "floor": 0.35,
+    "k": 8
+  },
+  "coverage": {
+    "candidate_docs": 43,
+    "covered": 43,
+    "fraction": 1.0
+  },
+  "single_stage": {
+    "hit2": 0.14285714285714285,
+    "fp": 4,
+    "opens": 5,
+    "entries_per_open": 1.4
+  },
+  "two_stage": {
+    "hit2": 0.5714285714285714,
+    "fp": 127,
+    "opens": 133,
+    "entries_per_open": 1.9699248120300752
+  },
+  "two_stage_passes": false,
+  "letter": "two_stage_passes = ts_hit2 >= ss_hit2 && ts_fp <= ss_fp",
+  "heldout": {
+    "splits": 5,
+    "half_size": 75,
+    "seed": 271828,
+    "per_split": [
+      {
+        "relevant": 3,
+        "fp": 71,
+        "single_stage_hit2": 0.0,
+        "two_stage_hit2": 0.6666666666666666
+      },
+      {
+        "relevant": 3,
+        "fp": 71,
+        "single_stage_hit2": 0.3333333333333333,
+        "two_stage_hit2": 0.6666666666666666
+      },
+      {
+        "relevant": 3,
+        "fp": 71,
+        "single_stage_hit2": 0.3333333333333333,
+        "two_stage_hit2": 0.3333333333333333
+      },
+      {
+        "relevant": 3,
+        "fp": 71,
+        "single_stage_hit2": 0.3333333333333333,
+        "two_stage_hit2": 0.6666666666666666
+      },
+      {
+        "relevant": 3,
+        "fp": 71,
+        "single_stage_hit2": 0.0,
+        "two_stage_hit2": 0.3333333333333333
+      }
+    ]
+  },
+  "embeds": {
+    "per_message": 1,
+    "scheme": "raw",
+    "latency_ms_p50": 42.94738040625,
+    "latency_ms_p95": 46.851632272727265
+  },
+  "injection": {
+    "rule": "chunk-hop",
+    "opens": 133,
+    "entries_per_open_median": 2.0
+  },
+  "merge_attribution": {
+    "opens_via_merge_only": 0,
+    "hits_via_merge_only": 0,
+    "v1merged_total": 0
+  },
+  "v1_merge": {
+    "latency_ms_p95": 31.063634999999998,
+    "volume_total": 0,
+    "measured": "merge-segment"
+  },
+  "ablation": {
+    "k": 8,
+    "top1": {
+      "hit2": 0.5714285714285714,
+      "fp": 127,
+      "opens": 133,
+      "entries_per_open": 1.9699248120300752
+    },
+    "topk": {
+      "hit2": 0.5714285714285714,
+      "fp": 127,
+      "opens": 133,
+      "entries_per_open": 1.9774436090225564
+    }
+  },
+  "stale_embed_key_total": 0
+}

@@ -71,6 +71,12 @@ pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
     // this floor — docs/benchmarks/2026-10-07-wisdom-gate-qwen3-embedding-4b.md.
     // Key form: <raw gate key>:instr1 (see embed_scheme::floor_key_for).
     ("external:qwen/qwen3-embedding-4b:instr1", 0.64),
+    // Two-stage composite key (spec §3, `<raw>:two-stage:<rule>`): calibrated
+    // 2026-10-18 on the live brain — chunk-hop @ 0.65, k=8: hit@2 0.143 (= v1
+    // baseline), FP 0 vs baseline 4, opens 1 vs baseline 5. Letter per #271 §7
+    // passed; campaign `calibration-run/grid-20261018-100351/` (14 cells, build
+    // 05dfe7bb) — docs/benchmarks/2026-10-18-wisdom-gate-two-stage-chunk-hop.md.
+    ("external:qwen/qwen3-embedding-4b:two-stage:chunk-hop", 0.65),
 ];
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -565,7 +571,13 @@ fn gated_entries(
 /// Two-stage k per gate key — mirrors [`gate_floor`]'s lookup shape but is a
 /// SEPARATE table (k is NOT a floor key, Opus r3 M3: an integer must never be
 /// matchable by `gate_floor`). Default 8 until calibration pins a key.
-pub const TWO_STAGE_K: &[(&str, usize)] = &[("default", 8)];
+pub const TWO_STAGE_K: &[(&str, usize)] = &[
+    ("default", 8),
+    // Pinned by the 2026-10-18 live calibration (chunk-hop @ 0.65 won; k
+    // measured under scheme "raw" — rule (i) never uses stage-1 breadth, so
+    // this row keys the UNSCHEMED profile key per Task 15's resolver pin).
+    ("external:qwen/qwen3-embedding-4b", 8),
+];
 
 /// `two_stage_k` over an EXPLICIT table — the exact-find-then-default lookup
 /// [`two_stage_k`] runs on [`TWO_STAGE_K`]. `pub` so the calibration harness
@@ -2206,13 +2218,14 @@ mod tests {
     /// Task-14/15 harness) invokes it BEFORE any embed_one and branches its
     /// embed logic on the projected §4 cell + the coverage probe, so §6's
     /// "coverage check BEFORE any embed" holds on ALL caller paths.
-    /// Precheck on the fixture, v1 floor only: cell-1 projected, one schemed
-    /// embed needed, zero stale keys (fixture coverage is 2/2). Uses the
-    /// real qwen key — the ONLY key with a v1 floor and NO composite floor
-    /// even in test builds (the test-only composite slice covers the stub
-    /// keys, so the stub cannot produce a v1-only world here).
+    /// Precheck on the fixture, BOTH floors present (post-flip 2026-10-18):
+    /// cell-3 projected (coverage veto), schemed-only embeds, both candidate
+    /// docs stale (fixture coverage 0/2 — its docs carry a non-matching
+    /// qwen embed_key). Uses the real qwen key — pre-flip this world was
+    /// v1-only (cell 1); the #265 flip added the composite chunk-hop floor,
+    /// so the same precheck now projects the coverage-veto cell.
     #[test]
-    fn precheck_v1_floor_only_projects_cell1_and_one_schemed_embed() {
+    fn precheck_both_floors_stale_coverage_projects_cell3_veto() {
         let conn = fixture();
         let pre = two_stage_pre_embed_check(
             &conn,
@@ -2223,19 +2236,24 @@ mod tests {
         .unwrap();
         assert!(pre.v1_floor_present, "qwen raw key has a v1 floor (0.70)");
         assert!(
-            !pre.ts_floor_present,
-            "no composite floor for the qwen key anywhere"
+            pre.ts_floor_present,
+            "composite chunk-hop floor flipped in 2026-10-18 (issue #265)"
         );
         assert!(!pre.coverage_probe_miss);
-        assert_eq!(pre.projected_cell, 1, "v1-only ⇒ §4 cell 1 (v1 fallback)");
+        assert_eq!(
+            pre.projected_cell, 3,
+            "both floors + partial fixture coverage ⇒ §4 cell 3 (coverage veto; \
+             the fixture's candidate docs carry no qwen embed_key)"
+        );
         assert_eq!(
             pre.embed_plan,
             TwoStageEmbedPlan::SchemedOnly,
-            "v1 fallback needs exactly the schemed vector"
+            "cell 3 with the v1 floor present still needs the schemed vector \
+             for the v1-fallback run"
         );
         assert_eq!(
-            pre.stale_embed_key, 0,
-            "no candidate doc carries the qwen key"
+            pre.stale_embed_key, 2,
+            "both fixture candidate docs are stale against the qwen key"
         );
     }
 
