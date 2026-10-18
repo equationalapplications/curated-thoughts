@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "winner": {
+    "rule": "chunk-hop",
+    "floor": 0.65,
+    "k": 8,
+    "gate_key": "external:qwen/qwen3-embedding-4b:two-stage:chunk-hop"
+  },
+  "cells_considered": 14,
+  "passing_cells": 2,
+  "tie_break": "higher hit@2 → lower FP → rule (i) (GLM r1 minor-5); full ties → stricter floor → smaller k (documented extension)",
+  "patch_snippet": "// WISDOM_GATE_FLOORS (src-tauri/src/wisdom_match.rs) — add:\n    (\"external:qwen/qwen3-embedding-4b:two-stage:chunk-hop\", 0.65),\n// TWO_STAGE_K (src-tauri/src/wisdom_match.rs) — add (rule (ii) only; rule (i) never uses stage-1 breadth; k measured under scheme \"raw\"):\n    (\"external:qwen/qwen3-embedding-4b\", 8),\n"
+}

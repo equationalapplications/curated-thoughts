@@ -1,0 +1,4 @@
+// WISDOM_GATE_FLOORS (src-tauri/src/wisdom_match.rs) — add:
+    ("external:qwen/qwen3-embedding-4b:two-stage:chunk-hop", 0.65),
+// TWO_STAGE_K (src-tauri/src/wisdom_match.rs) — add (rule (ii) only; rule (i) never uses stage-1 breadth; k measured under scheme "raw"):
+    ("external:qwen/qwen3-embedding-4b", 8),

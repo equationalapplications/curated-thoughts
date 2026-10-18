@@ -1,0 +1,18 @@
+{
+  "schema_note": "Two-stage freeze (Task 15 flip, 2026-10-18). expected values from the WINNING paired-calibration artifact calibration-run/grid-20261018-100351/cell-chunk-hop-0.65-8.json (campaign grid-20261018-100351, build 05dfe7bb); vectors.json.gz from calibrate_wisdom_gate --freeze over the wisdom_gate fixtures (facts_sha256/probes_sha256 pin those fixtures). Floor registered in WISDOM_GATE_FLOORS; k in TWO_STAGE_K.",
+  "floor": 0.65,
+  "rule": "chunk-hop",
+  "k": 8,
+  "model_key": "external:qwen/qwen3-embedding-4b:two-stage:chunk-hop",
+  "facts_sha256": "63c0349c8d95902769b50d9635c933108f33cfbc451fba3ae24caac714533f51",
+  "probes_sha256": "6124b38562c5c6340a769b242bfa781397ffde7549d5ea78074af2f226a00ac1",
+  "calibration": {
+    "campaign": "calibration-run/grid-20261018-100351",
+    "artifact": "cell-chunk-hop-0.65-8.json",
+    "build_sha": "05dfe7bb97411fe7909307698930737528326424",
+    "probe_file_sha256": "92942cffaad12911dd9110cb076c39e47a7fcbc8e841b546c79e76ce01b9fdd0",
+    "letter": "two_stage_passes: hit@2 0.143 (= baseline) && FP 0 (<= baseline 4)",
+    "benchmark_doc": "docs/benchmarks/2026-10-18-wisdom-gate-two-stage-chunk-hop.md"
+  },
+  "probes": []
+}

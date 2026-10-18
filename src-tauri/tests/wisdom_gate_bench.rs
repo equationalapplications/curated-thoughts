@@ -45,10 +45,11 @@ fn wisdom_gate_floor_still_holds_instr1() {
 
 /// Projected two-stage composite floor key (spec §3 shape:
 /// `embed_scheme::floor_key_for(model, scheme) + ":two-stage:" + rule`).
-/// PLACEHOLDER until Task 15's paired calibration picks the winning rule and
-/// flips the key into [`tauri_app_lib::wisdom_match::WISDOM_GATE_FLOORS`]; if
-/// chunk-hop wins, Task 15 renames this const together with the freeze dir.
-const TWO_STAGE_GATE_KEY: &str = "external:qwen/qwen3-embedding-4b:two-stage:restricted-cosine";
+/// Won the 2026-10-18 live calibration (chunk-hop @ 0.65; see
+/// `calibration-run/grid-20261018-100351/` and
+/// docs/benchmarks/2026-10-18-wisdom-gate-two-stage-chunk-hop.md); flipped
+/// into [`tauri_app_lib::wisdom_match::WISDOM_GATE_FLOORS`] by the flip PR.
+const TWO_STAGE_GATE_KEY: &str = "external:qwen/qwen3-embedding-4b:two-stage:chunk-hop";
 
 /// Floor key → freeze dir. The two calibrated v1 snapshots keep their
 /// historical dir names (`wisdom_gate`, `wisdom_gate_instr1`); every key
@@ -89,7 +90,6 @@ fn every_non_stub_floor_key_has_a_freeze_dir() {
 }
 
 #[test]
-#[ignore = "BLOCKER (Task 15, 2026-10-17): the composite key is still absent from `WISDOM_GATE_FLOORS` because NO live calibration has run — `two_stage_passes` is unknown, so the letter-gated flip (`calibrate_two_stage flip`) cannot proceed and the shipped tree stays opt-in. The artifact is pending the Task-16 ordered runbook (verify-scratch → repair-embed-key → paired run → pick → flip). Un-ignore ONLY when a real passing artifact's flip package has landed BOTH the `WISDOM_GATE_FLOORS` row AND the freeze snapshot (expected.json AND vectors.json.gz — expected.json alone cannot satisfy the asserts below)."]
 fn replay_two_stage() {
     let dir = freeze_dir_for(TWO_STAGE_GATE_KEY);
     let expected_path = format!("{dir}/expected.json");
