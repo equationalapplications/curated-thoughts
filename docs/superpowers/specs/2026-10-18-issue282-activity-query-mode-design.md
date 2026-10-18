@@ -1,9 +1,9 @@
 # Activity query mode for the wisdom gate: paths and commands reach concept rules (issue #282)
 
-**Date:** 2026-10-18 (rev 12 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
-GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6-11 Tier-4 gate
-rounds 1-6; rev 12 Tier-4 re-gate round 6: 0 blockers, 1 crate-placement major +
-2 minors).
+**Date:** 2026-10-18 (rev 13 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
+GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6-12 Tier-4 gate
+rounds 1-7; rev 13 Tier-4 re-gate round 7: 0 blockers, 2 crate-boundary majors +
+4 minors).
 **Status:** Draft — in Tier-4 convergence loop; then Kurt's explicit approval before
 implementation.
 **Branch:** `spec/issue282-activity-query-mode`
@@ -26,7 +26,32 @@ production floors in this spec are RAW.
 
 ## Revision history (compressed)
 
-- **rev 12 (this rev):** Tier-4 re-gate round 6 (REQUEST CHANGES, zero blockers;
+- **rev 13 (this rev):** Tier-4 re-gate round 7 (REQUEST CHANGES, zero blockers;
+  $2.23; full review `~/.local/state/tessera/issue282/tier4-delta7-review.md` —
+  all rev-12 folds verified, the m1 proxy confirmed DISCRIMINATING). Folded:
+  **M1** — the two aperture test bullets move to the `src-tauri` `mod tests` list
+  as lib assertions (with the stub composite forcing cell 4: no non-`user_stated`
+  entry in `run.result.entries`; a `user_stated` entry ranked below two filtered
+  entries present with `max` < pre-filter count; corrections of any provenance
+  present; `run.outcome.open` false when every opened fact is filtered); ONE CLI
+  bullet kept — on the fallback, provenance is unfiltered (byte-identical to the
+  reference, covered by the parity test). **M2** — §8 step 4 pins the helper
+  signature: it RETURNS the `WisdomMatch` it printed plus the
+  `Option<TwoStageOutcome>` for the audit line (print + return, not
+  `Result<i32>`-only), so the helper test compares the returned `WisdomMatch`
+  against the direct call (`wisdom_match_in_scheme` for the no-flag arm;
+  `wisdom_match_two_stage_with_v1` for the `--two-stage` arm — which under the
+  production table takes `!ran` on `stub:constant8`, a non-degenerate but
+  exercisable result). **m1** — the helper test reaches the `pub` helper via
+  `curated_thoughts_tools::queries` from a `tools/tests` file (the pattern twelve
+  existing test files use). **m2** — the closing CLI line reworded: the CLI
+  asserts the fallback's `gate` carries NO `:activity`; the active-path label is
+  the lib test. **m3** — the new aperture parameter is NAMED `provenance_filter`
+  (a second `Option` parameter beside the existing `id_filter`; all four call
+  sites pass `None` except rule (ii)). **m4** — the proxy note: `gate ==
+  GATE_UNCALIBRATED` alone proves `floor == None`; an un-threaded `QueryKind`
+  would yield `semantic-v1:stub:constant8` via the stub v1 row.
+- **rev 12:** Tier-4 re-gate round 6 (REQUEST CHANGES, zero blockers;
   $2.46; full review `~/.local/state/tessera/issue282/tier4-delta6-review.md` —
   four of five rev-11 folds verified faithful; the M1 fold fixed the CLI hole but
   reintroduced the same class on the lib side across a CRATE BOUNDARY: the
@@ -553,8 +578,10 @@ Placement (rev-2 I-5 + rev-3 M5):
    `gated_entries`, stage-1 candidate SQL, AND the complement — touching it would
    change message mode).
 2. The filter runs BEFORE truncation to `--max` — specifically (rev-8 m3, with
-   the mechanism NAMED by rev-10 m2) as a FILTER PARAMETER ON `gated_entries`
-   (Rust has no default arguments, so ALL FOUR call sites change to pass `None` —
+   the mechanism NAMED by rev-10 m2) as a NEW `Option` PARAMETER on
+   `gated_entries` NAMED `provenance_filter` (rev-13 m3 — a SECOND parameter
+   beside the existing `id_filter: Option<&[String]>`; Rust has no default
+   arguments, so ALL FOUR call sites change to pass `None` —
    `:363`/`:818`/`:861`/`:884`; only the rule-(ii) site passes the predicate),
    so the predicate sits inside
    the arm's scoring BEFORE its arm-internal `truncate(max)`, reading the
@@ -680,6 +707,13 @@ Message mode and the fallback path are untouched.
    prints in the same place — so this step FIRST extracts the message v1 and
    two-stage paths into a helper that takes pre-computed vectors and owns ALL
    printing; byte-identical stderr then has exactly one print site to test.
+   SIGNATURE PIN (rev-13 M2): the helper RETURNS the `WisdomMatch` it printed
+   plus the `Option<TwoStageOutcome>` for the audit line — print + return, NOT a
+   bare `Result<i32>` (a unit test cannot read `println!` back; the helper test
+   compares the returned `WisdomMatch` against the direct call:
+   `wisdom_match_in_scheme` for the no-flag arm, `wisdom_match_two_stage_with_v1`
+   for the `--two-stage` arm — which under the production table takes `!ran` on
+   `stub:constant8`, a non-degenerate but exercisable result).
 5. `user_stated` aperture pre-truncation filter (§5) on the activity-active path.
 6. Gate label per §3.1 (v1-shaped scheme key + `:activity`, NO composite segment;
    no v1 activity label — v1 is not an active arm).
@@ -734,11 +768,9 @@ Message mode and the fallback path are untouched.
     two-stage case as cheap or "closed gate"); exit 0 (rev-7 M1, superseding the
     rev-3 m4 wording rev-6 M2 retracted).
   - `--help` advertises all three flags (integrations' capability probe).
-  - `user_stated` filter: a non-`user_stated` fact that opens in message mode is
-    withheld in activity mode; a `user_stated` fact ranked below two filtered
-    entries IS delivered (pre-truncation order, rev-3 M5); corrections of any
-    provenance still delivered.
-  - audit `open=`/top reflect post-aperture delivery (rev-3 M5).
+  - on the FALLBACK, provenance is unfiltered — byte-identical to the reference
+    (already covered by the parity test; rev-13 M1 keeps exactly this one CLI
+    aperture bullet).
   - the ACTIVE path (composite, cell 4) is exercised through lib tests / the
     harness's explicit floors — the composite stub lives in
     `WISDOM_GATE_FLOORS_TEST`, and CLI tests can and must see the fallback fire
@@ -767,20 +799,32 @@ Message mode and the fallback path are untouched.
       `gate == GATE_UNCALIBRATED`, empty entries — which is the named proxy for
       "the attempt never enters `gated_entries`" (rev-12 m1: with a non-empty
       vector and `max > 0`, that signature is reachable ONLY through the `None`
-      arm that skips `gated_entries`).
-    - `tools` HELPER test: call the extracted helper with pre-computed vectors and
-      assert its output equals the direct message call on the same vectors — no
-      cell-4 projection needed. The embed-call COUNT assertion is dropped (a
-      helper whose signature takes pre-computed vectors cannot embed — nothing to
-      count).
+      arm that skips `gated_entries`; alone it proves `floor == None` — an
+      un-threaded `QueryKind` would yield `semantic-v1:stub:constant8` via the
+      stub v1 row, so the proxy is discriminating, rev-13 m4).
+    - APERTURE lib assertions (rev-13 M1 — the aperture is reachable only on the
+      active path, which the `ct` binary can never enter), with the stub
+      composite forcing cell 4: `run.result.entries` contains NO
+      non-`user_stated` entry; a `user_stated` entry ranked below two filtered
+      entries IS present with `max` smaller than the pre-filter count
+      (pre-truncation order, rev-3 M5); corrections of any provenance are
+      present; `run.outcome.open` is false when every opened fact is filtered.
+    - `tools` HELPER test (rev-13 m1): reached via the `pub` helper from
+      `curated_thoughts_tools::queries` in a `tools/tests` file (the pattern
+      twelve existing test files use): call it with pre-computed vectors and
+      compare the RETURNED `WisdomMatch` against the direct call on the same
+      vectors — no cell-4 projection needed. The embed-call COUNT assertion is
+      dropped (a helper whose signature takes pre-computed vectors cannot embed —
+      nothing to count).
   - stderr pins, BY CONSTRUCTION (rev-11 M1): exactly-once per-row warning and
     no-flag no-audit-line hold because the helper (rev-5 m4) is the SINGLE print
     site and the attempt has none — verified by the lib assertion above plus the
     helper's structure, not by CLI output capture.
   - zero-target case (`ct wisdom match` with no target at all): clap's
     group-required error, message pinned (rev-9 m4).
-- One CLI test per JSON field: schema unchanged, `:activity` label only on the
-  active path.
+- One CLI test per JSON field: schema unchanged; the CLI asserts the fallback's
+  `gate` carries NO `:activity` — the active-path label is the lib test
+  (rev-13 m2).
 
 ## Out of scope (Kurt's rulings + Fable D5)
 
