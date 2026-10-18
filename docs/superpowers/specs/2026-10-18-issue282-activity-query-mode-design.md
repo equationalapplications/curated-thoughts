@@ -1,11 +1,13 @@
 # Activity query mode for the wisdom gate: paths and commands reach concept rules (issue #282)
 
-**Date:** 2026-10-18 (rev 13 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
-GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6-12 Tier-4 gate
-rounds 1-7; rev 13 Tier-4 re-gate round 7: 0 blockers, 2 crate-boundary majors +
-4 minors).
-**Status:** Draft — in Tier-4 convergence loop; then Kurt's explicit approval before
-implementation.
+**Date:** 2026-10-18 (rev 14 — FINAL of the review ladder: rev 1 step-0 Fable memo +
+Kurt's rulings; rev 2 Tier-2 GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta
+convergence; rev 6-13 Tier-4 gate rounds 1-8; rev 14 folds the gate's two closing
+nits).
+**Status:** Tier-4 Fable gate: **Approved with nits at rev 13** (round 8: zero
+blockers, zero majors; nits folded in rev 14 — no further review round needed, the
+nits are evidence-citation fixes, not design). PRESENTED TO KURT for implementation
+approval.
 **Branch:** `spec/issue282-activity-query-mode`
 **Priority:** High — the integrations' autonomous-work delivery (plugin 0.7.x) is live
 and shipping the bare target to the message path until this lands.
@@ -26,7 +28,19 @@ production floors in this spec are RAW.
 
 ## Revision history (compressed)
 
-- **rev 13 (this rev):** Tier-4 re-gate round 7 (REQUEST CHANGES, zero blockers;
+- **rev 14 (this rev):** Tier-4 re-gate round 8: **APPROVE WITH NITS** ($2.52; zero
+  blockers, zero MAJORS; every rev-13 fold verified against the code, including
+  `WisdomMatch`/`TwoStageOutcome` `PartialEq` derivability and the non-degenerate
+  `!ran`-on-stub comparison). Nits folded: **m1** — the "twelve test files"
+  pattern citation corrected (zero `tools/tests` files import
+  `curated_thoughts_tools::queries`; twelve import `tauri_app_lib::` directly,
+  five import `curated_thoughts_tools::`; this is the FIRST `queries` consumer,
+  through the existing `pub mod queries`). **m2** — the helper SIGNATURE PIN
+  extended with its INPUTS: `conn: &Connection`, the resolved key, `read_scheme`,
+  `max`, `exclude`, `now_ms`, the two vectors, the stage selection, `json_mode`;
+  `wisdom_match_cmd` stays the only place that opens the brain and reads the
+  clock, so the equality test passes byte-identical inputs to both sides.
+- **rev 13:** Tier-4 re-gate round 7 (REQUEST CHANGES, zero blockers;
   $2.23; full review `~/.local/state/tessera/issue282/tier4-delta7-review.md` —
   all rev-12 folds verified, the m1 proxy confirmed DISCRIMINATING). Folded:
   **M1** — the two aperture test bullets move to the `src-tauri` `mod tests` list
@@ -707,10 +721,15 @@ Message mode and the fallback path are untouched.
    prints in the same place — so this step FIRST extracts the message v1 and
    two-stage paths into a helper that takes pre-computed vectors and owns ALL
    printing; byte-identical stderr then has exactly one print site to test.
-   SIGNATURE PIN (rev-13 M2): the helper RETURNS the `WisdomMatch` it printed
-   plus the `Option<TwoStageOutcome>` for the audit line — print + return, NOT a
-   bare `Result<i32>` (a unit test cannot read `println!` back; the helper test
-   compares the returned `WisdomMatch` against the direct call:
+   SIGNATURE PIN (rev-13 M2, inputs added rev-14 m2): the helper takes
+   `conn: &Connection`, the resolved key, `read_scheme`, `max`, `exclude`,
+   `now_ms`, the two vectors, the stage selection and `json_mode` —
+   `wisdom_match_cmd` stays the ONLY place that opens the brain and reads the
+   clock — and RETURNS the `WisdomMatch` it printed plus the
+   `Option<TwoStageOutcome>` for the audit line: print + return, NOT a bare
+   `Result<i32>` (a unit test cannot read `println!` back; the helper test
+   passes byte-identical inputs to helper and direct call and compares the
+   returned `WisdomMatch` against the direct call:
    `wisdom_match_in_scheme` for the no-flag arm, `wisdom_match_two_stage_with_v1`
    for the `--two-stage` arm — which under the production table takes `!ran` on
    `stub:constant8`, a non-degenerate but exercisable result).
@@ -809,9 +828,12 @@ Message mode and the fallback path are untouched.
       entries IS present with `max` smaller than the pre-filter count
       (pre-truncation order, rev-3 M5); corrections of any provenance are
       present; `run.outcome.open` is false when every opened fact is filtered.
-    - `tools` HELPER test (rev-13 m1): reached via the `pub` helper from
-      `curated_thoughts_tools::queries` in a `tools/tests` file (the pattern
-      twelve existing test files use): call it with pre-computed vectors and
+    - `tools` HELPER test (rev-13 m1, citation corrected rev-14): reached via the
+      `pub` helper from `curated_thoughts_tools::queries` in a `tools/tests` file
+      — the lib-import pattern `tools/tests` already uses (twelve files import
+      `tauri_app_lib::` directly, five import `curated_thoughts_tools::`; none
+      imports `queries` yet, so this is the first `queries` consumer, through the
+      existing `pub mod queries`): call it with pre-computed vectors and
       compare the RETURNED `WisdomMatch` against the direct call on the same
       vectors — no cell-4 projection needed. The embed-call COUNT assertion is
       dropped (a helper whose signature takes pre-computed vectors cannot embed —
