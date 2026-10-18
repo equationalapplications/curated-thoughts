@@ -25,7 +25,21 @@ production floors in this spec are RAW.
 
 ## Revision history (compressed)
 
-- **rev 4 (this rev):** Tier-3 delta re-review (REQUEST CHANGES; full review
+- **rev 5 (this rev):** Tier-3 delta #2: **APPROVE WITH NITS** ($0.50; the rev-4
+  fixes verified against the code — cell-4 projection `:1110`, probe-miss cells
+  `:1090-1094`, `outcome.rule` guard `:1183`, `schemed = raw.clone()` under raw
+  `queries.rs:910-911`, v1-merge dead without a v1 row `:1150`). Folded:
+  **M1″** — §7 precondition rewritten to "a build containing the #287 floor rows
+  AND this PR"; the harness selects arms explicitly, so no "two-stage deploy" wait.
+  **m1** — rev-3 history entry carries an inline numbering-correction pointer.
+  **m2** — §4 table gains the explicit `--single-stage`/kill-switch row (no
+  activity attempt); §3.3 drops the wrong harness reason for the CLI flag.
+  **m3** — `raw_vec` reuse pinned as RAW-only (a future instr1 row must re-embed).
+  **m4** — implementation step names the helper refactor (message paths pulled
+  out, printing in one place) so the byte-identical-stderr test has a single
+  print site. **m5** — the expected no-flag stderr difference (fallback: no audit
+  line; active: audit line) is pinned and both CLI cases are tested.
+- **rev 4:** Tier-3 delta re-review (REQUEST CHANGES; full review
   `~/.local/state/tessera/issue282/tier3-delta-review.md`, $0.57). Fixes:
   **B1′** — the healthy cell is CELL 4, not cell 1 (cell 1 is "ts floor missing →
   v1 fallback", `wisdom_match.rs:715/:1163`; cell 4 is "ts present + cov 100% →
@@ -61,8 +75,9 @@ production floors in this spec are RAW.
   rows demote to grid cells; the activity instruction constant is NOT landed in this
   PR (it moves to the calibration harness — §2.1, a recorded deviation from issue
   request 2). **B2** — activity mode occupies ONLY the healthy two-stage path
-  (cell 1); every degraded state (uncalibrated row, coverage <100%, probe miss,
-  cells 2/3/4) falls back to the message-mode invocation with the SAME stage flags —
+  (cell 1; numbering corrected in rev 4: cell 4); every degraded state (uncalibrated
+  row, coverage <100%, probe miss, the other cells) falls back to the message-mode
+  invocation with the SAME stage flags —
   the never-worse guarantee now holds by construction. **M1/m1** — honest statement
   that under chunk-hop the open/close decision keys on the RAW vector and CHUNK
   scores; any query-side instruction only reorders already-open facts and feeds the
@@ -240,8 +255,7 @@ in `tools/src/bin/ct.rs`):
   hold in every state the core can reach, and the only states where
   activity-specific floors and the aperture are calibrated are healthy-path states.
 - Stage selection: the explicit `--two-stage`/`--single-stage` flag wins SELECTION
-  (parity with message mode; the calibration harness needs to walk both arms).
-  Absent a flag, an activity target prefers two-stage. Under rev 3 the arm matters
+  (parity with message mode). Absent a flag, an activity target prefers two-stage. Under rev 3 the arm matters
   mainly for which message-mode invocation the fallback mirrors (§4): a
   `--two-stage` fallback therefore runs the message two-stage path on its raw
   composite and prints the audit line — byte-identical to
@@ -296,15 +310,18 @@ code). Per-state table:
 | composite `:activity` row ABSENT (would-be cell 1) | message call, same flags |
 | coverage < 100% or probe MISS (composite present; cells 2/3) | message call, same flags |
 | projected_cell != 4 for any other reason | message call, same flags |
-| post-embed degradation (`candidate_set` → `None`, `run.outcome.rule` absent) | message call, same flags, REUSING `raw_vec` (under raw the vector is identical — no second embed) |
-| kill-switch active | message call with the v1 message floor |
+| post-embed degradation (`candidate_set` → `None`, `run.outcome.rule` absent) | message call, same flags, REUSING `raw_vec` (under raw the vector is identical — no second embed). RAW-ONLY shortcut: if a future rev ships instr1 activity rows, the fallback must RE-EMBED `query_text` — the reuse argument does not survive a scheme change |
+| `--single-stage` selected, or kill-switch active | message call, same flags — NO activity attempt at all (the v1 arm is not an active path, §3.3; no `two_stage_pre_embed_check` is reached, so no cell logic applies) |
 | empty target (`--path=`) | TODAY'S empty-text short-circuit wins FIRST — closed gate, exit 0, no embed, before key resolution and before fallback (rev-3 m4) |
 
 Audit-line suppression (rev-4 B1′): the ABANDONED activity attempt prints NOTHING —
 the activity code path emits no `print_two_stage_audit` before delegating, so the
 only audit line on stderr is the one the fallback's message two-stage call prints.
 Without this pin stderr would not be byte-identical in the `--two-stage` fallback
-case.
+case. Expected NO-FLAG asymmetry (rev-5 m5): the no-flag fallback (`-- X`) is the
+v1 path and prints NO audit line, while a no-flag ACTIVE activity call (two-stage)
+DOES print one — that difference is the mode-vs-mode comparison of §7, not a parity
+break; the CLI tests pin BOTH cases.
 
 - The fallback reference is per flags: `--path=X` alone falls back to
   `ct wisdom match -- X`; `--two-stage --path=X` falls back to
@@ -375,8 +392,10 @@ Message mode and the fallback path are untouched.
 
 ## 7. Calibration plan + acceptance letter (D4 — resolved)
 
-- **Precondition:** the post-#287 two-stage build (deployed, not just merged).
-  Calibration on the single-stage deployed dpkg is a wasted round-trip.
+- **Precondition (rev-5 M1″):** a build containing the #287 floor rows AND this
+  PR (§3.3 stage-default honesty). The harness selects arms explicitly, so the
+  deployed dpkg's stage default is irrelevant to calibration; waiting for a
+  "two-stage deploy" would block forever, since this PR never produces one.
 - **Labeled set:** positives GENERATED from the stored facts (a proposal model
   drafts plausible activity targets per fact — path, command, and pattern shapes;
   Opus or Kurt adjudicates), because 7 adjudicated message-mode probes must not be
@@ -426,8 +445,12 @@ Message mode and the fallback path are untouched.
    `profile_key` unsuffixed for coverage/k (`wisdom_match.rs`, `queries.rs`).
 3. Composite stub row in `WISDOM_GATE_FLOORS_TEST` (rev-3 M4); NO v1 `:activity`
    row anywhere in production tables (rev-4 M2′).
-4. Healthy-path-only activation (cell-4 predicate, §3.3) + the fallback rule (§4)
-   in `wisdom_match_cmd`, including audit-line suppression and `raw_vec` reuse.
+4. Healthy-path-only activation (cell-4 predicate, §3.3) + the fallback rule (§4),
+   including audit-line suppression and `raw_vec` reuse. NAMED PREREQUISITE
+   (rev-5 m4): the fallback is inline in `wisdom_match_cmd` today — embeds and
+   prints in the same place — so this step FIRST extracts the message v1 and
+   two-stage paths into a helper that takes pre-computed vectors and owns ALL
+   printing; byte-identical stderr then has exactly one print site to test.
 5. `user_stated` aperture pre-truncation filter (§5) on the activity-active path.
 6. Gate label per §3.1 (composite scheme key carries `:activity`; no v1 activity
    label — v1 is not an active arm).
