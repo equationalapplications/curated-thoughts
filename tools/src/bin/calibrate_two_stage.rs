@@ -725,7 +725,7 @@ pub fn pick_winner(cells: &[CalibrationArtifact]) -> Result<CalibrationArtifact>
         let best = all[0];
         bail!(
             "no grid cell passes the acceptance letter (§7) — two-stage does NOT flip. \
-             Best cell rule={} floor={} k={}: ts_{}={} ts_fp={} vs base_{}={} base_fp={}",
+             Best cell rule={} floor={} k={}: ts_{}={} ts_fp={} vs ss_{}={} ss_fp={}",
             best.candidate.rule,
             best.candidate.floor,
             best.candidate.k,
@@ -1107,7 +1107,7 @@ fn verdict_of(entries: &[WisdomItem], open: bool, probe: &Probe) -> ProbeVerdict
         hit: probe_hit(entries, probe),
         hit1: entries
             .first()
-            .map_or(false, |e| probe.expect.iter().any(|id| id == &e.id)),
+            .is_some_and(|e| probe.expect.iter().any(|id| id == &e.id)),
         open: open && !entries.is_empty(),
         entries: entries.len(),
     }
