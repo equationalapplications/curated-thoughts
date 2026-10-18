@@ -957,10 +957,7 @@ fn emitted_k_row_binds_at_the_resolver_for_both_schemes() {
             // the unschemed profile key, so an appended duplicate would be
             // shadowed by the resolver's first-match exact find. Replace the
             // exact-key row if present, else append (pre-flip shape).
-            let mut table: Vec<(&str, usize)> = tauri_app_lib::wisdom_match::TWO_STAGE_K
-                .iter()
-                .copied()
-                .collect();
+            let mut table: Vec<(&str, usize)> = tauri_app_lib::wisdom_match::TWO_STAGE_K.to_vec();
             match table.iter_mut().find(|(k, _)| *k == k_key) {
                 Some(slot) => *slot = (k_key, winner.candidate.k),
                 None => table.push((k_key, winner.candidate.k)),
