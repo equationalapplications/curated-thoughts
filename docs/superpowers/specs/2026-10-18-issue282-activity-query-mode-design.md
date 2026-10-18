@@ -1,10 +1,10 @@
 # Activity query mode for the wisdom gate: paths and commands reach concept rules (issue #282)
 
-**Date:** 2026-10-18 (rev 4 — rev 1 folded the step-0 Fable memo + Kurt's rulings;
-rev 2 the Tier-2 GLM 5.3 review; rev 3 the Tier-3 Opus review; rev 4 the Tier-3 delta
-re-review: 1 blocker + 2 majors + 3 minors).
-**Status:** Draft — in Tier-3 convergence loop; then the Tier-4 Fable gate; Kurt's
-explicit approval required before implementation.
+**Date:** 2026-10-18 (rev 6 — rev 1 step-0 Fable memo + Kurt's rulings; rev 2 Tier-2
+GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta convergence; rev 6 the Tier-4 Fable
+gate: 1 blocker + 3 majors + 4 minors).
+**Status:** Draft — Tier 4 gate ran (Changes requested at rev 5); rev 6 folds it;
+re-gate next, then Kurt's explicit approval before implementation.
 **Branch:** `spec/issue282-activity-query-mode`
 **Priority:** High — the integrations' autonomous-work delivery (plugin 0.7.x) is live
 and shipping the bare target to the message path until this lands.
@@ -25,7 +25,38 @@ production floors in this spec are RAW.
 
 ## Revision history (compressed)
 
-- **rev 5 (this rev):** Tier-3 delta #2: **APPROVE WITH NITS** ($0.50; the rev-4
+- **rev 6 (this rev):** Tier-4 Fable gate (REQUEST CHANGES at rev 5; $3.46, 36 turns;
+  full review `~/.local/state/tessera/issue282/tier4-fable-review.md`; all prior-tier
+  fixes verified holding). Folded: **B1** — a FIFTH floor-key resolution site: the
+  rule-attribution block inside `two_stage_entries` recomputes
+  `scheme_key = floor_key_for(profile_key, scheme)` and picks the rule whose composite
+  table value EQUALS the passed floor; an activity floor calibrated to anything but
+  the message value would attribute NOTHING → default RestrictedCosine on a
+  chunk-hop-calibrated floor, on the only active path. Fix: `two_stage_entries`
+  (attribution block) is resolution site 5, `QueryKind` threaded; lib test with a
+  stub activity value DIFFERENT from the message stub (0.40 vs 0.45) asserting
+  `outcome.floor_key_used` byte-exactly `…:activity:two-stage:chunk-hop` and
+  `rule == ChunkHop`; §3.1's "picks the composite up for free" dropped. **M1** —
+  the pinned two-stage gate label was WRONG: the ran-path label is
+  `{TWO_STAGE_LABEL_PREFIX}{scheme_key}` with the v1-shaped scheme key — NO composite
+  segment. Pinned label corrected to
+  `semantic-v2-two-stage:external:qwen/qwen3-embedding-4b:activity`; the composite
+  key appears ONLY in the audit `floor=` token. **M2** — empty-target row reworded:
+  immediate delegation to the message call with the same flags, NO activity
+  precheck; that call's own empty-text handling applies (the two-stage path checks
+  emptiness AFTER the pre-embed check today, so "before key resolution" was false).
+  **M3** — harness fidelity: activity calibration cells run with `v1_floor = None`
+  (no merge — matching production), the harness scoring applies the SAME
+  `user_stated` pre-truncation aperture, and positives are drawn from `user_stated`
+  facts (gated hit@1 reported on that subset; the aperture's cost reported
+  separately); `--query-kind` implies both. **m2** — audit `open` is post-aperture;
+  `top` stays the rule's own decision variable (chunk score under rule ii — the
+  aperture cannot move it). **m3** — `two_stage::coverage` has THREE unsuffixed
+  call sites (`:727` inside `two_stage_entries`, `:1073`, `:1160`). **m4** — the
+  fallback-parity test passes the target as ONE argv element after `--`. **m1/m5** —
+  header rev corrected; the `--max 1` claim stays controller-verified (integrations
+  repo outside the gate's context).
+- **rev 5:** Tier-3 delta #2: **APPROVE WITH NITS** ($0.50; the rev-4
   fixes verified against the code — cell-4 projection `:1110`, probe-miss cells
   `:1090-1094`, `outcome.rule` guard `:1183`, `schemed = raw.clone()` under raw
   `queries.rs:910-911`, v1-merge dead without a v1 row `:1150`). Folded:
@@ -212,16 +243,21 @@ in `tools/src/bin/ct.rs`):
   four-field `wisdom_gate_decision` stderr line (timestamp, read_scheme,
   open|closed, count) is UNCHANGED — it carries no gate label today and gains none.
   Pinned label strings, byte-exact:
-  - two-stage arm (the ONLY active arm — §3.3):
-    `semantic-v2-two-stage:{scheme_key}` with the scheme key carrying the activity
-    suffix — e.g.
-    `semantic-v2-two-stage:external:qwen/qwen3-embedding-4b:activity:two-stage:chunk-hop`.
+  - two-stage arm (the ONLY active arm — §3.3): `semantic-v2-two-stage:{scheme_key}`
+    where `scheme_key` is the EXISTING label construction
+    (`{TWO_STAGE_LABEL_PREFIX}{floor_key_for(profile_key, scheme)}` — the v1-shaped
+    key, NO composite segment) with the `:activity` suffix folded in via
+    `QueryKind`: pinned byte-exact as
+    `semantic-v2-two-stage:external:qwen/qwen3-embedding-4b:activity` (rev-6 M1;
+    the rev-3..5 string with `:two-stage:chunk-hop` appended was WRONG — appending
+    the composite at the label site would change the MESSAGE two-stage label too,
+    a #271 contract break).
   - v1 arm: NOT an active arm in this PR (rev-4 M2′), so it has no activity label.
     If a future rev re-admits it, its label is `semantic-v1:{gate_key}:activity`,
     grafted at the `wisdom_match_impl` gate-key formatting site via `QueryKind`.
-  The two-stage audit line's `floor=` token picks the composite up for free once the
-  suffix is folded in at the §3.3 resolution sites. NO new JSON field, NO `mode`
-  field — the label is the audit surface (Fable D1). The activity target is never
+  The audit line's `floor=` token prints `floor_key_used` from the §3.3 site-5
+  attribution fix — "for free" was FALSE and is dropped (rev-6 B1). NO new JSON
+  field, NO `mode` field — the label is the audit surface (Fable D1). The activity target is never
   echoed to stderr beyond what the message path echoes of message text today.
 
 ### 2. What gets embedded (D2 — resolved: bare target, byte parity with message mode)
@@ -285,10 +321,19 @@ in `tools/src/bin/ct.rs`):
   2. `two_stage_pre_embed_check`,
   3. `wisdom_match_two_stage_with_v1` (moot in activity mode — the merge never
      runs, §4 — but the parameter is threaded for type-honesty),
-  4. `match_with_resolved_floor`.
-  The sites that must stay UNSUFFIXED: `two_stage::coverage` (both call sites) and
-  `two_stage_k` — k is SHARED with message mode, keyed on the unschemed profile
-  key, and NOT re-calibrated for activity mode (rev-2 M-4).
+  4. `match_with_resolved_floor`,
+  5. the RULE-ATTRIBUTION block inside `two_stage_entries` (rev-6 B1): it
+     recomputes `scheme_key = floor_key_for(profile_key, scheme)` and picks the
+     rule whose composite table value EQUALS the passed `ts_floor` — without
+     `QueryKind` there, a calibrated activity floor (≠ the message value)
+     attributes NOTHING, the tie-break default RestrictedCosine runs against a
+     chunk-hop-calibrated floor, and `floor_key_used` (what the audit `floor=`
+     token prints) degrades to `…:two-stage:unattributed`.
+  The sites that must stay UNSUFFIXED: `two_stage::coverage` — ALL THREE call
+  sites (inside `two_stage_entries`, in `two_stage_pre_embed_check`, and in
+  `wisdom_match_two_stage_with_v1`) — and `two_stage_k`: k is SHARED with message
+  mode, keyed on the unschemed profile key, and NOT re-calibrated for activity
+  mode (rev-2 M-4; rev-6 m3).
 - Stage-default honesty (rev-4 M1′): `WisdomStageMode::Auto => false` IN MAIN —
   #287 flipped the chunk-hop floor row, NOT the stage default; with no stage flag
   the integrations run plain v1 today. All `:activity` calibration numbers MUST
@@ -312,7 +357,7 @@ code). Per-state table:
 | projected_cell != 4 for any other reason | message call, same flags |
 | post-embed degradation (`candidate_set` → `None`, `run.outcome.rule` absent) | message call, same flags, REUSING `raw_vec` (under raw the vector is identical — no second embed). RAW-ONLY shortcut: if a future rev ships instr1 activity rows, the fallback must RE-EMBED `query_text` — the reuse argument does not survive a scheme change |
 | `--single-stage` selected, or kill-switch active | message call, same flags — NO activity attempt at all (the v1 arm is not an active path, §3.3; no `two_stage_pre_embed_check` is reached, so no cell logic applies) |
-| empty target (`--path=`) | TODAY'S empty-text short-circuit wins FIRST — closed gate, exit 0, no embed, before key resolution and before fallback (rev-3 m4) |
+| empty target (`--path=`) | immediate delegation to the message call with the same flags — NO activity precheck; that call's own empty-text handling applies (no embed on either arm), exit 0 (rev-6 M2: on the two-stage path the empty check runs AFTER the pre-embed check today, so "before key resolution" was false) |
 
 Audit-line suppression (rev-4 B1′): the ABANDONED activity attempt prints NOTHING —
 the activity code path emits no `print_two_stage_audit` before delegating, so the
@@ -373,10 +418,12 @@ Placement (rev-2 I-5 + rev-3 M5):
    #265 corrections-always-delivered contract dominates ruling 3 — a superseding
    entry of any provenance still flows mid-task. And `user_confirmed` is EXCLUDED:
    the ruling says `user_stated` only.
-7. Audit pin (rev-3 M5): the two-stage audit `open=` and the JSON gate semantics
-   are computed AFTER the aperture — `open` reflects what would actually be
-   delivered (`TwoStageOutcome.open` keys on the final entries list), so a
-   fully-filtered pass reports closed, not open-then-empty.
+7. Audit pin (rev-3 M5 + rev-6 m2): the two-stage audit `open=` is computed AFTER
+   the aperture — `open` reflects what would actually be delivered
+   (`TwoStageOutcome.open` keys on the final entries list), so a fully-filtered
+   pass reports closed, not open-then-empty. `top` is NOT post-aperture: it stays
+   the rule's own decision variable (the member-CHUNK score under rule (ii)),
+   which the aperture cannot move — only `open` changes.
 Message mode and the fallback path are untouched.
 
 ### 6. Matching, ranking, corrections
@@ -396,6 +443,15 @@ Message mode and the fallback path are untouched.
   PR (§3.3 stage-default honesty). The harness selects arms explicitly, so the
   deployed dpkg's stage default is irrelevant to calibration; waiting for a
   "two-stage deploy" would block forever, since this PR never produces one.
+- **Harness fidelity (rev-6 M3):** activity calibration cells MUST measure the
+  shape production ships — `v1_floor = None` (the merge never runs in activity
+  mode, §4; the harness's default passes `Some(v1_floor)`, which would inflate
+  hit@1 with merged complement facts production never delivers), the SAME
+  `user_stated` pre-truncation aperture applied inside the harness scoring, and
+  positives drawn from `user_stated` facts only — the gated hit@1 is reported on
+  that subset, with the aperture's cost reported separately (a non-`user_stated`
+  positive reachable by baseline v1 but never by activity mode must not read as
+  "the floor bet failed"). `--query-kind` (step 7) implies ALL of this.
 - **Labeled set:** positives GENERATED from the stored facts (a proposal model
   drafts plausible activity targets per fact — path, command, and pattern shapes;
   Opus or Kurt adjudicates), because 7 adjudicated message-mode probes must not be
@@ -454,8 +510,10 @@ Message mode and the fallback path are untouched.
 5. `user_stated` aperture pre-truncation filter (§5) on the activity-active path.
 6. Gate label per §3.1 (composite scheme key carries `:activity`; no v1 activity
    label — v1 is not an active arm).
-7. Calibration harness extension: `--query-kind` (message|path|command|pattern) +
-   the instr1 instruction-ablation cell (harness-side prefix text).
+7. Calibration harness extension: `--query-kind` (message|path|command|pattern) —
+   implying `v1_floor = None`, the `user_stated` aperture in scoring, and
+   `user_stated`-only positives (rev-6 M3) — plus the instr1 instruction-ablation
+   cell (harness-side prefix text).
 8. Tests (§ Testing), docs, CHANGELOG.
 
 ## Error handling
@@ -476,7 +534,9 @@ Message mode and the fallback path are untouched.
     `ct wisdom match -- X`; `--two-stage --path=X` is byte-identical to
     `ct wisdom match --two-stage -- X` (including the audit line); both exit 0;
     empty output iff the reference call is empty (rev-2 M-2 — never an
-    unconditional "empty" assertion).
+    unconditional "empty" assertion). The reference passes the target as ONE argv
+    element after `--` (rev-6 m4: the positional is `Vec<String>` joined with a
+    space; a multi-space target must not produce a false parity failure).
   - empty target (`--path=`): closed gate, exit 0, no embed, ahead of key
     resolution (rev-3 m4).
   - `--help` advertises all three flags (integrations' capability probe).
@@ -490,6 +550,14 @@ Message mode and the fallback path are untouched.
     `WISDOM_GATE_FLOORS_TEST`, and CLI tests can and must see the fallback fire
     for an uncalibrated composite (rev-3 M4); there is NO v1-activity row or
     active-path test (rev-4 M2′).
+  - attribution test (rev-6 B1): with a stub activity composite value DIFFERENT
+    from the message stub (e.g. 0.40 vs 0.45), the active path's
+    `outcome.floor_key_used` is byte-exactly
+    `stub:constant8:activity:two-stage:chunk-hop` and `rule == ChunkHop` —
+    attribution exercised, not coincidental.
+  - label test (rev-6 M1): the JSON `gate` on the active path is exactly
+    `semantic-v2-two-stage:{scheme_key}:activity`-shaped (prefix + scheme key +
+    `:activity`, NO composite segment); the MESSAGE two-stage label is unchanged.
   - post-embed degradation: `candidate_set` → `None` after a cell-4 projection →
     fallback fires, reuses the raw vector (no second embed), and the abandoned
     attempt leaves NO stderr output of its own (rev-4 B1′).
