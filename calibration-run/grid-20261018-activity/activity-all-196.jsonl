@@ -1,0 +1,196 @@
+{"text": "scripts/install-ct.sh", "expect": ["fact_2c37b99b34c1893587cbd098"]}
+{"text": "packaging/postinst", "expect": ["fact_9eaedf3b3cd9609f5c2b1ae7"]}
+{"text": "immutable-source-files/agents/memories/new-deposit.md", "expect": ["fact_e6999db2fdf2b8046d26ffc3"]}
+{"text": "vault_write_note --path notes/scratch.md", "expect": ["fact_e6999db2fdf2b8046d26ffc3"]}
+{"text": "scripts/check-app-running.sh", "expect": ["fact_66d15681f76def10c2e56c38"]}
+{"text": ".hermes/skills/opus-review-bot/SKILL.md", "expect": ["fact_94b6dd1ea40dbd88e22d8b3c"]}
+{"text": "immutable-source-files/agents/memories/deposit-integrity.md", "expect": ["fact_10581d3c767b49e817c7a3f4"]}
+{"text": "ct wisdom deposit --file new-fact.md", "expect": ["fact_10581d3c767b49e817c7a3f4"]}
+{"text": "templates/note-frontmatter.md", "expect": ["fact_7febfadabd41769025e6ba84"]}
+{"text": "vault_write_note drafts/idea.md", "expect": ["fact_7febfadabd41769025e6ba84"]}
+{"text": "src-tauri/src/db/commit.rs", "expect": ["fact_8181b2fb7104c67a79a9dc85"]}
+{"text": "expo-llm-wiki/tests/brain_path.test.ts", "expect": ["fact_0ac4810a14e533c292d47993"]}
+{"text": ".config/Code/User/settings.json", "expect": ["fact_3e56bde0b08dc4104209a84b"]}
+{"text": "docs/comms/kurt-updates.md", "expect": ["fact_a668c3e9f3c4c5a40db37483"]}
+{"text": "INTENT.md", "expect": ["fact_0dfc2750a4a4c5031dc5f331"]}
+{"text": "cat INTENT.md", "expect": ["fact_0dfc2750a4a4c5031dc5f331"]}
+{"text": "INTENT", "expect": ["fact_0dfc2750a4a4c5031dc5f331"]}
+{"text": ".hermes/scripts/backup-memory.sh", "expect": ["fact_b24bb6adcc91b3fe44063e9c"]}
+{"text": "src-tauri/tests/common/mod.rs", "expect": []}
+{"text": "target/release/.fingerprint/app-1/libapp.d", "expect": []}
+{"text": ".github/workflows/ci.yml", "expect": []}
+{"text": ".github/workflows/build.yml", "expect": []}
+{"text": "src/hooks/useVaultPath.ts", "expect": []}
+{"text": "Cargo.lock", "expect": []}
+{"text": "src/lib/tauri.ts", "expect": []}
+{"text": "src/tests/setup.vitest.ts", "expect": []}
+{"text": "src/App.tsx", "expect": []}
+{"text": "src/components/TrustList.tsx", "expect": []}
+{"text": "src/utils/date.ts", "expect": []}
+{"text": ".github/CODEOWNERS", "expect": []}
+{"text": "eslint.config.js", "expect": []}
+{"text": "src/i18n/index.ts", "expect": []}
+{"text": "docs/runbooks/oncall.md", "expect": []}
+{"text": "src-tauri/build.rs", "expect": []}
+{"text": "src/components/SettingsModal.tsx", "expect": []}
+{"text": ".nvmrc", "expect": []}
+{"text": "src-tauri/src/db/connection.rs", "expect": []}
+{"text": "pnpm-workspace.yaml", "expect": []}
+{"text": ".editorconfig", "expect": []}
+{"text": "src/state/store.ts", "expect": []}
+{"text": "src-tauri/icons/32x32.png", "expect": []}
+{"text": "contrib/completions/ct.bash", "expect": []}
+{"text": "src-tauri/src/db/mod.rs", "expect": []}
+{"text": "tools/Cargo.toml", "expect": []}
+{"text": ".github/ISSUE_TEMPLATE/bug_report.md", "expect": []}
+{"text": "vite.config.ts", "expect": []}
+{"text": "playwright.config.ts", "expect": []}
+{"text": "docs/adr/0007-embed-scheme.md", "expect": []}
+{"text": "src-tauri/tauri.conf.json", "expect": []}
+{"text": "tools/tests/fixtures/probe.jsonl", "expect": []}
+{"text": "src/main.tsx", "expect": []}
+{"text": "public/icon.svg", "expect": []}
+{"text": "docs/adr/0008-provenance.md", "expect": []}
+{"text": "src-tauri/capabilities/default.json", "expect": []}
+{"text": "rust-toolchain.toml", "expect": []}
+{"text": "README.md", "expect": []}
+{"text": "CONTRIBUTING.md", "expect": []}
+{"text": "e2e/smoke.spec.ts", "expect": []}
+{"text": ".github/pull_request_template.md", "expect": []}
+{"text": "src/types/brain.ts", "expect": []}
+{"text": "LICENSE", "expect": []}
+{"text": "docs/db-diagram.md", "expect": []}
+{"text": "locales/de.json", "expect": []}
+{"text": "index.html", "expect": []}
+{"text": ".prettierrc", "expect": []}
+{"text": "docs/benchmarks/grid-2026-10-18/summary.json", "expect": []}
+{"text": "assets/logo.png", "expect": []}
+{"text": "src/api/client.ts", "expect": []}
+{"text": "scripts/rotate-keys.sh", "expect": []}
+{"text": "src/components/ConsentDialog.tsx", "expect": []}
+{"text": "tsconfig.json", "expect": []}
+{"text": "CHANGELOG.md", "expect": []}
+{"text": "locales/en.json", "expect": []}
+{"text": "src/styles/tokens.css", "expect": []}
+{"text": "cargo test -p curated-thoughts-tools", "expect": ["fact_ec357540b4dcfcacce38aa55"]}
+{"text": "cargo nextest run --workspace", "expect": ["fact_ec357540b4dcfcacce38aa55"]}
+{"text": "pgrep -f curated-thoughts", "expect": ["fact_2c37b99b34c1893587cbd098"]}
+{"text": "pgrep.*curated-thoughts", "expect": ["fact_2c37b99b34c1893587cbd098"]}
+{"text": "vault_write_note existing", "expect": ["fact_e6999db2fdf2b8046d26ffc3"]}
+{"text": "pgrep -af curated", "expect": ["fact_66d15681f76def10c2e56c38"]}
+{"text": "opus-review 289", "expect": ["fact_94b6dd1ea40dbd88e22d8b3c"]}
+{"text": "ct heal --yes", "expect": ["fact_8181b2fb7104c67a79a9dc85"]}
+{"text": "pnpm -C expo-llm-wiki test", "expect": ["fact_0ac4810a14e533c292d47993"]}
+{"text": "code --install-extension rust-lang.rust-analyzer", "expect": ["fact_3e56bde0b08dc4104209a84b"]}
+{"text": "msg kurt discord", "expect": ["fact_a668c3e9f3c4c5a40db37483"]}
+{"text": "backup-memory.sh --pre-heal", "expect": ["fact_b24bb6adcc91b3fe44063e9c"]}
+{"text": "df -h /", "expect": []}
+{"text": "cargo outdated", "expect": []}
+{"text": "pnpm build", "expect": []}
+{"text": "pnpm dlx svgo icon.svg", "expect": []}
+{"text": "snap list | head", "expect": []}
+{"text": "gh release list --limit 3", "expect": []}
+{"text": "pnpm install --frozen-lockfile", "expect": []}
+{"text": "rustup update stable", "expect": []}
+{"text": "cargo install cargo-nextest --locked", "expect": []}
+{"text": "git stash pop", "expect": []}
+{"text": "apt list --upgradable", "expect": []}
+{"text": "gh repo sync", "expect": []}
+{"text": "cargo sweep --time 30", "expect": []}
+{"text": "pnpm vitest run src/hooks", "expect": []}
+{"text": "systemctl status nginx", "expect": []}
+{"text": "pre-commit run --all-files", "expect": []}
+{"text": "gh pr view 282 --json commits", "expect": []}
+{"text": "cargo audit", "expect": []}
+{"text": "pnpm lint", "expect": []}
+{"text": "cargo run --bin ct -- status", "expect": []}
+{"text": "free -m", "expect": []}
+{"text": "sccache --show-stats", "expect": []}
+{"text": "cargo doc --no-deps", "expect": []}
+{"text": "cargo tree -d", "expect": []}
+{"text": "sqlite3 .schema llm_wiki_tasks", "expect": []}
+{"text": "sqlite3 'PRAGMA integrity_check;'", "expect": []}
+{"text": "cargo build --release", "expect": []}
+{"text": "node scripts/gen-types.ts", "expect": []}
+{"text": "dust -d 1 target", "expect": []}
+{"text": "cargo clippy --fix --allow-dirty", "expect": []}
+{"text": "pnpm exec tsc --noEmit", "expect": []}
+{"text": "systemctl --user status ct-gui-manual", "expect": []}
+{"text": "pgrep -af rustc", "expect": []}
+{"text": "git bisect start", "expect": []}
+{"text": "fd -e rs -x wc -l", "expect": []}
+{"text": "cargo metadata --format-version 1", "expect": []}
+{"text": "markdownlint docs --fix", "expect": []}
+{"text": "gh api rate_limit", "expect": []}
+{"text": "docker ps --format '{{.Names}}'", "expect": []}
+{"text": "cargo fmt --all", "expect": []}
+{"text": "ripgrep --version", "expect": []}
+{"text": "broot --sizes", "expect": []}
+{"text": "pnpm typecheck", "expect": []}
+{"text": "cargo bloat --release", "expect": []}
+{"text": "git gc --aggressive", "expect": []}
+{"text": "du -sh target", "expect": []}
+{"text": "codespell -L crate,ba", "expect": []}
+{"text": "journalctl --user -u ct-gui-manual -n 20", "expect": []}
+{"text": "git rebase -i origin/main", "expect": []}
+{"text": "gh run watch --exit-status", "expect": []}
+{"text": "git log --stat -5", "expect": []}
+{"text": "taplo format", "expect": []}
+{"text": "CT_BRAIN_DIR", "expect": ["fact_ec357540b4dcfcacce38aa55"]}
+{"text": "getent passwd kvuser", "expect": ["fact_9eaedf3b3cd9609f5c2b1ae7"]}
+{"text": "SUDO_USER", "expect": ["fact_9eaedf3b3cd9609f5c2b1ae7"]}
+{"text": "curated-thoughts is running", "expect": ["fact_66d15681f76def10c2e56c38"]}
+{"text": "flash reviewer", "expect": ["fact_94b6dd1ea40dbd88e22d8b3c"]}
+{"text": "append-only deposit", "expect": ["fact_10581d3c767b49e817c7a3f4"]}
+{"text": "okf frontmatter", "expect": ["fact_7febfadabd41769025e6ba84"]}
+{"text": "content_hash", "expect": ["fact_8181b2fb7104c67a79a9dc85"]}
+{"text": "EXPO_BRAIN", "expect": ["fact_0ac4810a14e533c292d47993"]}
+{"text": "integrated terminal", "expect": ["fact_3e56bde0b08dc4104209a84b"]}
+{"text": "ask Kurt", "expect": ["fact_a668c3e9f3c4c5a40db37483"]}
+{"text": "nightly heal", "expect": ["fact_b24bb6adcc91b3fe44063e9c"]}
+{"text": "actions/checkout@", "expect": []}
+{"text": "ALTER TABLE", "expect": []}
+{"text": "deprecated", "expect": []}
+{"text": "CREATE INDEX", "expect": []}
+{"text": "Box<dyn Error>", "expect": []}
+{"text": "data-testid", "expect": []}
+{"text": "assert_eq!", "expect": []}
+{"text": "tracing::debug!", "expect": []}
+{"text": "base64::encode", "expect": []}
+{"text": "vi\\.mock", "expect": []}
+{"text": "rand::thread_rng", "expect": []}
+{"text": "chrono::Utc::now()", "expect": []}
+{"text": "secrets\\.GITHUB_TOKEN", "expect": []}
+{"text": "aria-label", "expect": []}
+{"text": "matrix:", "expect": []}
+{"text": "unsafe ", "expect": []}
+{"text": "version = \"", "expect": []}
+{"text": "FIXME", "expect": []}
+{"text": "serde_json::to_value", "expect": []}
+{"text": "runs-on:", "expect": []}
+{"text": "#\\[derive\\(Serialize\\)\\]", "expect": []}
+{"text": "INSERT OR IGNORE", "expect": []}
+{"text": "timeout-minutes:", "expect": []}
+{"text": "fn run_migrations", "expect": []}
+{"text": "reqwest::Client", "expect": []}
+{"text": "CHANGELOG", "expect": []}
+{"text": "Result<(), Error>", "expect": []}
+{"text": "flex-direction:", "expect": []}
+{"text": "impl Display for", "expect": []}
+{"text": "permissions: write-all", "expect": []}
+{"text": "createMemo", "expect": []}
+{"text": "useEffect\\(", "expect": []}
+{"text": "TODO", "expect": []}
+{"text": "TODO\\(migration\\)", "expect": []}
+{"text": "PRAGMA foreign_keys", "expect": []}
+{"text": "match err", "expect": []}
+{"text": "tokio::spawn", "expect": []}
+{"text": "#\\[cfg\\(test\\)\\]", "expect": []}
+{"text": "sha2::Digest", "expect": []}
+{"text": "unwrap\\(\\)", "expect": []}
+{"text": "schema_version", "expect": []}
+{"text": "z-index:", "expect": []}
+{"text": "eprintln!", "expect": []}
+{"text": "pub(crate) fn", "expect": []}
+{"text": "unwrap_or_default", "expect": []}
+{"text": "async function", "expect": []}
