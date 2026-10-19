@@ -159,6 +159,11 @@ fn replay_activity_two_stage() {
         std::path::Path::new(&format!("{dir}/vectors.json.gz")).exists(),
         "partial freeze: expected.json and vectors.json.gz must be committed together"
     );
+    // TODO(follow-up, Tier-1.5 r1/r3/r4): this is a floor tripwire, not yet a
+    // true replay — vectors are never decoded and hit@1/FP are not re-asserted.
+    // Same gap as the shipped `replay_two_stage` (the shared `replay()` helper
+    // assumes hit@2 letters + message-shape expected.json). Extend both to a
+    // real replay once the helper generalizes to hit@1 activity letters.
 }
 
 /// Replays one frozen snapshot. `freeze_dir` holds vectors.json.gz +

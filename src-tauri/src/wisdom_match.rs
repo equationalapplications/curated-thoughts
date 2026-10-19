@@ -117,6 +117,12 @@ pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
     // kind; campaign `calibration-run/grid-20261018-activity/` (24 recorded cells +
     // 3 winning cells re-run at build bad0cdbb91f3) —
     // docs/benchmarks/2026-10-18-wisdom-gate-activity-restricted-cosine.md.
+    // Provenance note (Tier-1.5 r4): the freeze ran via a TEMPORARY, disclosed
+    // gate-disable of calibrate_wisdom_gate's fixture-size gate (reverted after
+    // the freeze — see freeze_provenance in the fixture's expected.json); the
+    // floor registration itself is this constant, unaffected by tooling. Flip
+    // go (covering the scratch-label stand-in AND the calibration methodology)
+    // approved by Kurt 2026-10-19.
     (
         "external:qwen/qwen3-embedding-4b:activity:two-stage:restricted-cosine",
         0.65,
