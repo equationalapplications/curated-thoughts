@@ -1,3 +1,15 @@
+## [3.9.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.8.1...v3.9.0) (2026-10-19)
+
+### Features
+
+* **wisdom-gate:** register activity composite floor — restricted-cosine @ 0.65 (letter PASSED) ([03327ff](https://github.com/equationalapplications/curated-thoughts/commit/03327ff14e4380de5c833e623e6cfe603ad83a72)), closes [#282](https://github.com/equationalapplications/curated-thoughts/issues/282)
+
+### Bug Fixes
+
+* **review:** commit per-kind probe splits so expected.json pins are auditable (Tier-1.5 r3) ([fc46d4f](https://github.com/equationalapplications/curated-thoughts/commit/fc46d4f55208a682d9b0dfab7cedcab4e71bb9f2))
+* **review:** correct activity freeze provenance hash + scope note (Tier-1.5 r1 findings 1,6) ([e2eaa9c](https://github.com/equationalapplications/curated-thoughts/commit/e2eaa9c371f52b4a89de5095fc6b6c78106e3d16))
+* **review:** Tier-1.5 r2 findings — true floor-band ratios, full sweep evidence, sample caveats ([954eb12](https://github.com/equationalapplications/curated-thoughts/commit/954eb12024ee88e06c1e7a3ab6217caaff9a8a6a))
+
 ## [3.8.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.8.0...v3.8.1) (2026-10-18)
 
 ### Bug Fixes
