@@ -109,7 +109,9 @@ pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
     // Activity composite key (issue #282, spec §3 `<raw>:activity:two-stage:<rule>`;
     // ONE shared `:activity` floor across all three kinds — Kurt ruling 2026-10-18):
     // calibrated 2026-10-18 on the Kurt-approved scratch COPY of the live brain (14
-    // facts relabeled user_stated in the copy only). restricted-cosine @ 0.65, k=8
+    // facts relabeled user_stated in the copy only; 12–18 positives per kind — SMALL
+    // SAMPLES, scratch-label stand-in pending Option 2 app attestations).
+    // restricted-cosine @ 0.65, k=8
     // (TWO_STAGE_K default): hit@1 0.278/0.250/0.250 vs v1-baseline 0.111/0.083/0.167
     // (path/command/pattern), FP 0 everywhere vs 1. Letter per #282 §7 passed in every
     // kind; campaign `calibration-run/grid-20261018-activity/` (24 recorded cells +

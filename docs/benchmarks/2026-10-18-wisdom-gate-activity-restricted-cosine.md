@@ -16,8 +16,8 @@ floor key, and 8 is both the measured value and the shipped default.
   This is a stand-in for Option 2 (in-app attestation), agreed with Kurt.
 - **Probe set:** 196 probes — 42 positives (3 target shapes per fact:
   path/command/pattern) + 154 near-miss negatives. Per-kind splits:
-  path 18+/56−, command 12+/52−, pattern 12+/46−. Full union
-  `probes/activity-all-196.jsonl` (this dir), facts in `activity-facts.jsonl`.
+  path 18+/56−, command 12+/52−, pattern 12+/46−.  Full union
+  `activity-all-196.jsonl` (this dir), facts in `activity-facts.jsonl`.
 - **Baseline (pinned):** message-mode v1, `ct wisdom match --max 1` @ registered
   raw floor 0.70.
 - **Cells:** 24 paired runs — (rule × floor) × 3 kinds × 2 rules × 4 floors
@@ -50,9 +50,27 @@ every passing grid; the tie-break never had to cross rules. chunk-hop (the
 shipped message-mode rule) survives all kinds only at 0.55 (hit@1 0.167–0.250,
 FP up to 3 on pattern) — dominated.
 
-Floor-band shape on rule (i): FP 0 up to 0.65; 0.70 collapses hit@1
-(0.083–0.167); 0.55 lets pattern FP 3 through. 0.65 is the conservative pick:
-the highest floor with hit@1 ≥ 3× baseline everywhere at FP 0.
+Floor-band shape on rule (i): FP 0 holds up to 0.65; 0.70 still passes the
+letter but collapses hit@1 to 0.083–0.167 — at or below baseline, i.e. the
+letter's equality boundary with no headroom; 0.55 lets pattern FP 3 through.
+0.65 is the shared floor actually picked for path and command (pattern's raw
+pick 0.60, which 0.65 also passes): the highest floor that keeps hit@1
+STRICTLY above baseline in every kind — 2.5×/3.0×/1.5× (path/command/pattern).
+(Correction 2026-10-19, Tier-1.5 r2 finding 1: an earlier draft claimed
+"≥ 3× everywhere", which pattern's 1.5× never met.)
+
+All 24 original sweep artifacts are committed here: the three winning cells
+twice (as `recorded-cell-*` from the original unversioned sweep, build
+`05dfe7bb`, and as `cell-*` from the version-tied re-run, build
+`bad0cdbb91f3…`), plus the remaining 21 as `sweep-<kind>-<rule>-f<floor>.json`
+under their scratch-campaign names (r2 finding 2).
+
+Regeneration caveat (r2 finding 3): the freeze snapshot is NOT regenerable
+from the committed tooling — see `freeze_provenance` in the fixture's
+`expected.json` (the freeze run used a temporary, since-reverted gate-disable
+of `calibrate_wisdom_gate`'s fixture-size gate). The calibration build sha
+`bad0cdbb91f3…` pins the calibration tree, not the merge commit (same
+convention as the #271 flip) (r2 finding 6).
 
 ## Winner
 
