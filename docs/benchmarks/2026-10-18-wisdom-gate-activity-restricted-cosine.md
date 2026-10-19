@@ -63,7 +63,10 @@ All 24 original sweep artifacts are committed here: the three winning cells
 twice (as `recorded-cell-*` from the original unversioned sweep, build
 `05dfe7bb`, and as `cell-*` from the version-tied re-run, build
 `bad0cdbb91f3…`), plus the remaining 21 as `sweep-<kind>-<rule>-f<floor>.json`
-under their scratch-campaign names (r2 finding 2).
+under their scratch-campaign names (r2 finding 2). The per-kind probe split
+files are committed too (`probes-path/command/pattern.jsonl` — r3 finding:
+`expected.json`'s `probes_sha256` pins the path split, so it must be
+auditable in-repo).
 
 Regeneration caveat (r2 finding 3): the freeze snapshot is NOT regenerable
 from the committed tooling — see `freeze_provenance` in the fixture's
