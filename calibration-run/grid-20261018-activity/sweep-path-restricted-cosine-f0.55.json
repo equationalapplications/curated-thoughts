@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "code_sha": "unversioned",
+  "generated_utc": "2026-10-18T23:40:52.983908653+00:00",
+  "probes": {
+    "path": "/home/kv-thinkpad-t420-ubuntu/ct-calibration-scratch/probes/probes-path.jsonl",
+    "sha256": "6000eaa3c802be5fd676ff3e79d00887726af338b31ce8bb49530589f51dd910",
+    "count": 74,
+    "relevant": 18,
+    "fp": 56
+  },
+  "baseline": {
+    "key": "external:qwen/qwen3-embedding-4b",
+    "floor": 0.7,
+    "scheme": "raw"
+  },
+  "candidate": {
+    "rule": "restricted-cosine",
+    "floor": 0.55,
+    "k": 8
+  },
+  "grid": {
+    "cells": 1,
+    "rule": "restricted-cosine",
+    "floor": 0.55,
+    "k": 8
+  },
+  "coverage": {
+    "candidate_docs": 43,
+    "covered": 43,
+    "fraction": 1.0
+  },
+  "single_stage": {
+    "hit2": 0.16666666666666666,
+    "hit1": 0.1111111111111111,
+    "fp": 1,
+    "opens": 8,
+    "entries_per_open": 1.375
+  },
+  "two_stage": {
+    "hit2": 0.4444444444444444,
+    "hit1": 0.2777777777777778,
+    "fp": 0,
+    "opens": 8,
+    "entries_per_open": 1.625
+  },
+  "two_stage_passes": true,
+  "letter": "act_hit1 >= base_hit1 && act_fp <= base_fp",
+  "letter_metric": "hit1",
+  "query_kind": "path",
+  "heldout": {
+    "splits": 5,
+    "half_size": 37,
+    "seed": 271828,
+    "per_split": [
+      {
+        "relevant": 9,
+        "fp": 28,
+        "single_stage_hit2": 0.1111111111111111,
+        "two_stage_hit2": 0.4444444444444444
+      },
+      {
+        "relevant": 9,
+        "fp": 28,
+        "single_stage_hit2": 0.1111111111111111,
+        "two_stage_hit2": 0.3333333333333333
+      },
+      {
+        "relevant": 9,
+        "fp": 28,
+        "single_stage_hit2": 0.0,
+        "two_stage_hit2": 0.4444444444444444
+      },
+      {
+        "relevant": 9,
+        "fp": 28,
+        "single_stage_hit2": 0.1111111111111111,
+        "two_stage_hit2": 0.4444444444444444
+      },
+      {
+        "relevant": 9,
+        "fp": 28,
+        "single_stage_hit2": 0.3333333333333333,
+        "two_stage_hit2": 0.4444444444444444
+      }
+    ]
+  },
+  "embeds": {
+    "per_message": 1,
+    "scheme": "raw",
+    "latency_ms_p50": 57.537597,
+    "latency_ms_p95": 61.784222
+  },
+  "injection": {
+    "rule": "restricted-cosine",
+    "opens": 8,
+    "entries_per_open_median": 2.0
+  },
+  "merge_attribution": {
+    "opens_via_merge_only": 0,
+    "hits_via_merge_only": 0,
+    "v1merged_total": 0
+  },
+  "v1_merge": {
+    "latency_ms_p95": 522.530183,
+    "volume_total": 0,
+    "measured": "combined-call"
+  },
+  "ablation": null,
+  "stale_embed_key_total": 0
+}

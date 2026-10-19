@@ -128,15 +128,14 @@ fn replay_two_stage() {
 
 /// Issue #282 (spec rev-9 m3): a replay test FOR THE ACTIVITY COMPOSITE
 /// KEY, parallel to [`replay_two_stage`], with its own sanitized-key freeze
-/// dir. `#[ignore]`d until the #282 calibration run commits the snapshot
-/// (spec §7: the grid evidence dir + freeze snapshot land with the
-/// calibration; the activity floor row ships in `WISDOM_GATE_FLOORS` only
-/// after the hit@1 letter passes — so the flip-gated floor assertion below
-/// is meaningless until then, exactly like `replay_two_stage` pre-#287).
+/// dir. Un-ignored by the 2026-10-18 calibration flip: the grid evidence
+/// dir + freeze snapshot landed (`calibration-run/grid-20261018-activity/`,
+/// `docs/benchmarks/2026-10-18-wisdom-gate-activity-restricted-cosine.md`)
+/// and the hit@1 letter passed in every kind, so the flip-gated floor
+/// assertion below now bites exactly like [`replay_two_stage`] post-#287.
 #[test]
-#[ignore = "activity freeze dir lands with the #282 calibration run (spec rev-9 m3)"]
 fn replay_activity_two_stage() {
-    let key = "external:qwen/qwen3-embedding-4b:activity:two-stage:chunk-hop";
+    let key = "external:qwen/qwen3-embedding-4b:activity:two-stage:restricted-cosine";
     let dir = freeze_dir_for(key);
     let expected_path = format!("{dir}/expected.json");
     assert!(
@@ -160,6 +159,11 @@ fn replay_activity_two_stage() {
         std::path::Path::new(&format!("{dir}/vectors.json.gz")).exists(),
         "partial freeze: expected.json and vectors.json.gz must be committed together"
     );
+    // TODO(follow-up, Tier-1.5 r1/r3/r4): this is a floor tripwire, not yet a
+    // true replay — vectors are never decoded and hit@1/FP are not re-asserted.
+    // Same gap as the shipped `replay_two_stage` (the shared `replay()` helper
+    // assumes hit@2 letters + message-shape expected.json). Extend both to a
+    // real replay once the helper generalizes to hit@1 activity letters.
 }
 
 /// Replays one frozen snapshot. `freeze_dir` holds vectors.json.gz +

@@ -1,0 +1,58 @@
+{"text": "CT_BRAIN_DIR", "expect": ["fact_ec357540b4dcfcacce38aa55"]}
+{"text": "getent passwd kvuser", "expect": ["fact_9eaedf3b3cd9609f5c2b1ae7"]}
+{"text": "SUDO_USER", "expect": ["fact_9eaedf3b3cd9609f5c2b1ae7"]}
+{"text": "curated-thoughts is running", "expect": ["fact_66d15681f76def10c2e56c38"]}
+{"text": "flash reviewer", "expect": ["fact_94b6dd1ea40dbd88e22d8b3c"]}
+{"text": "append-only deposit", "expect": ["fact_10581d3c767b49e817c7a3f4"]}
+{"text": "okf frontmatter", "expect": ["fact_7febfadabd41769025e6ba84"]}
+{"text": "content_hash", "expect": ["fact_8181b2fb7104c67a79a9dc85"]}
+{"text": "EXPO_BRAIN", "expect": ["fact_0ac4810a14e533c292d47993"]}
+{"text": "integrated terminal", "expect": ["fact_3e56bde0b08dc4104209a84b"]}
+{"text": "ask Kurt", "expect": ["fact_a668c3e9f3c4c5a40db37483"]}
+{"text": "nightly heal", "expect": ["fact_b24bb6adcc91b3fe44063e9c"]}
+{"text": "actions/checkout@", "expect": []}
+{"text": "ALTER TABLE", "expect": []}
+{"text": "deprecated", "expect": []}
+{"text": "CREATE INDEX", "expect": []}
+{"text": "Box<dyn Error>", "expect": []}
+{"text": "data-testid", "expect": []}
+{"text": "assert_eq!", "expect": []}
+{"text": "tracing::debug!", "expect": []}
+{"text": "base64::encode", "expect": []}
+{"text": "vi\\.mock", "expect": []}
+{"text": "rand::thread_rng", "expect": []}
+{"text": "chrono::Utc::now()", "expect": []}
+{"text": "secrets\\.GITHUB_TOKEN", "expect": []}
+{"text": "aria-label", "expect": []}
+{"text": "matrix:", "expect": []}
+{"text": "unsafe ", "expect": []}
+{"text": "version = \"", "expect": []}
+{"text": "FIXME", "expect": []}
+{"text": "serde_json::to_value", "expect": []}
+{"text": "runs-on:", "expect": []}
+{"text": "#\\[derive\\(Serialize\\)\\]", "expect": []}
+{"text": "INSERT OR IGNORE", "expect": []}
+{"text": "timeout-minutes:", "expect": []}
+{"text": "fn run_migrations", "expect": []}
+{"text": "reqwest::Client", "expect": []}
+{"text": "CHANGELOG", "expect": []}
+{"text": "Result<(), Error>", "expect": []}
+{"text": "flex-direction:", "expect": []}
+{"text": "impl Display for", "expect": []}
+{"text": "permissions: write-all", "expect": []}
+{"text": "createMemo", "expect": []}
+{"text": "useEffect\\(", "expect": []}
+{"text": "TODO", "expect": []}
+{"text": "TODO\\(migration\\)", "expect": []}
+{"text": "PRAGMA foreign_keys", "expect": []}
+{"text": "match err", "expect": []}
+{"text": "tokio::spawn", "expect": []}
+{"text": "#\\[cfg\\(test\\)\\]", "expect": []}
+{"text": "sha2::Digest", "expect": []}
+{"text": "unwrap\\(\\)", "expect": []}
+{"text": "schema_version", "expect": []}
+{"text": "z-index:", "expect": []}
+{"text": "eprintln!", "expect": []}
+{"text": "pub(crate) fn", "expect": []}
+{"text": "unwrap_or_default", "expect": []}
+{"text": "async function", "expect": []}

@@ -1,0 +1,42 @@
+{
+  "schema_note": "Activity two-stage freeze (issue #282 flip, 2026-10-18). Flip fields below are verbatim output of `calibrate_two_stage flip` on the winning artifact; the calibration block adds provenance. vectors.json.gz was frozen over the campaign's 14 labeled facts + the full 196-probe union (path/command/pattern splits) via a TEMPORARY uncommitted gate-disable in calibrate_wisdom_gate (its fixture-size gate \u2014 facts>=100/probes>=200 \u2014 predates small labeled sets; the #271 freeze predates that gate). Floor registered in WISDOM_GATE_FLOORS; k on TWO_STAGE_K's default row (8).",
+  "baseline_floor": 0.699999988079071,
+  "baseline_key": "external:qwen/qwen3-embedding-4b",
+  "floor": 0.6499999761581421,
+  "gate_key": "external:qwen/qwen3-embedding-4b:activity:two-stage:restricted-cosine",
+  "k": 8,
+  "note": "Floor/rule/k derived from the paired calibration artifact. replay_two_stage additionally requires vectors.json.gz, which ONLY the freeze-producing live run writes; never hand-edit this file.",
+  "probe_count": 74,
+  "probes_sha256": "6000eaa3c802be5fd676ff3e79d00887726af338b31ce8bb49530589f51dd910",
+  "rule": "restricted-cosine",
+  "schema": 1,
+  "source_artifact_code_sha": "bad0cdbb91f388428d37b9aebb277a5383780419",
+  "calibration": {
+    "campaign": "calibration-run/grid-20261018-activity",
+    "artifact": "cell-path-restricted-cosine-0.65-8.json",
+    "build_sha": "bad0cdbb91f388428d37b9aebb277a5383780419",
+    "probe_files": {
+      "path": {
+        "sha256": "6000eaa3c802be5fd676ff3e79d00887726af338b31ce8bb49530589f51dd910",
+        "file": "probes-path.jsonl (committed in calibration-run/grid-20261018-activity/, 74 lines; command/pattern splits committed beside it) — same value as the top-level probes_sha256; corrected 2026-10-19 (Tier-1.5 r1 finding 1: the previously recorded 7665ca64… matched no file on disk)"
+      }
+    },
+    "freeze_provenance": "vectors.json.gz produced by a live calibrate_wisdom_gate --freeze run at build bad0cdbb91f388428d37b9aebb277a5383780419 (tools harness), using a TEMPORARY uncommitted gate-disable of the tool's fixture-size gate (facts>=100/probes>=200 — predates small labeled sets). The disable was reverted immediately after the freeze; the committed tool keeps its guard. SCOPE: top-level flip fields (probe_count=74, probes_sha256) describe the WINNING PATH-KIND artifact; vectors.json.gz covers the FULL 196-probe union (probe_union.sha256) + the 14 labeled facts (facts.sha256).",
+    "probe_union": {
+      "count": 196,
+      "sha256": "9d371784eac0c70f3a2d55fcea32a858f31fe851d412e927ef953a20212592db",
+      "splits": "path 18+/56-, command 12+/52-, pattern 12+/46-"
+    },
+    "facts": {
+      "count": 14,
+      "sha256": "304df9b428d724aa3ee779ce4949cc6db168f95a414ec2322aa896d4fe7b9d35",
+      "note": "user_stated relabels on a Kurt-approved scratch COPY; live brain untouched"
+    },
+    "letters": {
+      "path": "act_hit1 0.278 vs base 0.111, FP 0 vs 1 \u2014 PASS",
+      "command": "act_hit1 0.250 vs base 0.083, FP 0 vs 1 \u2014 PASS",
+      "pattern": "act_hit1 0.250 vs base 0.167, FP 0 vs 1 \u2014 PASS"
+    },
+    "benchmark_doc": "docs/benchmarks/2026-10-18-wisdom-gate-activity-restricted-cosine.md"
+  }
+}

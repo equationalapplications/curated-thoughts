@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "winner": {
+    "rule": "restricted-cosine",
+    "floor": 0.6,
+    "k": 8,
+    "gate_key": "external:qwen/qwen3-embedding-4b:activity:two-stage:restricted-cosine"
+  },
+  "cells_considered": 8,
+  "passing_cells": 4,
+  "tie_break": "higher hit@2 → lower FP → rule (i) (GLM r1 minor-5); full ties → stricter floor → smaller k (documented extension)",
+  "patch_snippet": "// WISDOM_GATE_FLOORS (src-tauri/src/wisdom_match.rs) — add:\n    (\"external:qwen/qwen3-embedding-4b:activity:two-stage:restricted-cosine\", 0.6),\n"
+}
