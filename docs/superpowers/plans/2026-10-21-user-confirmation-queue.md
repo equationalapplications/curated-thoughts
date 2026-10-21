@@ -428,10 +428,29 @@ fn direct_write_is_gone() { /* compile-level: add_wisdom_in_tx no longer exists 
 - Create: scratch-brain seeding script (scratch only — NOT committed) confirming the 14 kernel facts as `user_confirmed` fixtures
 - Modify: `src-tauri/src/wisdom_match.rs` bench module (`--features slow-tests`; `wisdom_gate_bench` needs the feature flag or it silently runs 0 tests)
 
-- [ ] **Step 1: Benchmark** — activity FP stays 0 with the widened aperture on the seeded scratch brain (spec §3.6 by-construction argument, made empirical)
-- [ ] **Step 2: Full gate sweep** — entire suite + clippy `--all-targets -- -D warnings` on touched manifests + frontend build + message-mode replay
-- [ ] **Step 3: End-to-end smoke (local)** — deposit attributed note → appears in queue → confirm → `ct wisdom match --path=…` delivers it; message-mode replay byte-identical
-- [ ] **Step 4: Commit** — `test(wisdom): activity fp-0 benchmark on confirmed kernel set`
+- [x] **Step 1: Benchmark** — activity FP stays 0 with the widened aperture on the seeded scratch brain (spec §3.6 by-construction argument, made empirical)
+- [x] **Step 2: Full gate sweep** — entire suite + clippy `--all-targets -- -D warnings` on touched manifests + frontend build + message-mode replay
+- [x] **Step 3: End-to-end smoke (local)** — deposit attributed note → appears in queue → confirm → `ct wisdom match --path=…` delivers it; message-mode replay byte-identical
+- [x] **Step 4: Commit** — `test(wisdom): activity fp-0 benchmark on confirmed kernel set`
+
+> **Errata (Task-11 review):** (1) Task-1 ruling's mcp-server gate form is
+> `cargo check --tests --features mcp-server,test-utils` — the literal
+> `--features mcp-server` form fails pre-existing on test-utils-gated
+> `tests/pipeline_config.rs` exports (lib.rs:62-68). (2) Plan line 401
+> "Task 8/10 benchmark" reads "Task 11" (Task-10 verdict E1/INFO-1).
+
+> **Controller tick (2026-10-22):** Task 11 DONE — commit `68d0dcf2`; ALL 14 work items landed;
+> gates verified personally (canonical lib **1487/0 exact**, +5 attributable; replay **17/17**;
+> clippy clean; mcp-server,test-utils combined gate exit 0; bench **6/0** — FP **0.000** over
+> 154 irrelevant probes, opens 14, hit@1 0.262; pnpm build 0; vitest 612/0; E2E smoke
+> byte-identical ×2); SOR clean (0 findings, 19 clusters); verdict **APPROVE**
+> (`task11-review-verdict.md`). E1-E9 all accepted: FP-0 test asserts the PRODUCTION floor from
+> `WISDOM_GATE_FLOORS`; E5 resolved choice (a) — agent-tier event suppressed on Path-B stamps,
+> pinned both directions; all carried items (Tasks 2/5/6/7/8/9) closed verbatim; atomic
+> rewrites via house `safe_write_bytes`; N1 spoof covers env + label forms. Adversarial all
+> pass (fps asserted; crash-shape non-vacuous; env restore on panic). Findings: none blocking,
+> 4 informational (recorded in completion handoff). **IMPLEMENTATION COMPLETE — Tasks 1-11 all
+> APPROVED. PR #294 leaves draft.**
 
 ## Execution notes
 
