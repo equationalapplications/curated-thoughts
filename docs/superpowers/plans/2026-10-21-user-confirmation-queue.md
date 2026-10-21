@@ -297,7 +297,7 @@ fn message_mode_output_byte_identical() { /* ct wisdom match fixture: cached-out
 **Interfaces:**
 - Produces: widened activity aperture; `stated_attestations`-driven `user_stated` stamp.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[test]
@@ -312,7 +312,17 @@ fn mixed_or_zero_sources_stay_agent_tier() { /* mixed → librarian_inferred; ze
 fn attestation_frontmatter_in_agent_deposit_forges_nothing() { /* deposit file WITH attestation-shaped frontmatter, no table row → librarian_inferred */ }
 ```
 
-- [ ] **Step 2: RED** → **Step 3: Implement** → **Step 4: Gates** (baseline + 5; message-mode replay green) → **Step 5: Commit** — `feat(wisdom): widen activity aperture to user_confirmed and add attested-source arm`
+- [x] **Step 2: RED** → **Step 3: Implement** → **Step 4: Gates** (baseline + 5; message-mode replay green) → **Step 5: Commit** — `feat(wisdom): widen activity aperture to user_confirmed and add attested-source arm`
+
+> **Controller tick (2026-10-22):** Task 7 DONE — commit `d127d282`; gates verified personally
+> (canonical lib 1474/0 exact; replay 17/17; clippy clean); SOR clean (0 findings, 35 clusters,
+> n_unjudged=0); verdict **APPROVE** (`task7-review-verdict.md`). E1-E8 all accepted; **E2
+> RULED:** `verified` labels read the latest `okf_verified` json entry gated on
+> `confidence='confirmed'` (all three writers mirror the json atomically — data-identical to the
+> columns; MORE §3.3-faithful ISO `at`); one-line §5 wording clarification → docs pass (Task 10/
+> 11). Task-6 N+1 CLOSED via `ResolvedHit` + batched payload query. Routed to Task 11's carried
+> list: Low-1 stale tie-break comment (`tool_dispatch.rs:417`), Info-1 batch-level query_map
+> swallow, Info-2 plural log token, Info-3 silent non-array degradation.
 
 ### Task 9: App capture flow — stated/ folder, kick registration, confirm UI wiring, direct-write retirement
 
