@@ -65,6 +65,17 @@
   modal cap + snooze preference + read-only-`.brain/` safety, handle
   format validation, `audit_and_seed_kick` named as the index transaction,
   MCP identity format marked historical).
+- rev 4.1 (2026-10-21): Tier-4 delta re-gate — **APPROVE WITH NITS** ($3.27;
+  review preserved at
+  `records/investigations/2026-10-20-confirm-queue-fable-consult/spec294-fable-review2.md`
+  in the vault). All four nits folded: N1 — the human-tier predicate is a
+  `human_surface: true` flag in `ResolveOptions`, never a `reviewed_by`
+  string compare (`USER=desktop-ui` + PTY would spoof it); N2 —
+  `approval_instruction_source` dropped (no carrier exists; deposit
+  attribution already top-sorts); N3 — confirmation rebuild matches by
+  content hash, `fact_id` advisory; N4 — `stated/.*.jsonl` ledgers have
+  ingest tier None; JSONL forgery added to residual risk. Gate: no further
+  pass needed.
 
 ## 0. Decision record (Kurt rulings — binding; made in Discord thread 1559927525226971258, 2026-10-20/21; logged verbatim in vault `immutable-source-files/agents/memories/confirm-queue-aperture-decision-2026-10-20.md`)
 
@@ -425,7 +436,10 @@ INTENT Rule 8's planned capture, built here:
    existing pattern), an entry in the `walk_vault`/`ingest_tier_for`
    logic, and a NON-DEPOSIT kick path: the APP — not an agent kick —
    registers the kick ledger row (`set_kick_state`,
-   `wisdom_deposit.rs:474`) when it creates the file.
+   `wisdom_deposit.rs:474`) when it creates the file. The three
+   `stated/.*.jsonl` ledgers (`.confirmations`, `.attestations`,
+   `.denials`) have INGEST TIER NONE — they are operational state, never
+   documents (rev 4.1, gate N4).
 4. The kick ingests the file; the librarian extracts facts with evidence
    rows and embeddings — the standard extraction pipeline, unchanged.
    `stated/` files' proposals list them as source documents.
@@ -457,24 +471,29 @@ mid-task delivery vector for non-human-approved content. Fix, enforcing D2
 (rev 4: deletions, per the gate):
 
 - **The desktop app is the ONLY human-tier surface.** `resolve_proposal`
-  stamps a human tier (`user_confirmed`) ONLY when the decision carries the
-  app surface — `reviewed_by == DESKTOP_REVIEWER` (`proposals_api.rs:21`;
-  `reviewed_by` is server-set from the calling surface, never
-  caller-supplied, which is what makes this a code-surface check, m5).
+  stamps a human tier (`user_confirmed`) ONLY when the decision carries an
+  explicit `human_surface: true` FLAG in `ResolveOptions` — set ONLY by the
+  desktop app's call sites, never derived from a string (rev 4.1, gate N1:
+  the CLI's `reviewed_by` comes from the `USER` env var, so
+  `USER=desktop-ui` plus a PTY would satisfy a `reviewed_by ==
+  "desktop-ui"` string check and reopen D2; a boolean flag set by app code
+  cannot be spoofed by environment). `DESKTOP_REVIEWER`
+  (`proposals_api.rs:21`) remains the app's `reviewed_by` LABEL; the flag,
+  not the label, is the predicate.
 - CLI approvals and internal-API approvals resolve at agent tier
   (`librarian_inferred`) from rev 4 on, writing an event
   `approved_at_agent_tier`. A CLI operator who genuinely approves should
   confirm in the queue — one tap, same as chat-relay facts. (rev 4 M2: the
   TTY check cannot authenticate a human, so it must not confer a human
   stamp.)
-- An agent resolving an approval on Kurt's chat instruction MAY record the
-  instruction handle as display metadata (`approval_instruction_source`,
-  same format validation as `attribution_source`, §3.1) — queue rows
-  carrying it sort to the TOP ("Kurt said approve on <date> — confirm?").
-  The handle NEVER confers a tier; it is a convenience so the human stamp
-  is one tap in the app. A verified form of instruction-binding returns in
-  the R-B follow-up, when a transport can bind the handle to a real human
-  action (rev 4 B1: in v1 nothing verifies a handle, so it must not stamp).
+- Instruction handles (`approval_instruction_source`) are DROPPED (rev 4.1,
+  gate N2: after rev 4 no agent-facing approval surface exists to carry
+  one, and nothing verified it anyway). A chat "approved" simply resolves
+  at agent tier; queue top-sort for chat-relayed facts comes from the
+  deposit's `attribution_source` (§3.1), which already exists. A VERIFIED
+  form of instruction-binding returns in the R-B follow-up, when a
+  transport can bind the handle to a real human action (rev 4 B1: in v1
+  nothing verifies a handle, so it must not stamp).
 - The hardening doubles as a TRIPWIRE: if an MCP decide tool is ever
   proposed again, §0-H/§3.7-A is the standing answer — proposal-resolving
   tools stamp agent tier unless the human decision happens in the app.
@@ -490,10 +509,12 @@ mid-task delivery vector for non-human-approved content. Fix, enforcing D2
   rows; a frontmatter-trusted rebuild would violate Rule 2 and Rule 5's "a
   machine never raises the trust tier of a fact it received"). A brain
   rebuild re-derives `user_confirmed` ONLY from `.confirmations.jsonl`,
-  re-verifying each entry's content hash against the rebuilt row's
-  title+body; mismatch → not confirmed (the person re-confirms in the
-  app). Rule 1 traceability is carried by the evidence source document
-  plus this record.
+  matching by `content_hash` against the rebuilt row's title+body —
+  `fact_id` is ADVISORY only (rev 4.1, gate N3: fact ids are random and
+  change across rebuilds; the content hash is the stable key); hash
+  mismatch → not confirmed (the person re-confirms in the app). Rule 1
+  traceability is carried by the evidence source document plus this
+  record.
 - **Attestations:** `stated_attestations` rows are mirrored at write time
   to `stated/.attestations.jsonl` in the vault (app-written, one JSON line
   per attestation, content-hash keyed). A rebuild repopulates the table
@@ -618,7 +639,12 @@ Path-B replacement can be added when Rule 4 lands.
   database access can write `stated_attestations` or fact rows directly;
   CT's threat model is local-first single-user, so this is recorded, not
   defended (§3.7). A PTY-allocating agent can defeat the CLI TTY check —
-  which is why the CLI confers no human tier at all (§3.7-A).
+  which is why the CLI confers no human tier at all (§3.7-A). A hand-edited
+  or sync-corrupted `stated/.*.jsonl` ledger can at worst suppress facts or
+  fail-confirmed rebuilds — a FORGED confirmation line only promotes a fact
+  if its content hash matches re-ingested content AND the writer had file
+  access, which is the same local-process trust boundary as the database
+  itself (rev 4.1, gate N4).
 
 ## 5. Testing
 
@@ -662,9 +688,10 @@ Path-B replacement can be added when Rule 4 lands.
 - **Human-tier hardening tests (§3.7-A):** CLI approval resolves at agent
   tier + `approved_at_agent_tier` event; internal-API approval as an agent
   (`reviewed_by="tessera"`) resolves at agent tier; desktop-surface
-  approval (`DESKTOP_REVIEWER`) stamps `user_confirmed`;
-  `approval_instruction_source` sorts the queue row to the top and confers
-  NO tier.
+  approval (`human_surface: true`) stamps `user_confirmed`; **spoof test
+  (rev 4.1 N1):** a CLI-shaped call with `USER=desktop-ui` and
+  `reviewed_by="desktop-ui"` but no `human_surface` flag resolves at agent
+  tier.
 - **Durability tests (§3.8):** brain rebuild re-derives `user_confirmed`
   from `.confirmations.jsonl` with hash re-verification; mismatched
   confirmation entries → not confirmed; `stated_attestations` + denials
@@ -707,7 +734,8 @@ Path-B replacement can be added when Rule 4 lands.
 
 None blocking. Four items are flagged for his spec approval: (1) the §0-H
 hardening is stricter than first proposed — the desktop app is the ONLY
-human-tier surface; CLI and internal-API approvals resolve at agent tier
+human-tier surface (enforced by a `human_surface` flag in `ResolveOptions`,
+not a string compare); CLI and internal-API approvals resolve at agent tier
 (even a human at the terminal confirms via the queue); (2) the confidence
 ordinal is a ranking behavior change in `curated_recall_context`, shipped
 with a pinning test as a test-only exception to INTENT's spec+benchmark
