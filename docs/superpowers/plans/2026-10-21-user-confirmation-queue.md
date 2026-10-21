@@ -175,7 +175,7 @@ fn auto_approve_unchanged() { /* librarian_inferred, no event */ }
 **Interfaces:**
 - Produces: `QueueRow { fact_id, title, body, provenance, entity_id, evidence_quote: Option<String>, source_document: Option<String>, attributed_speaker: Option<String>, instruction_source: Option<String>, age_days }`; fn `queue_rows(conn) -> Vec<QueueRow>` — SQL: live entries (`lifecycle_status='stable'`, not superseded/expired per the existing supersede filters) with `source_type NOT IN ('user_stated','user_confirmed')` (NULL/out-of-vocab included) LEFT JOIN anti-match against `queue_denials` (document path + chunk hash + fact-text hash), evidence quote via the `deposit_status_row` join chain (`wisdom_deposit.rs:183-187`), ORDER BY age DESC.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[test]
@@ -186,7 +186,15 @@ fn denied_fact_excluded_sibling_included() { /* deny (doc,chunk,textA): fact A o
 fn evidence_quote_and_attribution_surfaces_on_row() { /* attributed deposit row shows speaker + quote */ }
 ```
 
-- [ ] **Step 2: RED** → **Step 3: Implement** → **Step 4: Gates** (baseline + 3; also run the MCP tool registration test module) → **Step 5: Commit** — `feat(queue): confirmation queue query and read-only mcp listing`
+- [x] **Step 2: RED** → **Step 3: Implement** → **Step 4: Gates** (baseline + 3; also run the MCP tool registration test module) → **Step 5: Commit** — `feat(queue): confirmation queue query and read-only mcp listing`
+
+> **Controller tick (2026-10-22):** Task 4 DONE — commit `d25b102c`; gates verified (lib 1465+59
+> exact, mcp_integration 4/4 via `--features mcp-server` recipe, clippy clean); SOR clean
+> (0 findings, 13 clusters); verdict **APPROVE** (`task4-review-verdict.md`). D1-D5 accepted
+> (D1: additive section in pre-existing db/queue.rs; D5: non-feature lib run is the canonical
+> count). **D6 ruling (binding):** replay-gate 16/17 failure = pre-existing wall-clock flake in
+> `target_of`'s byte-compare of two `ct` processes — convention: one re-run; timestamp-only diff +
+> green = PASS; ts-normalization fix rides Task 5's brief as a declared test-only deviation.
 
 ### Task 5: App confirm/deny actions (stamp + suppression + ledger append)
 
