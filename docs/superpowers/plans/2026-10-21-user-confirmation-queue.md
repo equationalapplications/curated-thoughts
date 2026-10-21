@@ -336,7 +336,7 @@ fn attestation_frontmatter_in_agent_deposit_forges_nothing() { /* deposit file W
 **Interfaces:**
 - Produces: `capture_statement` (Path B entry); frontend queue + modal components (contract: modal re-reads fact by id from the brain API, never renders drop-file payload text).
 
-- [ ] **Step 1: Failing tests (backend)**
+- [x] **Step 1: Failing tests (backend)**
 
 ```rust
 #[test]
@@ -347,7 +347,19 @@ fn fresh_statement_via_queue_creates_backing_fact() { /* Rule-15: confirm-with-n
 fn direct_write_is_gone() { /* compile-level: add_wisdom_in_tx no longer exists (#[cfg(test)] grep guard or deletion assertion via cargo check failure expectation) */ }
 ```
 
-- [ ] **Step 2: RED** → **Step 3: Implement** (backend first, then frontend components; `pnpm install --frozen-lockfile`, `pnpm build` + vitest for the queue/modal components with a mocked brain API: payload-tampering test = modal shows brain content not payload text) → **Step 4: Gates** (cargo baseline + 3; frontend suite green) → **Step 5: Commit** — `feat(app): stated capture flow, queue ui, and verification modals`
+- [x] **Step 2: RED** → **Step 3: Implement** (backend first, then frontend components; `pnpm install --frozen-lockfile`, `pnpm build` + vitest for the queue/modal components with a mocked brain API: payload-tampering test = modal shows brain content not payload text) → **Step 4: Gates** (cargo baseline + 3; frontend suite green) → **Step 5: Commit** — `feat(app): stated capture flow, queue ui, and verification modals`
+
+> **Controller tick (2026-10-22):** Task 8 DONE — commit `a43d833e`; gates verified personally
+> (canonical lib 1479/0 exact; replay 17/17; clippy clean); SOR clean (0 findings, 11 clusters,
+> n_unjudged=0); verdict **APPROVE** (`task8-review-verdict.md`). E1-E3 accepted (membership
+> predicate pre-truncate verified in code; Path B arm at `commit.rs:2994` structurally disjoint
+> from Task-3 arms; `all_sources_attested` sibling-safe against real schemas — `documents.path`
+> UNIQUE, attestation PK). **E4 RULED:** Path B arm not gated on `auto_approve` is
+> spec-conformant (§7.5 condition exhaustive; §2 instant-confirm requires auto path).
+> **E5 RULED:** mixed `user_stated` stamp + agent-tier event on a hypothetical manual resolve is
+> cosmetic, unreachable via shipped flows — carried to Task 11 (suppress-event-on-attested OR
+> document-as-behavior; silence not allowed). Adversarial checks: anti-forge test uses real file
+> + real hash + no row; no test touches the real vault.
 
 ### Task 10: Charter + spec-delta text (docs task)
 
