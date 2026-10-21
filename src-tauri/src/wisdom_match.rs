@@ -55,8 +55,9 @@ pub const PROVENANCE_VOCAB: &[&str] = &[
 /// (prose) or an activity target (`--path=`/`--command=`/`--pattern=` — a
 /// bare path, command or search pattern). The kind selects the ACTIVITY
 /// floor-key suffix — ONE shared `:activity` floor across all three target
-/// kinds (Kurt ruling 2026-10-18) — and, on the active path, the
-/// `user_stated` delivery aperture (§5 of the #282 spec). Message mode is
+/// kinds (Kurt ruling 2026-10-18) — and, on the active path, the human-tier
+/// delivery aperture (`user_stated` + `user_confirmed`; §5 rev-15 of the
+/// #282 spec). Message mode is
 /// byte-for-byte untouched: `QueryKind::Message` reproduces today's keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryKind {
@@ -524,7 +525,7 @@ fn gated_entries(
     now_ms: i64,
     temporal: &Temporal,
     id_filter: Option<&[String]>,
-    provenance_filter: Option<&str>,
+    provenance_filter: Option<&[&str]>,
 ) -> Result<Vec<WisdomItem>> {
     // THE shared eligibility predicate (spec §3.2) — the same fragment
     // `eligible_entry_ids` (and Task 3's stage-1 SQL) consumes, so the v1
@@ -598,13 +599,16 @@ fn gated_entries(
         if blob.len() != dim * 4 {
             continue;
         }
-        // The delivery aperture (issue #282 §5): `Some("user_stated")` on the
-        // activity-active path admits ONLY Kurt-stated facts, BEFORE the
-        // arm-internal truncate (`:565` below) — a top-N of filtered-out
-        // facts must never shadow a `user_stated` fact ranked below it.
+        // The delivery aperture (issue #282 §5 rev-15): the activity-active
+        // path admits the HUMAN-TIER SET — `user_stated` AND
+        // `user_confirmed` — as a provenance-set membership test, applied
+        // BEFORE the arm-internal truncate (`:635` below) so a top-N of
+        // filtered-out facts never shadows an admitted fact ranked below it.
         // Message mode and the merge pass `None` (unchanged).
         if let Some(want) = provenance_filter {
-            if provenance_for(source_type.as_deref()).as_deref() != Some(want) {
+            let admitted = provenance_for(source_type.as_deref())
+                .is_some_and(|p| want.contains(&p.as_str()));
+            if !admitted {
                 continue;
             }
         }
@@ -758,13 +762,14 @@ pub fn two_stage_entries(
 ) -> Result<TwoStageResult> {
     let max = max.min(MAX_ENTRIES);
     let k = two_stage_k(profile_key);
-    // The delivery aperture rides with the kind (issue #282 §5): activity
-    // admits `user_stated` only; message never filters. The v1-merge is dead
-    // under activity (its `v1_floor` is `None` — no v1 `:activity` row ships),
-    // so the filter below is inert there by construction.
-    let provenance_filter = match kind {
+    // The delivery aperture rides with the kind (issue #282 §5 rev-15):
+    // activity admits the human tier — `user_stated` AND `user_confirmed`;
+    // message never filters. The v1-merge is dead under activity (its
+    // `v1_floor` is `None` — no v1 `:activity` row ships), so the filter
+    // below is inert there by construction.
+    let provenance_filter: Option<&[&str]> = match kind {
         QueryKind::Message => None,
-        QueryKind::Activity => Some("user_stated"),
+        QueryKind::Activity => Some(&["user_stated", "user_confirmed"][..]),
     };
     // One skip set for ALL selections ("one id, one list"):
     let mut skip: HashSet<String> = exclude.iter().cloned().collect();
@@ -2952,6 +2957,106 @@ mod tests {
         assert!(
             msg_entries.iter().any(|e| e.id == "f1"),
             "message mode unchanged: f1 (librarian_inferred) delivered"
+        );
+    }
+
+    // ===================== Task 8: aperture widening + Path B =====================
+
+    /// Task 8 helper: a rule-(ii)-reachable entry (its evidence names the
+    /// fixture's `h-c1` chunk hash) with the stored `source_type` explicit,
+    /// so the delivery aperture is the ONLY filter standing between it and
+    /// the delivered list.
+    fn seed_aperture_entry(conn: &Connection, id: &str, source_type: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+               (id, entity_id, title, body, source_type, source_ref,
+                created_at, updated_at, embedding_blob)
+             VALUES (?1, ?2, 'T', 'B', ?3, 'x', 0, 0, ?4)",
+            params![id, format!("e-{id}"), source_type, ts_blob(&unit_vec(4))],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, created_at)
+             VALUES (?1, 'p1', '{\"evidence\":[{\"content_hash\":\"h-c1\"}]}', 0)",
+            params![id],
+        )
+        .unwrap();
+    }
+
+    /// Task 8 (§5 rev-15): the activity aperture admits the human-tier SET —
+    /// `user_stated` AND `user_confirmed`; `immutable_document` and a
+    /// stored type outside the provenance vocabulary (NULL provenance) do
+    /// not. Delivered labels stay `provenance_for(stored)` verbatim.
+    #[test]
+    fn activity_admits_confirmed_and_stated() {
+        let conn = fixture();
+        seed_aperture_entry(&conn, "f-cf", "user_confirmed");
+        seed_aperture_entry(&conn, "f-st", "user_stated");
+        seed_aperture_entry(&conn, "f-im", "immutable_document");
+        seed_aperture_entry(&conn, "f-np", "raw_note");
+        let (entries, outcome) = two_stage_entries(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            None,
+            Some(0.40), // the activity composite floor (test table)
+            8,
+            &HashSet::new(),
+            &HashSet::new(),
+            TS_NOW,
+            TS_KEY,
+            QueryKind::Activity,
+        )
+        .unwrap();
+        assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
+        // All four carry cosine 0.0 (u4 blobs vs the u1 query), so the
+        // delivered order is the id tie-break over the admitted set only.
+        let got: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            got,
+            vec!["f-cf", "f-st"],
+            "user_confirmed joins user_stated; immutable_document and NULL provenance stay out"
+        );
+        assert_eq!(entries[0].provenance.as_deref(), Some("user_confirmed"));
+        assert_eq!(entries[1].provenance.as_deref(), Some("user_stated"));
+    }
+
+    /// Task 8 non-shadowing pin (§5 fairness rule): the aperture filter runs
+    /// BEFORE the arm-internal truncate, so with max=1 a high-ranking
+    /// non-admitted fact is dropped rather than consuming the slot and
+    /// shadowing the admitted fact ranked below it.
+    #[test]
+    fn non_admitted_fact_never_shadows_admitted_below() {
+        let conn = fixture();
+        seed_aperture_entry(&conn, "f-im-high", "immutable_document");
+        seed_aperture_entry(&conn, "f-st-low", "user_stated");
+        // The immutable fact outranks: cosine 1.0 vs 0.0 against the query.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'f-im-high'",
+            params![ts_blob(&unit_vec(1))],
+        )
+        .unwrap();
+        let (entries, _outcome) = two_stage_entries(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            None,
+            Some(0.40),
+            1, // ONE slot: a post-truncate filter would deliver nothing
+            &HashSet::new(),
+            &HashSet::new(),
+            TS_NOW,
+            TS_KEY,
+            QueryKind::Activity,
+        )
+        .unwrap();
+        let got: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            got,
+            vec!["f-st-low"],
+            "the non-admitted high-ranker must be filtered pre-truncate, never shadow"
         );
     }
 

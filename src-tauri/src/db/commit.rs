@@ -2925,6 +2925,36 @@ pub(crate) fn precompute_entry_embeddings(
     out
 }
 
+/// Path B's attested-source predicate (spec §7.5, user-confirmation-queue
+/// Task 8): the proposal has AT LEAST ONE source document AND EVERY source
+/// document has a `stated_attestations` row whose `content_hash` matches the
+/// ingested `documents.hash`. THE TABLE is the only attestation authority
+/// (spec §3.3) — a source file's attestation-shaped frontmatter proves
+/// nothing, so this predicate never reads the file; a content-hash mismatch
+/// (file edited after attestation) reads as NOT attested.
+fn all_sources_attested(conn: &Connection, proposal_id: &str) -> Result<bool> {
+    let source_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM curated_proposal_sources WHERE proposal_id = ?1",
+        [proposal_id],
+        |r| r.get(0),
+    )?;
+    if source_count < 1 {
+        // Zero sources can never be human-tier (spec §7.5).
+        return Ok(false);
+    }
+    let unattested: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM curated_proposal_sources s
+         JOIN documents d ON d.id = s.doc_id
+         LEFT JOIN stated_attestations a
+           ON a.document_path = d.path AND a.content_hash = d.hash
+         WHERE s.proposal_id = ?1 AND a.document_path IS NULL",
+        [proposal_id],
+        |r| r.get(0),
+    )?;
+    Ok(unattested == 0)
+}
+
 /// Resolve a pending proposal inside `BEGIN IMMEDIATE` — all mutations and outbox rows roll back together on failure.
 pub fn resolve_proposal(
     conn: &mut Connection,
@@ -2953,12 +2983,17 @@ pub fn resolve_proposal(
     });
 
     let (now_secs, now_ms) = now_timestamps();
-    // Provenance arms (spec §3.7-A): (1) desktop-surface manual decision →
-    // `user_confirmed`; (2) manual decision without the desktop surface (CLI,
-    // MCP, internal API) → agent tier + `approved_at_agent_tier` event; (3)
-    // `auto_approve` → agent tier, unchanged, no event. Path B's `user_stated`
-    // arm lands later at this same decision point.
-    let source_type = if !options.auto_approve && options.human_surface {
+    // Provenance arms (spec §3.7-A + §7.5): Path B FIRST — a proposal with
+    // at least one source document where EVERY source document carries an
+    // app-written `stated_attestations` row (content-hash matched) stamps
+    // `user_stated` with no queue step ("instant confirm"). Then the
+    // Task-3 arms: (1) desktop-surface manual decision → `user_confirmed`;
+    // (2) manual decision without the desktop surface (CLI, MCP, internal
+    // API) → agent tier + `approved_at_agent_tier` event; (3)
+    // `auto_approve` → agent tier, unchanged, no event.
+    let source_type = if !options.human_surface && all_sources_attested(conn, proposal_id)? {
+        "user_stated"
+    } else if !options.auto_approve && options.human_surface {
         "user_confirmed"
     } else {
         "librarian_inferred"
@@ -4703,6 +4738,216 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM llm_wiki_events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(event_count, 1);
+    }
+
+    // ── Task 8: Path B attested-source provenance arm (spec §2/§7.5) ───────
+
+    fn stamped_source_type(conn: &Connection, result: &CommitResult) -> String {
+        assert_eq!(result.committed.len(), 1, "exactly one committed record");
+        conn.query_row(
+            "SELECT source_type FROM llm_wiki_entries WHERE id = ?1",
+            params![result.committed[0].record_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Task 8: a proposal whose source documents are ALL attested (a
+    /// `stated_attestations` row per document, `content_hash` matching the
+    /// ingested `documents.hash`, at least one source) stamps `user_stated`
+    /// without any queue step — the desktop app wrote the attestations, so
+    /// the fact is human-tier when the librarian finishes.
+    #[test]
+    fn attested_sources_stamp_user_stated() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/stated/kurt/2026/note.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        insert_test_proposal(
+            &conn,
+            "prop-att",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-att", chunk_id, "A stated fact.")],
+            doc_id,
+        );
+        // The app's attestation of record: `seed_document` pins the
+        // documents.hash literal "hash", so the row matches both keys.
+        conn.execute(
+            "INSERT INTO stated_attestations
+               (document_path, content_hash, attested_by, attested_at)
+             VALUES ('/vault/stated/kurt/2026/note.md', 'hash', 'kurt',
+                     '2026-10-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let decisions = all_accept_decisions(&conn, "prop-att");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-att",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "user_stated",
+            "all-attested sources ⇒ Path B user_stated"
+        );
+    }
+
+    /// Task 8 anti-arms: MIXED sources (one attested, one not) and ZERO
+    /// sources both stay agent tier — every source must be attested and at
+    /// least one source must exist before `user_stated` may stamp.
+    #[test]
+    fn mixed_or_zero_sources_stay_agent_tier() {
+        // (a) Mixed: one attested source + one unattested source.
+        let mut conn = open_in_memory().unwrap();
+        let doc_a = seed_document(&conn, "/vault/stated/kurt/2026/attested.md");
+        let doc_b = seed_document(&conn, "/vault/documents/plain.md");
+        let chunk_id = seed_chunk(&conn, doc_a);
+        insert_test_proposal(
+            &conn,
+            "prop-mixed",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-mixed", chunk_id, "A mixed-source fact.")],
+            doc_a,
+        );
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES ('prop-mixed', ?1, 'evidence')",
+            params![doc_b],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stated_attestations
+               (document_path, content_hash, attested_by, attested_at)
+             VALUES ('/vault/stated/kurt/2026/attested.md', 'hash', 'kurt',
+                     '2026-10-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let decisions = all_accept_decisions(&conn, "prop-mixed");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-mixed",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "librarian_inferred",
+            "mixed attested/unattested ⇒ agent tier"
+        );
+
+        // (b) Zero sources: no curated_proposal_sources row at all.
+        // `insert_proposal` refuses source-less proposals at insert time, so
+        // the zero-source brain is reached by deleting the row after the
+        // insert (the resolver must judge the TABLE, not the insert path).
+        let doc_c = seed_document(&conn, "/vault/documents/solo.md");
+        let chunk_c = seed_chunk(&conn, doc_c);
+        insert_test_proposal(
+            &conn,
+            "prop-zero",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-zero", chunk_c, "A sourceless fact.")],
+            doc_c,
+        );
+        conn.execute(
+            "DELETE FROM curated_proposal_sources WHERE proposal_id = 'prop-zero'",
+            [],
+        )
+        .unwrap();
+        let sources: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM curated_proposal_sources WHERE proposal_id = 'prop-zero'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sources, 0, "fixture: the zero-source proposal has no sources");
+        let decisions = all_accept_decisions(&conn, "prop-zero");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-zero",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "librarian_inferred",
+            "zero sources can never be human tier"
+        );
+    }
+
+    /// Task 8 anti-forge pin (spec §3.3): an agent deposit file carrying
+    /// attestation-SHAPED frontmatter but NO `stated_attestations` row
+    /// stamps `librarian_inferred` — the table is the only attestation
+    /// authority, so file content proves nothing and the resolver never
+    /// reads it back.
+    #[test]
+    fn attestation_frontmatter_in_agent_deposit_forges_nothing() {
+        let mut conn = open_in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("ct-task8-forge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("agent_deposit.md");
+        std::fs::write(
+            &file,
+            "---\n\
+             attested_by: kurt\n\
+             attested_at: '2026-10-21T00:00:00Z'\n\
+             ---\n\n\
+             An agent deposit wearing attestation-shaped frontmatter.\n",
+        )
+        .unwrap();
+        let content_hash = crate::hasher::hash_bytes(&std::fs::read(&file).unwrap());
+        let doc_id = upsert_document(&conn, &file.to_string_lossy(), &content_hash).unwrap();
+        let chunk_id = seed_chunk(&conn, doc_id);
+        insert_test_proposal(
+            &conn,
+            "prop-forge",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-forge", chunk_id, "A forged-tier fact.")],
+            doc_id,
+        );
+
+        let decisions = all_accept_decisions(&conn, "prop-forge");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-forge",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "librarian_inferred",
+            "attestation-shaped frontmatter with no table row forges nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
