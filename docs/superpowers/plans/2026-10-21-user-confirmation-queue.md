@@ -397,10 +397,21 @@ fn direct_write_is_gone() { /* compile-level: add_wisdom_in_tx no longer exists 
 > add-fact semantics; the record lives in the confirmation-queue spec's as-built
 > addendum (rev 4.2).
 
-- [ ] **Step 1: Apply INTENT.md amendments** (exact text from spec §3.10 — no paraphrase)
-- [ ] **Step 2: Apply #282 §5 delta** (rev-15 entry: aperture admits `user_stated` + `user_confirmed`; `immutable_document` excluded; non-shadowing preserved; precondition (a) met by the kernel calibration argument + the Task 8/10 benchmark)
-- [ ] **Step 3: Verify** — every quoted old passage matches what INTENT.md actually had (git diff shows pure replacements); no other INTENT edits
-- [ ] **Step 4: Commit** — `docs(intent): confirmation queue, provenance labels, and user-scope documentation`
+- [x] **Step 1: Apply INTENT.md amendments** (exact text from spec §3.10 — no paraphrase)
+- [x] **Step 2: Apply #282 §5 delta** (rev-15 entry: aperture admits `user_stated` + `user_confirmed`; `immutable_document` excluded; non-shadowing preserved; precondition (a) met by the kernel calibration argument + the Task 8/10 benchmark)
+- [x] **Step 3: Verify** — every quoted old passage matches what INTENT.md actually had (git diff shows pure replacements); no other INTENT edits
+- [x] **Step 4: Commit** — `docs(intent): confirmation queue, provenance labels, and user-scope documentation`
+
+> **Controller tick (2026-10-22):** Task 10 DONE — commit `09bc787b`; controller verified
+> personally (review_shim diff COMMENT-ONLY line by line; canonical lib **1482/0 re-derived
+> empirically** — closes the implementer's flagged gap, their run was machine-killed mid-build);
+> SOR clean (3 clusters, docs triaged); verdict **APPROVE** (`task10-review-verdict.md`).
+> Verbatim-match audit MECHANICAL: all 11 §3.10 quoted passages diffed programmatically — 9
+> exact, 2 verbatim modulo the house-style status-marker wrapper (E2 RULED authorized — the
+> quotes themselves say "Partly built"); zero unauthorized INTENT edits; adversarial
+> vocabulary/meaning-flip sweep clean; C4 proven comment-only byte-identical after comment
+> strip. E1 accepted (Task 11 citation factually correct; plan line 401 stale — ERRATA-worthy
+> only). One INFO (Rule 10 heading period, cosmetic).
 
 ### Task 11: Kernel seeding + benchmark + whole-branch verification
 
