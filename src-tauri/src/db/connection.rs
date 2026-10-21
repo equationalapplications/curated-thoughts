@@ -835,9 +835,18 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
     // rev 4.1 §1/D4): the deposit file's frontmatter is authoritative; this
     // derived table is written inside the audit_and_seed_kick transaction.
-    // Ungated, idempotent DDL on every open — no schema_version stamp (the
-    // V18/V26 DDL-only precedent). Task 2 adds its own migrations/ files.
+    // Ungated, idempotent DDL on every open — no schema_version stamp. (The
+    // ungated precedent is the V27/V28 bodies above, which also run on every
+    // open; V18/V26 themselves DO stamp schema_version.) Task 2 adds its own
+    // migrations/ files.
     conn.execute_batch(include_str!("migrations/0001_deposit_attribution.sql"))?;
+
+    // Stated verification tables (user-confirmation-queue Task 2, spec rev 4.1
+    // §8): derived indexes for attestations and queue denials, rebuilt from the
+    // app-written stated/.attestations.jsonl / .denials.jsonl vault ledgers by
+    // db::stated_ledger::rebuild_rederive. Same ungated, idempotent DDL shape
+    // as 0001 — no schema_version stamp.
+    conn.execute_batch(include_str!("migrations/0002_stated_verification.sql"))?;
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
