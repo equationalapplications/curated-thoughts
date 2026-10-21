@@ -22,24 +22,49 @@
   payload (m4).
 - rev 3 (2026-10-21): Tier-3 Opus review (REQUEST CHANGES; 1 BLOCKER,
   7 MAJOR, 8 MINOR — all adjudicated REAL, all addressed): §0-H hardening —
-  `curated_proposal_decide` / CLI review can already stamp `user_confirmed`
-  today; human-tier stamps now require an app surface or an attested human
-  instruction, else agent tier (B1); sidecar is NOT read-only — trust
-  boundary restated as code-surface + policy, residual risk documented;
-  modal renders from the brain by fact id, never from drop-file payload
-  (M1); rate-limit moved to drop-file + app side (M2); deny-suppression
-  re-keyed to (document path + chunk hash) (M3); durability & sync
-  subsection — confirm writes the vault fact file AND the brain row,
-  app-sealed state mirrored to the vault for rebuild (M4); Path B
-  predicate requires ≥1 source and all attested, stated/ files ride the
-  deposit lane, human-tier arm checked first (M5); Rule 10 text carries
-  the #265 corrections exception (M6); D7 confidence write declared as an
-  intended recall-ranking shift with a pinning test (M7); minors: file
-  paths fixed, `provenance` key unified with `wiki_graph.rs:1953`,
-  attribution parsed at deposit time (single statement), SHA-256 content
-  hash pinned, drop-file race notes, Rule 2/8 status amendments added,
-  new tests. Plus ruling R-B: verification prompting is roadmap-planned
-  for remote transports (Discord); the R-A event is transport-agnostic.
+  human-tier stamps restricted to app surface or attested human
+  instruction; sidecar is NOT read-only — trust boundary restated as
+  code-surface + policy, residual risk documented; modal renders from the
+  brain by fact id, never from drop-file payload (M1); rate-limit moved to
+  drop-file + app side (M2); deny-suppression keyed to document+chunk
+  (M3); durability & sync subsection (M4); Path B predicate requires ≥1
+  source and all attested, stated/ files ride the deposit lane, human-tier
+  arm checked first (M5); Rule 10 text carries the #265 corrections
+  exception (M6); confidence write declared with pinning test (M7); file
+  paths fixed, attribution parsed at deposit time (single statement),
+  SHA-256 content hash pinned, drop-file race notes, Rule 2/8 status
+  amendments added, new tests. Plus ruling R-B: verification prompting is
+  roadmap-planned for remote transports (Discord); the R-A event is
+  transport-agnostic.
+- rev 4 (2026-10-21): Tier-4 Fable gate, pass 1 (REQUEST CHANGES; 2
+  BLOCKERS, 6 MAJOR, 10 MINOR — all adjudicated REAL, all addressed, mostly
+  by DELETION): human-tier stamps are DESKTOP-APP-ONLY — the
+  `human_instruction` escape hatch is dropped from v1 (B1: an agent-asserted
+  handle is exactly the unverifiable assertion D2 forbids) and CLI
+  approvals resolve at agent tier too (M2: the TTY check is hygiene, not
+  authentication); chat-"approved" resolves at agent tier and records the
+  handle as queue-priority display metadata — the human stamp is one tap in
+  the app; confirmations rebuild from an app-written
+  `stated/.confirmations.jsonl` mirror, not fact-file frontmatter (B2: the
+  vault fact file does not exist and frontmatter-trusted rebuilds violate
+  Rules 2/5); the hardening premise corrected — `curated_proposal_decide`
+  was REMOVED (INTENT Rule 1), real surfaces are the CLI loop and the
+  internal API, and the hardening doubles as a tripwire against
+  re-introducing an MCP decide tool (M1); deny-suppression re-keyed to
+  (document path, chunk hash, normalized fact-text hash) so sibling facts
+  from the same chunk stay confirmable (M3); `rank_wiki_entries` maps
+  confidence to an ORDINAL (`confirmed` > `inferred` > unknown) — the
+  string compare ranked `confirmed` BELOW `inferred` (M4); per-hit labels
+  are `source_type` + `verified` (the `provenance` at `wiki_graph.rs:1953`
+  is a top-level trace list, not a per-hit field — M5); the direct app
+  write is retired IN THIS PR and the Rule 2 status replaced wholesale
+  (M6); minors m1–m10 (vocab cite off-by-one, Rule 8 status "partly
+  built", `stated/` folder mode + app-registered kick ledger, hash reuse
+  via `hasher::hash_bytes`, `DESKTOP_REVIEWER` constant + server-set
+  `reviewed_by`, confirm does not touch `lifecycle_status`, per-drain
+  modal cap + snooze preference + read-only-`.brain/` safety, handle
+  format validation, `audit_and_seed_kick` named as the index transaction,
+  MCP identity format marked historical).
 
 ## 0. Decision record (Kurt rulings — binding; made in Discord thread 1559927525226971258, 2026-10-20/21; logged verbatim in vault `immutable-source-files/agents/memories/confirm-queue-aperture-decision-2026-10-20.md`)
 
@@ -57,7 +82,7 @@
 | D6 | Recall labeling | Provenance + who/when-verified labels added to ALL agent-facing recall tools; `ct wisdom match` CLI output stays byte-identical |
 | D7 | Vocabulary | `immutable_document` stays OUT of mid-task delivery for now (fully recallable + labeled; a future widen decision with its own evidence). Confirm also sets `confidence = 'confirmed'` |
 | D8 | Spec vehicle | ONE combined spec: this document carries the feature design, the INTENT.md amendment text, and the #282 §5 rev-15 delta; one ladder pass |
-| H | Spec hardening (rev 3, enforcing D2 — flagged for Kurt at spec approval) | A human-tier provenance stamp requires an app-surface decision or an attested human instruction. The existing hole — `curated_proposal_decide` (MCP) and `ct proposals review` stamp `user_confirmed` today, and both are agent-callable — is closed by §3.7-A |
+| H | Spec hardening (rev 3/4, enforcing D2 — flagged for Kurt at spec approval) | A human-tier provenance stamp is produced ONLY by the desktop app (queue confirm, or Path B attestation at stated-file creation). Every other approval surface — the CLI review loop, the internal Rust API — resolves at agent tier. This closes the pre-existing hole where any `auto_approve: false` approval stamped `user_confirmed`, and acts as a tripwire against re-introducing an agent-callable decide tool |
 
 ## 1. Problem
 
@@ -67,17 +92,21 @@
    quotes Kurt verbatim. The live brain holds 504 active entries, ALL
    `librarian_inferred`, zero `user_stated`/`user_confirmed`.
 2. **Human-approved stamps exist but are never exercised on the live brain —
-   and the paths that stamp them are agent-callable.** `user_confirmed` is in
-   the provenance vocabulary (`wisdom_match.rs:48-53`) and is emitted by
-   `resolve_proposal` whenever `auto_approve` is false
-   (`src-tauri/src/db/commit.rs:2926-2930`); both review surfaces pass
+   and the surfaces that stamp them are not human-authenticated.**
+   `user_confirmed` is in the provenance vocabulary (`wisdom_match.rs:47-52`)
+   and is emitted by `resolve_proposal` whenever `auto_approve` is false
+   (`src-tauri/src/db/commit.rs:2926-2930`); the review surfaces pass
    `auto_approve: false` (`src-tauri/src/db/proposals_review.rs:161-168`,
-   `:263-265`). But BOTH surfaces are reachable by agents: the MCP tool
-   `curated_proposal_decide` (`tool_dispatch.rs:2265`) and the CLI. A repo
+   `:263-265`). But the surfaces are the CLI review loop
+   (`tools/src/cmds.rs:1722-1731`; its TTY check is documented in-code as
+   hygiene, not authentication — a PTY-allocating agent defeats
+   `is_terminal()`, `cmds.rs:1723-1726`) and the internal Rust API (a repo
    test approves as `reviewed_by="tessera"` — an agent — and gets
-   `user_confirmed` (`proposals_review.rs:633-640`). The 2026-09-09 design
+   `user_confirmed`, `proposals_review.rs:633-640`). The 2026-09-09 design
    treats `auto_approve: false` as declaring a human decision; nothing
-   enforces it.
+   enforces it. (An MCP decide tool once existed and was removed — INTENT
+   Rule 1: "the four old tools are gone from both the MCP sidecar and `ct`",
+   INTENT.md:76-78 — but nothing prevents its reintroduction.)
 3. **App-stated facts are delivery-invisible.** The app writes `user_stated`
    rows directly with no evidence and no chunks (`src-tauri/src/db/wisdom.rs:143-158`).
    Activity mode runs rule (ii) only, which opens facts through the
@@ -123,11 +152,13 @@ deposit, not of the librarian's output.
 
 Rejected alternatives (with reasons):
 
-- **MCP confirm tool for the queue** — an agent vouching as Kurt is the
-  honesty hole the design closes (D2). The read-only queue list is the only
-  agent surface. The proposal-decide escalation remains for chat-"approved",
-  but hardened per §0-H/§3.7-A: without an attested human instruction it can
-  no longer produce a human-tier stamp.
+- **Any non-app human-tier stamp** (a re-introduced MCP decide tool, a CLI
+  stamp, agent-carried "he approved in chat" handles) — an agent vouching as
+  Kurt is the honesty hole the design closes (D2). Every such surface
+  resolves at agent tier; the queue sorts agent-resolved approvals carrying
+  an instruction handle to the top so the human stamp is one tap in the app
+  (§3.7-A). The removed MCP decide tool must stay removed; §3.7-A is also
+  the tripwire if one is ever proposed again.
 - **Delivery-gate exception for app-written facts** — punches a hole in the
   FP=0 gate story and adds a permanent special case (rejected in favor of
   D5's file path, which IS the charter's own Rule 8).
@@ -136,10 +167,18 @@ Rejected alternatives (with reasons):
   frontmatter is the carrier of truth (D4), with a deposit-time derived
   index for cheap queries (a cache over files, recomputable, never
   authoritative).
-- **Retiring the direct app write before Path B ships** — breaks existing
-  app behavior; instead the direct write stays until Path B lands, and the
-  UI labels such facts "recallable, not delivered mid-task" so the gap is
-  visible (retired once Path B ships, per D5).
+- **Vault fact files for confirmations** — rejected at gate (rev 4, B2): no
+  fact-file artifact exists today (facts are `llm_wiki_entries` rows; the
+  OKF migration purged wiki-tier documents), and a frontmatter-trusted
+  rebuild would let any file writer forge `user_confirmed` (Rule 2: files
+  without an app-written attestation are agent-written, wherever they sit;
+  Rule 5: a machine never raises the trust tier of a fact it received).
+  Confirmations rebuild from the app-written `.confirmations.jsonl` mirror
+  instead (§3.8).
+- **Keeping the direct app write alongside Path B** — Path B ships in this
+  PR (§3.7); keeping both would leave two app write paths with different
+  delivery semantics. The direct `add_wisdom_in_tx` write is retired in
+  this PR (D5, rev 4 M6).
 
 ## 3. Design
 
@@ -162,12 +201,17 @@ Notes without attribution render exactly as today (no frontmatter, byte
 identical). `kind` vocabulary: `verbatim` and `restated_at_direction` only —
 the agent may attribute only what Kurt said or faithfully restated at his
 direction, never its own paraphrase or librarian output (S2; enforced by
-argument validation, not by trust). Consequences handled:
+argument validation, not by trust). Handle values (`attribution_source`,
+and later `approval_instruction_source`, §3.7-A) are validated against
+`^[a-z]+:[A-Za-z0-9_.-]+$` at argument validation — they are rendered into
+YAML frontmatter and parsed back, so free text is rejected at the door
+(rev 4 m8). Consequences handled:
 
 - The chunker will see frontmatter lines; the ingest path strips/ignores
   them for evidence quotes (pinned by test, §5).
-- The frontmatter is parsed at DEPOSIT time — in the same transaction that
-  registers the kick (`wisdom_deposit.rs:454-480`) — into a derived
+- The frontmatter is parsed at DEPOSIT time — inside the
+  `audit_and_seed_kick` `with_rw` closure (`wisdom_deposit.rs:454-480`,
+  named so the index insert lands in that transaction) — into a derived
   brain-side attribution index keyed by document path. The file is created
   by the same call, so deposit time is the only parse point needed; a
   re-ingest repopulates the index from the file. The index is a cache: the
@@ -176,14 +220,14 @@ argument validation, not by trust). Consequences handled:
 ### 2. The confirmation queue (D1)
 
 The queue is a query, not a table. Membership: a fact is in the queue when
-it is (a) live (not superseded/expired), (b) its provenance is NOT in
-`{user_stated, user_confirmed}` — i.e. `librarian_inferred` and
-`immutable_document` facts both appear — and (c) it is not deny-suppressed
-(§3). NULL or out-of-vocabulary provenance counts as unverified (in the
-queue); the delivery aperture, by contrast, admits only exact vocabulary
-values, so NULL/unknown provenance is never delivered mid-task. No
-attribution required for membership (D1: verification status is the
-criterion). The existing trace
+it is (a) live (`lifecycle_status` active — not superseded/expired), (b) its
+provenance is NOT in `{user_stated, user_confirmed}` — i.e.
+`librarian_inferred` and `immutable_document` facts both appear — and (c) it
+is not deny-suppressed (§3). NULL or out-of-vocabulary provenance counts as
+unverified (in the queue); the delivery aperture, by contrast, admits only
+exact vocabulary values, so NULL/unknown provenance is never delivered
+mid-task. No attribution required for membership (D1: verification status is
+the criterion). The existing trace
 entry → `librarian_evidence` → proposal → `curated_proposal_sources` →
 `documents` (the join `wisdom_deposit.rs:183-187` uses) supplies each row's
 evidence quote, so the UI shows the fact beside the source text it came
@@ -199,13 +243,15 @@ Confirm runs one UPDATE in the shape of `drafts.rs:62-74`:
 
 - `source_type = 'user_confirmed'`
 - `confidence = 'confirmed'` (D7; matches the app's own direct-write
-  convention, `wisdom.rs:148`; ranking consequence declared in §3.5)
+  convention, `wisdom.rs:148`; ranking consequence handled via an ordinal,
+  §3.5)
 - append `{by: "human:kurt", at: <iso>}` to the entry's OKF `verified` list,
   mirrored into `last_verified_by` / `last_verified_at`
 - push an outbox Update row (Rule 5 sync) and write an event
-- update the vault FACT FILE (frontmatter `source_type` + `verified` list)
-  in the same action — the file is the durable record (D4); a brain rebuild
-  re-derives the stamp from the file (see §3.8)
+- append the confirmation to `stated/.confirmations.jsonl` — the durable
+  record the rebuild re-derives from (§3.8; there is NO vault fact file)
+- `lifecycle_status` is NOT touched (it is already `stable`; the drafts
+  UPDATE's `lifecycle_status` write serves a different transition)
 
 The confirm action lives ONLY in the desktop app in v1 (which owns the
 embedding sweep, `src-tauri/src/db/proposals_review.rs:12-22` — app-only
@@ -214,26 +260,26 @@ transport-agnostic so a later Discord transport can carry the SAME
 confirm/deny actions (its remote confirm path will need its own
 attestation story — designed then, not now; see §6). Deny =
 **archive + suppress**: the fact is archived AND a denial row is recorded —
-keyed by (source document path + evidence CHUNK hash, not fact-body text:
-the librarian rewords on re-extraction, but chunking is deterministic, so
-the chunk hash is stable) plus who/when — so a re-kick of the still-live
-source document cannot resurrect it as a new queue row (fact ids are
-random, `wisdom.rs:138`; there is no content dedupe at commit). The queue
-query excludes deny-matched rows; the UI shows a "denied" section
+keyed by (source document path + evidence CHUNK hash + normalized
+fact-title/body hash, plus who/when): the chunk hash is stable across
+re-extraction (chunking is deterministic), and the fact-text hash pins the
+SPECIFIC fact, so denying one fact never hides a sibling extracted from the
+same chunk (rev 4 M3; pinned by test) while a verbatim re-extraction of the
+denied fact stays suppressed. Residual, stated honestly: the librarian
+rewords on re-extraction, so a REWORDED re-extraction of a denied fact
+re-appears — correct behavior (new wording, new vouch opportunity). The
+queue query excludes deny-matched rows; the UI shows a "denied" section
 (undoable — un-denying un-archives the fact). The denial check lives in the
 QUEUE QUERY only for v1 — the librarian pipeline stays untouched (a
 commit-time suppression check would be a librarian change and is explicitly
-deferred). Residual: if the source DOCUMENT itself changes, its chunks
-change and a genuinely re-extracted fact re-appears — correct behavior (new
-content, new vouch opportunity). Edit-then-confirm is deny + create: for a
-recently stated dictum a denial means the agent misunderstood (S2), so the
-edit path routes through Path B (write the corrected statement as a
-`stated/` file, §7) rather than mutating the agent-tier fact in place —
-edit-then-confirm must NOT silently become an agent-independent fact write.
-An edit invalidates the embedding (the commit path only trusts a
-precomputed vector whose `embed_text` matches stored title/body,
-`commit.rs:1663-1667`); the new Path-B fact gets a fresh one via the normal
-kick.
+deferred). Edit-then-confirm is deny + create: for a recently stated dictum
+a denial means the agent misunderstood (S2), so the edit path routes through
+Path B (write the corrected statement as a `stated/` file, §7) rather than
+mutating the agent-tier fact in place — edit-then-confirm must NOT silently
+become an agent-independent fact write. An edit invalidates the embedding
+(the commit path only trusts a precomputed vector whose `embed_text`
+matches stored title/body, `commit.rs:1663-1667`); the new Path-B fact gets
+a fresh one via the normal kick.
 
 ### 4. Active Verification Prompting (ruling R-A; roadmap R-B)
 
@@ -256,7 +302,11 @@ now"). The app renders the modal with Confirm/Reject. Rules:
   at worst cause a nuisance modal, never a wrong confirmation. Appends are
   single-line `O_APPEND` writes; the app is the sole pruner (reads, acks,
   truncates); the drop file is ephemeral operational state — excluded from
-  brain sync/backup.
+  brain sync/backup. **Emitter safety (rev 4 m7):** drop-file I/O errors in
+  the emitter are LOGGED AND SWALLOWED — a read path (`ct wisdom match` and
+  every recall tool) must never fail because the prompt drop could not be
+  written; a read-only `.brain/` degrades to "no prompts", never an error
+  (pinned by test).
 - **Transport-agnostic by design (R-B):** the drop file is the LOCAL
   transport of a transport-independent event record. A future Discord
   transport reads the same event stream and renders the same
@@ -266,11 +316,13 @@ now"). The app renders the modal with Confirm/Reject. Rules:
   blocked by the modal; the agent proceeds with the fact as a lead
   (labeled, per §5).
 - Rate limit lives with the drop file + app, not in the emitting process
-  (M2 — each `ct` hook call is a new process, so in-process de-dupe is
-  useless): the emitter appends only if the fact has no UNACKED line in the
-  drop file (read-before-append, advisory); the app additionally de-dupes
-  and caps modal display per drain cycle (default: one modal per fact per
-  drain; batched overflow shown as a queue digest).
+  (M2-rev2 — each `ct` hook call is a new process, so in-process de-dupe
+  is useless): the emitter appends only if the fact has no UNACKED line in
+  the drop file (read-before-append, advisory); the app additionally
+  de-dupes, caps modals PER DRAIN CYCLE (default 3 — overflow collapses
+  into a queue digest; day-one the queue holds 504 facts, so caps are
+  load-bearing from the first session), and honors a "snooze prompts while
+  queue > N" preference (rev 4 m7).
 - App not running: the drop file accumulates; the app drains it on launch.
   Never an error; recall never waits.
 
@@ -278,24 +330,33 @@ now"). The app renders the modal with Confirm/Reject. Rules:
 
 Additive JSON keys; no schema key removed or renamed:
 
-- `WikiSearchHit` (`wiki_graph.rs:19-27`) gains its provenance via the
-  existing `provenance` field already emitted in `wiki_context` output
-  (`wiki_graph.rs:1953`) — ONE key, unified, not a duplicate; `wiki_search`
-  gains the same. Value from `provenance_for` (`wisdom_match.rs:264-268`,
-  vocabulary verbatim, `None` outside it). `verified: Option<{by, at}>`
-  (from `last_verified_by`/`last_verified_at`) is new.
-- `rank_wiki_entries` (`tool_dispatch.rs:437-443`) adds `source_type`,
-  `last_verified_by`, `last_verified_at` to its SELECT and emits the same
-  keys. Flows to `curated_recall_context`.
-- **Declared, intended value shift (M7):** D7's `confidence = 'confirmed'`
-  feeds `curated_recall_context`'s existing confidence-weighted scoring
-  (`tool_dispatch.rs:445`, `:482`), so human-confirmed facts rank HIGHER in
-  on-demand recall than they did as `librarian_inferred`/low-confidence.
-  This is intended — human-trusted facts should rank up when the person
-  asks — and it is pinned by a test (§5). It does NOT touch the delivery
-  aperture's ordering rule (D3: relevance only within the admitted set) nor
-  message mode (`ct wisdom match` byte-identical; cached-output replay test
-  stays green).
+- All three agent-facing tools emit per-hit `source_type: Option<String>`
+  (vocabulary-filtered via `provenance_for`, `wisdom_match.rs:264-268`,
+  `None` outside it) and `verified: Option<{by, at}>` (from
+  `last_verified_by`/`last_verified_at`): added to `WikiSearchHit`
+  (`wiki_graph.rs:19-27`) for `wiki_context` + `wiki_search`, and to
+  `rank_wiki_entries`' SELECT/emit (`tool_dispatch.rs:437-443`) for
+  `curated_recall_context`. The top-level `WikiContextResult.provenance`
+  trace list (`wiki_graph.rs:1953`) is a different thing (per-call
+  fact→source traces) and is UNTOUCHED — `source_type` was chosen over
+  `provenance` for the per-hit key precisely to avoid a same-named,
+  different-typed homonym (rev 4 M5).
+- **Declared, intended behavior change (rev 4 M4):** `rank_wiki_entries`
+  currently sorts by `confidence` as a plain string descending
+  (`tool_dispatch.rs:480-482`, `:491`) — lexicographically `confirmed` <
+  `inferred`, so D7's confidence write would rank confirmed facts DOWN.
+  Fix in this PR: confidence is mapped to an ORDINAL (`confirmed` >
+  `inferred` > unknown/NULL) before ordering; the §5 pin test asserts the
+  ordinal behavior. Note: INTENT "Out of scope" (`INTENT.md:249-251`)
+  requires a spec + benchmark for ranking changes; `curated_recall_context`
+  has no benchmark, so this change ships with the ordinal pin test as its
+  guard and is flagged to Kurt in §7 (test-only exception). The delivery
+  aperture's ordering rule is untouched (D3: relevance only within the
+  admitted set).
+- `ct wisdom match` is UNTOUCHED — it already labels provenance
+  (`wisdom_match.rs:623`, `WisdomItem.provenance`) and message mode stays
+  byte-identical by definition (no `SCHEMA_VERSION` bump, cached-output
+  replay test stays green).
 - Consumer vocabulary documented in INTENT (glossary): human-tier =
   `user_stated`, `user_confirmed`; agent-tier = `librarian_inferred`;
   `immutable_document` = document-derived, unassigned (D7).
@@ -335,16 +396,20 @@ INTENT Rule 8's planned capture, built here:
 2. **Attestation storage (the predicate input):** the attestation of record
    is a brain-side table `stated_attestations(document_path, content_hash,
    attested_by, attested_at)` written ONLY by the app at the moment it
-   creates the `stated/` file. `content_hash` = SHA-256 hex of the file
-   bytes at attestation time. `resolve_proposal` checks THE TABLE (joined
-   by document path + content hash recomputed at ingest), never the file's
+   creates the `stated/` file. `content_hash` = the SAME hash routine the
+   `documents` table already uses (`hasher::hash_bytes`, SHA-256 — one hash
+   function everywhere, so the predicate and the ingest can never
+   disagree; rev 4 m4). `resolve_proposal` checks THE TABLE (joined by
+   document path + content hash recomputed at ingest), never the file's
    frontmatter — an agent deposit carrying attestation-shaped frontmatter
    cannot forge `user_stated` because no agent-facing tool or CLI command
-   writes that table. A content-hash mismatch (file edited after
-   attestation) means NOT attested until the person re-attests in the app.
-   INTENT Rule 2's "no attestation record in the code yet" status line is
-   closed by this table.
-   **Trust boundary, stated honestly (rev 3):** the sidecar process is NOT
+   writes that table (and `vault_write_note` cannot even place a file under
+   `stated/` — it is confined to `immutable-source-files/agents/**` by
+   `under_deposit`, `okf/write.rs:483-485`). A content-hash mismatch (file
+   edited after attestation) means NOT attested until the person
+   re-attests in the app. INTENT Rule 2's "no attestation record in the
+   code yet" status line is closed by this table.
+   **Trust boundary, stated honestly:** the sidecar process is NOT
    read-only — since the 2026-09-05 write-path work it holds a write
    connection for the wisdom CRUD tools (`mcp_server.rs:351`). Enforcement
    here is CODE-SURFACE + POLICY, not connection-level: no MCP tool, CLI
@@ -353,62 +418,94 @@ INTENT Rule 8's planned capture, built here:
    malicious local process could write the database directly — that is
    outside CT's threat model (local-first, single-user machine) and is
    recorded as residual risk rather than defended against.
-3. The normal kick ingests the file; the librarian extracts facts with
-   evidence rows and embeddings — the standard pipeline, unchanged.
-   `stated/` files ride the DEPOSIT lane (they are vault documents; the
-   proposals they generate list them as sources).
-4. `resolve_proposal` gains a third provenance arm (`commit.rs:2926-2930`
+3. **Folder mode & kick registration (rev 4 m3):** `stated/` is a new vault
+   root and gets explicit rows: a folder-rules entry (app-writable,
+   agent-non-deposit — the agent deposit allowlist does NOT extend to it)
+   in the folder-mode/ingest-tier tables (`connection.rs:770-773` is the
+   existing pattern), an entry in the `walk_vault`/`ingest_tier_for`
+   logic, and a NON-DEPOSIT kick path: the APP — not an agent kick —
+   registers the kick ledger row (`set_kick_state`,
+   `wisdom_deposit.rs:474`) when it creates the file.
+4. The kick ingests the file; the librarian extracts facts with evidence
+   rows and embeddings — the standard extraction pipeline, unchanged.
+   `stated/` files' proposals list them as source documents.
+5. `resolve_proposal` gains a third provenance arm (`commit.rs:2926-2930`
    is the one decision point; human-tier check runs BEFORE the agent-tier
    default): when the proposal has AT LEAST ONE source document and EVERY
    source document has a `stated_attestations` row whose `content_hash`
    matches the ingested file, stamp `user_stated`; otherwise
-   `librarian_inferred` (zero sources can never be human-tier — M5). No
-   queue step; the fact is human-tier when the librarian finishes
-   ("instant confirm", one LLM generation + one embedding of latency).
-5. Until Path B ships, the app's direct `add_wisdom_in_tx` write
-   (`wisdom.rs:127-218`) remains, and the UI labels those facts
-   "recallable, not delivered mid-task." Once Path B ships, the direct
-   write is retired (D5).
+   `librarian_inferred` (zero sources can never be human-tier). No queue
+   step; the fact is human-tier when the librarian finishes ("instant
+   confirm", one LLM generation + one embedding of latency).
+6. The app's direct `add_wisdom_in_tx` write (`wisdom.rs:127-218`) is
+   RETIRED IN THIS PR (rev 4 M6): Path B ships in the same PR, §3.9 routes
+   fresh statements through Path B, and keeping both would leave two app
+   write paths with different delivery semantics.
 
-### 7-A. Hardening: who may stamp human tier (§0-H; closes B1)
+### 7-A. Hardening: who may stamp human tier (§0-H; closes the trust hole)
 
-Today `curated_proposal_decide` (MCP) and `ct proposals review` stamp
-`user_confirmed` on any `auto_approve: false` approval — both are
-agent-callable, and a repo test already approves as an agent
-(`proposals_review.rs:633-640`). With the aperture widened, that becomes a
-mid-task delivery vector for agent-approved content. Fix, enforcing D2:
+Today ANY `auto_approve: false` approval stamps `user_confirmed` — via the
+CLI review loop (`tools/src/cmds.rs:1722-1731`; its TTY check is documented
+in-code as "hygiene, not authentication": a PTY-allocating agent defeats
+`is_terminal()`, `cmds.rs:1723-1726`) or the internal Rust API (a repo test
+approves as `reviewed_by="tessera"` — an agent — and gets `user_confirmed`,
+`proposals_review.rs:633-640`; the MCP decide tool once named here is GONE
+— INTENT Rule 1 removed it, the dispatcher has only
+`curated_proposals_list`, `tool_dispatch.rs:1310`, and the name survives
+only in comments). With the aperture widened, any of these becomes a
+mid-task delivery vector for non-human-approved content. Fix, enforcing D2
+(rev 4: deletions, per the gate):
 
-- `resolve_proposal` stamps a human tier (`user_confirmed`) only when the
-  decision carries (a) an app surface (`reviewed_by = "desktop-ui"`), or
-  (b) the CLI review loop (operator's OS account — a human at a terminal),
-  or (c) an explicit `human_instruction: {source}` argument — an attested
-  handle to the human's instruction (e.g. `discord:<message-id>`), the same
-  pattern and honesty rules as deposit attribution (S2/D4): the agent may
-  pass it only when the human literally instructed the approval.
-- Without (a)/(b)/(c), an approval still resolves the proposal (existing
-  workflow unchanged) but stamps `librarian_inferred` and writes an event
-  `approved_without_human_instruction` — visible, honest, not human-tier.
+- **The desktop app is the ONLY human-tier surface.** `resolve_proposal`
+  stamps a human tier (`user_confirmed`) ONLY when the decision carries the
+  app surface — `reviewed_by == DESKTOP_REVIEWER` (`proposals_api.rs:21`;
+  `reviewed_by` is server-set from the calling surface, never
+  caller-supplied, which is what makes this a code-surface check, m5).
+- CLI approvals and internal-API approvals resolve at agent tier
+  (`librarian_inferred`) from rev 4 on, writing an event
+  `approved_at_agent_tier`. A CLI operator who genuinely approves should
+  confirm in the queue — one tap, same as chat-relay facts. (rev 4 M2: the
+  TTY check cannot authenticate a human, so it must not confer a human
+  stamp.)
+- An agent resolving an approval on Kurt's chat instruction MAY record the
+  instruction handle as display metadata (`approval_instruction_source`,
+  same format validation as `attribution_source`, §3.1) — queue rows
+  carrying it sort to the TOP ("Kurt said approve on <date> — confirm?").
+  The handle NEVER confers a tier; it is a convenience so the human stamp
+  is one tap in the app. A verified form of instruction-binding returns in
+  the R-B follow-up, when a transport can bind the handle to a real human
+  action (rev 4 B1: in v1 nothing verifies a handle, so it must not stamp).
+- The hardening doubles as a TRIPWIRE: if an MCP decide tool is ever
+  proposed again, §0-H/§3.7-A is the standing answer — proposal-resolving
+  tools stamp agent tier unless the human decision happens in the app.
 - The internal Rust API is not an agent surface; the repo test's
-  `reviewed_by="tessera"` case is updated to expect agent-tier without
-  `human_instruction`.
+  `reviewed_by="tessera"` case is updated to expect agent tier.
 
-### 8. Durability & sync (M4)
+### 8. Durability & sync (M4-rev3, B2-rev4)
 
-- **Confirmations:** the app confirm writes the vault fact file
-  (frontmatter `source_type: user_confirmed` + `verified` list) AND the
-  brain row (§3). The file is the durable record (D4); the outbox row syncs
-  the brain (Rule 5). A brain rebuild re-derives the stamp by re-ingesting
-  fact files.
+- **Confirmations:** the app confirm updates the brain row (§3) AND appends
+  to `stated/.confirmations.jsonl` —
+  `{fact_id, content_hash(title+body), by, at}`, app-written (rev 4 B2:
+  there is NO vault fact file to update — facts are `llm_wiki_entries`
+  rows; a frontmatter-trusted rebuild would violate Rule 2 and Rule 5's "a
+  machine never raises the trust tier of a fact it received"). A brain
+  rebuild re-derives `user_confirmed` ONLY from `.confirmations.jsonl`,
+  re-verifying each entry's content hash against the rebuilt row's
+  title+body; mismatch → not confirmed (the person re-confirms in the
+  app). Rule 1 traceability is carried by the evidence source document
+  plus this record.
 - **Attestations:** `stated_attestations` rows are mirrored at write time
   to `stated/.attestations.jsonl` in the vault (app-written, one JSON line
   per attestation, content-hash keyed). A rebuild repopulates the table
   from the JSONL, re-verifying each file's current hash; mismatched lines
   are dropped (not attested) — the person re-attests in the app.
 - **Denials:** mirrored the same way to `stated/.denials.jsonl`
-  (document path + chunk hash + who/when); rebuilds repopulate suppression.
+  (document path + chunk hash + fact-text hash + who/when); rebuilds
+  repopulate suppression.
 - Rule 5's "attestations sync along with the facts they cover" is thus
   true for the new tables: they live in the vault, and the brain copies are
-  derived.
+  derived. Outbox rows still sync the brain rows for live machines
+  (Rule 5).
 
 ### 9. Confirm with no backing fact (Rule-15 lesson)
 
@@ -426,11 +523,16 @@ activity delivery — exactly the gap Rule 2's status line already names.
   confirmed it and when on the fact itself and stamps its provenance
   `user_confirmed`. Confirmations, like attestations, are written only by
   the app."
-- **Rule 2, status:** reword the closing clause to — "…and the app still
-  writes `user_stated` facts directly when the person types them in the
-  app; the planned change routes those statements through a `stated/` file
-  and the Librarian so they gain evidence and become deliverable
-  mid-task."
+- **Rule 2, status:** replace the status clause wholesale (rev 4 M6) —
+  "**Partly built.** The attestation of record exists for `stated/` files
+  (`stated_attestations`, mirrored to `stated/.attestations.jsonl`) and for
+  queue confirmations (`.confirmations.jsonl`). The app's direct
+  `user_stated` write is retired in this change: statements typed in the
+  app are captured as `stated/` files and ingested through the Librarian so
+  they gain evidence and become deliverable mid-task. Bulk attestation of
+  existing human files and re-ingest of wrongly stamped `user_stated` facts
+  are not done; trust for other folders still follows location
+  (`deposit_default_tier`)."
 - **Rule 3:** add — "A fact that has been ingested but not yet confirmed by
   a person is not pending. It is live, recallable, and labeled with its
   provenance; `wisdom_pending` never lists it."
@@ -449,8 +551,10 @@ activity delivery — exactly the gap Rule 2's status line already names.
   attribute only statements the person said or faithfully restated at the
   person's direction — never the agent's own paraphrase."
 - **Rule 8, status:** replace "None of this is in the code yet." with —
-  "Built with the confirmation-queue delivery (2026-10): `stated/` capture,
-  the attestation table, and the attested-source provenance arm."
+  "**Partly built.** `stated/` capture, the attestation table and the
+  attested-source provenance arm are built with the confirmation-queue
+  delivery (2026-10). Project scoping (`works/<project>/`) is not in the
+  code." (rev 4 m2 — the rule's first sentence is still unbuilt.)
 - **New Rule 10 — "Unconfirmed facts are recallable, labeled, and rarely
   delivered mid-task."** Body: "Every live fact is recallable on demand and
   carries its provenance. Mid-task delivery admits only human-tier facts:
@@ -465,14 +569,16 @@ activity delivery — exactly the gap Rule 2's status line already names.
   duty): CT scopes by VAULT, not by user account. One brain per vault
   (issue #213, implemented); there are no user accounts. Identity is a
   string stamped on the action: proposal approvals record `reviewed_by`
-  (`desktop-ui`, the operator's OS account, or `<client>:<os-account>` for
-  MCP), fact verifications record `last_verified_by` (by convention prefixed
-  `human:`) and `last_verified_at`. Authorship of spoken statements lives in
-  file paths and frontmatter (`stated/<author>/<year>/`, deposit
-  attribution). All of a person's machines share one brain (Rule 5); a team
-  today means separate vaults and separate brains per person — shared or
-  cross-person verification is an open decision, deliberately not designed
-  here.
+  (`desktop-ui` for the app; for the CLI review loop, the operator's OS
+  account via `os_account()` — historical note: an earlier design also
+  defined an MCP `<client>:<os-account>` form for a decide tool that has
+  since been removed, rev 4 m10), fact verifications record
+  `last_verified_by` (by convention prefixed `human:`) and
+  `last_verified_at`. Authorship of spoken statements lives in file paths
+  and frontmatter (`stated/<author>/<year>/`, deposit attribution). All of
+  a person's machines share one brain (Rule 5); a team today means separate
+  vaults and separate brains per person — shared or cross-person
+  verification is an open decision, deliberately not designed here.
 - **Glossary:** add "Provenance" (the four values + tier mapping),
   "Attribution" (speaker recorded at deposit), "Confirmation" (a per-fact
   human vouch in the app), "Attestation of record" (the
@@ -506,11 +612,13 @@ Path-B replacement can be added when Rule 4 lands.
   editing deposits (vault standing rule), so no staleness path is added.
 - **Modal abuse:** rate limits live at the drop file + app (§3.4); the
   modal re-reads the brain so payload poisoning cannot mislead (§3.4);
-  app-not-running accumulation is drained on launch.
+  app-not-running accumulation is drained on launch; per-drain modal cap
+  (3) + snooze preference bound day-one volume.
 - **Residual risk (documented, accepted):** a malicious local process with
   database access can write `stated_attestations` or fact rows directly;
   CT's threat model is local-first single-user, so this is recorded, not
-  defended (§3.7).
+  defended (§3.7). A PTY-allocating agent can defeat the CLI TTY check —
+  which is why the CLI confers no human tier at all (§3.7-A).
 
 ## 5. Testing
 
@@ -524,76 +632,90 @@ Path-B replacement can be added when Rule 4 lands.
   scratch brain).
 - **Queue query tests:** membership (live + not human-tier), superseded and
   expired excluded, `immutable_document` included, attribution display
-  fields optional, deny-suppressed excluded.
+  fields optional, deny-suppressed excluded; **sibling test (rev 4 M3):**
+  deny fact A; sibling fact B extracted from the same chunk REMAINS in the
+  queue.
 - **Confirm stamp tests:** the UPDATE shape — provenance, confidence,
-  verified list, `last_verified_by/at`, outbox row, event, FACT-FILE
-  update; idempotent re-confirm; deny archives + suppresses;
-  edit-then-confirm produces a Path-B fact, not an in-place mutation.
-- **Recall label tests:** additive keys on all three tools with the
-  `provenance` key unified (no duplicate key at `wiki_graph.rs:1953`);
+  verified list, `last_verified_by/at`, outbox row, event,
+  `.confirmations.jsonl` append; `lifecycle_status` untouched; idempotent
+  re-confirm; deny archives + suppresses; edit-then-confirm produces a
+  Path-B fact, not an in-place mutation.
+- **Recall label tests:** additive per-hit `source_type`/`verified` keys on
+  all three tools; the top-level `provenance` trace list unchanged;
   `ct wisdom match` output byte-identical (cached-output replay test stays
-  green); **ranking-shift pin (M7):** a fact whose confidence moves to
-  `confirmed` rises in `curated_recall_context` ordering — asserted as
-  intended behavior.
+  green); **ordinal ranking pin (rev 4 M4):** `confirmed` ranks ABOVE
+  `inferred` in `curated_recall_context` at equal term overlap (the old
+  string compare ranked it below).
 - **Attribution render tests:** an unattributed deposit renders byte
   identically to today; frontmatter lines NEVER leak into evidence quotes
-  or extracted chunks.
+  or extracted chunks; handle-format validation rejects free text (m8).
 - **Deny-suppression test:** deny a fact, re-kick its still-live source
-  document, assert no new queue row for the denied content; un-deny
+  document, assert no new queue row for the denied fact's text; un-deny
   restores membership.
 - **Path B tests:** attested-source proposal stamps `user_stated`; mixed
   attested/unattested sources stamp `librarian_inferred`; zero-source
   proposal NEVER stamps human tier; `stated/` ingest produces evidence +
   embedding; attestation-table predicate ignores attestation-shaped
   frontmatter in agent deposits (the forgery test); content-hash mismatch
-  after edit → not attested.
-- **Human-tier hardening tests (§3.7-A):** MCP decide without
-  `human_instruction` resolves the proposal but stamps
-  `librarian_inferred` + writes `approved_without_human_instruction`; with
-  `human_instruction: {source}` it stamps `user_confirmed`; CLI and
-  desktop surfaces stamp as today.
-- **Durability tests (§3.8):** brain rebuild re-derives confirmed stamps
-  from fact files; `stated_attestations` + denials repopulate from vault
-  JSONL with hash re-verification; mismatched attestations dropped.
+  after edit → not attested; `stated/` folder mode + app-registered kick
+  ledger row present (m3).
+- **Human-tier hardening tests (§3.7-A):** CLI approval resolves at agent
+  tier + `approved_at_agent_tier` event; internal-API approval as an agent
+  (`reviewed_by="tessera"`) resolves at agent tier; desktop-surface
+  approval (`DESKTOP_REVIEWER`) stamps `user_confirmed`;
+  `approval_instruction_source` sorts the queue row to the top and confers
+  NO tier.
+- **Durability tests (§3.8):** brain rebuild re-derives `user_confirmed`
+  from `.confirmations.jsonl` with hash re-verification; mismatched
+  confirmation entries → not confirmed; `stated_attestations` + denials
+  repopulate from vault JSONL; mismatched attestations dropped.
 - **Active Verification Prompting tests:** event emitted iff an unverified
-  fact matches; drop-file de-dupe + app-side cap; sidecar-process case —
-  the event lands in the `.brain/` drop file with no Tauri runtime
-  present; modal renders from the brain (payload tampering cannot change
-  the displayed fact); app-not-running accumulation and drain on launch;
-  recall latency unaffected.
+  fact matches; drop-file de-dupe + per-drain modal cap (3) + snooze
+  preference; sidecar-process case — the event lands in the `.brain/` drop
+  file with no Tauri runtime present; modal renders from the brain (payload
+  tampering cannot change the displayed fact); app-not-running accumulation
+  and drain on launch; **read-only `.brain/` case (rev 4 m7):** the recall
+  call succeeds byte-identically with prompt emission disabled; recall
+  latency unaffected.
 - **Benchmark:** activity FP stays 0 with the widened aperture on a scratch
   brain seeded with the 14 kernel facts confirmed as `user_confirmed` (the
   by-construction argument in §3.6, made empirical).
 
 ## 6. Out of scope (Kurt rulings + inherited)
 
-- Any MCP/CLI confirm tool for the queue (D2); MCP decide keeps resolving
-  proposals but can no longer produce a human-tier stamp without an
-  attested human instruction (§3.7-A).
+- Any MCP/CLI confirm tool for the queue (D2); CLI and internal-API
+  approvals resolve at agent tier (§3.7-A) — the desktop app is the only
+  human-tier surface in v1.
 - **Remote (Discord) verification transport — PLANNED ROADMAP, not v1
   (R-B):** v1 ships the local modal; the event record and the
   confirm/deny action contract are transport-agnostic so the Discord
-  transport is an addition. Its design (including how a remote confirm
-  attests the human) is a follow-up spec, gated on the same honesty rules.
+  transport is an addition. Its design — including a VERIFIED form of
+  instruction-binding, reinstating what §3.7-A defers — is a follow-up
+  spec, gated on the same honesty rules.
 - Admitting `immutable_document` to mid-task delivery (D7 — future decision
   with its own evidence).
 - Librarian supersession application (Rule 4) — queue v1 uses archive +
   create; commit-time deny-suppression (queue-query-level for v1).
 - Teams / shared cross-person verification (open decision, charter
   documents the gap).
-- Question embeddings, ANN, any recall-ranking change beyond the declared
-  confidence shift (origin never ranks — INTENT "Out of scope"; D3 keeps
-  delivery ordering pure-relevance).
+- Question embeddings, ANN; the ONLY recall-ranking change is the
+  confidence ordinal fix (§3.5, declared + pinned; test-only exception to
+  the INTENT benchmark rule, flagged in §7). Origin still never ranks
+  delivery (D3).
 
 ## 7. Open questions for Kurt
 
-None blocking. Three items are flagged for his spec approval: (1) the §0-H
-hardening changes existing behavior — MCP/CLI approvals without an attested
-human instruction no longer stamp `user_confirmed`; (2) §3.5 declares the
-intended recall-ranking shift caused by D7's confidence write; (3) R-B is
-recorded as roadmap (Discord transport later), with v1 local-only. All are
-direct consequences of his recorded rulings; none needs a new decision
-unless he disagrees.
+None blocking. Four items are flagged for his spec approval: (1) the §0-H
+hardening is stricter than first proposed — the desktop app is the ONLY
+human-tier surface; CLI and internal-API approvals resolve at agent tier
+(even a human at the terminal confirms via the queue); (2) the confidence
+ordinal is a ranking behavior change in `curated_recall_context`, shipped
+with a pinning test as a test-only exception to INTENT's spec+benchmark
+rule (that tool has no benchmark); (3) R-B is recorded as roadmap (Discord
+transport later), with v1 local-only — and the instruction-handle stamp is
+deferred to it; (4) the app's direct `user_stated` write is retired in this
+same PR. All are consequences of his recorded rulings; none needs a new
+decision unless he disagrees.
 
 ## Rulings carried
 
@@ -605,6 +727,8 @@ unless he disagrees.
   corrections-always-delivered contract still dominates the aperture (and
   is now written into proposed Rule 10).
 - Ladder note: tier-4 Fable reviewed the underlying investigation as
-  guidance run 1 (2026-10-20); the post-convergence Tier-4 spec gate
-  (dual-review-cycle "Where Fable runs", placement 1) still runs on THIS
-  document after the GLM/Opus ladder converges.
+  guidance run 1 (2026-10-20) and gated rev 3 (pass 1, REQUEST CHANGES,
+  $4.33; review preserved at
+  `records/investigations/2026-10-20-confirm-queue-fable-consult/spec294-fable-review-run1.md`
+  in the vault); per the gate's closing assessment, a Tier-4 re-gate on the
+  rev-4 delta is sufficient — no full ladder repeat.
