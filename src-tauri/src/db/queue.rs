@@ -199,6 +199,221 @@ fn warn_no_vault_root_once() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Confirmation queue (user-confirmation-queue plan Task 4; spec rev 4.1 §3.2)
+//
+// The queue is a QUERY, not a table. Membership: (a) live — deleted_at IS NULL
+// AND lifecycle_status='stable' AND not superseded/expired per the EXISTING
+// temporal filters (same probe + fragment semantics as
+// wisdom_match::entry_eligibility_where); (b) provenance NOT human-tier —
+// `source_type IS NULL OR source_type NOT IN ('user_stated','user_confirmed')`
+// (NULL/out-of-vocab counts as unverified; delivery, by contrast, admits only
+// exact vocabulary values); (c) not deny-suppressed by a queue_denials row
+// keyed (document path, chunk hash, fact-text hash) — sibling-safe, because a
+// sibling extracted from the same chunk has a DIFFERENT fact-text hash.
+// ---------------------------------------------------------------------------
+
+/// One row of the human confirmation queue (`curated_queue_list`, read-only —
+/// NO mutate tool: Task 5 owns confirm/deny and exposes them frontend-only).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct QueueRow {
+    pub fact_id: String,
+    pub title: String,
+    pub body: String,
+    /// `provenance_for(source_type)` — verbatim vocabulary value, `None`
+    /// outside the vocab (wisdom_match.rs).
+    pub provenance: Option<String>,
+    pub entity_id: String,
+    /// First stored evidence quote, via the `deposit_status_row` join chain
+    /// (librarian_evidence → curated_proposal_sources → documents).
+    pub evidence_quote: Option<String>,
+    pub source_document: Option<String>,
+    /// Deposit attribution speaker (Task 1's `deposit_attribution` table),
+    /// joined on the source document path. Display only.
+    pub attributed_speaker: Option<String>,
+    /// `approval_instruction_source` was DROPPED (spec rev 4.1 §6 — no
+    /// carrier exists); the field stays in the row shape for the frontend
+    /// contract and is always `None` until a carrier lands.
+    pub instruction_source: Option<String>,
+    /// Whole days since `created_at` (aging indicator; floor).
+    pub age_days: i64,
+}
+
+/// Normalized fact-text hash — the third `queue_denials` key component. The
+/// chunk hash is stable across re-extraction, so the fact-text hash pins the
+/// SPECIFIC fact: a verbatim re-extraction stays suppressed, while a sibling
+/// extracted from the same chunk (different text) keeps its vouch opportunity
+/// (spec rev 4.1 §3.3, rev-4 M3). Normalization: whitespace-collapsed +
+/// lowercased title, one newline, same-normalized body, SHA-256 hex.
+///
+/// Task 5's `deny_fact` MUST write denials with THIS function so the queue
+/// anti-match and the ledger agree.
+pub fn fact_text_hash(title: &str, body: &str) -> String {
+    fn normalize(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    }
+    let mut bytes = normalize(title).into_bytes();
+    bytes.push(b'\n');
+    bytes.extend_from_slice(normalize(body).as_bytes());
+    sha256_hex(&bytes)
+}
+
+/// The confirmation queue: live, non-human-tier, non-denied facts, oldest
+/// first (`ORDER BY age DESC`). Infallible by contract (the plan pins
+/// `-> Vec<QueueRow>`): a query failure degrades to an empty queue with a
+/// logged error — a broken queue read must never take down a caller.
+pub fn queue_rows(conn: &Connection) -> Vec<QueueRow> {
+    match queue_rows_inner(conn) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("[queue] confirmation queue query failed: {e:#}");
+            Vec::new()
+        }
+    }
+}
+
+fn queue_rows_inner(conn: &Connection) -> anyhow::Result<Vec<QueueRow>> {
+    // Supersede/expiry: reuse the EXISTING temporal filters. `temporal_columns`
+    // is wisdom_match's ONE column probe; the two fragments below are the exact
+    // eligibility predicate `entry_eligibility_where` applies (future-stamped
+    // supersessions stay eligible). The embedding/scheme legs of that fragment
+    // are DELIVERY gates, not membership gates — the queue must surface a fact
+    // whose embedding failed, so they are deliberately not carried over (spec
+    // §3.2: membership is live + non-human-tier + not denied, nothing else).
+    let t = crate::wisdom_match::temporal_columns(conn, None)?;
+    let now = crate::wisdom_deposit::now_ms();
+    let mut where_sql = String::from(
+        "e.deleted_at IS NULL \
+         AND e.lifecycle_status = 'stable' \
+         AND (e.source_type IS NULL OR e.source_type NOT IN ('user_stated','user_confirmed'))",
+    );
+    if t.has_superseded_by {
+        where_sql.push_str(" AND (e.superseded_by IS NULL OR e.superseded_at > :now)");
+    }
+    if t.has_valid_to {
+        where_sql.push_str(" AND (e.valid_to IS NULL OR e.valid_to > :now)");
+    }
+
+    // Evidence quote via the `deposit_status_row` join chain (the trace entry →
+    // librarian_evidence → proposal → curated_proposal_sources → documents
+    // path), attribution joined on the source document path.
+    let sql = format!(
+        "SELECT e.id, e.title, e.body, e.source_type, e.entity_id, e.created_at, \
+                le.evidence_json, d.path, da.speaker \
+           FROM llm_wiki_entries e \
+           LEFT JOIN librarian_evidence le ON le.entry_id = e.id \
+           LEFT JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id \
+           LEFT JOIN documents d ON d.id = ps.doc_id \
+           LEFT JOIN deposit_attribution da ON da.document_path = d.path \
+          WHERE {where_sql} \
+          ORDER BY e.created_at ASC"
+    );
+
+    // Denial anti-match: the plan's "LEFT JOIN anti-match" against
+    // queue_denials. The key's third component is a SHA-256 computed in Rust
+    // (SQLite ships no hash function), so the triple match cannot execute
+    // inside the statement; the (document_path, chunk_hash, fact_text_hash)
+    // triple is enforced per row below — same semantics, sibling-safe.
+    let mut denied: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT document_path, chunk_hash, fact_text_hash FROM queue_denials",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        for row in rows {
+            let (p, c, f) = row?;
+            denied.insert((p, c, f));
+        }
+    }
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::named_params! {":now": now}, |r| {
+        let fact_id: String = r.get(0)?;
+        let title: String = r.get(1)?;
+        let body: String = r.get(2)?;
+        let source_type: Option<String> = r.get(3)?;
+        let entity_id: String = r.get(4)?;
+        let created_at: i64 = r.get(5)?;
+        let evidence_json: Option<String> = r.get(6)?;
+        let doc_path: Option<String> = r.get(7)?;
+        let speaker: Option<String> = r.get(8)?;
+
+        // evidence_json shape is pinned by `evidence_json_with_hashes`
+        // (commit.rs): {"proposal_id", "evidence":[{chunk_id, content_hash,
+        // quote, ...}]}. First entry wins; a malformed blob degrades to None.
+        let (quote, chunk_hash) = evidence_json
+            .as_deref()
+            .and_then(|ej| serde_json::from_str::<serde_json::Value>(ej).ok())
+            .map(|v| {
+                (
+                    v["evidence"][0]["quote"].as_str().map(str::to_string),
+                    v["evidence"][0]["content_hash"].as_str().map(str::to_string),
+                )
+            })
+            .unwrap_or((None, None));
+
+        Ok((
+            fact_id,
+            title,
+            body,
+            source_type,
+            entity_id,
+            created_at,
+            quote,
+            doc_path,
+            chunk_hash,
+            speaker,
+        ))
+    })?;
+
+    let mut out: Vec<QueueRow> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in rows {
+        let (
+            fact_id,
+            title,
+            body,
+            source_type,
+            entity_id,
+            created_at,
+            quote,
+            doc_path,
+            chunk_hash,
+            speaker,
+        ) = row?;
+        // Join fan-out guard: a fact with several evidence rows / source docs
+        // must appear once (first row wins — the quote is illustrative, not
+        // exhaustive).
+        if !seen.insert(fact_id.clone()) {
+            continue;
+        }
+        // Sibling-safe denial check: only an exact triple suppresses.
+        if let (Some(doc), Some(chunk)) = (&doc_path, &chunk_hash) {
+            let key = (doc.clone(), chunk.clone(), fact_text_hash(&title, &body));
+            if denied.contains(&key) {
+                continue;
+            }
+        }
+        out.push(QueueRow {
+            age_days: (now - created_at).div_euclid(86_400_000),
+            provenance: crate::wisdom_match::provenance_for(source_type.as_deref()),
+            fact_id,
+            title,
+            body,
+            entity_id,
+            evidence_quote: quote,
+            source_document: doc_path,
+            attributed_speaker: speaker,
+            instruction_source: None,
+        });
+    }
+    Ok(out)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::enqueue_vault_event;
@@ -1109,5 +1324,240 @@ mod tests {
             "the row must not outlive the file"
         );
         assert_eq!(deleted_source_rows(&conn, "prop-vanished").len(), 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation queue tests (user-confirmation-queue plan Task 4; spec rev 4.1
+// §3.2). The queue is a QUERY over llm_wiki_entries, not a table: live entries
+// whose provenance is not human-tier, minus deny-suppressed rows.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod confirmation_queue_tests {
+    use super::{fact_text_hash, queue_rows, QueueRow};
+    use crate::db::connection::open_in_memory;
+    use rusqlite::params;
+    use std::collections::HashSet;
+
+    const DAY_MS: i64 = 86_400_000;
+
+    fn conn() -> rusqlite::Connection {
+        open_in_memory().expect("open migrated in-memory brain db")
+    }
+
+    fn insert_entry(conn: &rusqlite::Connection, id: &str, source_type: &str, title: &str, created_at: i64) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, source_type, created_at, updated_at)
+             VALUES (?1, 'ent_queue', ?2, ?3, ?4, ?5, ?5)",
+            params![id, title, format!("body of {title}"), source_type, created_at],
+        )
+        .unwrap();
+    }
+
+    /// Evidence-chain fixture: one proposal bound to one source document
+    /// (curated_proposal_sources) — the `deposit_status_row` join chain's
+    /// proposal→documents leg.
+    fn seed_proposal_doc(conn: &rusqlite::Connection, proposal_id: &str, doc_path: &str) {
+        let doc_id = crate::db::queries::upsert_document(conn, doc_path, "hash-q").unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, created_at)
+             VALUES (?1, 'new_entity', 'test', ?2)",
+            params![proposal_id, crate::wisdom_deposit::now_ms()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES (?1, ?2, 'evidence')",
+            params![proposal_id, doc_id],
+        )
+        .unwrap();
+    }
+
+    /// One librarian_evidence row binding `entry_id` to the proposal, whose
+    /// evidence_json carries the chunk hash + quote exactly like
+    /// `evidence_json_with_hashes` writes them (commit.rs).
+    fn seed_evidence_row(
+        conn: &rusqlite::Connection,
+        entry_id: &str,
+        proposal_id: &str,
+        chunk_hash: &str,
+        quote: &str,
+    ) {
+        let evidence_json = serde_json::json!({
+            "proposal_id": proposal_id,
+            "evidence": [{
+                "chunk_id": 1,
+                "content_hash": chunk_hash,
+                "quote": quote,
+                "start_line": 1,
+                "end_line": 2,
+                "source_kind": null,
+            }]
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, unanchored, created_at)
+             VALUES (?1, ?2, ?3, 0, ?4)",
+            params![entry_id, proposal_id, evidence_json, crate::wisdom_deposit::now_ms()],
+        )
+        .unwrap();
+    }
+
+    fn ids_of(rows: Vec<QueueRow>) -> HashSet<String> {
+        rows.into_iter().map(|r| r.fact_id).collect()
+    }
+
+    #[test]
+    fn queue_membership_live_not_human_tier() {
+        let conn = conn();
+        let now = crate::wisdom_deposit::now_ms();
+
+        // In: agent-tier provenance.
+        insert_entry(&conn, "q-inferred", "librarian_inferred", "Inferred fact", now);
+        insert_entry(&conn, "q-immutable", "immutable_document", "Document fact", now);
+        // In: out-of-vocabulary provenance counts as unverified (spec §3.2).
+        // (The NULL case is admitted by the same SQL clause but is not
+        // insertable on the current schema: source_type is NOT NULL there.)
+        insert_entry(&conn, "q-future-tier", "some_future_tier", "Future tier fact", now);
+
+        // Out: human tier.
+        insert_entry(&conn, "q-stated", "user_stated", "Stated fact", now);
+        insert_entry(&conn, "q-confirmed", "user_confirmed", "Confirmed fact", now);
+
+        // Out: not live.
+        insert_entry(&conn, "q-superseded", "librarian_inferred", "Superseded fact", now);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET superseded_by = 'q-inferred', superseded_at = ?1
+             WHERE id = 'q-superseded'",
+            params![now],
+        )
+        .unwrap();
+        insert_entry(&conn, "q-expired", "librarian_inferred", "Expired fact", now);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET valid_to = ?1 WHERE id = 'q-expired'",
+            params![now - 1],
+        )
+        .unwrap();
+        insert_entry(&conn, "q-deleted", "librarian_inferred", "Deleted fact", now);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE id = 'q-deleted'",
+            params![now],
+        )
+        .unwrap();
+        insert_entry(&conn, "q-draft", "librarian_inferred", "Draft fact", now);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET lifecycle_status = 'draft' WHERE id = 'q-draft'",
+            [],
+        )
+        .unwrap();
+
+        let ids = ids_of(queue_rows(&conn));
+        assert!(ids.contains("q-inferred"), "librarian_inferred in: {ids:?}");
+        assert!(ids.contains("q-immutable"), "immutable_document in: {ids:?}");
+        assert!(
+            ids.contains("q-future-tier"),
+            "out-of-vocab provenance in: {ids:?}"
+        );
+        assert!(!ids.contains("q-stated"), "user_stated out: {ids:?}");
+        assert!(!ids.contains("q-confirmed"), "user_confirmed out: {ids:?}");
+        assert!(!ids.contains("q-superseded"), "superseded out: {ids:?}");
+        assert!(!ids.contains("q-expired"), "expired out: {ids:?}");
+        assert!(!ids.contains("q-deleted"), "deleted out: {ids:?}");
+        assert!(!ids.contains("q-draft"), "non-stable lifecycle out: {ids:?}");
+
+        // ORDER BY age DESC: the older fact comes FIRST.
+        insert_entry(&conn, "q-older", "librarian_inferred", "Older fact", now - 30 * DAY_MS);
+        let rows = queue_rows(&conn);
+        let pos = |id: &str| {
+            rows.iter()
+                .position(|r| r.fact_id == id)
+                .unwrap_or_else(|| panic!("{id} present"))
+        };
+        assert!(
+            pos("q-older") < pos("q-inferred"),
+            "ORDER BY age DESC puts the oldest fact first"
+        );
+    }
+
+    #[test]
+    fn denied_fact_excluded_sibling_included() {
+        let conn = conn();
+        let now = crate::wisdom_deposit::now_ms();
+
+        // Two facts extracted from the SAME document chunk: same doc path +
+        // same chunk hash, different fact text.
+        insert_entry(&conn, "q-sib-a", "librarian_inferred", "Denied fact title", now);
+        insert_entry(&conn, "q-sib-b", "librarian_inferred", "Sibling fact title", now);
+        seed_proposal_doc(&conn, "p-sib", "documents/note.md");
+        seed_evidence_row(&conn, "q-sib-a", "p-sib", "chunkhash-sib", "shared quote");
+        seed_evidence_row(&conn, "q-sib-b", "p-sib", "chunkhash-sib", "shared quote");
+
+        // Deny fact A only: key = (doc path, chunk hash, A's fact-text hash).
+        conn.execute(
+            "INSERT INTO queue_denials (document_path, chunk_hash, fact_text_hash, denied_by, denied_at)
+             VALUES ('documents/note.md', 'chunkhash-sib', ?1, 'test', ?2)",
+            params![
+                fact_text_hash("Denied fact title", "body of Denied fact title"),
+                now
+            ],
+        )
+        .unwrap();
+
+        let ids = ids_of(queue_rows(&conn));
+        assert!(
+            !ids.contains("q-sib-a"),
+            "denied fact is suppressed: {ids:?}"
+        );
+        assert!(
+            ids.contains("q-sib-b"),
+            "sibling fact (same doc+chunk, different text) stays in: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn evidence_quote_and_attribution_surfaces_on_row() {
+        let conn = conn();
+        let now = crate::wisdom_deposit::now_ms();
+
+        insert_entry(
+            &conn,
+            "q-attr",
+            "librarian_inferred",
+            "Attributed fact",
+            now - 2 * DAY_MS,
+        );
+        seed_proposal_doc(&conn, "p-attr", "documents/talk.md");
+        seed_evidence_row(&conn, "q-attr", "p-attr", "chunkhash-attr", "the quoted sentence");
+        conn.execute(
+            "INSERT INTO deposit_attribution (document_path, speaker, kind, source, deposited_at)
+             VALUES ('documents/talk.md', 'kurt', 'verbatim', 'discord:123', ?1)",
+            params![now],
+        )
+        .unwrap();
+
+        let rows = queue_rows(&conn);
+        assert_eq!(rows.len(), 1, "one queue row, no join fan-out: {rows:?}");
+        let r = &rows[0];
+        assert_eq!(r.fact_id, "q-attr");
+        assert_eq!(r.title, "Attributed fact");
+        assert_eq!(r.provenance.as_deref(), Some("librarian_inferred"));
+        assert_eq!(r.entity_id, "ent_queue");
+        assert_eq!(
+            r.evidence_quote.as_deref(),
+            Some("the quoted sentence"),
+            "evidence quote via the deposit_status_row join chain"
+        );
+        assert_eq!(r.source_document.as_deref(), Some("documents/talk.md"));
+        assert_eq!(
+            r.attributed_speaker.as_deref(),
+            Some("kurt"),
+            "attributed deposit speaker joins on the source document path"
+        );
+        assert_eq!(
+            r.instruction_source, None,
+            "approval_instruction_source was DROPPED (spec rev 4.1 §6) — no carrier exists"
+        );
+        assert_eq!(r.age_days, 2, "age_days floors the ms age to whole days");
     }
 }

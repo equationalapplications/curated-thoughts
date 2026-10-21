@@ -279,8 +279,11 @@ pub fn truncate_text(text: &str) -> &str {
 /// Task 3's `two_stage` consumers can hold the same value the gate resolved —
 /// the shared predicate and its consumers all take `&Temporal`).
 pub(crate) struct Temporal {
-    has_superseded_by: bool,
-    has_valid_to: bool,
+// `pub(crate)` for the confirmation queue (user-confirmation-queue plan
+// Task 4): db::queue reuses the SAME probe + predicate fragments instead
+// of re-probing. `scheme` stays private — delivery-only concern.
+pub(crate) has_superseded_by: bool,
+pub(crate) has_valid_to: bool,
     /// Read scheme for the SELECT filter — `None` on the pre-V27 shape (no
     /// `embed_scheme` column). Resolved once per call, next to the column
     /// probes, so every scheme-derived tuple member of the call path (floor,

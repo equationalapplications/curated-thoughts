@@ -871,6 +871,13 @@ pub struct CuratedProposalsListParams {
     pub limit: Option<usize>,
 }
 
+/// user-confirmation-queue plan Task 4: read-only listing of the human
+/// confirmation queue. No parameters — the queue is one fixed query
+/// (oldest-first); confirm/deny are app-only (Task 5, frontend-only).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct CuratedQueueListParams {}
+
 /// Fail-closed audit log for curated tool calls (spec §7): a failed INSERT
 /// propagates and fails the tool call, unlike the best-effort
 /// [`log_agent_access`] used by the eight pre-existing read tools
@@ -1045,6 +1052,23 @@ pub async fn dispatch_curated_proposals_list(
     .map_err(|e| anyhow::anyhow!("curated_proposals_list task join error: {e}"))??;
     let items = serde_json::to_value(rows)?;
     log_curated_access_rw(&ctx, "curated_proposals_list", None, "read").await?;
+    Ok(items)
+}
+
+/// user-confirmation-queue plan Task 4: list the human confirmation queue —
+/// live facts whose provenance is not human-tier, minus deny-suppressed rows
+/// (db::queue::queue_rows). READ-ONLY: no mutation tool is registered beside
+/// it (Task 5 exposes confirm/deny to the FRONTEND only).
+pub async fn dispatch_curated_queue_list(ctx: ToolDispatchContext) -> Result<serde_json::Value> {
+    let conn = ctx.conn.clone();
+    let rows = tokio::task::spawn_blocking(move || -> Result<_> {
+        let guard = conn.lock().unwrap();
+        Ok(crate::db::queue::queue_rows(&guard))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("curated_queue_list task join error: {e}"))??;
+    let items = serde_json::to_value(rows)?;
+    log_curated_access_rw(&ctx, "curated_queue_list", None, "read").await?;
     Ok(items)
 }
 
@@ -1310,6 +1334,12 @@ pub async fn dispatch_tool_call(
         "curated_proposals_list" => {
             let p: CuratedProposalsListParams = serde_json::from_value(params)?;
             let result = dispatch_curated_proposals_list(ctx.clone(), p).await?;
+            // Audit already recorded fail-closed inside the dispatcher (read op).
+            Ok(result)
+        }
+        "curated_queue_list" => {
+            let _p: CuratedQueueListParams = serde_json::from_value(params)?;
+            let result = dispatch_curated_queue_list(ctx.clone()).await?;
             // Audit already recorded fail-closed inside the dispatcher (read op).
             Ok(result)
         }

@@ -235,6 +235,24 @@ impl VaultMcpServer {
     }
 
     #[tool(
+        name = "curated_queue_list",
+        description = "Read-only listing of the human confirmation queue: live brain facts whose provenance is NOT human-tier (user_stated/user_confirmed) — librarian_inferred, immutable_document, and unknown provenance all appear — excluding deny-suppressed rows. Each item: fact_id, title, body, provenance, entity_id, evidence_quote, source_document, attributed_speaker, instruction_source, age_days; ordered oldest first. No mutation surface: confirm/deny live in the desktop app only."
+    )]
+    async fn curated_queue_list(
+        &self,
+        args: Parameters<tool_dispatch::CuratedQueueListParams>,
+    ) -> Result<String, rmcp::ErrorData> {
+        let Parameters(params) = args;
+        let value = serde_json::to_value(params)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("params encode: {e}"), None))?;
+        let result = tool_dispatch::dispatch_tool_call(&self.ctx, "curated_queue_list", value)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(retrieval::mcp_error_hint(&e), None))?;
+        serde_json::to_string(&result)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("json encode: {e}"), None))
+    }
+
+    #[tool(
         name = "wisdom_deposit",
         description = "Append-only deposit of a fact file under immutable-source-files/agents/. Writes the file with agent provenance, kicks the per-document ingest+librarian pipeline (vault-lock serialized), and reports honest pending state. The Active Librarian is the sole writer of brain facts (INTENT rule 1); corrections go through wisdom_propose_supersession. Paths outside the agents lane (including agents/supersessions/) are refused; an existing path is refused (append-only, INTENT rule 9)."
     )]
