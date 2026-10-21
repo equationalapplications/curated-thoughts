@@ -435,16 +435,16 @@ pub(crate) fn rank_wiki_entries(
     }
 
     let mut stmt = conn.prepare(
-        "SELECT id, entity_id, title, body, source_ref, confidence,
-                updated_at
+        "SELECT id, entity_id, title, body, source_ref, confidence, source_type,
+                okf_verified, updated_at
          FROM llm_wiki_entries
          WHERE deleted_at IS NULL
            AND (title LIKE '%' || ?1 || '%'
                 OR body LIKE '%' || ?1 || '%')",
     )?;
-    // id -> (overlap_count, json_value, confidence_rank, updated_at)
+    // id -> (overlap_count, json_value, confidence_ordinal, updated_at)
     use std::collections::HashMap;
-    let mut candidates: HashMap<String, (usize, Value, String, i64)> = HashMap::new();
+    let mut candidates: HashMap<String, (usize, Value, i64, i64)> = HashMap::new();
     for term in &terms {
         let rows = stmt.query_map(rusqlite::params![term], |row| {
             Ok((
@@ -454,13 +454,15 @@ pub(crate) fn rank_wiki_entries(
                 row.get::<_, Option<String>>(3)?,                 // body
                 row.get::<_, Option<String>>(4)?,                 // source_ref
                 row.get::<_, Option<String>>(5)?,                 // confidence (TEXT)
-                row.get::<_, Option<rusqlite::types::Value>>(6)?, // updated_at
+                row.get::<_, Option<String>>(6)?,                 // source_type (TEXT)
+                row.get::<_, Option<String>>(7)?,                 // okf_verified (TEXT json)
+                row.get::<_, Option<rusqlite::types::Value>>(8)?, // updated_at
             ))
         })?;
         for row in rows {
             // A single malformed row must never abort the whole tool call:
             // log it and skip.
-            let (id, entity_id, title, text, source_ref, confidence, updated_at_raw) = match row {
+            let (id, entity_id, title, text, source_ref, confidence, stored_source_type, okf_verified, updated_at_raw) = match row {
                 Ok(row) => row,
                 Err(e) => {
                     eprintln!("curated-thoughts-mcp: skipping unreadable wiki row: {e}");
@@ -469,7 +471,7 @@ pub(crate) fn rank_wiki_entries(
             };
             let updated_at = coerce_updated_at(updated_at_raw);
             let entry = candidates.entry(id.clone()).or_insert_with(|| {
-                let v = serde_json::json!({
+                let mut v = serde_json::json!({
                     "id": id,
                     "entity_id": entity_id,
                     "title": title,
@@ -477,9 +479,33 @@ pub(crate) fn rank_wiki_entries(
                     "source_ref": source_ref,
                     "confidence": confidence,
                 });
-                // Higher confidence string sorts later; rank key is
-                // inverted for descending sort convenience.
-                (0, v, confidence.clone().unwrap_or_default(), updated_at)
+                // Additive per-hit labels (spec §5 D6): vocabulary-filtered
+                // `source_type` via `provenance_for`, plus `verified {by, at}`
+                // for CONFIRMED facts only. `None` degrades to an absent key
+                // (infallible — controller note 5).
+                if let Some(label) =
+                    crate::wisdom_match::provenance_for(stored_source_type.as_deref())
+                {
+                    v["source_type"] = serde_json::json!(label);
+                }
+                if let Some(verified) = crate::wiki_graph::verified_label(
+                    confidence.as_deref(),
+                    okf_verified.as_deref(),
+                ) {
+                    if let Ok(verified) = serde_json::to_value(verified) {
+                        v["verified"] = verified;
+                    }
+                }
+                // Confidence ORDINAL (spec rev-4 M4): `confirmed`=3 >
+                // `inferred`=2 > unknown=0. The previous plain-string rank key
+                // sorted `confirmed` BELOW `inferred`, which D7's confidence
+                // write would have baked into the permanent recall order.
+                let ordinal = match confidence.as_deref() {
+                    Some("confirmed") => 3,
+                    Some("inferred") => 2,
+                    _ => 0,
+                };
+                (0, v, ordinal, updated_at)
             });
             entry.0 += 1; // one overlap point per matching term
         }
@@ -639,15 +665,23 @@ pub async fn dispatch_curated_recall_context(
         // Active Verification Prompting (spec §4, plan Task 6): emit AFTER
         // results are computed, BEFORE the surface returns — infallible,
         // non-human-tier matches only, vault-file only (never process
-        // streams, so the `ct` replay surface is untouched).
-        let ids: Vec<String> = wiki_entries
+        // streams, so the `ct` replay surface is untouched). Task 7: the hit
+        // list carries the pre-resolved provenance label — one batched
+        // payload lookup, no per-id re-SELECT (N+1 closed).
+        let hits: Vec<crate::prompt_drop::ResolvedHit> = wiki_entries
             .iter()
-            .filter_map(|v| v.get("id").and_then(|i| i.as_str()).map(str::to_string))
+            .filter_map(|v| {
+                let fact_id = v.get("id").and_then(|i| i.as_str())?;
+                Some(crate::prompt_drop::ResolvedHit {
+                    fact_id,
+                    source_type: v.get("source_type").and_then(|s| s.as_str()),
+                })
+            })
             .collect();
         crate::prompt_drop::emit_unverified_matches(
             vault_dir.as_deref(),
             &conn_guard,
-            &ids,
+            &hits,
             &query,
             "curated_recall_context",
         );
@@ -1238,12 +1272,19 @@ pub async fn dispatch_tool_call(
                 // Active Verification Prompting (spec §4, plan Task 6): emit
                 // AFTER results are computed, BEFORE the surface returns —
                 // infallible, non-human-tier matches only, vault-file only
-                // (never process streams).
-                let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+                // (never process streams). Task 7: pre-resolved hit labels,
+                // one batched payload lookup (N+1 closed).
+                let resolved: Vec<crate::prompt_drop::ResolvedHit> = hits
+                    .iter()
+                    .map(|h| crate::prompt_drop::ResolvedHit {
+                        fact_id: &h.id,
+                        source_type: h.source_type.as_deref(),
+                    })
+                    .collect();
                 crate::prompt_drop::emit_unverified_matches(
                     vault_dir.as_deref(),
                     &conn_guard,
-                    &ids,
+                    &resolved,
                     &drop_query,
                     "wiki_search",
                 );
@@ -1270,12 +1311,21 @@ pub async fn dispatch_tool_call(
                     dispatch_wiki_context(&conn_guard, &query_vec, tier, depth, max_facts, scheme)?;
                 // Active Verification Prompting (spec §4, plan Task 6): emit
                 // AFTER results are computed, BEFORE the surface returns —
-                // infallible, non-human-tier matches only.
-                let ids: Vec<String> = result.facts.iter().map(|h| h.id.clone()).collect();
+                // infallible, non-human-tier matches only. Task 7:
+                // pre-resolved hit labels, one batched payload lookup (N+1
+                // closed).
+                let resolved: Vec<crate::prompt_drop::ResolvedHit> = result
+                    .facts
+                    .iter()
+                    .map(|h| crate::prompt_drop::ResolvedHit {
+                        fact_id: &h.id,
+                        source_type: h.source_type.as_deref(),
+                    })
+                    .collect();
                 crate::prompt_drop::emit_unverified_matches(
                     vault_dir.as_deref(),
                     &conn_guard,
-                    &ids,
+                    &resolved,
                     &drop_query,
                     "wiki_context",
                 );
@@ -1500,7 +1550,10 @@ mod dispatch_tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT, title TEXT,
-                tier TEXT NULL, embedding_blob BLOB, deleted_at INTEGER);",
+                tier TEXT NULL, embedding_blob BLOB, deleted_at INTEGER,
+                confidence TEXT NOT NULL DEFAULT 'inferred',
+                source_type TEXT NOT NULL DEFAULT 'librarian_inferred',
+                okf_verified TEXT);",
         )
         .unwrap();
         conn
@@ -1625,12 +1678,16 @@ mod dispatch_tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT, title TEXT,
-                tier TEXT NULL, embedding_blob BLOB, deleted_at INTEGER);",
+                tier TEXT NULL, embedding_blob BLOB, deleted_at INTEGER,
+                confidence TEXT NOT NULL DEFAULT 'inferred',
+                source_type TEXT NOT NULL DEFAULT 'librarian_inferred',
+                okf_verified TEXT);",
         )
         .unwrap();
         let blob = crate::wiki_graph::f32_vec_to_blob(&[1.0]);
         conn.execute(
-            "INSERT INTO llm_wiki_entries VALUES ('e1', 'ent_448a', 'Entity One', NULL, ?1, NULL)",
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, tier, embedding_blob, deleted_at)
+             VALUES ('e1', 'ent_448a', 'Entity One', NULL, ?1, NULL)",
             rusqlite::params![blob],
         )
         .unwrap();
@@ -2058,6 +2115,98 @@ mod curated_memory_tests {
         let hits = rank_wiki_entries(&conn, "vault documents", 5).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["id"], "w1");
+    }
+
+    /// Task 7 (spec rev-4 M4): `confidence` ranks by an ORDINAL
+    /// (`confirmed`=3 > `inferred`=2 > unknown=0), not by string compare —
+    /// the plain string DESC ranked `confirmed` BELOW `inferred`, which D7's
+    /// confidence write would have baked into the permanent recall order.
+    #[test]
+    fn confidence_ordinal_ranks_confirmed_above_inferred() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = seed_file_db(dir.path());
+        let blob: Vec<u8> = [1.0f32; 8].iter().flat_map(|f| f.to_le_bytes()).collect();
+        for (id, confidence) in [("w3", "confirmed"), ("w4", "inferred")] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type,
+                    created_at, updated_at, embedding_blob
+                 ) VALUES (?1, 'ent-1', ?2, 'alpha beta payload', '[]', ?3,
+                       'librarian_inferred', 100, 100, ?4)",
+                rusqlite::params![id, format!("Note {id}"), confidence, blob],
+            )
+            .unwrap();
+        }
+        let hits = rank_wiki_entries(&conn, "alpha beta", 5).unwrap();
+        assert_eq!(hits.len(), 2, "both seeded notes must surface");
+        let ids: Vec<&str> = hits
+            .iter()
+            .filter_map(|v| v.get("id").and_then(|i| i.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["w3", "w4"],
+            "equal term overlap: CONFIRMED must rank FIRST (the old string compare ranked it below)"
+        );
+    }
+
+    /// Task 7 (D6 replay surface): the `curated_recall_context` JSON gains the
+    /// additive per-hit label keys while the `ct wisdom match` output — the
+    /// cached message-mode surface — stays BYTE-IDENTICAL: same schema
+    /// version, same field set, same bytes for the same seeded brain (no
+    /// `SCHEMA_VERSION` bump).
+    #[test]
+    fn message_mode_output_byte_identical() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        // Blob matches the query direction exactly (v[0]=1, rest 0), so the
+        // cosine is 1.0 and the fact clears the 0.5 floor (ct seed_fact
+        // convention).
+        let mut v = [0f32; 8];
+        v[0] = 1.0;
+        let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at, embedding_blob
+             ) VALUES ('mm1', 'ent_t', 'Message mode fact',
+                   'Stable body for the byte pin.', '[]', 'inferred',
+                   'librarian_inferred', 100, 100, ?1)",
+            rusqlite::params![blob],
+        )
+        .unwrap();
+
+        // (a) The recall surface now carries the additive labels.
+        let recalled = rank_wiki_entries(&conn, "byte pin", 5).unwrap();
+        assert_eq!(recalled.len(), 1, "only mm1 matches the pin query");
+        assert_eq!(
+            recalled[0]["source_type"], "librarian_inferred",
+            "recall JSON must gain the additive source_type key"
+        );
+        assert!(
+            recalled[0].get("verified").is_none(),
+            "inferred recall hits carry no verified key"
+        );
+
+        // (b) The message-mode replay surface is byte-identical to the
+        // pre-change fixture: additive keys on OTHER tools must never leak
+        // into `ct wisdom match` output.
+        let out = crate::wisdom_match::wisdom_match_with_floor(
+            &conn,
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "message-mode-pin",
+            crate::embed_scheme::Scheme::Raw,
+            Some(0.5),
+            5,
+            &[],
+            1_761_050_400_000,
+        )
+        .unwrap();
+        let bytes = serde_json::to_string(&out).unwrap();
+        assert_eq!(
+            bytes,
+            "{\"schema\":1,\"gate\":\"semantic-v1:message-mode-pin\",\"entries\":[{\"id\":\"mm1\",\"title\":\"Message mode fact\",\"text\":\"Stable body for the byte pin.\",\"score\":1.0,\"supersedes\":[],\"provenance\":\"librarian_inferred\"}],\"corrections\":[]}",
+            "ct wisdom match output must stay byte-identical (fixture pin)"
+        );
     }
 
     /// ToolDispatchContext over the shared file fixture. The embed stub env

@@ -179,53 +179,99 @@ fn has_unacked_line(path: &Path, fact_id: &str) -> bool {
     false
 }
 
-/// Recall-path hook: for each matched fact id, look up its row, skip
-/// human-tier provenance, and emit an unverified-match prompt for the rest.
+/// One recall hit with its provenance ALREADY resolved (Task 7): the caller
+/// holds the hit's id and vocabulary-filtered `source_type` label (from
+/// `WikiSearchHit` / `rank_wiki_entries`), so the hook never re-SELECTs per id
+/// for the tier decision — the Task-6 N+1 lookup is closed here.
+pub struct ResolvedHit<'a> {
+    pub fact_id: &'a str,
+    /// Hit-level provenance label (post-`provenance_for`). `None` outside the
+    /// vocabulary — never human tier.
+    pub source_type: Option<&'a str>,
+}
+
+/// One brain row's drop payload: `(title, body, quote)` — the three columns
+/// the batched lookup reads (anti-spoof M1: payload text comes from the brain
+/// row, never from agent-controlled input).
+type RowPayload = (Option<String>, Option<String>, Option<String>);
+
+/// Recall-path hook: for each matched fact, skip human-tier provenance (the
+/// hit-level label — NO per-id re-SELECT) and emit an unverified-match prompt
+/// for the rest. The payload columns (`title`, `body`, `source_ref`) still
+/// come from the brain row (anti-spoof M1), read in ONE batched query for the
+/// whole hit list; a fact missing from that result is skipped silently (the
+/// old skip-on-missing), per-row read errors are logged and skipped.
 /// INFALLIBLE end to end — `vault_root: None` (vault not configured) or any
-/// per-row lookup error degrades to fewer/no prompts, never an error.
+/// lookup error degrades to fewer/no prompts, never an error.
 pub fn emit_unverified_matches(
     vault_root: Option<&Path>,
     conn: &Connection,
-    fact_ids: &[String],
+    hits: &[ResolvedHit<'_>],
     query: &str,
     surface: &str,
 ) {
+    use std::collections::HashMap;
     let Some(root) = vault_root else {
         return;
     };
-    for fact_id in fact_ids {
-        let row = conn.query_row(
-            "SELECT title, body, source_ref, source_type
-             FROM llm_wiki_entries
-             WHERE id = ?1 AND deleted_at IS NULL",
-            rusqlite::params![fact_id],
-            |r| {
-                Ok((
-                    r.get::<_, Option<String>>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                ))
-            },
-        );
-        let (title, body, quote, source_type) = match row {
-            Ok(t) => t,
-            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
-            Err(e) => {
-                eprintln!("curated-thoughts-mcp: prompt drop row skipped: {e}");
-                continue;
+    if hits.is_empty() {
+        return;
+    }
+    // ONE batched lookup for the payload columns (Task 7 N+1 closure).
+    let placeholders = vec!["?"; hits.len()].join(", ");
+    let sql = format!(
+        "SELECT id, title, body, source_ref
+         FROM llm_wiki_entries
+         WHERE id IN ({placeholders}) AND deleted_at IS NULL"
+    );
+    let ids: Vec<&str> = hits.iter().map(|h| h.fact_id).collect();
+    let mut stmt = match conn.prepare(sql.as_str()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("curated-thoughts-mcp: prompt drop rows skipped: {e}");
+            return;
+        }
+    };
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(ids.iter()),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        },
+    );
+    let mut payload: HashMap<String, RowPayload> = HashMap::new();
+    if let Ok(iter) = rows {
+        for row in iter {
+            match row {
+                Ok((id, title, body, quote)) => {
+                    payload.insert(id, (title, body, quote));
+                }
+                Err(e) => {
+                    eprintln!("curated-thoughts-mcp: prompt drop row skipped: {e}");
+                }
             }
+        }
+    }
+    for hit in hits {
+        // Skip-on-missing: a fact deleted between the search and this emit is
+        // simply absent from the batch result — skipped as before.
+        let Some((title, body, quote)) = payload.get(hit.fact_id) else {
+            continue;
         };
-        if is_human_tier(source_type.as_deref()) {
+        if is_human_tier(hit.source_type) {
             continue;
         }
         emit_unverified_match(
             root,
             UnverifiedMatch {
-                fact_id: fact_id.clone(),
-                title,
-                body,
-                quote,
+                fact_id: hit.fact_id.to_string(),
+                title: title.clone(),
+                body: body.clone(),
+                quote: quote.clone(),
                 query: query.to_string(),
                 surface: surface.to_string(),
             },
@@ -333,7 +379,10 @@ mod tests {
         emit_unverified_matches(
             Some(dir.path()),
             &open_memory_conn(),
-            &["w1".to_string()],
+            &[ResolvedHit {
+                fact_id: "w1",
+                source_type: None,
+            }],
             "q",
             "wiki_context",
         );
