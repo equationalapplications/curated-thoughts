@@ -206,7 +206,7 @@ fn evidence_quote_and_attribution_surfaces_on_row() { /* attributed deposit row 
 **Interfaces:**
 - Produces: `fn confirm_fact(app_ctx, fact_id) -> Result<()>` — one UPDATE: `source_type='user_confirmed', confidence='confirmed'`, `okf_verified` json_insert `{by:"human:kurt", at}`, `last_verified_by`/`last_verified_at` mirror, outbox Update row, event; `lifecycle_status` UNTOUCHED; `.confirmations.jsonl` append; idempotent on re-confirm. `fn deny_fact(app_ctx, fact_id) -> Result<()>` — archive + `queue_denials` insert + `.denials.jsonl` append. `fn undeny_fact(app_ctx, denial_key) -> Result<()>`. These are exposed to the FRONTEND ONLY (Tauri command layer, Task 9) — no MCP/CLI wrapper.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[test]
@@ -217,7 +217,18 @@ fn confirm_is_idempotent() { /* second confirm: no-op, no duplicate event, no du
 fn deny_suppresses_and_undeny_restores() { /* deny → out of queue; undeny → back; jsonl line written */ }
 ```
 
-- [ ] **Step 2: RED** → **Step 3: Implement** → **Step 4: Gates** (baseline + 3) → **Step 5: Commit** — `feat(queue): app-only confirm and deny with durable ledgers`
+- [x] **Step 2: RED** → **Step 3: Implement** → **Step 4: Gates** (baseline + 3) → **Step 5: Commit** — `feat(queue): app-only confirm and deny with durable ledgers`
+
+> **Controller tick (2026-10-22):** Task 5 DONE — commit `764fd4f1` (+ declared test-only D6
+> ride-along); gates verified (lib 1468+59 exact; replay 17/17 TWICE — D6 ts-normalization fix is
+> deterministic; clippy clean); SOR clean (0 findings, 16 clusters); verdict **APPROVE**
+> (`task5-review-verdict.md`). E1-E6 all accepted (E1 two-layer confirm converges with spec §8
+> rebuild semantics; E2 orphan-stamp reset DEFERRED to Task 11 — spec §8 authorizes reset ONLY
+> on the rebuild path, §4 double-confirm makes an existing stamp terminal, do NOT add
+> confirm-path reset; E3 jsonl rewrite forced, Low-1 atomic tmp+rename → Task 11; E4 refusal
+> spec-correct, Task 9 UI must surface the deny error; E5 extraction byte-identical, verified
+> programmatically; E6 conventions held). Low-2 (deny-retry duplicate ledger line) and Low-3
+> (hash-only un-deny restore) → Task 11.
 
 ### Task 6: Active Verification Prompting — emitter + drop file
 
