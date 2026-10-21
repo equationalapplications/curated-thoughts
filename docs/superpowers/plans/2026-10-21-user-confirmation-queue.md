@@ -386,6 +386,17 @@ fn direct_write_is_gone() { /* compile-level: add_wisdom_in_tx no longer exists 
 - Modify: `docs/superpowers/specs/2026-10-18-issue282-activity-query-mode-design.md` — §5 rev-15 delta (admitted set + rationale), "Out of scope" `:865-866` and "Rulings carried" `:883-885` lines
 - Modify: this plan — tick annotations
 
+> **Task 10 implementer note (2026-10-21, docs-pass inputs a/b — checkboxes left
+> unticked for the controller):** (a) queue digit shortcut: NONE is intended — the
+> queue is rail-reachable only (`AppShell.tsx:44-46` comment is the source;
+> renumbering rail 3-5 would break muscle memory and a pinned test). (b)
+> `add_entity_fact_cmd` semantics change: now an async capture command — keeps its
+> name/arguments, routes through `capture_statement` (Path B), drops entity
+> binding (spec-§9 consequence commented at the site), and returns the `stated/`
+> path (`Promise<string>` frontend wrapper). No living repo doc described the old
+> add-fact semantics; the record lives in the confirmation-queue spec's as-built
+> addendum (rev 4.2).
+
 - [ ] **Step 1: Apply INTENT.md amendments** (exact text from spec §3.10 — no paraphrase)
 - [ ] **Step 2: Apply #282 §5 delta** (rev-15 entry: aperture admits `user_stated` + `user_confirmed`; `immutable_document` excluded; non-shadowing preserved; precondition (a) met by the kernel calibration argument + the Task 8/10 benchmark)
 - [ ] **Step 3: Verify** — every quoted old passage matches what INTENT.md actually had (git diff shows pure replacements); no other INTENT edits

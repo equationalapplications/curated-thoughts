@@ -45,9 +45,19 @@ There are two ways in, both over the same pipeline:
   is gone, flagging inconsistencies, applying supersessions. (The code
   still calls part of this "heal"; see below.)
 - **Tier** — how much a fact is trusted: *human* (a person stands behind
-  it) or *agent*.
+  it) or *agent*. (Not the database's `tier` column — `fact`/`wisdom`/none
+  — used for ranking.)
 - **Attestation** — a record that a person confirmed a file's exact
   content.
+- **Attestation of record** — the `stated_attestations` row for a
+  `stated/` file, mirrored to the vault.
+- **Attribution** — the speaker recorded at deposit time when an agent
+  relays a person's statement.
+- **Confirmation** — a per-fact human vouch made in the app's confirmation
+  queue.
+- **Provenance** — how a fact earned its tier: `librarian_inferred`
+  (agent), `user_stated` or `user_confirmed` (human), `immutable_document`
+  (document-derived, unassigned).
 - **Supersession** — marking an old fact as replaced by a newer one,
   instead of deleting it.
 - **Recall** — looking up facts relevant to a question.
@@ -91,7 +101,11 @@ past that check.
 
 A file earns the human tier only when the app has recorded an attestation
 for its exact content. Attestations are written only by the app, never by
-agent tools. Every file without one is treated as agent-written, no matter
+agent tools. A fact also earns the human tier when the person confirms it
+in the app's confirmation queue. The confirmation records who confirmed it
+and when on the fact itself and stamps its provenance `user_confirmed`.
+Confirmations, like attestations, are written only by the app. Every file
+without one is treated as agent-written, no matter
 which folder it sits in.
 
 *Why:* CT can't tell who wrote a file by looking at it, so it requires
@@ -103,10 +117,15 @@ When this ships, existing human files will be attested once in bulk, and
 facts that were wrongly stamped as human-stated (`user_stated`) will be
 re-ingested as agent facts and superseded.
 
-**Status: Planned.** There is no attestation record in the code yet. Today
-trust follows *location*: facts from the agent deposit folder get the
-configured `deposit_default_tier`, and the app still writes `user_stated`
-facts directly.
+**Status: Partly built.** The attestation of record exists for `stated/`
+files (`stated_attestations`, mirrored to `stated/.attestations.jsonl`) and
+for queue confirmations (`.confirmations.jsonl`). The app's direct
+`user_stated` write is retired in this change: statements typed in the app
+are captured as `stated/` files and ingested through the Librarian so they
+gain evidence and become deliverable mid-task. Bulk attestation of existing
+human files and re-ingest of wrongly stamped `user_stated` facts are not
+done; trust for other folders still follows location
+(`deposit_default_tier`).
 
 ### 3. A deposit shows as "pending" until it has been processed
 
@@ -116,6 +135,10 @@ there is no ingest host if this machine can't process files. Recall and
 injection never read files that haven't been ingested. The one exception
 is `wisdom_pending`, a separate read-only list of unprocessed deposits,
 which is never mixed into recall results.
+
+A fact that has been ingested but not yet confirmed by a person is not
+pending. It is live, recallable, and labeled with its provenance;
+`wisdom_pending` never lists it.
 
 *Why:* agents should get an honest answer ("not ready yet") rather than
 half-processed knowledge.
@@ -187,14 +210,22 @@ wiki search) have no cutoff. Question embeddings are not built.
 ### 8. Facts stay inside the project they came from
 
 Facts ingested from `works/<project>/` are only recalled within that
-project. Things a person says directly are captured by the app (never by
-an agent) under `stated/<author>/<year>/`, with frontmatter recording who
-said it, how it was captured, and its attestation. They stay below wisdom
-tier until attested.
+project. Statements a person makes directly to the app are captured by the
+app under `stated/<author>/<year>/` with frontmatter recording who said it,
+how it was captured, and its attestation; the app records the attestation
+of record, and such statements reach wisdom tier when the Librarian
+finishes processing them. Statements a person makes to an agent may be
+relayed by that agent into its deposit lane with an attribution naming the
+speaker; such facts stay agent tier until the person confirms them in the
+app. An agent may attribute only statements the person said or faithfully
+restated at the person's direction — never the agent's own paraphrase.
 
 *Why:* one project's knowledge shouldn't leak into another's answers.
 
-**Status: Planned.** None of this is in the code yet.
+**Status: Partly built.** `stated/` capture, the attestation table and the
+attested-source provenance arm are built with the confirmation-queue
+delivery (2026-10). Project scoping (`works/<project>/`) is not in the
+code.
 
 ### 9. Each area of the vault has its own editing rules
 
@@ -209,6 +240,37 @@ facts are retired, but only by the machine that ingested them.
 but `vault_write_note` can edit existing ones in the deposit folder (see
 rule 1). Facts whose source is gone are retired by the database "heal"
 pass, which is not limited to the ingesting machine.
+
+### 10. Unconfirmed facts are recallable, labeled, and rarely delivered mid-task
+
+Every live fact is recallable on demand and carries its provenance. Mid-task
+delivery admits only human-tier facts: `user_stated` and `user_confirmed` —
+with the standing #265 exception: corrections of any provenance always
+flow. The confirmation queue is the app's list of facts the person has not
+yet confirmed; confirming stamps the fact, it never asks the person to
+retype. When an unconfirmed fact matches during an agent's recall, the app
+offers the person a confirmation prompt.
+
+*Why:* a wrong fact pushed mid-task is worse than a missed one; a labeled
+fact on request is neither.
+
+**Status: Planned.**
+
+## Who verifies: users and scope
+
+CT scopes by VAULT, not by user account. One brain per vault (issue #213,
+implemented); there are no user accounts. Identity is a string stamped on
+the action: proposal approvals record `reviewed_by` (`desktop-ui` for the
+app; for the CLI review loop, the operator's OS account via `os_account()`
+— historical note: an earlier design also defined an MCP
+`<client>:<os-account>` form for a decide tool that has since been removed,
+rev 4 m10), fact verifications record `last_verified_by` (by convention
+prefixed `human:`) and `last_verified_at`. Authorship of spoken statements
+lives in file paths and frontmatter (`stated/<author>/<year>/`, deposit
+attribution). All of a person's machines share one brain (Rule 5); a team
+today means separate vaults and separate brains per person — shared or
+cross-person verification is an open decision, deliberately not designed
+here.
 
 ## The Active Librarian
 
@@ -232,6 +294,8 @@ Planned Librarian improvements:
   embedding. **Planned.**
 - Recall that skips superseded and expired facts. **Partly built:** only
   `ct wisdom match` does this today.
+- Provenance from attested source documents: a proposal whose every source
+  carries an attestation of record lands as `user_stated`. **Planned.**
 
 Design target: about 10,000 live facts per brain. Approximate
 nearest-neighbor search (ANN) can wait until about 100,000.

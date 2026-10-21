@@ -1,9 +1,10 @@
 # Activity query mode for the wisdom gate: paths and commands reach concept rules (issue #282)
 
-**Date:** 2026-10-18 (rev 14 — FINAL of the review ladder: rev 1 step-0 Fable memo +
+**Date:** 2026-10-18 (rev 15 — rev 14 was FINAL of the review ladder: rev 1 step-0 Fable memo +
 Kurt's rulings; rev 2 Tier-2 GLM 5.3; rev 3 Tier-3 Opus; rev 4-5 Tier-3 delta
 convergence; rev 6-13 Tier-4 gate rounds 1-8; rev 14 folds the gate's two closing
-nits).
+nits; rev 15 (2026-10-21) widens the §5 aperture by ruling S1 of the
+confirmation-queue spec, #294 — a delta change, not a ladder round).
 **Status:** Tier-4 Fable gate: **Approved with nits at rev 13** (round 8: zero
 blockers, zero majors; nits folded in rev 14 — no further review round needed, the
 nits are evidence-citation fixes, not design). PRESENTED TO KURT for implementation
@@ -28,7 +29,20 @@ production floors in this spec are RAW.
 
 ## Revision history (compressed)
 
-- **rev 14 (this rev):** Tier-4 re-gate round 8: **APPROVE WITH NITS** ($2.52; zero
+- **rev 15 (this rev, 2026-10-21):** aperture-widening delta from the
+  confirmation-queue spec (`2026-10-20-user-confirmation-queue-design.md`,
+  ruling S1): §5 admits `user_confirmed` alongside `user_stated` — the
+  `provenance_filter` predicate becomes `user_stated` OR `user_confirmed`;
+  `immutable_document` stays excluded; the non-shadowing fairness rule is
+  preserved by construction (the filter still runs BEFORE any truncation).
+  §5's precondition (a) (activity FP stays 0 on the labeled set) is met by
+  the kernel calibration argument — the 14 kernel facts are relabeled
+  `user_stated` in the 2026-10-18 calibration scratch copy, so the
+  post-widening admitted set equals the calibrated `user_stated` set — and
+  made empirical by the Task 11 benchmark (activity FP stays 0 with the
+  widened aperture). "Out of scope" and "Rulings carried" updated
+  accordingly; Kurt's sign-off is ruling S1 itself.
+- **rev 14:** Tier-4 re-gate round 8: **APPROVE WITH NITS** ($2.52; zero
   blockers, zero MAJORS; every rev-13 fold verified against the code, including
   `WisdomMatch`/`TwoStageOutcome` `PartialEq` derivability and the non-degenerate
   `!ran`-on-stub comparison). Nits folded: **m1** — the "twelve test files"
@@ -577,10 +591,20 @@ break; the CLI tests pin BOTH cases.
   cells with its own merge floor is future work, only if the calibration data shows
   the healthy path is not enough.
 
-### 5. Aperture — `user_stated` facts only (Kurt ruling 3, 2026-10-18)
+### 5. Aperture — `user_stated` + `user_confirmed` as of rev 15 (Kurt ruling 3, 2026-10-18; widened by ruling S1, rev 15)
+
+**rev 15 (2026-10-21, #294):** the delivered set is now filtered to
+provenance `user_stated` OR `user_confirmed` (ruling S1 of the
+confirmation-queue spec). Everything below that says "`user_stated` only"
+describes the rev-14 state; the widening changes ONLY the admitted set —
+placement (the pre-truncation `provenance_filter` parameter), the
+corrections bypass, the audit pins, and "message mode and the fallback
+path are untouched" all stand as written. `immutable_document` is NOT
+admitted.
 
 While activity mode is ACTIVE (healthy two-stage path, composite row resolved), the
-delivered entries are filtered to provenance `user_stated`. Rationale (Kurt):
+delivered entries are filtered to provenance `user_stated` (and
+`user_confirmed` from rev 15). Rationale (Kurt):
 fail-closed, consistent with the integrations' philosophy — mid-task delivery must
 protect the agent's signal-to-noise ratio, and a wrong fact pushed mid-task is worse
 than a missed one. Widening the aperture to all sources requires (a) calibration
@@ -612,8 +636,10 @@ Placement (rev-2 I-5 + rev-3 M5):
    recorded so a future cell-extension inherits the joint.
 6. CORRECTIONS BYPASS the aperture as a stated RULE (not a test implication): the
    #265 corrections-always-delivered contract dominates ruling 3 — a superseding
-   entry of any provenance still flows mid-task. And `user_confirmed` is EXCLUDED:
-   the ruling says `user_stated` only.
+   entry of any provenance still flows mid-task. And `user_confirmed` was
+   EXCLUDED at rev 14 (`user_stated` only) — superseded by rev 15 (ruling
+   S1): it is admitted alongside `user_stated`; only `immutable_document`
+   remains excluded.
 7. Audit pin (rev-3 M5 + rev-6 m2): the two-stage audit `open=` is computed AFTER
    the aperture — `open` reflects what would actually be delivered
    (`TwoStageOutcome.open` keys on the final entries list), so a fully-filtered
@@ -862,8 +888,10 @@ Message mode and the fallback path are untouched.
   earns it; carries its own message-mode recalibration.
 - No free-text hint argument, EVER (rev-2 M-5) — targets are typed kinds only; a
   `--hint` would reintroduce the injection surface the typed targets exist to avoid.
-- Any ranking heuristic change (§6), any aperture widening (§5), any new
-  subcommand (§3.1), any probe-set reuse from message mode (§7).
+- Any ranking heuristic change (§6), any aperture widening BEYOND the
+  rev-15 `user_stated`+`user_confirmed` set (§5 — `immutable_document`
+  stays out), any new subcommand (§3.1), any probe-set reuse from message
+  mode (§7).
 
 ## Open questions for Kurt
 
@@ -882,7 +910,11 @@ it is flagged here so he sees it at approval time. Remaining unknowns are EXPERI
   of facts to code boundaries is the endgame fix; not in #282.
 - **`user_stated`-only aperture at first** (Kurt, 2026-10-18): fail-closed,
   protect mid-task signal-to-noise; widen only on robust calibration evidence
-  that FP stays at zero, with Kurt's sign-off.
+  that FP stays at zero, with Kurt's sign-off. **SUPERSEDED 2026-10-21:**
+  widened to `user_stated`+`user_confirmed` by ruling S1 via rev 15 — the
+  fail-closed principle and the FP=0 precondition carried over
+  (kernel calibration argument + Task 11 benchmark); `immutable_document`
+  remains excluded.
 - **Spec first, then implement** (Kurt, standing instruction for #282).
 - **Own the PR** (Kurt, 2026-10-18): Tessera runs the ladder and the PR
   end-to-end; Kurt's spec approval remains the implementation gate.

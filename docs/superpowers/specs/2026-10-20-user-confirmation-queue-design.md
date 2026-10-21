@@ -760,3 +760,34 @@ decision unless he disagrees.
   `records/investigations/2026-10-20-confirm-queue-fable-consult/spec294-fable-review-run1.md`
   in the vault); per the gate's closing assessment, a Tier-4 re-gate on the
   rev-4 delta is sufficient — no full ladder repeat.
+
+## As-built addendum (rev 4.2, 2026-10-21)
+
+> Additions-only as-built record carried from the Task-9 review verdict
+> (`task9-review-verdict.md`, docs-pass inputs); the normative text above is
+> unchanged.
+
+- **`add_entity_fact_cmd` is a capture command as built (input b):** the
+  app's direct-write path is retired — the command keeps its name and
+  arguments but routes through `capture_statement` (Path B) and returns the
+  `stated/` path (`Promise<string>` on the frontend wrapper). Entity
+  binding is dropped, with the §9 consequence commented at the site. No
+  living doc outside this spec described the old add-fact semantics; this
+  note is the record.
+- **`stated/` registration as built (input c):** a folder row
+  `('stated','synthesize',1)` (app-writable, agent-non-deposit) is seeded
+  by the every-open V25 `INSERT OR IGNORE` block — no schema-version bump —
+  and the three `stated/.*.jsonl` ledgers (`.confirmations`,
+  `.attestations`, `.denials`) are INGEST TIER NONE, excluded by whole
+  name at the vault walk. Both are pinned by tests; do not add a migration.
+- **Verified-label wording (§5 clarification, as built, E2 ruling):** the
+  per-hit `verified` label reads the LATEST `okf_verified` JSON entry,
+  gated on `confidence='confirmed'`; all three label writers mirror the
+  JSON atomically. This is data-identical to the `last_verified_by` /
+  `last_verified_at` columns, and the JSON `at` (ISO 8601) is more
+  §3.3-faithful than the column timestamps. §3.5's normative sentence
+  stands; this note is the fuller contract.
+- **`review_shim.rs` shims (Task-3 verdict C4):** they resolve at AGENT
+  tier absent `human_surface: true` and MUST pass the flag explicitly
+  before any desk rewiring — fail-closed, zero live callers; corrected
+  doc comments in `review_shim.rs`.
