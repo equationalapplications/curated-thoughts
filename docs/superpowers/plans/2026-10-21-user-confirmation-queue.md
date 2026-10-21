@@ -142,7 +142,7 @@ fn confirmation_rebuild_matches_by_content_hash_fact_id_advisory() {
 **Interfaces:**
 - Produces: `ResolveOptions { ..., human_surface: bool }` (default `false` via existing construction sites); `resolve_proposal` provenance decision: (1) if `human_surface && auto_approve == false` → `user_confirmed`; (2) else if `!human_surface && auto_approve == false` → `librarian_inferred` + event `approved_at_agent_tier`; (3) `auto_approve == true` → `librarian_inferred` (unchanged). Path B's `user_stated` arm lands in Task 8 (same decision point).
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[test]
@@ -156,7 +156,14 @@ fn cli_and_internal_approvals_resolve_at_agent_tier() {
 fn auto_approve_unchanged() { /* librarian_inferred, no event */ }
 ```
 
-- [ ] **Step 2: RED** → **Step 3: Implement** (arm reorder per spec §3.7-A; thread ALL `ResolveOptions` construction sites in one pass; gate with `cargo check --tests`) → **Step 4: Gates** (baseline + 3) → **Step 5: Commit** — `feat(wisdom): human-tier stamps require the desktop surface`
+- [x] **Step 2: RED** → **Step 3: Implement** (arm reorder per spec §3.7-A; thread ALL `ResolveOptions` construction sites in one pass; gate with `cargo check --tests`) → **Step 4: Gates** (baseline + 3) → **Step 5: Commit** — `feat(wisdom): human-tier stamps require the desktop surface`
+
+> **Controller tick (2026-10-22):** Task 3 DONE — commit `73212aba`; gates verified (lib 1462+59
+> exact, replay 17/17, clippy clean); SOR clean (0 findings, 20 clusters); verdict **APPROVE**
+> (`task3-review-verdict.md`). C1-C4 all accepted (C1 nit: prefer literal `true` when
+> `resolve_proposal_cmd` is next touched; C4: review_shim docs note + 2-line comment fix →
+> **Task 10**). Forward items: spec §5 N1 spoof test → **Task 11** whole-branch pass;
+> audit result: only 3 non-test `human_surface: true` sites, all desktop (proposals_api.rs).
 
 ### Task 4: Confirmation queue query + read-only MCP listing
 
@@ -304,6 +311,11 @@ fn direct_write_is_gone() { /* compile-level: add_wisdom_in_tx no longer exists 
 
 ### Task 10: Charter + spec-delta text (docs task)
 
+> **Controller note (Task-3 review ruling C4):** ride-along docs fix here —
+> `review_shim.rs`'s docs claim desk-reachability, but its shims resolve at agent tier under the
+> human-surface rule (fail-closed, zero live callers). Correct the doc claim + add the 2-line
+> comment fix; the verdict file `task3-review-verdict.md` has the exact wording guidance.
+
 **Files:**
 - Modify: `INTENT.md` — apply ALL amendments quoted in spec §3.10 verbatim (Rules 2/3/8 + statuses, new Rule 10, "Who verifies: users and scope", Glossary, Active Librarian planned list)
 - Modify: `docs/superpowers/specs/2026-10-18-issue282-activity-query-mode-design.md` — §5 rev-15 delta (admitted set + rationale), "Out of scope" `:865-866` and "Rulings carried" `:883-885` lines
@@ -320,6 +332,10 @@ fn direct_write_is_gone() { /* compile-level: add_wisdom_in_tx no longer exists 
 > `cargo check --tests --features mcp-server` (the `cfg_attr(mcp-server)` schemars derive on
 > `WisdomDepositParams` is not covered by the default-feature gates). Plain
 > `cargo check --tests` FAILS at baseline — always use `--features test-utils`.
+> **Task-3 review additions:** include the spec §5 N1 spoof test (plan-level gap assigned here);
+> controller docs pass must also fix the stale "V18/V26" comment inside
+> `0001_deposit_attribution.sql` (Task-2 verdict B6) and the review_shim desk-reachability
+> docs note + 2-line comment fix (Task-3 verdict C4).
 
 **Files:**
 - Create: scratch-brain seeding script (scratch only — NOT committed) confirming the 14 kernel facts as `user_confirmed` fixtures
