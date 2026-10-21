@@ -165,6 +165,10 @@ pub fn review_approve_with(
         None,
         ResolveOptions {
             auto_approve: false,
+            // Agent surface (CLI `proposals review` / MCP / internal API):
+            // never confers the human tier (spec §3.7-A) — resolves at agent
+            // tier and writes `approved_at_agent_tier`.
+            human_surface: false,
             reviewed_by: Some(reviewed_by.to_string()),
             embed_profile: opts.embed_profile,
             entry_embeddings: opts.entry_embeddings,
@@ -263,6 +267,8 @@ pub fn review_reject_with(
         ResolveOptions {
             auto_approve: false,
             reviewed_by: Some(reviewed_by.to_string()),
+            // Agent surface — explicit arm-2 posture (spec §3.7-A).
+            human_surface: false,
             audit: opts.audit,
             ..Default::default()
         },
@@ -629,8 +635,11 @@ mod tests {
         );
     }
 
+    /// UPDATED legacy case (spec §3.7-A): an internal-API approval by an
+    /// agent (`reviewed_by="tessera"`, no `human_surface` flag) resolves at
+    /// AGENT tier — the reviewer stamp persists, the human stamp does not.
     #[test]
-    fn review_approve_stamps_user_confirmed_and_reviewer() {
+    fn review_approve_stamps_reviewer_and_resolves_at_agent_tier() {
         with_brain(|| {
             let mut conn = open_in_memory().unwrap();
             let pid = "prop-approve-1";
@@ -649,12 +658,149 @@ mod tests {
             assert_eq!(rb.as_deref(), Some("tessera"));
             let st: i64 = conn
                 .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'librarian_inferred'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(st >= 1, "agent-tier approval must stamp librarian_inferred");
+            let ut: i64 = conn
+                .query_row(
                     "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
                     [],
                     |r| r.get(0),
                 )
                 .unwrap();
+            assert_eq!(ut, 0, "no human tier without the desktop surface");
+        });
+    }
+
+    /// Spec §3.7-A arm 1: ONLY the desktop surface (human_surface: true) with
+    /// a manual decision stamps `user_confirmed`.
+    #[test]
+    fn desktop_surface_stamps_user_confirmed() {
+        with_brain(|| {
+            let mut conn = open_in_memory().unwrap();
+            let pid = "prop-desktop-1";
+            seed_pending(&conn, pid);
+            let decisions = load_accept_all_decisions(&conn, pid).unwrap();
+            let result = resolve_proposal(
+                &mut conn,
+                pid,
+                &decisions,
+                None,
+                ResolveOptions {
+                    auto_approve: false,
+                    human_surface: true,
+                    reviewed_by: Some(crate::proposals_api::DESKTOP_REVIEWER.to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.proposal_status, "approved");
+            let rb: Option<String> = conn
+                .query_row(
+                    "SELECT reviewed_by FROM curated_proposals WHERE id = ?1",
+                    [pid],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(rb.as_deref(), Some(crate::proposals_api::DESKTOP_REVIEWER));
+            let ut: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(ut >= 1, "desktop-surface approval stamps user_confirmed");
+        });
+    }
+
+    /// Spec §3.7-A arm 2: a manual decision WITHOUT the desktop surface — CLI
+    /// or internal API, here the updated `reviewed_by="tessera"` legacy case —
+    /// resolves at agent tier and writes an `approved_at_agent_tier` event.
+    #[test]
+    fn cli_and_internal_approvals_resolve_at_agent_tier() {
+        with_brain(|| {
+            let mut conn = open_in_memory().unwrap();
+            let pid = "prop-agent-tier-1";
+            seed_pending(&conn, pid);
+            let out = review_approve(&mut conn, pid, "tessera").unwrap();
+            assert_eq!(out.status, "approved");
+            assert_eq!(out.reviewed_by, "tessera");
+            let st: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'librarian_inferred'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(st >= 1, "agent-tier approval stamps librarian_inferred");
+            let ut: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(ut, 0, "no human tier without the desktop surface");
+            let ev: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_events WHERE event_type = 'approved_at_agent_tier'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(ev, 1, "agent-tier approval writes its event");
+        });
+    }
+
+    /// Spec §3.7-A arm 3: `auto_approve: true` is unchanged — librarian tier,
+    /// no `approved_at_agent_tier` event.
+    #[test]
+    fn auto_approve_unchanged() {
+        with_brain(|| {
+            let mut conn = open_in_memory().unwrap();
+            let pid = "prop-auto-1";
+            seed_pending(&conn, pid);
+            let decisions = load_accept_all_decisions(&conn, pid).unwrap();
+            let result = resolve_proposal(
+                &mut conn,
+                pid,
+                &decisions,
+                None,
+                ResolveOptions {
+                    auto_approve: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.proposal_status, "approved");
+            let st: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'librarian_inferred'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert!(st >= 1);
+            let ut: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(ut, 0);
+            let ev: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_events WHERE event_type = 'approved_at_agent_tier'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(ev, 0, "auto-approve writes no agent-tier event");
         });
     }
 

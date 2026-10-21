@@ -14,6 +14,13 @@ use crate::db::entity_gate::ImmediateTx;
 pub struct ResolveOptions {
     /// When true, summary-update conflicts are skipped silently (auto-approve path).
     pub auto_approve: bool,
+    /// Human-tier gate (spec §3.7-A): `user_confirmed` provenance is stamped
+    /// ONLY when this flag is `true` AND `auto_approve` is `false`. Set ONLY
+    /// by the desktop app's resolve path (`proposals_api.rs`); CLI, MCP, and
+    /// internal-API approvals resolve at agent tier (`librarian_inferred`)
+    /// and write an `approved_at_agent_tier` event. Never derived from a
+    /// string — `reviewed_by` is a label, not the predicate.
+    pub human_surface: bool,
     /// When `Some`, entry embeddings are computed before the commit transaction
     /// opens and stored with the new facts. `None` disables write-time
     /// embedding — rows land with NULL and the sweep fills them later. Either
@@ -2795,6 +2802,29 @@ fn finalize_proposal_status(accepted: usize, rejected: usize) -> &'static str {
     }
 }
 
+/// Spec §3.7-A arm 2: the `approved_at_agent_tier` event, written when a
+/// manual (non-`auto_approve`) resolution arrived WITHOUT the desktop
+/// `human_surface` flag and content actually landed. Summary deliberately
+/// avoids the `Approved`/`Rejected` prefixes so `resolution_events_use_approved_rejected_types`-style
+/// event_type lookups keep resolving to the regular resolution event.
+fn write_agent_tier_event(
+    conn: &Connection,
+    ctx: &CommitContext,
+    source_label: &str,
+) -> Result<()> {
+    let event_id = generate_llm_id("evt_");
+    let summary = format!(
+        "Agent-tier approval for *{}* from *{}* — no desktop human_surface flag (spec §3.7-A)",
+        ctx.entity_name, source_label
+    );
+    conn.execute(
+        "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
+         VALUES (?1, ?2, 'approved_at_agent_tier', ?3, NULL, ?4)",
+        params![event_id, ctx.entity_id, summary, ctx.now_ms],
+    )?;
+    Ok(())
+}
+
 /// Embed the bodies of every accepted `fact_add` in one batch.
 ///
 /// Returns an empty map when no profile is configured or the provider fails —
@@ -2923,11 +2953,19 @@ pub fn resolve_proposal(
     });
 
     let (now_secs, now_ms) = now_timestamps();
-    let source_type = if options.auto_approve {
-        "librarian_inferred"
-    } else {
+    // Provenance arms (spec §3.7-A): (1) desktop-surface manual decision →
+    // `user_confirmed`; (2) manual decision without the desktop surface (CLI,
+    // MCP, internal API) → agent tier + `approved_at_agent_tier` event; (3)
+    // `auto_approve` → agent tier, unchanged, no event. Path B's `user_stated`
+    // arm lands later at this same decision point.
+    let source_type = if !options.auto_approve && options.human_surface {
         "user_confirmed"
+    } else {
+        "librarian_inferred"
     };
+    // Arm 2's durable marker: a manual approval that did NOT happen on the
+    // desktop surface resolves at agent tier, and the resolution says so.
+    let approved_at_agent_tier = !options.auto_approve && !options.human_surface;
 
     // Compute entry embeddings BEFORE opening the transaction: embed_batch is a
     // blocking network call and must never run while a write lock is held.
@@ -3146,6 +3184,13 @@ pub fn resolve_proposal(
     let source_label = trigger_source_label(&tx, proposal_id)?;
     if entity_id.is_some() {
         write_resolution_event(&tx, &ctx, proposal_status, &source_label)?;
+        // Spec §3.7-A arm 2: a manual approval that did not happen on the
+        // desktop surface resolved at agent tier — record that durably, once,
+        // when content actually landed (a pure rejection approved nothing, so
+        // there is nothing to have approved at any tier).
+        if approved_at_agent_tier && proposal_status != "rejected" {
+            write_agent_tier_event(&tx, &ctx, &source_label)?;
+        }
     }
 
     finalize_proposal_status_guarded(
@@ -4389,7 +4434,9 @@ mod tests {
 
     /// Spec §2: the reviewer identity carried on ResolveOptions must be
     /// stamped into `curated_proposals.reviewed_by` on resolution, and the
-    /// entries must land as `user_confirmed` (manual review path).
+    /// resolution stays at AGENT tier (spec §3.7-A): an internal-API resolve
+    /// by an agent (`reviewed_by="tessera"`, no `human_surface` flag) stamps
+    /// `librarian_inferred`, never `user_confirmed`.
     #[test]
     fn resolve_proposal_stamps_reviewed_by_on_resolution() {
         let mut conn = open_in_memory().unwrap();
@@ -4420,6 +4467,14 @@ mod tests {
         assert_eq!(st, "approved");
         assert_eq!(result.proposal_status, "approved");
 
+        let lt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'librarian_inferred'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(lt >= 1, "agent-tier resolution must stamp librarian_inferred");
         let ut: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
@@ -4427,7 +4482,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(ut >= 1, "manual resolution must stamp user_confirmed");
+        assert_eq!(ut, 0, "no human tier without the desktop surface flag");
     }
 
     /// Characterization of the auto path: no reviewer on ResolveOptions →
@@ -4592,6 +4647,11 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                // Desktop-surface shaped (spec §3.7-A arm 1): this test pins
+                // entity/fact/outbox mechanics for the human-tier provenance
+                // path; the agent-tier provenance path is covered by
+                // `resolve_proposal_stamps_reviewed_by_on_resolution`.
+                human_surface: true,
                 embed_profile: None,
                 ..Default::default()
             },
