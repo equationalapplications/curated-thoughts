@@ -31,49 +31,15 @@ impl std::fmt::Display for PromoteDraftError {
 
 impl std::error::Error for PromoteDraftError {}
 
-pub fn promote_draft(
+/// Re-read a wiki-fact row and build the canonical outbox payload. Extracted
+/// verbatim from `promote_draft` so the Task 5 confirm/undeny paths (queue.rs)
+/// reuse the SAME payload builder instead of forking the row→payload mapping.
+pub(crate) fn fact_row_outbox_payload(
     conn: &Connection,
     entry_id: &str,
     entity_id: &str,
-    now_ms: i64,
-) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-
-    let status: Option<String> = tx
-        .query_row(
-            "SELECT lifecycle_status FROM llm_wiki_entries
-             WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
-            params![entry_id, entity_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    match status.as_deref() {
-        None => return Err(PromoteDraftError::NotFound.into()),
-        Some("draft") => {}
-        Some(_) => return Err(PromoteDraftError::NotDraft.into()),
-    }
-
-    let at_iso = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms)
-        .ok_or_else(|| anyhow!("promote_draft: timestamp out of range: {now_ms}"))?
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-
-    // Same shape as core's writeOkfTrust: append {by, at}, and mirror the
-    // latest reviewer into last_verified_by/at (ms). updated_at untouched.
-    tx.execute(
-        "UPDATE llm_wiki_entries
-            SET lifecycle_status = 'stable',
-                okf_verified = json_insert(
-                    COALESCE(NULLIF(okf_verified, ''), '[]'),
-                    '$[#]',
-                    json_object('by', ?3, 'at', ?4)
-                ),
-                last_verified_by = ?3,
-                last_verified_at = ?5
-          WHERE id = ?1 AND entity_id = ?2",
-        params![entry_id, entity_id, LOCAL_REVIEWER, at_iso, now_ms],
-    )?;
-
-    let payload = tx.query_row(
+) -> Result<serde_json::Value> {
+    Ok(conn.query_row(
         "SELECT title, body, tags, confidence, source_type, source_hash,
                 COALESCE(source_ref, ''), okf_type, okf_sources, okf_verified,
                 okf_usage_window, created_at, updated_at, deleted_at,
@@ -124,7 +90,52 @@ pub fn promote_draft(
                 last_verified_by.as_deref(),
             ))
         },
+    )?)
+}
+
+pub fn promote_draft(
+    conn: &Connection,
+    entry_id: &str,
+    entity_id: &str,
+    now_ms: i64,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT lifecycle_status FROM llm_wiki_entries
+             WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
+            params![entry_id, entity_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match status.as_deref() {
+        None => return Err(PromoteDraftError::NotFound.into()),
+        Some("draft") => {}
+        Some(_) => return Err(PromoteDraftError::NotDraft.into()),
+    }
+
+    let at_iso = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms)
+        .ok_or_else(|| anyhow!("promote_draft: timestamp out of range: {now_ms}"))?
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+    // Same shape as core's writeOkfTrust: append {by, at}, and mirror the
+    // latest reviewer into last_verified_by/at (ms). updated_at untouched.
+    tx.execute(
+        "UPDATE llm_wiki_entries
+            SET lifecycle_status = 'stable',
+                okf_verified = json_insert(
+                    COALESCE(NULLIF(okf_verified, ''), '[]'),
+                    '$[#]',
+                    json_object('by', ?3, 'at', ?4)
+                ),
+                last_verified_by = ?3,
+                last_verified_at = ?5
+          WHERE id = ?1 AND entity_id = ?2",
+        params![entry_id, entity_id, LOCAL_REVIEWER, at_iso, now_ms],
     )?;
+
+    let payload = fact_row_outbox_payload(&tx, entry_id, entity_id)?;
 
     push_entries_outbox(
         &tx,

@@ -251,10 +251,27 @@ fn unresolvable_brain_exits_1() {
 // label/exit discipline.
 
 fn target_of(out: &std::process::Output) -> String {
+    // Task-5 ride-along (Task-4 verdict D6, test-only): the gate-decision log
+    // line carries a wall-clock ts, so byte-comparing two separate `ct`
+    // invocations flaked when they straddled a second boundary. Normalize the
+    // ts field for the comparison only; field order and count stay
+    // contract-pinned by `gate_decision_log_line_*`.
+    let normalize = |s: String| {
+        s.lines()
+            .map(|l| match l.strip_prefix("wisdom_gate_decision\t") {
+                Some(rest) => match rest.split_once('\t') {
+                    Some((_ts, tail)) => format!("wisdom_gate_decision\t<TS>\t{tail}"),
+                    None => l.to_string(),
+                },
+                None => l.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     format!(
         "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        normalize(String::from_utf8_lossy(&out.stdout).into_owned()),
+        normalize(String::from_utf8_lossy(&out.stderr).into_owned())
     )
 }
 

@@ -128,9 +128,54 @@ fn read_lines<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
     Ok(out)
 }
 
+/// Append one denial to `stated/.denials.jsonl` (spec §8). Thin public wrapper
+/// over the private [`append_line`] primitive so the deny action (queue.rs,
+/// Task 5) writes THROUGH the shared primitive rather than forking it.
+pub fn append_denial(vault_root: &Path, line: &DenialLine) -> Result<()> {
+    append_line(vault_root, DENIALS_LEDGER, line)
+}
+
+/// Remove every denial line matching
+/// `(document_path, chunk_hash, fact_text_hash)` from
+/// `stated/.denials.jsonl` — the un-deny path. The ledger has no tombstone
+/// shape (`DenialLine`'s field set is pinned by spec §8 and Task 2) and the
+/// rebuild repopulates suppression verbatim, so un-denying REWRITES the file
+/// without the matching line(s). The file is left untouched when nothing
+/// matches (returns 0). Malformed lines still error, exactly like the reader.
+pub fn remove_denial(
+    vault_root: &Path,
+    document_path: &str,
+    chunk_hash: &str,
+    fact_text_hash: &str,
+) -> Result<usize> {
+    let path = vault_root.join(STATED_DIR).join(DENIALS_LEDGER);
+    let lines: Vec<DenialLine> = read_lines(&path)?;
+    let kept: Vec<&DenialLine> = lines
+        .iter()
+        .filter(|l| {
+            !(l.document_path == document_path
+                && l.chunk_hash == chunk_hash
+                && l.fact_text_hash == fact_text_hash)
+        })
+        .collect();
+    let removed = lines.len() - kept.len();
+    if removed == 0 {
+        return Ok(0);
+    }
+    let mut out = String::new();
+    for l in &kept {
+        out.push_str(&serde_json::to_string(l)?);
+        out.push('\n');
+    }
+    std::fs::write(&path, out).with_context(|| format!("rewriting ledger {}", path.display()))?;
+    Ok(removed)
+}
+
 /// Resolve the configured vault root from the environment (the same resolver
-/// `AppDb::open` uses), so ledger writers can find `stated/`.
-fn resolve_vault_root() -> Result<std::path::PathBuf> {
+/// `AppDb::open` uses), so ledger writers can find `stated/`. `pub(crate)` so
+/// the Task 5 confirm/deny actions (queue.rs) reuse the SAME resolver rather
+/// than re-deriving a root.
+pub(crate) fn resolve_vault_root() -> Result<std::path::PathBuf> {
     let paths = crate::retrieval::resolve_brain_paths();
     let root = crate::vault::config::VaultConfig::new(paths.config_path).vault_root()?;
     root.ok_or_else(|| {
