@@ -3,6 +3,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { ModeRail, AppMode } from "./ModeRail";
 import { StatusBar } from "./StatusBar";
+import { listQueue } from "../../lib/tauri";
+import { QueueMode } from "../modes/QueueMode";
+import { UnverifiedPromptModal } from "../queue/UnverifiedPromptModal";
 import { ActivityFeedPanel } from "./ActivityFeedPanel";
 import { PeekPanel, type PeekTarget } from "./PeekPanel";
 import { CommandPalette } from "./CommandPalette";
@@ -38,6 +41,8 @@ interface Props {
 const MODE_SHORTCUTS: Record<string, AppMode> = {
   "1": "brain",
   "2": "review",
+  // Queue deliberately has no digit shortcut yet: renumbering 3-5 breaks
+  // muscle memory (and pinned tests). It is reachable from the rail.
   "3": "library",
   "4": "timeline",
   "5": "tasks",
@@ -46,6 +51,7 @@ const MODE_SHORTCUTS: Record<string, AppMode> = {
 const MODE_TITLES: Record<AppMode, string> = {
   brain: "Brain",
   review: "Review",
+  queue: "Queue",
   library: "Library",
   timeline: "Timeline",
   tasks: "Tasks",
@@ -70,6 +76,20 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   const [dragging, setDragging] = useState(false);
   const { queue, refresh, error: queueError } = useProposalQueue(vaultPath);
   useProposalNotifications(queue.length);
+  // Task 9: unconfirmed-fact count for the Queue rail badge + the prompting
+  // modal's refresh hook. Both degrade silently when the backend has no
+  // queue (fresh installs / tests that mock the command away).
+  const [unconfirmedCount, setUnconfirmedCount] = useState(0);
+  const refreshUnconfirmed = useCallback(() => {
+    listQueue()
+      .then((rows) => setUnconfirmedCount(Array.isArray(rows) ? rows.length : 0))
+      .catch(() => setUnconfirmedCount(0));
+  }, []);
+  useEffect(() => {
+    refreshUnconfirmed();
+    const t = window.setInterval(refreshUnconfirmed, 60_000);
+    return () => window.clearInterval(t);
+  }, [refreshUnconfirmed]);
   const wizardActive = needsSetup || nav.current.mode === "setup";
   const {
     needs_migration_disclosure,
@@ -339,6 +359,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
                 <ModeRail
                   mode={nav.current.mode}
                   reviewCount={queue.length}
+                  queueCount={unconfirmedCount}
                   errorCount={errors.length}
                   canGoBack={nav.canGoBack}
                   canGoForward={nav.canGoForward}
@@ -382,6 +403,9 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
                         nav.navigate({ mode: "library", docPath: path, chunkId: chunkId ?? undefined });
                       }}
                     />
+                  )}
+                  {nav.current.mode === "queue" && (
+                    <QueueMode onQueueChanged={refreshUnconfirmed} />
                   )}
                   {nav.current.mode === "library" && (
                     <LibraryMode
@@ -454,6 +478,7 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
               onAcknowledged={() => setMigrationDismissed(true)}
             />
           ) : null}
+          <UnverifiedPromptModal onAction={refreshUnconfirmed} />
         </>
       )}
     </div>

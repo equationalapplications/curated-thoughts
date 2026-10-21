@@ -128,6 +128,14 @@ fn read_lines<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
     Ok(out)
 }
 
+/// Append one attestation to `stated/.attestations.jsonl` (spec §8). Thin public
+/// wrapper over the private [`append_line`] primitive so the APP's capture
+/// flow (db::wisdom::capture_statement, Task 9) writes THROUGH the shared
+/// primitive rather than forking it.
+pub fn append_attestation(vault_root: &Path, line: &AttestationLine) -> Result<()> {
+    append_line(vault_root, ATTESTATIONS_LEDGER, line)
+}
+
 /// Append one denial to `stated/.denials.jsonl` (spec §8). Thin public wrapper
 /// over the private [`append_line`] primitive so the deny action (queue.rs,
 /// Task 5) writes THROUGH the shared primitive rather than forking it.

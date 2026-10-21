@@ -771,6 +771,19 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
              INSERT OR IGNORE INTO folder_rules
                  (folder_path, librarian_mode, auto_approve)
                  VALUES ('immutable-source-files/agents/supersessions', 'summarize', 1);
+             -- Task 9 (user-confirmation-queue, spec §3.7.3): the stated/ tree
+             -- is the APP's capture lane — synthesize + auto-approve so a
+             -- captured statement is human tier the moment the librarian
+             -- finishes (the attested-source provenance arm stamps
+             -- `user_stated`). Agents can NEVER deposit here: the deposit
+             -- path is allow-listed to immutable-source-files/agents/ (the
+             -- folder row only governs the librarian leg of the app's own
+             -- kick). The three `stated/. *.jsonl` ledgers are operational
+             -- state, never documents — walk_vault excludes them by name and
+             -- their extension is not ingestible.
+             INSERT OR IGNORE INTO folder_rules
+                 (folder_path, librarian_mode, auto_approve)
+                 VALUES ('stated', 'synthesize', 1);
              CREATE TABLE IF NOT EXISTS deposit_kick_state (
                  path       TEXT PRIMARY KEY,
                  state      TEXT NOT NULL
@@ -3922,6 +3935,39 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    /// Task 9 (user-confirmation-queue, spec §3.7.3): the stated/ tree gets a
+    /// folder rule — synthesize + auto-approve — so a captured statement is
+    /// human tier the moment the librarian finishes (the attested-source arm
+    /// stamps `user_stated`). The rule is seeded on EVERY open (INSERT OR
+    /// IGNORE in the V25 block), so existing brains get it without a new
+    /// schema_version stamp (the task's no-DDL constraint).
+    #[test]
+    fn v25_block_seeds_stated_folder_rule() {
+        use crate::librarian::get_folder_mode;
+        // Rooted re-migrate: the V25 block (folder rules + kick-state ledger)
+        // only runs past a settled V22, so the open must carry a vault root
+        // — same setup as v25_seeds_agent_folder_rules_and_kick_state_table.
+        let conn = open_in_memory().unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
+        migrate(
+            &conn,
+            Some(VaultRoots {
+                configured: "/Users/kurt/vault".to_string(),
+                canonical: "/private/var/vault".to_string(),
+            }),
+            None,
+        )
+        .unwrap();
+        let (mode, auto) =
+            get_folder_mode(&conn, "stated/kurt/2026/some-statement.md");
+        assert_eq!(
+            (mode.as_str(), auto),
+            ("synthesize", true),
+            "stated/ must be synthesize + auto-approve for the app capture lane"
+        );
     }
 
     /// Rootless opens must not stamp V25 past a deferred V22 (same masking

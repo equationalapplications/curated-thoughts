@@ -233,7 +233,7 @@ fn render_supersession_file(
 // Kick-state ledger helpers
 // ---------------------------------------------------------------------------
 
-fn set_kick_state(
+pub(crate) fn set_kick_state(
     conn: &rusqlite::Connection,
     path: &str,
     state: &str,
@@ -430,11 +430,35 @@ const KICK_LOCK_RETRY_MS: u64 = 500;
 /// VaultLock retry loop below.
 static KICK_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// App-side kick registration (spec §3.7.3): the APP — never an agent kick —
+/// writes the initial kick-ledger row when it creates a `stated/` file. The
+/// initial state is `pending`: unlike the MCP deposit path there is no
+/// spawn/await split to reflect (the capture call runs the kick itself).
+pub(crate) fn register_app_kick(conn: &rusqlite::Connection, rel_path: &str) -> Result<()> {
+    set_kick_state(conn, rel_path, "pending", None)
+}
+
 fn run_kick(
     db_path: PathBuf,
     vault_dir: PathBuf,
     rel_path: String,
     profile: crate::embedder::EmbedProfile,
+) {
+    run_kick_with(db_path, vault_dir, rel_path, profile, None)
+}
+
+/// [`run_kick`] with an injected LLM completer for the librarian leg —
+/// Task 9's stated/ capture test seam (spec §3.7.4: the extraction pipeline
+/// itself is unchanged; only the completion call site is substituted).
+/// `Some(_)` skips the `llm_generation_configured` gate, since the caller is
+/// the host. Not an agent surface: nothing outside `#[cfg(test)]` passes a
+/// completer.
+pub(crate) fn run_kick_with(
+    db_path: PathBuf,
+    vault_dir: PathBuf,
+    rel_path: String,
+    profile: crate::embedder::EmbedProfile,
+    completer: Option<&dyn crate::librarian::LlmCompleter>,
 ) {
     let _serial = KICK_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let outcome = (|| -> Result<String> {
@@ -501,18 +525,26 @@ fn run_kick(
         set_kick_state(&conn, &rel_path, "chunked", None)?;
 
         // Librarian leg. `generate_summary` consults folder rules itself
-        // (agents = synthesize + auto_approve after V25); with no configured
-        // generation provider it errors — that's `chunked` (no librarian
-        // host), not `failed`. Config is re-checked HERE rather than passed
-        // in from the spawn site so the ledger decision always matches the
-        // config this kick actually runs under.
-        if !crate::librarian::llm_generation_configured() {
+        // (agents = synthesize + auto_approve after V25; stated = Task 9's
+        // `synthesize` + auto-approve row); with no configured generation
+        // provider it errors — that's `chunked` (no librarian host), not
+        // `failed`. Config is re-checked HERE rather than passed in from the
+        // spawn site so the ledger decision always matches the config this
+        // kick actually runs under. An injected completer (test seam) skips
+        // the config gate — the caller IS the host.
+        if completer.is_none() && !crate::librarian::llm_generation_configured() {
             // The ledger already reads `chunked` from the ingest leg above —
             // this check only decides whether the librarian leg runs.
             return Ok("chunked".to_string());
         }
         let model = crate::librarian::active_generation_model(crate::setup::recommended_model());
-        match crate::librarian::generate_summary(&mut conn, &rel_path, &model, false) {
+        let gen_result = match completer {
+            Some(c) => {
+                crate::librarian::generate_summary_with(&mut conn, &rel_path, &model, false, c)
+            }
+            None => crate::librarian::generate_summary(&mut conn, &rel_path, &model, false),
+        };
+        match gen_result {
             Ok(()) => {
                 set_kick_state(&conn, &rel_path, "ingested", None)?;
                 Ok("ingested".to_string())

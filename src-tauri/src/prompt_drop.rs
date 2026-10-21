@@ -51,6 +51,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -140,6 +141,96 @@ pub fn emit_unverified_match(vault_root: &Path, ev: UnverifiedMatch) {
     if let Err(e) = emit() {
         eprintln!("curated-thoughts-mcp: prompt drop skipped (append): {e}");
     }
+}
+
+/// Per-drain modal cap (spec §4: per-drain modal cap (3) + snooze preference
+/// bound day-one volume).
+pub const PROMPT_DRAIN_CAP: usize = 3;
+
+/// One drained prompt: what the app needs to re-read the fact FROM THE BRAIN
+/// (anti-spoof M1: the drop payload's title/body/quote are NEVER rendered —
+/// the modal fetches the row by `fact_id`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DrainedPrompt {
+    pub fact_id: String,
+    pub ts: i64,
+}
+
+/// Drain result: the ≤cap prompts to show, plus how many unacked lines REMAIN
+/// (the modal's "N more" digest).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DrainReport {
+    pub prompts: Vec<DrainedPrompt>,
+    pub total_unacked: usize,
+}
+
+/// App-side drain (Task 9's Active Verification Prompting): take the oldest
+/// unacked lines (up to `cap`), mark THEM acked, and report the remaining
+/// unacked count. The drop file is otherwise append-only (the emitter never
+/// rewrites); this function is the ONLY rewriter, and it is app-only. A
+/// missing file is an empty drain; a malformed line is never silently dropped
+/// — it is rewritten unchanged (the ledger discipline).
+pub fn drain_unverified_matches(vault_root: &Path, cap: usize) -> Result<DrainReport> {
+    let dir = vault_root.join(BRAIN_DIR);
+    let path = dir.join(UNVERIFIED_MATCH_FILE);
+    if !path.exists() {
+        return Ok(DrainReport {
+            prompts: Vec::new(),
+            total_unacked: 0,
+        });
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut prompts: Vec<DrainedPrompt> = Vec::new();
+    let mut unacked_total = 0usize;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "curated-thoughts: prompt drain malformed line kept unchanged: {e}"
+                );
+                out_lines.push(line.to_string());
+                continue;
+            }
+        };
+        if v.get("acked_at").is_some() {
+            out_lines.push(line.to_string());
+            continue;
+        }
+        unacked_total += 1;
+        if prompts.len() < cap {
+            let fact_id = v
+                .get("fact_id")
+                .and_then(|f| f.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let ts = v.get("ts").and_then(|t| t.as_i64()).unwrap_or(0);
+            prompts.push(DrainedPrompt { fact_id, ts });
+            v["acked_at"] = serde_json::json!(now_ms);
+        }
+        out_lines.push(serde_json::to_string(&v)?);
+    }
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    let mut body = out_lines.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    std::fs::write(&path, body).with_context(|| format!("rewriting {}", path.display()))?;
+    let total_unacked = unacked_total - prompts.len();
+    Ok(DrainReport {
+        prompts,
+        total_unacked,
+    })
 }
 
 /// Advisory read-before-append: does `path` hold an UNACKED line (no

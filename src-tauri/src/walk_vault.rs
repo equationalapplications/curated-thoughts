@@ -174,6 +174,19 @@ const EXCLUDED_FILE_NAMES: &[&str] = &[
     "CHANGELOG.md.generated",
 ];
 
+/// Task 9 (user-confirmation-queue, spec §7.3): the three `stated/` ledger
+/// files are the app's DURABLE OPERATIONAL STATE (confirmations,
+/// attestations, denials mirrors), never vault knowledge. Their names are
+/// app-controlled constants (db::stated_ledger), so a whole-name exclusion
+/// anywhere in the vault is exact, and their `.jsonl` extension is not
+/// ingestible anyway — this entry makes the INGEST TIER NONE decision at the
+/// walk itself: no document row, no reconcile membership, ever.
+const STATED_LEDGER_FILES: &[&str] = &[
+    crate::db::stated_ledger::CONFIRMATIONS_LEDGER,
+    crate::db::stated_ledger::ATTESTATIONS_LEDGER,
+    crate::db::stated_ledger::DENIALS_LEDGER,
+];
+
 /// Path segments (matched anywhere in the relative path) that mark generated
 /// machine output rather than authored knowledge.
 const EXCLUDED_PATH_SEGMENTS: &[&str] = &["drizzle/meta/", "gen/schemas/"];
@@ -193,6 +206,11 @@ pub(crate) fn is_excluded_file(path: &Path) -> bool {
     if let Some(name) = path.file_name() {
         let name = name.to_string_lossy();
         if EXCLUDED_FILE_NAMES.contains(&name.as_ref()) {
+            return true;
+        }
+        // Task 9: the stated/ jsonl ledgers are operational state, never
+        // documents (spec §7.3 — ingest tier NONE).
+        if STATED_LEDGER_FILES.contains(&name.as_ref()) {
             return true;
         }
         if EXCLUDED_FILE_EXACT_TEMP.contains(&name.as_ref()) {
@@ -714,6 +732,43 @@ mod tests {
             !names.iter().any(|n| n.contains("/.brain/")),
             "walk leaked .brain content: {names:?}"
         );
+    }
+
+    /// Task 9 (user-confirmation-queue, spec §7.3): the three stated/ jsonl
+    /// ledgers are the app's operational state with INGEST TIER NONE — the
+    /// walk emits neither of them, while a real note in the same tree still
+    /// flows (the .md fixture rule: the extension gate must not be able to
+    /// pass this test on the exclusion's behalf).
+    #[test]
+    fn stated_ledgers_are_excluded_from_the_walk() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        let stated = root.join("stated").join("kurt").join("2026");
+        std::fs::create_dir_all(&stated).unwrap();
+        std::fs::write(root.join("stated/.confirmations.jsonl"), b"{}\n").unwrap();
+        std::fs::write(root.join("stated/.attestations.jsonl"), b"{}\n").unwrap();
+        std::fs::write(root.join("stated/.denials.jsonl"), b"{}\n").unwrap();
+        std::fs::write(stated.join("a-statement.md"), b"hello").unwrap();
+
+        let mut out = Vec::new();
+        let mut errs = Vec::new();
+        super::collect_files(&root, &mut out, &mut errs);
+        let names: Vec<String> = out
+            .iter()
+            .map(|f| f.virtual_path.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(names.iter().any(|n| n.ends_with("a-statement.md")));
+        for ledger in [
+            crate::db::stated_ledger::CONFIRMATIONS_LEDGER,
+            crate::db::stated_ledger::ATTESTATIONS_LEDGER,
+            crate::db::stated_ledger::DENIALS_LEDGER,
+        ] {
+            assert!(
+                !names.iter().any(|n| n.ends_with(ledger)),
+                "walk leaked stated ledger {ledger}: {names:?}"
+            );
+        }
     }
 
     /// Spec item 2 carve-out: a `documents/.brain` symlink must be reported

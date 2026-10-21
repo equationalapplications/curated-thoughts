@@ -429,7 +429,7 @@ pub const HUMAN_CONFIRMER: &str = "human:kurt";
 /// re-extraction while the fact-text hash pins the SPECIFIC fact, so denying
 /// one fact never hides a sibling from the same chunk (rev-4 M3, pinned by
 /// `deny_suppresses_and_undeny_restores`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DenialKey {
     pub document_path: String,
     pub chunk_hash: String,

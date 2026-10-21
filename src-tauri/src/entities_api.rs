@@ -3,11 +3,9 @@
 use crate::db::connections::{get_entity_connections, EntityConnections};
 use crate::db::entities::{
     archive_entity, create_entity, get_entity, list_entities, update_entity_summary,
-    CreateEntityInput, EntityDetail, EntityListFilter, EntitySort, EntitySummary, EntityWisdom,
+    CreateEntityInput, EntityDetail, EntityListFilter, EntitySort, EntitySummary,
 };
-use crate::db::wisdom::{
-    add_wisdom_with_blob, archive_wisdom, precompute_entry_embedding, update_wisdom_with_blob,
-};
+use crate::db::wisdom::{archive_wisdom, precompute_entry_embedding, update_wisdom_with_blob};
 use crate::DbState;
 use tauri::State;
 
@@ -70,22 +68,47 @@ pub fn get_entity_connections_cmd(
 }
 
 #[tauri::command]
-pub fn add_entity_fact_cmd(
+pub async fn add_entity_fact_cmd(
     entity_id: String,
     body: String,
-    db_state: State<DbState>,
-    embed_profile: State<crate::EmbedProfileState>,
-) -> Result<EntityWisdom, String> {
-    // Compute the embedding OUTSIDE the DbState mutex. `embed_batch` is a
-    // blocking HTTP round-trip and must never queue the app-level DB lock
-    // (which gates every other Tauri command behind this one). Provider
-    // failures collapse to None and the sweep fills the blob later.
-    let embedding_blob = {
-        let profile = embed_profile.0.lock().map_err(|e| e.to_string())?;
-        precompute_entry_embedding(Some(&profile), &body)
+    db_state: State<'_, DbState>,
+    embed_profile: State<'_, crate::EmbedProfileState>,
+) -> Result<String, String> {
+    // Task 9 (user-confirmation-queue, spec §3.7.6 + §9): the app's DIRECT
+    // `user_stated` INSERT is RETIRED. A statement typed in the app is
+    // captured as a `stated/` file, attested by the app, and ingested through
+    // the Librarian, so it gains evidence and becomes deliverable mid-task.
+    // Consequence, accepted by the spec: the entity binding is dropped —
+    // where the fact lands is decided by the librarian's proposal targeting,
+    // not by the page it was typed on.
+    let _ = entity_id;
+    // Compute the capture inputs OUTSIDE the blocking call; `embed_batch` and
+    // the kick both block and must never hold the app-level DB lock.
+    let (db_path, profile) = {
+        let guard = db_state.0.lock().map_err(|e| e.to_string())?;
+        let profile = embed_profile.0.lock().map_err(|e| e.to_string())?.clone();
+        (
+            guard
+                .0
+                .path()
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| "brain db has no path".to_string())?,
+            profile,
+        )
     };
-    let mut guard = db_state.0.lock().map_err(|e| e.to_string())?;
-    add_wisdom_with_blob(&mut guard.0, &entity_id, &body, embedding_blob).map_err(|e| e.to_string())
+    let ctx = crate::db::wisdom::CaptureContext {
+        db_path,
+        vault_root: crate::db::stated_ledger::resolve_vault_root().map_err(|e| e.to_string())?,
+        profile,
+    };
+    // The capture runs the whole kick (ingest + librarian) synchronously on a
+    // blocking thread: instant confirm — human tier when it returns.
+    let result = tokio::task::spawn_blocking(move || {
+        crate::db::wisdom::capture_statement(&ctx, &body).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("capture task join error: {e}"))?;
+    result
 }
 
 #[tauri::command]

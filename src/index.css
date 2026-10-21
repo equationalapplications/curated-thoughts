@@ -3762,6 +3762,48 @@ code {
   border: 0;
 }
 
+/* ---------------------------------------------------------------------------
+   Confirmation queue (Task 9, user-confirmation-queue plan). Queue state is
+   worded "unconfirmed" — never "pending" (INTENT Rule 3).
+   --------------------------------------------------------------------------- */
+.queue-screen { display: flex; flex-direction: column; gap: var(--sp-4); padding: var(--sp-4); overflow-y: auto; height: 100%; }
+.queue-header h2 { margin: 0 0 var(--sp-1); }
+.queue-subtitle { margin: 0; color: var(--on-surface-var); }
+.queue-capture { display: flex; flex-direction: column; gap: var(--sp-2); }
+.queue-capture-label { color: var(--on-surface-var); font-size: 0.9rem; }
+.queue-capture textarea { resize: vertical; min-height: 3rem; }
+.queue-capture-btn { align-self: flex-start; }
+.queue-error { color: var(--danger, var(--outline)); }
+.queue-notice { color: var(--on-surface-var); }
+.queue-bulkbar { display: flex; align-items: center; gap: var(--sp-3); }
+.queue-rows, .queue-denied-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.queue-row { display: flex; gap: var(--sp-3); padding: var(--sp-3); border: 1px solid var(--outline); border-radius: 8px; background: var(--elev-2); }
+.queue-row-check { display: flex; align-items: flex-start; }
+.queue-row-main { flex: 1; min-width: 0; }
+.queue-row-meta { display: flex; gap: var(--sp-3); color: var(--on-surface-var); font-size: 0.85rem; margin-bottom: var(--sp-1); }
+.queue-row-title { margin: 0 0 var(--sp-1); font-size: 1rem; }
+.queue-row-body { margin: 0 0 var(--sp-2); white-space: pre-wrap; }
+.queue-row-evidence { margin: 0; padding: var(--sp-2); border-left: 3px solid var(--outline); color: var(--on-surface-var); font-size: 0.9rem; }
+.queue-row-source { font-style: normal; }
+.queue-row-actions { display: flex; align-items: flex-start; }
+.queue-denied h3 { margin: 0 0 var(--sp-2); }
+.queue-denied li { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+.queue-denied-path { font-family: monospace; font-size: 0.85rem; word-break: break-all; }
+.queue-empty { color: var(--on-surface-var); }
+.queue-modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.45); display: flex; align-items: center; justify-content: center; z-index: 60; }
+.queue-modal { background: var(--elev-3); color: var(--on-surface); border-radius: 10px; padding: var(--sp-4); max-width: 34rem; width: min(34rem, 92vw); max-height: 80vh; overflow-y: auto; display: flex; flex-direction: column; gap: var(--sp-3); box-shadow: 0 12px 40px rgb(0 0 0 / 0.35); }
+.queue-modal-title { margin: 0; }
+.queue-modal-body { margin: 0; white-space: pre-wrap; }
+.queue-modal-evidence { margin: 0; padding: var(--sp-2); border-left: 3px solid var(--outline); color: var(--on-surface-var); font-size: 0.9rem; }
+.queue-modal-hint { margin: 0; color: var(--on-surface-var); font-size: 0.9rem; }
+.queue-modal-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.queue-prompt-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
+.queue-prompt-item { border: 1px solid var(--outline); border-radius: 8px; padding: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); }
+.queue-prompt-item h4 { margin: 0; }
+.queue-prompt-item p { margin: 0; }
+.queue-prompt-item blockquote { margin: 0; color: var(--on-surface-var); font-size: 0.9rem; }
+.queue-prompt-digest { margin: 0; color: var(--on-surface-var); font-size: 0.9rem; }
+
 /* WCAG 2.2 SC 2.3.3 — disable non-essential motion. Must remain the final
    rule in this file; the a11y contrast test asserts its position. */
 @media (prefers-reduced-motion: reduce) {

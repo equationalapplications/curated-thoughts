@@ -426,7 +426,10 @@ export interface EntityConnections {
 export const getEntityConnections = (entityId: string): Promise<EntityConnections> =>
   invoke("get_entity_connections_cmd", { entityId });
 
-export const addEntityFact = (entityId: string, body: string): Promise<EntityFact> =>
+/** Task 9 retirement: the direct `user_stated` INSERT is gone. Statements
+ * typed in the app are captured as stated/ files and ingested through the
+ * Librarian — resolves to the vault-relative stated/ path. */
+export const addEntityFact = (entityId: string, body: string): Promise<string> =>
   invoke("add_entity_fact_cmd", { entityId, body });
 
 export const updateEntityFact = (
@@ -763,3 +766,79 @@ export const applyOkfImport = (
 
 export const ingestDocument = (path: string): Promise<void> =>
   invoke("ingest_document_cmd", { path });
+
+// ---------------------------------------------------------------------------
+// Confirmation queue + Path B capture + Active Verification Prompting
+// (user-confirmation-queue plan, Task 9). Confirm/deny/capture are app-only.
+// ---------------------------------------------------------------------------
+
+/** One row of the human confirmation queue. Word for queue state is
+ * "unconfirmed" — never "pending" (Rule 3 reserves pending for un-processed
+ * deposits). */
+export interface QueueRow {
+  fact_id: string;
+  title: string;
+  body: string;
+  provenance: string | null;
+  entity_id: string;
+  evidence_quote: string | null;
+  source_document: string | null;
+  attributed_speaker: string | null;
+  instruction_source: string | null;
+  age_days: number;
+}
+
+/** One `queue_denials` row (the queue screen's denied section). */
+export interface DenialKey {
+  document_path: string;
+  chunk_hash: string;
+  fact_text_hash: string;
+}
+
+export interface DenialRow extends DenialKey {
+  denied_by: string;
+  denied_at: string;
+}
+
+export const listQueue = (): Promise<QueueRow[]> => invoke("queue_list_cmd");
+
+export const confirmQueueFact = (factId: string): Promise<void> =>
+  invoke("queue_confirm_cmd", { factId });
+
+/** The UI must surface denial errors, never swallow them (Task 8 review). */
+export const denyQueueFact = (factId: string): Promise<void> =>
+  invoke("queue_deny_cmd", { factId });
+
+export const unDenyQueueFact = (key: DenialKey): Promise<void> =>
+  invoke("queue_undeny_cmd", { key });
+
+export const listDenied = (): Promise<DenialRow[]> => invoke("queue_denied_cmd");
+
+/** Path B capture (spec §3.7): returns the vault-relative stated/ path. */
+export const captureStatement = (text: string): Promise<string> =>
+  invoke("queue_capture_cmd", { text });
+
+/** Rule 15 / spec §9: the queue-level confirm; confirm-with-no-fact routes
+ * through capture. Returns "confirmed" or the stated/ path. */
+export const confirmOrCapture = (
+  factId: string | null,
+  freshText: string | null,
+): Promise<string> => invoke("queue_confirm_or_capture_cmd", { factId, freshText });
+
+/** M1 contract: the prompting modal re-reads the fact BY ID from the brain
+ * and renders THIS — never the drop-file payload text. */
+export const getQueueFact = (factId: string): Promise<QueueRow | null> =>
+  invoke("queue_fact_get_cmd", { factId });
+
+export interface DrainedPrompt {
+  fact_id: string;
+  ts: number;
+}
+
+export interface PromptDrain {
+  prompts: DrainedPrompt[];
+  total_unacked: number;
+}
+
+export const drainUnverifiedPrompts = (): Promise<PromptDrain | null> =>
+  invoke("unverified_prompts_drain_cmd");

@@ -12,6 +12,7 @@ use rusqlite::Connection;
 
 pub use synthesis::active_generation_model;
 pub(crate) use synthesis::llm_generation_configured;
+pub(crate) use synthesis::{LlmCompleter, run_synthesis_with_completer};
 
 pub struct ChunkRow {
     pub id: i64,
@@ -233,6 +234,32 @@ pub fn generate_summary(
     model: &str,
     force: bool,
 ) -> Result<()> {
+    generate_summary_inner(conn, source_path, model, force, None)
+}
+
+/// Deterministic-host form of [`generate_summary`]: the extraction leg runs
+/// against the PROVIDED completer instead of the configured generation
+/// provider. Task 9's stated/ capture test seam — the REAL pipeline
+/// (gates → chunks → propose → auto-approve → resolve) executes unchanged;
+/// only the LLM call site is substituted. Not an agent surface: nothing
+/// outside `#[cfg(test)]` passes a completer.
+pub(crate) fn generate_summary_with(
+    conn: &mut Connection,
+    source_path: &str,
+    model: &str,
+    force: bool,
+    completer: &dyn LlmCompleter,
+) -> Result<()> {
+    generate_summary_inner(conn, source_path, model, force, Some(completer))
+}
+
+fn generate_summary_inner(
+    conn: &mut Connection,
+    source_path: &str,
+    model: &str,
+    force: bool,
+    completer: Option<&dyn LlmCompleter>,
+) -> Result<()> {
     let (mode, auto_approve) = get_folder_mode(conn, source_path);
 
     if mode == "index" {
@@ -333,17 +360,36 @@ pub fn generate_summary(
         .parent()
         .and_then(|p| p.parent());
 
-    run_synthesis(
-        conn,
-        source_path,
-        &chunks,
-        trigger_doc_id,
-        model,
-        synthesis_mode,
-        auto_approve,
-        vault_root,
-        force,
-    )
+    match completer {
+        Some(c) => {
+            let watermark_model = active_generation_model(model);
+            run_synthesis_with_completer(
+                conn,
+                source_path,
+                &chunks,
+                trigger_doc_id,
+                synthesis_mode,
+                auto_approve,
+                vault_root,
+                c,
+                watermark_model.as_str(),
+                force,
+            )
+        }
+        None => {
+            run_synthesis(
+                conn,
+                source_path,
+                &chunks,
+                trigger_doc_id,
+                model,
+                synthesis_mode,
+                auto_approve,
+                vault_root,
+                force,
+            )
+        }
+    }
 }
 
 #[cfg(test)]
