@@ -23,6 +23,7 @@ pub mod ontology_config;
 pub mod outbox;
 mod pipeline;
 pub mod privacy;
+pub mod prompt_drop;
 mod proposals_api;
 pub mod recall_bench_fixture;
 pub mod reconcile;

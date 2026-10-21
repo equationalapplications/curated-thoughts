@@ -631,9 +631,26 @@ pub async fn dispatch_curated_recall_context(
 
     let conn = ctx.conn.clone();
     let query = p.query.clone();
+    let vault_dir = ctx.vault_dir.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<Value> {
         let conn_guard = lock_conn(&conn)?;
         let wiki_entries = rank_wiki_entries(&conn_guard, &query, limit_wiki)?;
+
+        // Active Verification Prompting (spec §4, plan Task 6): emit AFTER
+        // results are computed, BEFORE the surface returns — infallible,
+        // non-human-tier matches only, vault-file only (never process
+        // streams, so the `ct` replay surface is untouched).
+        let ids: Vec<String> = wiki_entries
+            .iter()
+            .filter_map(|v| v.get("id").and_then(|i| i.as_str()).map(str::to_string))
+            .collect();
+        crate::prompt_drop::emit_unverified_matches(
+            vault_dir.as_deref(),
+            &conn_guard,
+            &ids,
+            &query,
+            "curated_recall_context",
+        );
 
         // Code chunks: real chunker strategies (ast_*). Vectors live in the
         // separate embeddings table.
@@ -1211,9 +1228,26 @@ pub async fn dispatch_tool_call(
             // Embed OUTSIDE the DB lock (blocking network call).
             let query_vec = embed_query(&ctx.profile, query_text).await?;
             let (entity_ids, tier, limit) = (p.entity_ids, p.tier, p.limit);
-            let hits = tokio::task::spawn_blocking(move || {
+            let vault_dir = ctx.vault_dir.clone();
+            let drop_query = p.query.clone();
+            let hits = tokio::task::spawn_blocking(
+                move || -> Result<Vec<WikiSearchHit>> {
                 let conn_guard = lock_conn(&conn)?;
-                dispatch_wiki_search(&conn_guard, &query_vec, entity_ids, tier, limit, scheme)
+                let hits =
+                    dispatch_wiki_search(&conn_guard, &query_vec, entity_ids, tier, limit, scheme)?;
+                // Active Verification Prompting (spec §4, plan Task 6): emit
+                // AFTER results are computed, BEFORE the surface returns —
+                // infallible, non-human-tier matches only, vault-file only
+                // (never process streams).
+                let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+                crate::prompt_drop::emit_unverified_matches(
+                    vault_dir.as_deref(),
+                    &conn_guard,
+                    &ids,
+                    &drop_query,
+                    "wiki_search",
+                );
+                Ok(hits)
             })
             .await??;
             Ok(serde_json::to_value(hits)?)
@@ -1227,9 +1261,25 @@ pub async fn dispatch_tool_call(
             // Embed OUTSIDE the DB lock (blocking network call).
             let query_vec = embed_query(&ctx.profile, query_text).await?;
             let (tier, depth, max_facts) = (p.tier, p.depth, p.max_facts);
-            let result = tokio::task::spawn_blocking(move || {
+            let vault_dir = ctx.vault_dir.clone();
+            let drop_query = p.query.clone();
+            let result = tokio::task::spawn_blocking(
+                move || -> Result<WikiContextResult> {
                 let conn_guard = lock_conn(&conn)?;
-                dispatch_wiki_context(&conn_guard, &query_vec, tier, depth, max_facts, scheme)
+                let result =
+                    dispatch_wiki_context(&conn_guard, &query_vec, tier, depth, max_facts, scheme)?;
+                // Active Verification Prompting (spec §4, plan Task 6): emit
+                // AFTER results are computed, BEFORE the surface returns —
+                // infallible, non-human-tier matches only.
+                let ids: Vec<String> = result.facts.iter().map(|h| h.id.clone()).collect();
+                crate::prompt_drop::emit_unverified_matches(
+                    vault_dir.as_deref(),
+                    &conn_guard,
+                    &ids,
+                    &drop_query,
+                    "wiki_context",
+                );
+                Ok(result)
             })
             .await??;
             Ok(serde_json::to_value(result)?)

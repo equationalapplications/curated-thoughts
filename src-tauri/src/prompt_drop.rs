@@ -1,0 +1,357 @@
+//! Active Verification Prompting drop-file emitter (user-confirmation-queue
+//! plan Task 6, spec rev 4.1 §4 / R-A).
+//!
+//! When an agent-facing recall tool (`wiki_context`, `wiki_search`,
+//! `curated_recall_context`) matches a fact whose provenance is not
+//! human-tier, the recall path appends one JSONL event line to
+//! `<vault>/.brain/unverified-match.jsonl`; the desktop app watches the file
+//! and renders the Confirm/Reject modal. Recall emits NOTHING over Tauri —
+//! this module holds no tauri import (the sidecar links this shape) and
+//! talks only to the filesystem and the read-only brain connection.
+//!
+//! # Drop-file format
+//!
+//! One self-contained JSON object per line, single-line serde-serialized
+//! (never hand-concatenated), fields pinned by the plan:
+//!
+//! ```json
+//! {"fact_id":"…","title":"…","body":"…","quote":"…","query":"…","surface":"wiki_search","ts":1761000000000}
+//! ```
+//!
+//! `quote` carries the evidence source reference (`llm_wiki_entries.source_ref`)
+//! and `surface` the calling tool — together the "why relevant now" trigger
+//! context (spec §4). Anti-spoof (M1): the modal NEVER renders payload text as
+//! the fact; the app re-reads fact, evidence and queue state from the brain by
+//! `fact_id`. A poisoned drop file can at worst cause a nuisance modal.
+//!
+//! # Ack contract
+//!
+//! The app is the SOLE pruner: it drains the file (read lines, render modals —
+//! capped and de-duped per drain cycle per spec §4 — then truncate). A line is
+//! UNACKED iff it has no `acked_at` field; the app MAY mark lines in place with
+//! `acked_at` instead of truncating. The emitter never rewrites or truncates
+//! the file: it appends ONLY when no UNACKED line for the same `fact_id`
+//! already exists (advisory read-before-append, spec §4 M2-rev2). The file is
+//! ephemeral operational state — excluded from brain sync/backup.
+//!
+//! # Emitter infallibility (spec §4 rev-4 m7)
+//!
+//! [`emit_unverified_match`] returns `()` — every drop-file I/O error is
+//! logged and swallowed. The recall path must NEVER fail because the prompt
+//! drop could not be written; a read-only `.brain/` degrades to "no prompts"
+//! (pinned by `read_only_brain_dir_never_errors_the_call`). The UNACKED
+//! dedupe read follows the ledger disciplines (`db::stated_ledger`): single
+//! serde-serialized appends, and a malformed line is never SILENTLY skipped —
+//! it is logged; since the emitter cannot propagate, a malformed line is then
+//! treated as non-matching for the advisory dedupe (nuisance-modal risk at
+//! worst, per the spec's poisoned-file bound).
+
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use rusqlite::Connection;
+use serde::Serialize;
+
+/// Brain directory inside the vault root — the drop file lives under it
+/// (NOT under `stated/`; controller note 1).
+pub const BRAIN_DIR: &str = ".brain";
+
+/// The unverified-match drop file name.
+pub const UNVERIFIED_MATCH_FILE: &str = "unverified-match.jsonl";
+
+/// Human-tier provenance values (plan Global Constraints: human tier =
+/// `user_stated` + `user_confirmed` ONLY). Membership is decided by running
+/// the stored `source_type` through `wisdom_match::provenance_for` (vocabulary
+/// filter, `wisdom_match.rs:264-268`) and comparing against this set — tier
+/// logic is NOT re-implemented here.
+const HUMAN_TIER: &[&str] = &["user_stated", "user_confirmed"];
+
+/// One unverified-match prompt event (spec §4 payload: fact id, title/body,
+/// evidence quote / source reference, trigger context).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnverifiedMatch {
+    pub fact_id: String,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    /// Evidence quote / source document reference.
+    pub quote: Option<String>,
+    /// The recall query — "why relevant now" (trigger context).
+    pub query: String,
+    /// The calling surface (which recall tool fired).
+    pub surface: String,
+}
+
+/// One serialized drop-file line (`ts` is stamped by the emitter at write
+/// time, ms since the Unix epoch).
+#[derive(Serialize)]
+struct DropLine<'a> {
+    fact_id: &'a str,
+    title: &'a Option<String>,
+    body: &'a Option<String>,
+    quote: &'a Option<String>,
+    query: &'a str,
+    surface: &'a str,
+    ts: i64,
+}
+
+/// True when the stored `source_type` is human-tier (see [`HUMAN_TIER`]).
+/// `None` / out-of-vocabulary values are NOT human tier.
+pub fn is_human_tier(source_type: Option<&str>) -> bool {
+    matches!(
+        crate::wisdom_match::provenance_for(source_type).as_deref(),
+        Some(p) if HUMAN_TIER.contains(&p)
+    )
+}
+
+/// Append one unverified-match line to `<vault_root>/.brain/unverified-match.jsonl`,
+/// unless an UNACKED line for `ev.fact_id` already exists. INFALLIBLE (spec §4
+/// rev-4 m7): every error is logged and swallowed; `Ok`-less by design.
+pub fn emit_unverified_match(vault_root: &Path, ev: UnverifiedMatch) {
+    let dir = vault_root.join(BRAIN_DIR);
+    let path = dir.join(UNVERIFIED_MATCH_FILE);
+    if has_unacked_line(&path, &ev.fact_id) {
+        return;
+    }
+    // Errors from here on are logged + swallowed — never propagated.
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("curated-thoughts-mcp: prompt drop skipped (mkdir): {e}");
+        return;
+    }
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let line = DropLine {
+        fact_id: &ev.fact_id,
+        title: &ev.title,
+        body: &ev.body,
+        quote: &ev.quote,
+        query: &ev.query,
+        surface: &ev.surface,
+        ts,
+    };
+    let emit = || -> std::io::Result<()> {
+        let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
+        writeln!(f, "{}", serde_json::to_string(&line).unwrap_or_default())?;
+        Ok(())
+    };
+    if let Err(e) = emit() {
+        eprintln!("curated-thoughts-mcp: prompt drop skipped (append): {e}");
+    }
+}
+
+/// Advisory read-before-append: does `path` hold an UNACKED line (no
+/// `acked_at` field) for `fact_id`? A missing file is "no line"; any read or
+/// parse problem is logged and read as "no matching line" — the dedupe is
+/// advisory (spec §4) and the emitter is infallible. A malformed line is
+/// never silently skipped (logged, per the ledger discipline).
+fn has_unacked_line(path: &Path, fact_id: &str) -> bool {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(e) => {
+            eprintln!("curated-thoughts-mcp: prompt dedupe read skipped: {e}");
+            return false;
+        }
+    };
+    for (n, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "curated-thoughts-mcp: prompt drop malformed line {} skipped: {e}",
+                    n + 1
+                );
+                continue;
+            }
+        };
+        if v.get("fact_id").and_then(|f| f.as_str()) == Some(fact_id)
+            && v.get("acked_at").is_none()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Recall-path hook: for each matched fact id, look up its row, skip
+/// human-tier provenance, and emit an unverified-match prompt for the rest.
+/// INFALLIBLE end to end — `vault_root: None` (vault not configured) or any
+/// per-row lookup error degrades to fewer/no prompts, never an error.
+pub fn emit_unverified_matches(
+    vault_root: Option<&Path>,
+    conn: &Connection,
+    fact_ids: &[String],
+    query: &str,
+    surface: &str,
+) {
+    let Some(root) = vault_root else {
+        return;
+    };
+    for fact_id in fact_ids {
+        let row = conn.query_row(
+            "SELECT title, body, source_ref, source_type
+             FROM llm_wiki_entries
+             WHERE id = ?1 AND deleted_at IS NULL",
+            rusqlite::params![fact_id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            },
+        );
+        let (title, body, quote, source_type) = match row {
+            Ok(t) => t,
+            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+            Err(e) => {
+                eprintln!("curated-thoughts-mcp: prompt drop row skipped: {e}");
+                continue;
+            }
+        };
+        if is_human_tier(source_type.as_deref()) {
+            continue;
+        }
+        emit_unverified_match(
+            root,
+            UnverifiedMatch {
+                fact_id: fact_id.clone(),
+                title,
+                body,
+                quote,
+                query: query.to_string(),
+                surface: surface.to_string(),
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+
+    fn scratch_ev(fact_id: &str) -> UnverifiedMatch {
+        UnverifiedMatch {
+            fact_id: fact_id.to_string(),
+            title: Some("Deploy checklist".to_string()),
+            body: Some("Run the gates before shipping.".to_string()),
+            quote: Some("docs/ops.md".to_string()),
+            query: "shipping checklist".to_string(),
+            surface: "wiki_search".to_string(),
+        }
+    }
+
+    fn drop_path(root: &Path) -> std::path::PathBuf {
+        root.join(BRAIN_DIR).join(UNVERIFIED_MATCH_FILE)
+    }
+
+    /// Table-less connection for the hook form: per-row lookups fail (logged,
+    /// skipped) and the emit degrades to no prompts — the pinned infallible
+    /// surface under test is the file write, not the DB.
+    fn open_memory_conn() -> Connection {
+        Connection::open_in_memory().unwrap()
+    }
+
+    /// Restores writable permissions on `.brain` even if the assertions panic
+    /// (the plan's "restore in catch/finally" — TempDir cleanup needs it too).
+    struct RestorePerm(std::path::PathBuf);
+    impl Drop for RestorePerm {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    #[test]
+    fn emitter_writes_jsonl_and_dedupes_unacked() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        // Two emits, one UNACKED line.
+        emit_unverified_match(root, scratch_ev("w1"));
+        emit_unverified_match(root, scratch_ev("w1"));
+        let text = fs::read_to_string(drop_path(root)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "two emits for the same fact = one line");
+        let line: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(line["fact_id"], "w1");
+        assert_eq!(line["surface"], "wiki_search");
+        assert_eq!(line["query"], "shipping checklist");
+        assert!(line["ts"].is_i64(), "emitter stamps ts");
+        // The plan's pinned field set — exactly these keys.
+        let mut keys: Vec<&str> = line.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["body", "fact_id", "query", "quote", "surface", "title", "ts"]
+        );
+
+        // A different fact still appends.
+        emit_unverified_match(root, scratch_ev("w2"));
+        assert_eq!(fs::read_to_string(drop_path(root)).unwrap().lines().count(), 2);
+
+        // The app acks w1's line; the NEXT emit for w1 must append again —
+        // the dedupe is UNACKED-scoped, not per-file.
+        let mut acked = line.clone();
+        acked["acked_at"] = serde_json::json!("2026-10-21T12:00:00Z");
+        fs::write(drop_path(root), format!("{acked}\n")).unwrap();
+        emit_unverified_match(root, scratch_ev("w1"));
+        let text = fs::read_to_string(drop_path(root)).unwrap();
+        assert_eq!(text.lines().count(), 2, "acked line no longer suppresses");
+        assert!(text.lines().all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok()),
+            "every line is a single-line JSON object");
+    }
+
+    #[test]
+    fn read_only_brain_dir_never_errors_the_call() {
+        let dir = TempDir::new().unwrap();
+        let brain = dir.path().join(BRAIN_DIR);
+        fs::create_dir_all(&brain).unwrap();
+        fs::set_permissions(&brain, fs::Permissions::from_mode(0o500)).unwrap();
+        let _restore = RestorePerm(brain.clone());
+
+        // Must return normally (no panic, no error surface) and write nothing:
+        // read-only `.brain` degrades to "no prompts" (spec §4 rev-4 m7).
+        emit_unverified_match(dir.path(), scratch_ev("w1"));
+        assert!(
+            !drop_path(dir.path()).exists(),
+            "no line may appear in a read-only .brain"
+        );
+
+        // The recall-hook form over the same read-only vault also degrades.
+        // (No live connection rows needed: the file-level emit is the pinned
+        // failure surface, and the hook fans into it.)
+        emit_unverified_matches(
+            Some(dir.path()),
+            &open_memory_conn(),
+            &["w1".to_string()],
+            "q",
+            "wiki_context",
+        );
+        assert!(!drop_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn sidecar_shape_has_no_tauri_dependency() {
+        // The sidecar links this module's shape: it must compile without any
+        // tauri import. Enforce on the source text (needles are assembled from
+        // parts so this test module never contains a real tauri path token).
+        let src = include_str!("prompt_drop.rs");
+        let needle = format!("{}{}", "tauri", "::");
+        assert!(
+            !src.contains(&needle),
+            "prompt_drop must not reference {needle} (sidecar links this shape)"
+        );
+        let use_needle = format!("use {needle}");
+        assert!(!src.contains(&use_needle));
+    }
+}
