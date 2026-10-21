@@ -240,7 +240,7 @@ fn deny_suppresses_and_undeny_restores() { /* deny → out of queue; undeny → 
 **Interfaces:**
 - Produces: `fn emit_unverified_match(vault_root, ev: UnverifiedMatch) -> ()` — infallible from the caller's perspective (I/O errors logged + swallowed); appends JSONL `{fact_id, title, body, quote, query, surface, ts}` to `<vault>/.brain/unverified-match.jsonl` ONLY if no UNACKED line for that fact_id (read-before-append); app-side drain/ack contract documented in the module doc comment.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[test]
@@ -251,7 +251,18 @@ fn read_only_brain_dir_never_errors_the_call() { /* chmod 0o500 .brain (restore 
 fn sidecar_shape_has_no_tauri_dependency() { /* prompt_drop compiles without any tauri import — enforced by module location */ }
 ```
 
-- [ ] **Step 2: RED** → **Step 3: Implement** (wire into `wiki_context`, `wiki_search`, `curated_recall_context` result paths; emit only for non-human-tier matches) → **Step 4: Gates** (baseline + 3; `ct wisdom match` replay test green) → **Step 5: Commit** — `feat(recall): unverified-match prompt drop emitter`
+- [x] **Step 2: RED** → **Step 3: Implement** (wire into `wiki_context`, `wiki_search`, `curated_recall_context` result paths; emit only for non-human-tier matches) → **Step 4: Gates** (baseline + 3; `ct wisdom match` replay test green) → **Step 5: Commit** — `feat(recall): unverified-match prompt drop emitter`
+
+> **Controller tick (2026-10-22):** Task 6 DONE — commit `5b86126e`; gates verified personally
+> (canonical lib 1471/0 exact; replay 17/17 FIRST run — D6 fix holding deterministic; clippy
+> clean); SOR clean (0 findings, 11 clusters, n_unjudged=0, fail_open=false); verdict **APPROVE**
+> (`task6-review-verdict.md`). E1-E8 all accepted (hooks in exactly the 3 recall paths inside
+> spawn_blocking; tier via `provenance_for` reuse, N+1 lookup deliberately closed by Task 7;
+> infallible `()` contract with error-path-only stderr; UNACKED advisory dedupe, TOCTOU race
+> bounded by spec M2-rev2; malformed-lines-logged deviation forced by m7; M1 payload bound
+> intact; drop-file `<vault>/.brain/unverified-match.jsonl` matches spec §4 verbatim). Low-1
+> (malformed-line dedupe behavior unpinned by a test) → Task 11 (or Task 9 drain tests);
+> Info-4 (emit holds DB lock during bounded file I/O) — do not let per-hit work grow.
 
 ### Task 7: Recall labels + confidence ordinal
 
