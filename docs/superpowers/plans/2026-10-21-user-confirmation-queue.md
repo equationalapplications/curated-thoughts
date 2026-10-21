@@ -349,6 +349,19 @@ fn direct_write_is_gone() { /* compile-level: add_wisdom_in_tx no longer exists 
 
 - [x] **Step 2: RED** → **Step 3: Implement** (backend first, then frontend components; `pnpm install --frozen-lockfile`, `pnpm build` + vitest for the queue/modal components with a mocked brain API: payload-tampering test = modal shows brain content not payload text) → **Step 4: Gates** (cargo baseline + 3; frontend suite green) → **Step 5: Commit** — `feat(app): stated capture flow, queue ui, and verification modals`
 
+> **Controller tick (2026-10-22):** Task 9 DONE — commit `a69b1e5e` (23 files, +2331/−340);
+> gates verified personally (canonical lib 1482/0 exact — 1483 with test-utils is the
+> feature-gated superset; replay 17/17; clippy clean; pnpm build 0; vitest 612/0, payload-
+> tampering green); SOR full-coverage re-run 120/120 judged (first run hit the run ceiling);
+> verdict **APPROVE** (`task9-review-verdict.md`). **E9 (SOR blocker-class) REFUTED** with code
+> evidence — denied-list key IS the `queue_denials` PK triple; no stale closure; no fix needed.
+> E1-E8, E10 all accepted: hash read back FROM DISK (byte-exact vs ingest); direct-write
+> retirement complete repo-wide; stated/ seeded in V25 INSERT OR IGNORE (no schema bump); kick
+> seam test-only; 9 commands registered in both handler lists; M1 by-id re-read pinned NOWHERE.
+> Outside-allowance touches accepted (stated_ledger wrapper, prompt_drop drain). Carried-list
+> updates: **Task-5 Low-1 atomic-rewrite scope EXTENDED to `drain_unverified_matches`**;
+> docs-pass inputs (a)-(d) in verdict §Task-10 items.
+
 > **Controller tick (2026-10-22):** Task 8 DONE — commit `a43d833e`; gates verified personally
 > (canonical lib 1479/0 exact; replay 17/17; clippy clean); SOR clean (0 findings, 11 clusters,
 > n_unjudged=0); verdict **APPROVE** (`task8-review-verdict.md`). E1-E3 accepted (membership
