@@ -7,11 +7,21 @@
 
 ## Revision history (compressed)
 
-- rev 1 (2026-10-20): initial draft from the converged tier-4 Fable guidance memo
-  (run 1, 2026-10-20, $5.65 — vault
+- rev 1 (2026-10-20): initial draft from the converged tier-4 Fable guidance
+  memo (run 1, 2026-10-20, $5.65 — vault
   `records/investigations/2026-10-20-confirm-queue-fable-consult/memo-run1.md`)
   and Kurt's rulings below. All `file:line` evidence re-verified against
   `main` @ `3224e3cd` during the consult run.
+- rev 2 (2026-10-21): Tier-2 GLM 5.3 review (REQUEST CHANGES; 1 BLOCKER,
+  2 MAJOR, 4 MINOR — all adjudicated REAL, all addressed): attestation of
+  record pinned to an app-written brain table keyed by content hash (B1
+  forgery hole closed); R-A channel corrected — sidecar has no Tauri
+  AppHandle, events go via a `.brain/` JSONL drop file the app watches
+  (M1); deny = archive + deny-suppression so re-kicks cannot resurrect
+  denied facts (M2); Rule 8 amendment now replaces the entire passage
+  (m1); NULL/out-of-vocab provenance semantics stated for queue vs
+  aperture (m2); added render-leak, deny-suppression, forgery, and
+  sidecar-process tests (m3); rate-limit default + fact-id payload (m4).
 
 ## 0. Decision record (Kurt rulings — binding; made in Discord thread 1559927525226971258, 2026-10-20/21; logged verbatim in vault `immutable-source-files/agents/memories/confirm-queue-aperture-decision-2026-10-20.md`)
 
@@ -80,10 +90,11 @@ deposit, not of the librarian's output.
   recallable immediately (labeled) and sits in the queue → Kurt one-tap
   confirms in the app → `user_confirmed` → activity-delivery eligible.
 - **Path B (app capture, "instant confirm"):** Kurt states it in the app →
-  the app writes a `stated/<author>/<year>/` file with attestation → the
-  same kick ingests it → the librarian extracts with evidence + embedding →
-  a new third provenance arm stamps `user_stated` because every source
-  document is attested. Human tier the moment the librarian finishes; no
+  the app writes a `stated/<author>/<year>/` file with an app-written
+  attestation record (§3.7) → the same kick ingests it → the librarian
+  extracts with evidence + embedding → a new third provenance arm stamps
+  `user_stated` because every source document has an attestation record
+  written by the app. Human tier the moment the librarian finishes; no
   queue step needed.
 
 Rejected alternatives (with reasons):
@@ -136,10 +147,14 @@ argument validation, not by trust). Consequences handled:
 ### 2. The confirmation queue (D1)
 
 The queue is a query, not a table. Membership: a fact is in the queue when
-it is (a) live (not superseded/expired), and (b) its provenance is NOT in
+it is (a) live (not superseded/expired), (b) its provenance is NOT in
 `{user_stated, user_confirmed}` — i.e. `librarian_inferred` and
-`immutable_document` facts both appear. No attribution required (D1:
-verification status is the criterion). The existing trace
+`immutable_document` facts both appear — and (c) it is not deny-suppressed
+(§3). NULL or out-of-vocabulary provenance counts as unverified (in the
+queue); the delivery aperture, by contrast, admits only exact vocabulary
+values, so NULL/unknown provenance is never delivered mid-task. No
+attribution required for membership (D1: verification status is the
+criterion). The existing trace
 entry → `librarian_evidence` → proposal → `curated_proposal_sources` →
 `documents` (the join `deposit_status_row` uses, `wisdom_deposit.rs:183-187`)
 supplies each row's evidence quote, so the UI shows the fact beside the
@@ -162,7 +177,15 @@ Confirm runs one UPDATE in the shape of `drafts.rs:62-74`:
 
 The confirm action lives ONLY in the desktop app (which owns the embedding
 sweep, `proposals_review.rs:12-22` — app-only confirm gets the sweep for
-free). Deny archives the fact. Edit-then-confirm is deny + create: for a
+free). Deny = **archive + suppress**: the fact is archived AND a denial row
+is recorded (source document path + normalized fact-text hash + who/when)
+so a re-kick of the still-live source document cannot resurrect it as a new
+queue row (fact ids are random, `wisdom.rs:138`; there is no content dedupe
+at commit). The queue query excludes deny-matched rows; the UI shows a
+"denied" section (undoable — un-denying un-archives the fact). The denial
+check lives in the QUEUE QUERY only for v1 — the librarian pipeline stays
+untouched (a commit-time suppression check would be a librarian change and
+is explicitly deferred). Edit-then-confirm is deny + create: for a
 recently stated dictum a denial means the agent misunderstood (S2), so the
 edit path routes through Path B (write the corrected statement as a
 `stated/` file, §7) rather than mutating the agent-tier fact in place —
@@ -176,20 +199,26 @@ the new Path-B fact gets a fresh one via the normal kick.
 When an agent-facing recall tool matches a fact whose provenance is not
 human-tier, the sidecar/CLI emits an unverified-wisdom event toward the
 desktop app in addition to serving the fact normally. Payload: the fact
-(title/body), the evidence quote / source document reference, the trigger
+id, title/body, the evidence quote / source document reference, the trigger
 context (the recall query and the calling surface — the "why relevant
-now"), and queue id. The app renders the modal with Confirm/Reject. Rules:
+now"). The app renders the modal with Confirm/Reject. Rules:
 
+- **Channel (corrected):** the MCP sidecar is a headless process — it holds
+  no Tauri `AppHandle`, and every in-repo Tauri emit requires one
+  (`lib.rs:380`, `:576`, `:1679`). So recall emits NOTHING over Tauri.
+  Instead the recall tool appends a JSONL event line to a drop file in the
+  vault's `.brain/` directory (created on first write); the desktop app
+  watches the file and renders the modal. The app owns ack/prune of
+  consumed lines. The CLI (`ct` in a terminal) behaves like the sidecar —
+  it also cannot open a modal, so it appends to the same drop file.
 - Fire-and-forget for the agent: the recall response is never delayed or
   blocked by the modal; the agent proceeds with the fact as a lead
   (labeled, per §5).
-- Rate-limited per session (same fact not re-surfaced within a session; a
-  configurable per-session cap) so a broad recall does not spam modals.
-- Headless (no app running): the event is dropped; the fact still sits in
-  the queue. Never an error.
-- Channel: the existing Tauri event/IPC surface used by the app for
-  librarian progress events (exact mechanism decided in the plan; the
-  contract is the payload above + "must not delay recall").
+- Rate-limited at emit time: the same fact is not re-emitted within a
+  session (in-process de-dupe set), and a per-session cap (default 5,
+  CLI-configurable) bounds total emits; a broad recall cannot spam modals.
+- Headless / app-not-running: the drop file simply accumulates; the app
+  drains it on next launch. Never an error; recall never waits.
 
 ### 5. Recall provenance labels (D6)
 
@@ -239,17 +268,31 @@ INTENT Rule 8's planned capture, built here:
 
 1. The app writes the statement as a file under
    `stated/<author>/<year>/` with frontmatter recording speaker, capture
-   method, and the app's attestation of the exact content (satisfies Rule 1
-   trace-to-file and Rule 2's "attestations written only by the app").
-2. The normal kick ingests it; the librarian extracts facts with evidence
-   rows and embeddings — the standard pipeline, unchanged.
-3. `resolve_proposal` gains a third provenance arm (`commit.rs:2926-2930`
+   method, and a human-readable attestation note (satisfies Rule 1
+   trace-to-file).
+2. **Attestation storage (the BLOCKER fix — the predicate input):** the
+   attestation of record is a brain-side table
+   `stated_attestations(document_path, content_hash, attested_by,
+   attested_at)` written ONLY by the app at the moment it creates the
+   `stated/` file — the same trust boundary as `last_verified_by` (no
+   agent-tool write path exists; the sidecar's connection is read-only).
+   The file's frontmatter attestation note is DISPLAY COPY, never the
+   predicate input: `resolve_proposal` checks the TABLE (joined by document
+   path + content hash recomputed at ingest), so an agent deposit carrying
+   attestation-shaped frontmatter cannot forge `user_stated` — the agent
+   has no way to insert into `stated_attestations`. A content-hash mismatch
+   (file edited after attestation) means NOT attested until the person
+   re-attests in the app. INTENT Rule 2's "no attestation record in the
+   code yet" status line is closed by this table.
+3. The normal kick ingests the file; the librarian extracts facts with
+   evidence rows and embeddings — the standard pipeline, unchanged.
+4. `resolve_proposal` gains a third provenance arm (`commit.rs:2926-2930`
    is the one decision point): when EVERY source document of the proposal
-   carries a person's attestation, stamp `user_stated` (not
-   `librarian_inferred`). No queue step; the fact is human-tier when the
-   librarian finishes ("instant confirm", one LLM generation + one
-   embedding of latency).
-4. Until Path B ships, the app's direct `add_wisdom_in_tx` write
+   has a `stated_attestations` row whose `content_hash` matches the
+   ingested file, stamp `user_stated` (not `librarian_inferred`). No queue
+   step; the fact is human-tier when the librarian finishes ("instant
+   confirm", one LLM generation + one embedding of latency).
+5. Until Path B ships, the app's direct `add_wisdom_in_tx` write
    (`wisdom.rs:127-218`) remains, and the UI labels those facts
    "recallable, not delivered mid-task." Once Path B ships, the direct
    write is retired (D5).
@@ -270,23 +313,28 @@ activity delivery — exactly the gap Rule 2's status line already names.
   confirmed it and when on the fact itself and stamps its provenance
   `user_confirmed`. Confirmations, like attestations, are written only by
   the app."
-- **Rule 2, status:** reword the closing clause to — "the app writes
-  `user_stated` facts directly when the person types them in the app; the
-  planned change routes those statements through a `stated/` file and the
-  Librarian so they gain evidence and become deliverable mid-task."
+- **Rule 2, status:** reword the closing clause to — "…and the app still
+  writes `user_stated` facts directly when the person types them in the
+  app; the planned change routes those statements through a `stated/` file
+  and the Librarian so they gain evidence and become deliverable
+  mid-task."
 - **Rule 3:** add — "A fact that has been ingested but not yet confirmed by
   a person is not pending. It is live, recallable, and labeled with its
   provenance; `wisdom_pending` never lists it."
-- **Rule 8, body:** replace "Things a person says directly are captured by
-  the app (never by an agent) under `stated/<author>/<year>/`" with —
-  "Things a person says directly to the app are captured by the app under
-  `stated/<author>/<year>/` with attestation. Things a person says to an
-  agent may be relayed by that agent into its deposit lane with an
-  attribution naming the speaker; such facts stay agent tier until the
-  person confirms them in the app. An agent may attribute only statements
-  the person said or faithfully restated at the person's direction — never
-  the agent's own paraphrase." (Encodes S2 where the charter can enforce
-  it.)
+- **Rule 8, body:** replace the ENTIRE passage after the first sentence
+  ("Things a person says directly are captured by the app (never by an
+  agent) under `stated/<author>/<year>/`, with frontmatter recording who
+  said it, how it was captured, and its attestation. They stay below wisdom
+  tier until attested.") with — "Statements a person makes directly to the
+  app are captured by the app under `stated/<author>/<year>/` with
+  frontmatter recording who said it, how it was captured, and its
+  attestation; the app records the attestation of record, and such
+  statements reach wisdom tier when the Librarian finishes processing
+  them. Statements a person makes to an agent may be relayed by that agent
+  into its deposit lane with an attribution naming the speaker; such facts
+  stay agent tier until the person confirms them in the app. An agent may
+  attribute only statements the person said or faithfully restated at the
+  person's direction — never the agent's own paraphrase."
 - **New Rule 10 — "Unconfirmed facts are recallable, labeled, and never
   delivered mid-task."** Body: "Every live fact is recallable on demand and
   carries its provenance. Mid-task delivery admits only human-tier facts:
@@ -358,11 +406,21 @@ Path-B replacement can be added when Rule 4 lands.
 - **Recall label tests:** additive keys on all three tools; JSON schema
   stable otherwise; `ct wisdom match` output byte-identical (cached-output
   replay test must stay green).
+- **Attribution render tests:** an unattributed deposit renders byte
+  identically to today; frontmatter lines NEVER leak into evidence quotes
+  or extracted chunks.
+- **Deny-suppression test:** deny a fact, re-kick its still-live source
+  document, assert no new queue row for the denied content; un-deny
+  restores membership.
 - **Path B tests:** attested-source proposal stamps `user_stated`; mixed
   attested/unattested sources stamp `librarian_inferred`; `stated/` ingest
-  produces evidence + embedding.
+  produces evidence + embedding; attestation-table predicate ignores
+  attestation-shaped frontmatter in agent deposits (the B1 forgery test);
+  content-hash mismatch after edit → not attested.
 - **Active Verification Prompting tests:** event emitted iff an unverified
-  fact matches; rate limit; headless drop; recall latency unaffected.
+  fact matches; rate limit; sidecar-process case — the event lands in the
+  `.brain/` drop file with no Tauri runtime present; app-not-running
+  accumulation and drain on launch; recall latency unaffected.
 - **Benchmark:** activity FP stays 0 with the widened aperture on a scratch
   brain seeded with the 14 kernel facts confirmed as `user_confirmed` (the
   by-construction argument in §3.6, made empirical).
