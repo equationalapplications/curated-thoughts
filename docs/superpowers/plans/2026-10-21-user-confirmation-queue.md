@@ -100,7 +100,7 @@ Add the struct/enum/validation; extend `render_deposit_file` to emit the three f
 **Interfaces:**
 - Produces: `stated_attestations(document_path TEXT PRIMARY KEY, content_hash TEXT NOT NULL, attested_by TEXT NOT NULL, attested_at TEXT NOT NULL)`; `queue_denials(document_path TEXT NOT NULL, chunk_hash TEXT NOT NULL, fact_text_hash TEXT NOT NULL, denied_by TEXT NOT NULL, denied_at TEXT NOT NULL, PRIMARY KEY(document_path, chunk_hash, fact_text_hash))`; `fn record_confirmation(conn, fact_id, content_hash, by, at) -> Result<()>` (appends JSONL + returns the row to upsert); `fn rebuild_rederive(conn, vault_root) -> Result<RebuildReport>` (repopulates all three tables from the JSONL ledgers, re-verifying hashes; attestations mismatched → dropped).
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[test]
@@ -118,10 +118,18 @@ fn confirmation_rebuild_matches_by_content_hash_fact_id_advisory() {
 }
 ```
 
-- [ ] **Step 2: RED** — same gate recipe. Expected: module/file missing → compile FAIL.
-- [ ] **Step 3: Implement** — migration SQL (two tables, `IF NOT EXISTS`), registration, `stated_ledger` module (single-line JSON appends via `OpenOptions::append`; SHA-256 via the same `hasher::hash_bytes` routine the `documents` table uses).
-- [ ] **Step 4: Gates** — `cargo check --tests`; `stated_ledger` + migration tests green (baseline + 3).
-- [ ] **Step 5: Commit** — `feat(db): stated verification tables and app-written jsonl ledgers`
+- [x] **Step 2: RED** — same gate recipe. Expected: module/file missing → compile FAIL.
+- [x] **Step 3: Implement** — migration SQL (two tables, `IF NOT EXISTS`), registration, `stated_ledger` module (single-line JSON appends via `OpenOptions::append`; SHA-256 via the same `hasher::hash_bytes` routine the `documents` table uses).
+- [x] **Step 4: Gates** — `cargo check --tests`; `stated_ledger` + migration tests green (baseline + 3).
+- [x] **Step 5: Commit** — `feat(db): stated verification tables and app-written jsonl ledgers`
+
+> **Controller tick (2026-10-22):** Task 2 DONE — commit `a0552ca4`; gates verified (lib 1459+59
+> exact, replay 17/17 byte-identical, clippy clean); SOR clean (0 findings, 10 clusters); verdict
+> **APPROVE** (`task2-review-verdict.md`). Rulings: B1 internal-upsert correct (spec §8);
+> B2 `pub mod` declarations in mod.rs OK, DDL registration never; B3/B4/B5 accepted;
+> B6 stale V18/V26 comment in `0001_deposit_attribution.sql` → controller Task-11 docs pass.
+> Parked (non-blocking, revisit Task 5/11): rebuild doesn't reset orphan `user_confirmed` stamps
+> on ledger truncation.
 
 ### Task 3: Human-tier hardening — `human_surface` flag + provenance arms
 
