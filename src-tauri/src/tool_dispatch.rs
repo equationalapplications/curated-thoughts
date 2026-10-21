@@ -415,8 +415,9 @@ pub(crate) fn coerce_updated_at(value: Option<rusqlite::types::Value>) -> i64 {
 /// Wisdom layer keyword ranking (ported verbatim from tools/src/queries.rs).
 ///
 /// Term-overlap scoring over live (`deleted_at IS NULL`) `llm_wiki_entries`:
-/// each matching term adds one overlap point; ties break by confidence string
-/// (desc) then numeric `updated_at` (desc). Doubles as the keyword fallback
+/// each matching term adds one overlap point; ties break by confidence
+/// ordinal (confirmed=3 > inferred=2 > unknown=0, desc) then numeric
+/// `updated_at` (desc). Doubles as the keyword fallback
 /// when no query embedding is available.
 pub(crate) fn rank_wiki_entries(
     conn: &Connection,

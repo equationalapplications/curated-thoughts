@@ -143,6 +143,14 @@ pub fn append_denial(vault_root: &Path, line: &DenialLine) -> Result<()> {
     append_line(vault_root, DENIALS_LEDGER, line)
 }
 
+/// Read the durable denial lines. `pub(crate)` so the Task-5 deny action
+/// (queue.rs) can presence-check the LEDGER — not just the brain table —
+/// before appending (Task-5 Low-2 closeout: a retry whose earlier brain
+/// transaction failed must not append a duplicate ledger line).
+pub(crate) fn read_denial_lines(vault_root: &Path) -> Result<Vec<DenialLine>> {
+    read_lines(&vault_root.join(STATED_DIR).join(DENIALS_LEDGER))
+}
+
 /// Remove every denial line matching
 /// `(document_path, chunk_hash, fact_text_hash)` from
 /// `stated/.denials.jsonl` — the un-deny path. The ledger has no tombstone
@@ -175,7 +183,12 @@ pub fn remove_denial(
         out.push_str(&serde_json::to_string(l)?);
         out.push('\n');
     }
-    std::fs::write(&path, out).with_context(|| format!("rewriting ledger {}", path.display()))?;
+    // Task-5 Low-1 closeout: the rewrite is ATOMIC — write to a same-directory
+    // temp file (fsynced, original permission bits preserved) and `rename` it
+    // over the ledger, so a crash mid-write can never leave a truncated
+    // `.denials.jsonl` behind.
+    crate::vault::safe_path::safe_write_bytes(&path, out.as_bytes())
+        .with_context(|| format!("rewriting ledger {}", path.display()))?;
     Ok(removed)
 }
 
@@ -281,6 +294,13 @@ pub fn rebuild_rederive(conn: &Connection, vault_root: &Path) -> Result<RebuildR
 
     // 1. Confirmations → user_confirmed stamps (dedup by hash; duplicate
     //    appends of the same confirmation stamp the same row once).
+    //
+    //    Orphan-stamp ruling (Task-5 verdict E2): this rebuild is the ONLY
+    //    place an orphan `user_confirmed` stamp (stamp present, ledger line
+    //    gone/mismatched) gets resolved — and it does so implicitly, by
+    //    re-deriving stamps from the ledger (spec §8:511). The confirm path
+    //    never resets an existing stamp: §4:628-630 makes an existing stamp
+    //    terminal. No explicit reset logic exists or is needed here.
     let confirmations: Vec<ConfirmationLine> = read_lines(&stated.join(CONFIRMATIONS_LEDGER))?;
     report.confirmations_read = confirmations.len();
     let hashes: HashSet<String> = confirmations.into_iter().map(|l| l.content_hash).collect();

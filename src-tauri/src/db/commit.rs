@@ -18,8 +18,11 @@ pub struct ResolveOptions {
     /// ONLY when this flag is `true` AND `auto_approve` is `false`. Set ONLY
     /// by the desktop app's resolve path (`proposals_api.rs`); CLI, MCP, and
     /// internal-API approvals resolve at agent tier (`librarian_inferred`)
-    /// and write an `approved_at_agent_tier` event. Never derived from a
-    /// string — `reviewed_by` is a label, not the predicate.
+    /// and write an `approved_at_agent_tier` event — UNLESS the Path B
+    /// attested-source arm stamped `user_stated` (human tier from the app's
+    /// attestation table), which suppresses the event (Task-8 verdict E5,
+    /// choice (a)). Never derived from a string — `reviewed_by` is a label,
+    /// not the predicate.
     pub human_surface: bool,
     /// When `Some`, entry embeddings are computed before the commit transaction
     /// opens and stored with the new facts. `None` disables write-time
@@ -3000,7 +3003,14 @@ pub fn resolve_proposal(
     };
     // Arm 2's durable marker: a manual approval that did NOT happen on the
     // desktop surface resolves at agent tier, and the resolution says so.
-    let approved_at_agent_tier = !options.auto_approve && !options.human_surface;
+    // Task-8 E5 closeout — choice (a), suppress-event-on-attested: when the
+    // arms above stamped `user_stated` via the Path B attested-source arm,
+    // the tier is HUMAN (it derives from the app-written attestation table
+    // over the person's own statements, §2/§7.5 — not from the approval),
+    // so the "approved at agent tier" event is suppressed: writing it beside
+    // a human-tier stamp was semantically mixed (Task-8 verdict E5).
+    let approved_at_agent_tier =
+        !options.auto_approve && !options.human_surface && source_type != "user_stated";
 
     // Compute entry embeddings BEFORE opening the transaction: embed_batch is a
     // blocking network call and must never run while a write lock is held.
@@ -4799,6 +4809,99 @@ mod tests {
             "user_stated",
             "all-attested sources ⇒ Path B user_stated"
         );
+    }
+
+    /// Task-8 E5 closeout — choice (a) suppress-event-on-attested: a MANUAL
+    /// (non-auto, non-desktop) resolve over an ALL-attested proposal stamps
+    /// `user_stated` (human tier via Path B) and does NOT write the
+    /// `approved_at_agent_tier` event — the event would sit semantically
+    /// mixed beside a human-tier stamp. Contrast: an equivalent resolve over
+    /// an UNATTESTED proposal stamps agent tier and DOES write the event.
+    #[test]
+    fn path_b_stamp_suppresses_agent_tier_event() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/stated/kurt/2026/note.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        insert_test_proposal(
+            &conn,
+            "prop-att-manual",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-att-manual", chunk_id, "A stated fact.")],
+            doc_id,
+        );
+        conn.execute(
+            "INSERT INTO stated_attestations
+               (document_path, content_hash, attested_by, attested_at)
+             VALUES ('/vault/stated/kurt/2026/note.md', 'hash', 'kurt',
+                     '2026-10-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let decisions = all_accept_decisions(&conn, "prop-att-manual");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-att-manual",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "user_stated",
+            "all-attested sources ⇒ Path B user_stated (manual resolve included)"
+        );
+        let event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_events
+                 WHERE event_type = 'approved_at_agent_tier'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            event_count, 0,
+            "human-tier Path B stamp ⇒ NO approved_at_agent_tier event"
+        );
+
+        // Contrast arm: same manual resolve, unattested source ⇒ agent tier
+        // + the event, exactly as §3.7-A arm 2 pins.
+        let mut conn2 = open_in_memory().unwrap();
+        let doc2 = seed_document(&conn2, "/vault/documents/plain.md");
+        let chunk2 = seed_chunk(&conn2, doc2);
+        insert_test_proposal(
+            &conn2,
+            "prop-agent-manual",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-agent-manual", chunk2, "A plain fact.")],
+            doc2,
+        );
+        let decisions2 = all_accept_decisions(&conn2, "prop-agent-manual");
+        resolve_proposal(
+            &mut conn2,
+            "prop-agent-manual",
+            &decisions2,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let event_count2: i64 = conn2
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_events
+                 WHERE event_type = 'approved_at_agent_tier'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count2, 1, "agent-tier manual resolve writes the event");
     }
 
     /// Task 8 anti-arms: MIXED sources (one attested, one not) and ZERO

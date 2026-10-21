@@ -453,6 +453,15 @@ pub fn confirm_fact(conn: &Connection, fact_id: &str) -> Result<()> {
 
 /// Explicit-root form of [`confirm_fact`] (tests and callers that already
 /// hold the vault root).
+///
+/// Orphan `user_confirmed` reset ruling (Task-5 verdict E2): a fact that
+/// carries a `user_confirmed` stamp whose backing `.confirmations.jsonl`
+/// line is gone (an "orphan" stamp) is REBUILT-ONLY by spec §8:511 — the
+/// rebuild re-derives the stamp from the ledger by content hash, so a
+/// mismatched/gone line simply does not re-stamp. The confirm path here
+/// does NOT reset it: spec §4:628-630 makes an existing stamp terminal
+/// (idempotent re-confirm), so this path treats `user_confirmed` as
+/// terminal and never demotes it. No reset logic lives here.
 pub fn confirm_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> Result<()> {
     let (entity_id, title, body, source_type, confidence): (String, String, String, Option<String>, Option<String>) = conn
         .query_row(
@@ -612,6 +621,21 @@ pub fn deny_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> Resu
         );
     };
     let fact_hash = fact_text_hash(&title, &body);
+
+    // Task-5 Low-2 closeout: the LEDGER is the durable carrier, so the
+    // retry guard checks IT first — a retry whose earlier brain transaction
+    // failed (queue_denials row absent) would otherwise append a duplicate
+    // `.denials.jsonl` line. The brain-table check below stays (it also
+    // no-ops a re-deny whose ledger line was already removed by un-deny).
+    let ledger_has_key =
+        crate::db::stated_ledger::read_denial_lines(vault_root)?.iter().any(|l| {
+            l.document_path == document_path
+                && l.chunk_hash == chunk_hash
+                && l.fact_text_hash == fact_hash
+        });
+    if ledger_has_key {
+        return Ok(());
+    }
 
     let already: i64 = conn.query_row(
         "SELECT COUNT(*) FROM queue_denials
@@ -2197,6 +2221,128 @@ mod confirmation_action_tests {
         assert!(
             lines.is_empty(),
             "ledger no longer carries the denial: {lines:?}"
+        );
+    }
+
+    /// Task-5 Low-2 closeout pin: a second deny arriving on the same key
+    /// never appends a duplicate `.denials.jsonl` line — in BOTH retry
+    /// shapes. (1) The landed idempotency semantics: a re-kicked duplicate
+    /// fact (identical normalized text, same source document/chunk) denied
+    /// after the original. (2) The Low-2 crash shape: the ledger append
+    /// landed but the brain transaction did not (queue_denials empty) — the
+    /// retry presence-checks the LEDGER itself, so no duplicate line.
+    #[test]
+    fn deny_retry_does_not_duplicate_ledger_line() {
+        let now = crate::wisdom_deposit::now_ms();
+        // Aliases: the second part binds `conn`-shaped locals of its own, and
+        // a local binding would shadow the module fns for the whole body.
+        let mk_conn = conn;
+        let mk_vault = vault;
+
+        // (1) Landed semantics: duplicate fact, same key, both live rows.
+        let conn = mk_conn();
+        let (_tmp, vault) = mk_vault();
+        seed_entity(&conn);
+        insert_entry(&conn, "q-dup-1", "Dup deny title", now);
+        insert_entry(&conn, "q-dup-2", "Dup deny title", now);
+        seed_proposal_doc(&conn, "p-dup", "documents/dup.md");
+        seed_evidence_row(&conn, "q-dup-1", "p-dup", "chunkhash-dup", "dup quote");
+        seed_evidence_row(&conn, "q-dup-2", "p-dup", "chunkhash-dup", "dup quote");
+        deny_fact_at(&conn, &vault, "q-dup-1").unwrap();
+        deny_fact_at(&conn, &vault, "q-dup-2").unwrap();
+        let lines = ledger_lines(&vault, ".denials.jsonl");
+        assert_eq!(lines.len(), 1, "re-deny on the same key: ONE ledger line");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue_denials", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "re-deny on the same key: ONE suppression row");
+
+        // (2) Low-2 crash shape: ledger line present, brain row absent.
+        let conn2 = mk_conn();
+        let (_tmp2, vault2) = mk_vault();
+        seed_entity(&conn2);
+        insert_entry(&conn2, "q-crash", "Crash retry title", now);
+        seed_proposal_doc(&conn2, "p-crash", "documents/crash.md");
+        seed_evidence_row(&conn2, "q-crash", "p-crash", "chunkhash-crash", "crash quote");
+        crate::db::stated_ledger::append_denial(
+            &vault2,
+            &crate::db::stated_ledger::DenialLine {
+                document_path: "documents/crash.md".into(),
+                chunk_hash: "chunkhash-crash".into(),
+                fact_text_hash: fact_text_hash("Crash retry title", "body of Crash retry title"),
+                denied_by: "human:kurt".into(),
+                denied_at: "2026-10-21T00:00:00Z".into(),
+            },
+        )
+        .unwrap();
+        let in_table: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM queue_denials", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(in_table, 0, "brain tx never landed (the Low-2 shape)");
+        deny_fact_at(&conn2, &vault2, "q-crash").unwrap();
+        let lines = ledger_lines(&vault2, ".denials.jsonl");
+        assert_eq!(
+            lines.len(),
+            1,
+            "retry after ledger-landed/brain-failed: no duplicate line"
+        );
+    }
+
+    /// Task-5 Low-3 closeout pin (documented behavior, no code change): the
+    /// un-deny restore matches by FACT-TEXT HASH alone — it restores ALL
+    /// archived rows sharing the hash (including one archived from a
+    /// DIFFERENT source document) and ONLY those. Identical content makes
+    /// this semantically correct (Task-5 verdict Low-3: acceptable for v1).
+    #[test]
+    fn undeny_restores_all_rows_sharing_the_fact_text_hash_only() {
+        let conn = conn();
+        let (_tmp, vault) = vault();
+        seed_entity(&conn);
+        let now = crate::wisdom_deposit::now_ms();
+
+        // fact A: the fact we actually deny. fact B: identical normalized
+        // text, DIFFERENT source document, archived directly (simulating an
+        // independently archived same-text fact). fact C: different text.
+        insert_entry(&conn, "q-hash-a", "Hash twin title", now);
+        insert_entry(&conn, "q-hash-b", "Hash twin title", now);
+        insert_entry(&conn, "q-hash-c", "Unrelated title", now);
+        seed_proposal_doc(&conn, "p-hash-a", "documents/a.md");
+        seed_evidence_row(&conn, "q-hash-a", "p-hash-a", "chunkhash-a", "quote a");
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 12345 WHERE id = 'q-hash-b'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 12345 WHERE id = 'q-hash-c'",
+            [],
+        )
+        .unwrap();
+
+        deny_fact_at(&conn, &vault, "q-hash-a").unwrap();
+        let key = DenialKey {
+            document_path: "documents/a.md".into(),
+            chunk_hash: "chunkhash-a".into(),
+            fact_text_hash: fact_text_hash("Hash twin title", "body of Hash twin title"),
+        };
+
+        undeny_fact_at(&conn, &vault, &key).unwrap();
+
+        let deleted: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM llm_wiki_entries WHERE deleted_at IS NOT NULL")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(
+            deleted,
+            vec!["q-hash-c".to_string()],
+            "un-deny restores every hash-matching archived row (a AND b) and ONLY those (c stays archived): {deleted:?}"
         );
     }
 }

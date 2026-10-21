@@ -756,6 +756,88 @@ mod tests {
         });
     }
 
+    /// Spec §5 gate N1 (rev 4.1) — the SPOOF form: a CLI-shaped call that
+    /// spoofs every STRING identity the desktop app carries — `USER=desktop-ui`
+    /// in the environment AND `reviewed_by="desktop-ui"` (the
+    /// `DESKTOP_REVIEWER` label) — but carries NO `human_surface` flag
+    /// resolves at AGENT tier. The predicate is the boolean flag set by app
+    /// code, never a label or an environment variable (§3.7-A/§7-A:
+    /// `USER=desktop-ui` plus a PTY would defeat any string compare; a flag
+    /// cannot be spoofed by environment).
+    #[test]
+    fn n1_spoof_user_env_and_desktop_reviewer_label_stay_agent_tier() {
+        with_brain(|| {
+            temp_env::with_vars([("USER", Some("desktop-ui"))], || {
+                // (a) CLI shape: review_approve carrying the spoofed label.
+                let mut conn = open_in_memory().unwrap();
+                let pid = "prop-n1-cli";
+                seed_pending(&conn, pid);
+                let out = review_approve(&mut conn, pid, crate::proposals_api::DESKTOP_REVIEWER)
+                    .unwrap();
+                assert_eq!(out.status, "approved");
+                assert_eq!(
+                    out.reviewed_by, "desktop-ui",
+                    "the spoofed label IS carried verbatim — and confers nothing"
+                );
+                let st: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM llm_wiki_entries
+                         WHERE source_type = 'librarian_inferred'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert!(st >= 1, "spoofed CLI approval stamps librarian_inferred");
+                let ut: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM llm_wiki_entries
+                         WHERE source_type = 'user_confirmed'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(ut, 0, "no human tier via USER/reviewed_by spoofing");
+                let ev: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM llm_wiki_events
+                         WHERE event_type = 'approved_at_agent_tier'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(ev, 1, "the spoofed call is recorded as agent-tier");
+
+                // (b) Raw-API shape: explicit reviewed_by, still no flag.
+                let mut conn2 = open_in_memory().unwrap();
+                let pid2 = "prop-n1-raw";
+                seed_pending(&conn2, pid2);
+                let decisions = load_accept_all_decisions(&conn2, pid2).unwrap();
+                let result = resolve_proposal(
+                    &mut conn2,
+                    pid2,
+                    &decisions,
+                    None,
+                    ResolveOptions {
+                        auto_approve: false,
+                        reviewed_by: Some(crate::proposals_api::DESKTOP_REVIEWER.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.proposal_status, "approved");
+                let st2: i64 = conn2
+                    .query_row(
+                        "SELECT COUNT(*) FROM llm_wiki_entries
+                         WHERE source_type = 'user_confirmed'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(st2, 0, "the flag, not the label, is the predicate");
+            });
+        });
+    }
+
     /// Spec §3.7-A arm 3: `auto_approve: true` is unchanged — librarian tier,
     /// no `approved_at_agent_tier` event.
     #[test]

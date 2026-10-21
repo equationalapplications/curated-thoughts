@@ -225,7 +225,12 @@ pub fn drain_unverified_matches(vault_root: &Path, cap: usize) -> Result<DrainRe
     if !body.is_empty() {
         body.push('\n');
     }
-    std::fs::write(&path, body).with_context(|| format!("rewriting {}", path.display()))?;
+    // Task-5 Low-1 closeout (Task-9 extension): the ack rewrite is ATOMIC —
+    // write to a same-directory temp file (fsynced, original permission bits
+    // preserved) and `rename` it over the ledger, so a crash mid-rewrite can
+    // never leave a truncated `unverified-match.jsonl` behind.
+    crate::vault::safe_path::safe_write_bytes(&path, body.as_bytes())
+        .with_context(|| format!("rewriting {}", path.display()))?;
     let total_unacked = unacked_total - prompts.len();
     Ok(DrainReport {
         prompts,
@@ -335,15 +340,21 @@ pub fn emit_unverified_matches(
         },
     );
     let mut payload: HashMap<String, RowPayload> = HashMap::new();
-    if let Ok(iter) = rows {
-        for row in iter {
-            match row {
-                Ok((id, title, body, quote)) => {
-                    payload.insert(id, (title, body, quote));
-                }
-                Err(e) => {
-                    eprintln!("curated-thoughts-mcp: prompt drop row skipped: {e}");
-                }
+    // Batch-level binding error: the WHOLE payload batch degrades to
+    // all-hits-skipped, so it logs the batch (plural) token — the per-row
+    // singular token below stays reserved for per-row failures (Task-7
+    // Info-1/Info-2 closeout: the degradation is never silent).
+    if let Err(e) = rows {
+        eprintln!("curated-thoughts-mcp: prompt drop rows skipped: {e}");
+        return;
+    }
+    for row in rows.unwrap() {
+        match row {
+            Ok((id, title, body, quote)) => {
+                payload.insert(id, (title, body, quote));
+            }
+            Err(e) => {
+                eprintln!("curated-thoughts-mcp: prompt drop row skipped: {e}");
             }
         }
     }
@@ -478,6 +489,55 @@ mod tests {
             "wiki_context",
         );
         assert!(!drop_path(dir.path()).exists());
+    }
+
+    /// Task-6 Low-1 closeout pin: a MALFORMED line in
+    /// `unverified-match.jsonl` is logged (the ledger discipline — never
+    /// silently skipped) and treated as non-matching on the dedupe read, so
+    /// the next emit still appends (the dedupe read survived the garbage)
+    /// and a genuinely unacked fact still suppresses.
+    #[test]
+    fn malformed_dedupe_line_is_logged_and_non_matching() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        // A garbage line + a valid UNACKED line for a DIFFERENT fact (w9).
+        fs::create_dir_all(dir.path().join(BRAIN_DIR)).unwrap();
+        fs::write(
+            drop_path(root),
+            format!(
+                "not json at all\n{}\n",
+                serde_json::json!({
+                    "fact_id": "w9", "title": "t", "body": "b", "quote": "q",
+                    "query": "shipping checklist", "surface": "wiki_search", "ts": 1
+                })
+            ),
+        )
+        .unwrap();
+
+        // The emit for w1 must APPEND — the malformed line is logged and
+        // read as non-matching, never a silent abort of the dedupe read.
+        emit_unverified_match(root, scratch_ev("w1"));
+        let text = fs::read_to_string(drop_path(root)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "garbage + unacked w9 + new w1: the dedupe read survived: {lines:?}"
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(lines[2]).is_ok(),
+            "the new w1 line is well-formed JSON"
+        );
+
+        // The unacked w9 line still suppresses its own re-emit (the read
+        // treated the garbage as non-matching, not as "file unreadable").
+        emit_unverified_match(root, scratch_ev("w9"));
+        assert_eq!(
+            fs::read_to_string(drop_path(root)).unwrap().lines().count(),
+            3,
+            "unacked w9 dedupes despite the malformed sibling line"
+        );
     }
 
     #[test]

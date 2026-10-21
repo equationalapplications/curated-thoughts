@@ -164,6 +164,199 @@ fn replay_activity_two_stage() {
     // Same gap as the shipped `replay_two_stage` (the shared `replay()` helper
     // assumes hit@2 letters + message-shape expected.json). Extend both to a
     // real replay once the helper generalizes to hit@1 activity letters.
+    // (`activity_fp0_on_user_confirmed_kernel_brain` below IS the activity
+    // snapshot's true replay — FP-0 benchmark form, spec §5/§3.6.)
+}
+
+/// Task 11 (user-confirmation-queue, spec §5 "Benchmark" + §3.6): the
+/// activity FP-0 benchmark, made EMPIRICAL on the seeded kernel brain.
+///
+/// Seeds a scratch (in-memory) brain with the activity calibration's 14
+/// kernel facts stamped `user_confirmed` — exactly what a queue confirm
+/// stamps (spec §3) — plus the supporting two-stage population the evidence
+/// join needs (one document + chunk + chunk embedding per fact, one
+/// proposal wiring every fact's evidence edge; the same structural shape
+/// the live-brain calibration scratch copy had). Then replays ALL 196
+/// frozen probes through the REAL activity orchestrator
+/// ([`tauri_app_lib::wisdom_match::wisdom_match_two_stage_with_v1`] with
+/// `QueryKind::Activity`), the floor resolved from `WISDOM_GATE_FLOORS` by
+/// production code (never passed in).
+///
+/// The 2026-10-18 calibration (campaign `grid-20261018-activity`, freeze
+/// provenance in expected.json) ran the SAME probes against the SAME 14
+/// facts relabeled `user_stated`; the widened aperture admits BOTH human
+/// tiers (`user_stated` + `user_confirmed`, #282 §5 rev-15), so the
+/// admitted set is IDENTICAL under the confirm-path stamp and FP must stay
+/// 0 — the §3.6 by-construction argument, now exercised: two-stage runs in
+/// every probe, no irrelevant probe ever opens, and the confirmed kernel
+/// actually delivers.
+#[test]
+fn activity_fp0_on_user_confirmed_kernel_brain() {
+    let key = "external:qwen/qwen3-embedding-4b:activity:two-stage:restricted-cosine";
+    let dir = freeze_dir_for(key);
+    let expected_path = format!("{dir}/expected.json");
+    let vectors_path = format!("{dir}/vectors.json.gz");
+    let expected: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&expected_path).unwrap()).unwrap();
+    let mut raw = Vec::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(&vectors_path).unwrap())
+        .read_to_end(&mut raw)
+        .unwrap();
+    let frozen: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    let profile_key = frozen["model_key"].as_str().unwrap();
+    let floor = expected["floor"].as_f64().unwrap() as f32;
+    assert_eq!(
+        tauri_app_lib::wisdom_match::gate_floor(key),
+        Some(floor),
+        "WISDOM_GATE_FLOORS[{key}] must match the calibration snapshot in {dir}"
+    );
+
+    let conn = tauri_app_lib::db::connection::open_in_memory().unwrap();
+    let vec_of = |v: &serde_json::Value| -> Vec<f32> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap() as f32)
+            .collect()
+    };
+    let now = 4_102_444_800_000i64; // replay()'s far-future "now"
+
+    // The seeded kernel brain: each frozen fact as a `user_confirmed`
+    // llm_wiki_entries row (blob + scheme raw), evidenced into its own
+    // indexed document through the evidence-hash join, whose single chunk
+    // carries the fact's frozen vector so the stage-1 population is fully
+    // scorable (coverage 14/14 ⇒ §4 cell 4, two-stage RUNS).
+    conn.execute(
+        "INSERT INTO curated_proposals (id, kind, model, status, created_at)
+         VALUES ('prop-kernel', 'new_entity', 'test', 'approved', 100)",
+        [],
+    )
+    .unwrap();
+    for (i, f) in frozen["facts"].as_array().unwrap().iter().enumerate() {
+        let fact_id = f["id"].as_str().unwrap();
+        let vector = vec_of(&f["vector"]);
+        let blob: Vec<u8> = vector.iter().flat_map(|x| x.to_le_bytes()).collect();
+        let chunk_hash = format!("kernel-chunk-{i}");
+        conn.execute(
+            "INSERT INTO documents (path, hash, status, tier, embed_key)
+             VALUES (?1, ?2, 'indexed', 'user_doc', ?3)",
+            params![format!("/vault/stated/kernel/{fact_id}.md"), fact_id, profile_key],
+        )
+        .unwrap();
+        let doc_id: i64 = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_text, position, content_hash)
+             VALUES (?1, ?2, 0, ?3)",
+            params![doc_id, format!("{}\n\n{}", f["title"].as_str().unwrap(), f["body"].as_str().unwrap()), chunk_hash],
+        )
+        .unwrap();
+        let chunk_id: i64 = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO embeddings (chunk_id, vector) VALUES (?1, ?2)",
+            params![chunk_id, blob],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES ('prop-kernel', ?1, 'evidence')",
+            params![doc_id],
+        )
+        .unwrap();
+        // FK order: the entry lands BEFORE its librarian_evidence row.
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embed_scheme, embedding
+             ) VALUES (?1, 'ent_calibration', ?2, ?3, '[]', 'inferred',
+                       'user_confirmed', NULL, NULL, 100, 100, NULL, 0, NULL,
+                       ?4, 'raw', NULL)",
+            params![
+                fact_id,
+                f["title"].as_str().unwrap(),
+                f["body"].as_str().unwrap(),
+                blob,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, created_at)
+             VALUES (?1, 'prop-kernel', ?2, 100)",
+            params![
+                fact_id,
+                format!("{{\"evidence\":[{{\"content_hash\":\"{chunk_hash}\"}}]}}")
+            ],
+        )
+        .unwrap();
+    }
+    let seeded: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(seeded, 14, "the 14 kernel facts seeded as user_confirmed");
+
+    // Replay: every frozen probe through the REAL activity orchestrator.
+    let (mut rel, mut opens, mut fps, mut irr, mut hit1) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    for p in frozen["probes"].as_array().unwrap() {
+        let expect: Vec<&str> = p["expect"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        let v = vec_of(&p["vector"]);
+        let run = tauri_app_lib::wisdom_match::wisdom_match_two_stage_with_v1(
+            &conn,
+            &v,
+            &v, // raw scheme: the schemed vector IS the raw one
+            Scheme::Raw,
+            2,
+            &[],
+            now,
+            profile_key,
+            tauri_app_lib::wisdom_match::QueryKind::Activity,
+        )
+        .unwrap();
+        assert!(
+            run.ran,
+            "two-stage must RUN (floor resolved from WISDOM_GATE_FLOORS); outcome {:?}",
+            run.outcome
+        );
+        if expect.is_empty() {
+            irr += 1;
+            // THE benchmark: an irrelevant probe must NEVER open the gate —
+            // FP 0 with the widened aperture (spec §5 "Benchmark").
+            fps += usize::from(!run.result.entries.is_empty());
+        } else {
+            rel += 1;
+            opens += usize::from(!run.result.entries.is_empty());
+            hit1 += usize::from(
+                run.result
+                    .entries
+                    .first()
+                    .is_some_and(|e| expect.contains(&e.id.as_str())),
+            );
+        }
+    }
+    let fp = fps as f64 / irr as f64;
+    let h1 = hit1 as f64 / rel as f64;
+    println!(
+        "activity FP-0 benchmark (user_confirmed kernel brain, {key} @ {floor}): \
+         {irr} irrelevant probes → FP {fp:.3}; {rel} relevant → opens {opens}, hit@1 {h1:.3}"
+    );
+    assert_eq!(fps, 0, "activity FP must stay 0 with the widened aperture");
+    assert!(
+        opens > 0,
+        "the seeded user_confirmed kernel must actually deliver through the activity path"
+    );
+    assert!(
+        h1 >= 0.25,
+        "hit@1 {h1:.3} collapsed below the calibrated activity letter floor (0.25; \
+         calibration per-kind hit@1 0.278/0.250/0.250)"
+    );
 }
 
 /// Replays one frozen snapshot. `freeze_dir` holds vectors.json.gz +

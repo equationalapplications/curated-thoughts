@@ -6,8 +6,10 @@
 -- from the file.
 --
 -- Idempotent DDL executed on every open — no schema_version stamp (the
--- V18/V26 "DDL only" precedent). Task 2 extends migrations/ with its own
--- files (stated_attestations, queue_denials); do not add them here.
+-- ungated precedent is the V27/V28 DDL bodies, which also run on every open;
+-- V18/V26 themselves DO stamp schema_version). Task 2 extends migrations/
+-- with its own files (stated_attestations, queue_denials); do not add them
+-- here.
 CREATE TABLE IF NOT EXISTS deposit_attribution (
   document_path TEXT PRIMARY KEY,
   speaker       TEXT NOT NULL,
