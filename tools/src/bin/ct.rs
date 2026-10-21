@@ -577,6 +577,7 @@ fn wisdom_deposit_cmd(
             title: title.to_string(),
             body: body.to_string(),
             tags: (!tags.is_empty()).then(|| tags.to_vec()),
+            attribution: None,
         },
     ))?;
     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());

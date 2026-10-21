@@ -46,6 +46,11 @@ pub struct WisdomDepositParams {
     /// Optional tags.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Optional attribution carrier (Task 1, spec rev 4.1 §1): rendered as an
+    /// OKF frontmatter block and indexed at deposit time. `None` renders
+    /// byte-identically to the pre-attribution format.
+    #[serde(default)]
+    pub attribution: Option<DepositAttribution>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -74,6 +79,86 @@ pub struct WisdomProposeSupersessionParams {
 }
 
 // ---------------------------------------------------------------------------
+// Attribution carrier (user-confirmation-queue Task 1, spec rev 4.1 §1/D4)
+// ---------------------------------------------------------------------------
+
+/// Who said what a deposit records, supplied by the calling agent at deposit
+/// time and rendered into the note's OKF frontmatter — the FILE is the
+/// authoritative carrier; the brain-side `deposit_attribution` row is a
+/// derived cache keyed by document path. The agent may attribute only what
+/// Kurt said (`Verbatim`) or faithfully restated at his direction
+/// (`RestatedAtDirection`) — never its own paraphrase or librarian output
+/// (S2); enforced here by argument validation, not by trust.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct DepositAttribution {
+    /// Speaker handle (e.g. `kurt`).
+    pub speaker: String,
+    /// Vocabulary kind — see [`AttributionKind`].
+    pub kind: AttributionKind,
+    /// Source handle for the attribution, e.g. `discord:1562137256498569278`.
+    /// Validated against [`validate_handle`] — these values are rendered into
+    /// YAML frontmatter and parsed back, so free text is rejected at the door.
+    pub source: String,
+}
+
+/// Attribution vocabulary: `verbatim` and `restated_at_direction` only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AttributionKind {
+    /// Kurt said exactly this.
+    Verbatim,
+    /// The agent restated this at Kurt's direction.
+    RestatedAtDirection,
+}
+
+impl AttributionKind {
+    /// Frontmatter token (the pinned kebab-lowercase vocabulary).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Verbatim => "verbatim",
+            Self::RestatedAtDirection => "restated_at_direction",
+        }
+    }
+}
+
+impl TryFrom<&str> for AttributionKind {
+    type Error = String;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "verbatim" => Ok(Self::Verbatim),
+            "restated_at_direction" => Ok(Self::RestatedAtDirection),
+            other => Err(format!(
+                "unknown attribution kind {other:?} (expected \"verbatim\" or \
+                 \"restated_at_direction\")"
+            )),
+        }
+    }
+}
+
+/// Handle values (`attribution_source`, and later `approval_instruction_source`)
+/// are rendered into YAML frontmatter and parsed back, so they must match
+/// `^[a-z]+:[A-Za-z0-9_.-]+$` — free text is rejected at the door (rev 4 m8).
+pub fn validate_handle(handle: &str) -> Result<(), String> {
+    let ok = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-');
+    match handle.split_once(':') {
+        Some((scheme, rest))
+            if !scheme.is_empty()
+                && scheme.bytes().all(|b| b.is_ascii_lowercase())
+                && !rest.is_empty()
+                && rest.bytes().all(ok) =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "invalid handle {handle:?} (must match ^[a-z]+:[A-Za-z0-9_.-]+$)"
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Deposit file rendering
 // ---------------------------------------------------------------------------
 
@@ -86,9 +171,26 @@ fn flatten_line(s: &str) -> String {
     s.replace(['\n', '\r'], " ")
 }
 
-fn render_deposit_file(title: &str, body: &str, tags: &[String]) -> String {
+fn render_deposit_file(
+    title: &str,
+    body: &str,
+    tags: &[String],
+    attribution: Option<&DepositAttribution>,
+) -> String {
     let title = flatten_line(title);
     let mut out = String::new();
+    // Attribution frontmatter rides FIRST (D4): the deposit file itself is the
+    // authoritative carrier, downstream copies inherit it. No attribution →
+    // no frontmatter, byte-identical to the pre-attribution render (pinned by
+    // test). The speaker is line-flattened so a newline cannot forge
+    // frontmatter lines; `source` is regex-validated at argument validation.
+    if let Some(a) = attribution {
+        out.push_str("---\n");
+        out.push_str(&format!("attributed_speaker: {}\n", flatten_line(&a.speaker)));
+        out.push_str(&format!("attribution_kind: {}\n", a.kind.as_str()));
+        out.push_str(&format!("attribution_source: {}\n", a.source));
+        out.push_str("---\n");
+    }
     out.push_str(&format!("# {title}\n\n"));
     if !tags.is_empty() {
         let list = tags
@@ -456,6 +558,7 @@ async fn audit_and_seed_kick(
     tool: &'static str,
     path: String,
     initial_state: &'static str,
+    attribution: Option<DepositAttribution>,
 ) -> Result<()> {
     let client = ctx.client.clone();
     let audit_path = path.clone();
@@ -472,6 +575,27 @@ async fn audit_and_seed_kick(
             "write",
         )?;
         set_kick_state(&tx, &kick_rel, initial_state, None)?;
+        // Deposit-time attribution index (Task 1, spec rev 4.1 §1): the
+        // frontmatter is parsed HERE — inside the same transaction as the
+        // audit + kick-ledger writes — so file, audit, ledger, and index all
+        // land or vanish together. The table is a derived cache keyed by
+        // document path; the FILE remains authoritative (a re-ingest
+        // repopulates the index from it).
+        if let Some(a) = attribution {
+            tx.execute(
+                "INSERT OR REPLACE INTO deposit_attribution
+                     (document_path, speaker, kind, source, deposited_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    kick_rel,
+                    a.speaker,
+                    a.kind.as_str(),
+                    a.source,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|e| anyhow!("deposit_attribution insert failed: {e}"))?;
+        }
         tx.commit()
             .map_err(|e| anyhow!("kick ledger tx commit failed: {e}"))
     })
@@ -597,12 +721,27 @@ async fn deposit_inner(
     if p.title.trim().is_empty() || p.body.trim().is_empty() {
         bail!("title and body are required");
     }
+    // Argument validation (spec rev 4.1 §1, rev 4 m8): attribution handles are
+    // rendered into YAML frontmatter and parsed back, so free text is rejected
+    // at the door — before any file is created.
+    if let Some(a) = &p.attribution {
+        if a.speaker.trim().is_empty() {
+            bail!("attribution speaker is required");
+        }
+        validate_handle(&a.source)
+            .map_err(|e| anyhow!("invalid attribution_source: {e}"))?;
+    }
     let target = vault.join(&rel);
     if target.symlink_metadata().is_ok() {
         bail!("deposit_exists: {} (append-only; supersede instead)", rel);
     }
 
-    let content = render_deposit_file(&p.title, &p.body, p.tags.as_deref().unwrap_or(&[]));
+    let content = render_deposit_file(
+        &p.title,
+        &p.body,
+        p.tags.as_deref().unwrap_or(&[]),
+        p.attribution.as_ref(),
+    );
     // The whole lane chain down to the deposit's parent must exist before
     // validation: safe_vault_path's MayCreate canonicalizes the parent and
     // reports "parent directory not found" for a fresh vault (CI caught this
@@ -675,6 +814,7 @@ async fn deposit_inner(
         "wisdom_deposit",
         rel.clone(),
         initial_kick_state(generation_configured),
+        p.attribution.clone(),
     )
     .await
     {
@@ -927,6 +1067,7 @@ async fn supersession_inner(
         "wisdom_propose_supersession",
         rel.clone(),
         initial_kick_state(generation_configured),
+        None,
     )
     .await
     {
@@ -1034,6 +1175,7 @@ mod tests {
                     title: "Alpha ships v2".into(),
                     body: "Alpha v2 ships 2026-11-01 behind a flag.".into(),
                     tags: Some(vec!["alpha".into()]),
+                    attribution: None,
                 },
             )
             .await
@@ -1052,6 +1194,7 @@ mod tests {
                     title: "x".into(),
                     body: "y".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1074,6 +1217,7 @@ mod tests {
                     title: "x".into(),
                     body: "y".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1101,6 +1245,7 @@ mod tests {
                     title: "Evidence note".into(),
                     body: "body".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1211,6 +1356,7 @@ mod tests {
                         title: "t".into(),
                         body: "b".into(),
                         tags: None,
+                        attribution: None,
                     },
                 )
                 .await
@@ -1224,6 +1370,7 @@ mod tests {
                     title: " ".into(),
                     body: "b".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1247,6 +1394,7 @@ mod tests {
                     title: "Beta facts".into(),
                     body: "Beta is written in Rust.".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1479,6 +1627,7 @@ mod tests {
                     title: "t".into(),
                     body: "b".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1515,6 +1664,7 @@ mod tests {
             "Alpha ships v2\n\n# Unrelated heading",
             "body",
             &["tag\nwith newline".to_string()],
+            None,
         );
         assert_eq!(
             deposit.lines().next().unwrap(),
@@ -1800,6 +1950,7 @@ mod tests {
                     title: "Nested".into(),
                     body: "Nested deposits land in fresh topic dirs.".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1825,6 +1976,7 @@ mod tests {
                     title: "t".into(),
                     body: "b".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1907,6 +2059,109 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(state, "chunked", "kick error: {error:?}");
+        });
+    }
+
+    // ------------------------------------------------------------------------
+    // Attribution carrier (user-confirmation-queue Task 1): deposit-file
+    // frontmatter (D4) + deposit-time index written inside the
+    // audit_and_seed_kick transaction. The FILE is authoritative; the brain
+    // table is a derived cache keyed by document path (spec rev 4.1 §1).
+    // ------------------------------------------------------------------------
+
+    /// Exact pre-change `render_deposit_file` output, captured verbatim from
+    /// the code at HEAD c149b3cf (H1, blank line, inline-code tag list, blank
+    /// line, `body.trim_end()`, trailing newline). The unattributed-render
+    /// test proves byte-identity against it.
+    const BASELINE_NOTE: &str = "# Test title\n\n`alpha`\n\nBeta is written in Rust.\n";
+
+    /// Harness helper: renders a minimal deposit note with an optional
+    /// attribution carrier.
+    fn render_test_deposit(attribution: Option<&DepositAttribution>) -> String {
+        render_deposit_file(
+            "Test title",
+            "Beta is written in Rust.",
+            &["alpha".to_string()],
+            attribution,
+        )
+    }
+
+    #[test]
+    fn attribution_frontmatter_renders_and_parses_back() {
+        let a = DepositAttribution {
+            speaker: "kurt".into(),
+            kind: AttributionKind::RestatedAtDirection,
+            source: "discord:1562137256498569278".into(),
+        };
+        let md = render_test_deposit(Some(&a));
+        assert!(md.starts_with(
+            "---\nattributed_speaker: kurt\nattribution_kind: restated_at_direction\nattribution_source: discord:1562137256498569278\n---\n"
+        ));
+        assert_eq!(
+            AttributionKind::try_from("verbatim").unwrap(),
+            AttributionKind::Verbatim
+        );
+        assert!(AttributionKind::try_from("paraphrase").is_err());
+        assert!(validate_handle("discord:123").is_ok());
+        assert!(validate_handle("has space:123").is_err());
+        assert!(validate_handle("discord:").is_err());
+    }
+
+    #[test]
+    fn unattributed_deposit_renders_byte_identical() {
+        assert_eq!(render_test_deposit(None), BASELINE_NOTE);
+    }
+
+    #[test]
+    fn attribution_index_lands_in_audit_and_seed_kick_transaction() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            let rel = "immutable-source-files/agents/attributed.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Kurt's direction".into(),
+                    body: "Deploy the staging stack nightly.".into(),
+                    tags: None,
+                    attribution: Some(DepositAttribution {
+                        speaker: "kurt".into(),
+                        kind: AttributionKind::RestatedAtDirection,
+                        source: "discord:1562137256498569278".into(),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+            // The attribution index row and the initial kick-ledger row are
+            // committed by the SAME audit_and_seed_kick transaction, so both
+            // are visible here, after the dispatch returned.
+            let conn = ctx.conn.lock().unwrap();
+            let (speaker, kind, source): (String, String, String) = conn
+                .query_row(
+                    "SELECT speaker, kind, source FROM deposit_attribution
+                      WHERE document_path = ?1",
+                    [rel],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(speaker, "kurt");
+            assert_eq!(kind, "restated_at_direction");
+            assert_eq!(source, "discord:1562137256498569278");
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM deposit_kick_state WHERE path = ?1",
+                    [rel],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                matches!(state.as_str(), "pending" | "no_ingest_host"),
+                "kick ledger row must exist beside the attribution row, got {state}"
+            );
         });
     }
 }

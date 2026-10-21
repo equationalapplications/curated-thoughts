@@ -832,6 +832,13 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     apply_v27_embed_scheme(conn)?;
     apply_v28_two_stage_columns(conn)?;
 
+    // Deposit-time attribution index (user-confirmation-queue Task 1, spec
+    // rev 4.1 §1/D4): the deposit file's frontmatter is authoritative; this
+    // derived table is written inside the audit_and_seed_kick transaction.
+    // Ungated, idempotent DDL on every open — no schema_version stamp (the
+    // V18/V26 DDL-only precedent). Task 2 adds its own migrations/ files.
+    conn.execute_batch(include_str!("migrations/0001_deposit_attribution.sql"))?;
+
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
         conn.execute_batch(
