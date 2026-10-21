@@ -35,7 +35,7 @@
 **Interfaces:**
 - Produces: `DepositAttribution { speaker: String, kind: AttributionKind, source: String }`, `enum AttributionKind { Verbatim, RestatedAtDirection }`, `TryFrom<&str> for AttributionKind`, fn `validate_handle(&str) -> Result<(), String>` (regex `^[a-z]+:[A-Za-z0-9_.-]+$`); `render_deposit_file` gains `attribution: Option<&DepositAttribution>`; brain table `deposit_attribution(document_path TEXT PRIMARY KEY, speaker TEXT, kind TEXT, source TEXT, deposited_at TEXT)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -62,21 +62,35 @@ fn attribution_index_lands_in_audit_and_seed_kick_transaction() {
 }
 ```
 
-- [ ] **Step 2: Run to verify RED**
+- [x] **Step 2: Run to verify RED**
 
 Run: `cargo test -p curated-thoughts --lib wisdom_deposit 2>&1 | tee /tmp/t1.log` (with the repo gate wrapper/env per AGENTS.md). Expected: compile FAIL — `DepositAttribution` not found.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add the struct/enum/validation; extend `render_deposit_file` to emit the three frontmatter lines when `attribution` is `Some` (else byte-identical output); inside the `audit_and_seed_kick` `with_rw` closure, insert the `deposit_attribution` row (migration in Task 2's migration file — coordinate: this task adds the migration SQL file, Task 2 extends it; if Task 2 has not landed, add ONLY `deposit_attribution` here).
 
-- [ ] **Step 4: Gates**
+- [x] **Step 4: Gates**
 
 `cargo check --tests` warning-free on touched files; full `wisdom_deposit` test module green; counts = baseline + 3.
 
-- [ ] **Step 5: Commit** — `feat(deposit): attribution frontmatter carrier with deposit-time index`
+- [x] **Step 5: Commit** — `feat(deposit): attribution frontmatter carrier with deposit-time index`
+
+> **Controller tick (2026-10-21):** Task 1 DONE — commit `06811cfe`; gates verified (lib 1456+59
+> exact, replay 17/17 byte-identical, clippy clean); SOR clean (0 findings); task-review verdict
+> **APPROVE** (`.superpowers/sdd/confirm-queue/task1-review-verdict.md`).
 
 ### Task 2: Migration — `stated_attestations`, `queue_denials` + ledger JSONL writers/rebuild
+
+> **Controller note (Task-1 review ruling, binding):** the plan's `migrations/NNNN_…sql` +
+> `db/mod.rs` registration assumption does not match repo reality (DDL lives in Rust consts
+> `MIGRATION_V1..V28` in `schema.rs`, applied by `connection.rs::migrate()`; `db/mod.rs` is a
+> chunk-hash data migration, not a DDL point). Follow the `06811cfe` pattern exactly:
+> `src-tauri/src/db/migrations/0002_stated_verification.sql`, `CREATE TABLE IF NOT EXISTS`,
+> registered with one `conn.execute_batch(include_str!(…))?;` in `migrate()` after the
+> deposit_attribution line — **no** `schema_version` stamp, **no** `db/mod.rs` edit.
+> Ride-along (comment-only): correct the imprecise "V18/V26 DDL-only precedent" citation
+> introduced by Task 1 (V18/V26 stamp; the ungated precedent is the V27/V28 bodies).
 
 **Files:**
 - Create: `src-tauri/src/db/migrations/NNNN_stated_verification.sql` (next number; check `migrations/` for the current max)
@@ -293,6 +307,11 @@ fn direct_write_is_gone() { /* compile-level: add_wisdom_in_tx no longer exists 
 - [ ] **Step 4: Commit** — `docs(intent): confirmation queue, provenance labels, and user-scope documentation`
 
 ### Task 11: Kernel seeding + benchmark + whole-branch verification
+
+> **Controller note (Task-1 review ruling):** Task 11's gate sweep must additionally include
+> `cargo check --tests --features mcp-server` (the `cfg_attr(mcp-server)` schemars derive on
+> `WisdomDepositParams` is not covered by the default-feature gates). Plain
+> `cargo check --tests` FAILS at baseline — always use `--features test-utils`.
 
 **Files:**
 - Create: scratch-brain seeding script (scratch only — NOT committed) confirming the 14 kernel facts as `user_confirmed` fixtures
