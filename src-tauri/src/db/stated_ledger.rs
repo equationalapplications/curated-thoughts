@@ -247,6 +247,18 @@ pub fn record_confirmation_at(
     Ok(())
 }
 
+/// Retry guard for the confirm path — mirror of the deny-side ledger check
+/// (`read_denial_lines` in `queue.rs`'s `deny_fact_at`). A confirm retry whose
+/// earlier brain transaction failed must not append a duplicate
+/// `.confirmations.jsonl` line: the rebuild is hash-idempotent, so a duplicate
+/// is harmless — this is ledger hygiene, not lost-state repair.
+pub fn confirmation_ledger_has_key(vault_root: &Path, content_hash: &str) -> Result<bool> {
+    let stated = vault_root.join(STATED_DIR);
+    Ok(read_lines::<ConfirmationLine>(&stated.join(CONFIRMATIONS_LEDGER))?
+        .iter()
+        .any(|l| l.content_hash == content_hash))
+}
+
 /// Stamp `source_type = 'user_confirmed'` on every non-deleted entry whose
 /// current title+body hash is in `hashes`. Returns the number of rows stamped.
 fn apply_confirmations_by_hash(conn: &Connection, hashes: &HashSet<String>) -> Result<usize> {

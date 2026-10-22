@@ -491,14 +491,26 @@ pub fn confirm_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> R
     //    re-derives the confirmation from the ledger.
     let content_hash =
         crate::db::stated_ledger::confirmation_content_hash(&title, &body);
-    crate::db::stated_ledger::record_confirmation_at(
-        conn,
+    // Tier-1.5 medium MINOR-1 closeout: mirror of the deny-side ledger-
+    // duplicate guard (Task-5 Low-2 / Task-11 A2). A retry whose earlier
+    // brain transaction failed must not append a duplicate
+    // `.confirmations.jsonl` line. The rebuild is hash-idempotent, so the
+    // duplicate was harmless — this is ledger hygiene, not lost-state repair;
+    // the full stamp below (tx) re-applies everything on the retry.
+    let already_in_ledger = crate::db::stated_ledger::confirmation_ledger_has_key(
         vault_root,
-        fact_id,
         &content_hash,
-        HUMAN_CONFIRMER,
-        &at_iso,
     )?;
+    if !already_in_ledger {
+        crate::db::stated_ledger::record_confirmation_at(
+            conn,
+            vault_root,
+            fact_id,
+            &content_hash,
+            HUMAN_CONFIRMER,
+            &at_iso,
+        )?;
+    }
 
     // 2. The full stamp, one transaction: UPDATE + outbox Update + event.
     //    `updated_at` untouched (drafts.rs discipline), `lifecycle_status`
@@ -2285,6 +2297,63 @@ mod confirmation_action_tests {
             lines.len(),
             1,
             "retry after ledger-landed/brain-failed: no duplicate line"
+        );
+    }
+
+    /// Tier-1.5 medium MINOR-1 closeout: the confirm path gets the same
+    /// ledger-duplicate guard the deny path has (Task-5 Low-2 / Task-11 A2
+    /// mirror). Crash shape: the first confirm landed the ledger line, then
+    /// the brain transaction failed (confidence never set). The retry must
+    /// (a) NOT append a duplicate `.confirmations.jsonl` line, and (b) still
+    /// complete the stamp — the two-condition early-return guard
+    /// (`source_type` AND `confidence`) deliberately lets a half-applied row
+    /// back into the full transaction.
+    #[test]
+    fn confirm_retry_does_not_duplicate_ledger_line_and_heals() {
+        let now = crate::wisdom_deposit::now_ms();
+        let conn = conn();
+        let (_tmp, vault) = vault();
+        seed_entity(&conn);
+        insert_entry(&conn, "q-confirm-retry", "Confirm retry title", now);
+
+        confirm_fact_at(&conn, &vault, "q-confirm-retry").unwrap();
+        let lines = ledger_lines(&vault, ".confirmations.jsonl");
+        assert_eq!(lines.len(), 1, "first confirm: one ledger line");
+
+        // Simulate the crash: the tx rolled back its half (confidence back to
+        // a non-confirmed value), leaving the autocommit hash-stamp from
+        // record_confirmation_at in place.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET confidence = 'inferred'
+              WHERE id = 'q-confirm-retry'",
+            [],
+        )
+        .unwrap();
+
+        // The user's natural retry: full stamp must complete, ledger grows
+        // by ZERO lines.
+        confirm_fact_at(&conn, &vault, "q-confirm-retry").unwrap();
+        let lines = ledger_lines(&vault, ".confirmations.jsonl");
+        assert_eq!(
+            lines.len(),
+            1,
+            "retry after ledger-landed/tx-failed: no duplicate line"
+        );
+        let (source_type, confidence): (String, String) = conn
+            .query_row(
+                "SELECT source_type, confidence FROM llm_wiki_entries
+                  WHERE id = 'q-confirm-retry'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            source_type, "user_confirmed",
+            "retry completes the stamp"
+        );
+        assert_eq!(
+            confidence, "confirmed",
+            "retry heals the half-applied row (the MAJOR-2 refute: nothing is stuck)"
         );
     }
 
