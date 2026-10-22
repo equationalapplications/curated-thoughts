@@ -54,54 +54,25 @@ fn entity_crud_via_tauri_commands() {
     assert_eq!(with_archived.len(), 1);
 }
 
-/// Task R3 end-to-end: `add_entity_fact_cmd` now threads `EmbedProfileState`
-/// into `add_fact_with_profile`, so a profile-aware write should land with a
-/// non-NULL `embedding_blob` rather than deferring to the runtime sweep.
-/// Uses `CURATED_EMBED_STUB=constant8` to make the embedder deterministic
-/// without contacting Ollama.
-#[test]
-fn add_entity_fact_cmd_writes_entry_embedding_inline() {
-    temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
-        let app = TestApp::new();
-        let created: serde_json::Value = app.invoke(
-            "create_entity_cmd",
-            json!({
-                "input": {
-                    "name": "Fact Target",
-                    "entity_type": null,
-                    "summary": null
-                }
-            }),
-        );
-        let entity_id = created["id"].as_str().expect("entity id").to_string();
-
-        let fact: serde_json::Value = app.invoke(
-            "add_entity_fact_cmd",
-            json!({ "entityId": entity_id, "body": "A fact written with a profile." }),
-        );
-        let fact_id = fact["id"].as_str().expect("fact id").to_string();
-
-        let conn = app.open_db();
-        let blob_len: Option<i64> = conn
-            .query_row(
-                "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = ?1",
-                [&fact_id],
-                |r| r.get(0),
-            )
-            .expect("query embedding_blob length");
-        assert_eq!(
-            blob_len,
-            Some(32),
-            "embedding_blob should be set inline (8 floats × 4 bytes)"
-        );
-    });
-}
-
-/// `update_entity_fact_cmd` is the edit twin of `add_entity_fact_cmd`: it must
-/// also embed at write time. It previously NULLed `embedding_blob` on every
+/// Task 9 retired the app's direct `user_stated` INSERT (spec §3.7.6 + §9,
+/// PR #294 verdict E3): `add_entity_fact_cmd` is now an async capture command
+/// (stated/ file → attestation → synchronous librarian kick) and the R3
+/// inline-write contract is gone with it. Its replacement coverage lives in
+/// the lib suite: `capture_statement_writes_attested_file_and_kicks`,
+/// `capture_statement_dedupes_duplicate_slugs`, and the real-pipeline E2E
+/// (all in `src/db/wisdom.rs`). An integration test of the capture command
+/// cannot run the production kick deterministically (no completer seam at
+/// the command layer), so the command-level contract pinned here is only
+/// what CI-exercised glue still needs: the EDIT twin's write-time embedding.
+///
+/// `update_entity_fact_cmd` is the edit twin and is UNCHANGED by Task 9: it
+/// must embed at write time. It previously NULLed `embedding_blob` on every
 /// edit and relied on the null-embedding sweep, which nothing on this path
 /// triggers — so an edited fact dropped out of semantic retrieval until an
-/// app restart or an unrelated write happened to fire a sweep.
+/// app restart or an unrelated write happened to fire a sweep. The seed fact
+/// is inserted DIRECTLY (Task 9 fixture shape, mirroring `seed_fact` in
+/// `src/db/wisdom.rs`) because the old seed route — `add_entity_fact_cmd` —
+/// no longer writes `llm_wiki_entries`.
 #[test]
 fn update_entity_fact_cmd_writes_entry_embedding_inline() {
     temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
@@ -114,11 +85,28 @@ fn update_entity_fact_cmd_writes_entry_embedding_inline() {
         );
         let entity_id = created["id"].as_str().expect("entity id").to_string();
 
-        let fact: serde_json::Value = app.invoke(
-            "add_entity_fact_cmd",
-            json!({ "entityId": entity_id, "body": "The body before the edit." }),
-        );
-        let fact_id = fact["id"].as_str().expect("fact id").to_string();
+        // Direct seed: one live fact row keyed to the entity (same column
+        // shape the retired `add_wisdom_in_tx` INSERT used; `embed_scheme`
+        // default 'raw' keeps the stub embedder deterministic).
+        let fact_id = "fact_seed_edit_inline".to_string();
+        {
+            let conn = app.open_db();
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type,
+                    source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                    access_count, deleted_at, embedding_blob, embed_scheme, embedding
+                 ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, NULL, ?5, ?5, NULL, 0, NULL, NULL, 'raw', NULL)",
+                rusqlite::params![
+                    fact_id,
+                    entity_id,
+                    "The body before the edit.",
+                    "The body before the edit.",
+                    1_700_000_000_i64,
+                ],
+            )
+            .expect("seed fact row");
+        }
 
         app.invoke::<()>(
             "update_entity_fact_cmd",
