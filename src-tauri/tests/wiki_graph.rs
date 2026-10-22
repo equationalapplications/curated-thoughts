@@ -118,7 +118,10 @@ fn open_entries_db() -> Connection {
             title TEXT NOT NULL,
             tier TEXT NULL,
             deleted_at INTEGER,
-            embedding_blob BLOB
+            embedding_blob BLOB,
+            confidence TEXT NULL,
+            source_type TEXT NULL,
+            okf_verified TEXT NULL
         );",
     )
     .unwrap();
@@ -897,10 +900,19 @@ use tauri_app_lib::wiki_graph::wiki_context;
 /// edges, and curated_entities (the space a fact's `entity_id` resolves in).
 fn open_context_db() -> Connection {
     let conn = open_graph_db_with_entities();
+    // The recall column list grew with Task 6's per-hit provenance labels
+    // (commit d127d282): wiki_context now SELECTs confidence, source_type and
+    // okf_verified alongside tier/embedding_blob. Keep the minimal fixture in
+    // step — this binary never ran on CI because `cargo test` fail-fast
+    // aborted at entities_api (the pre-9ce2c048 failure), which is why the
+    // drift went unnoticed.
     conn.execute_batch(
         "ALTER TABLE llm_wiki_entries ADD COLUMN tier TEXT NULL;
          ALTER TABLE llm_wiki_entries ADD COLUMN embedding_blob BLOB;
-         ALTER TABLE llm_wiki_entries ADD COLUMN source_ref TEXT;",
+         ALTER TABLE llm_wiki_entries ADD COLUMN source_ref TEXT;
+         ALTER TABLE llm_wiki_entries ADD COLUMN confidence TEXT NULL;
+         ALTER TABLE llm_wiki_entries ADD COLUMN source_type TEXT NULL;
+         ALTER TABLE llm_wiki_entries ADD COLUMN okf_verified TEXT NULL;",
     )
     .unwrap();
     conn
