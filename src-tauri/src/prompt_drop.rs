@@ -135,7 +135,12 @@ pub fn emit_unverified_match(vault_root: &Path, ev: UnverifiedMatch) {
     };
     let emit = || -> std::io::Result<()> {
         let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
-        writeln!(f, "{}", serde_json::to_string(&line).unwrap_or_default())?;
+        // ONE write syscall for line+newline (Tier-1.5 sonnet-high MINOR-5,
+        // mirroring stated_ledger::append_line): writeln! on an unbuffered
+        // File issues two writes, which a concurrent appender can interleave.
+        let mut buf = serde_json::to_vec(&line)?;
+        buf.push(b'\n');
+        f.write_all(&buf)?;
         Ok(())
     };
     if let Err(e) = emit() {

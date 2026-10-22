@@ -332,7 +332,9 @@ pub fn precompute_entry_embedding(profile: Option<&EmbedProfile>, body: &str) ->
             None
         }
     }
-}/// Rewrite a wisdom entry's body (title re-derived); pushes full-payload outbox UPDATE.
+}
+
+/// Rewrite a wisdom entry's body (title re-derived); pushes full-payload outbox UPDATE.
 ///
 /// Equivalent to `update_wisdom_with_blob(conn, entity_id, wisdom_id, body, None)`
 /// — the entry lands with a NULL embedding for the sweep to fill. Kept for
