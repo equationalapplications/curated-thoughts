@@ -18,7 +18,7 @@ const ROW: QueueRow = {
 
 // The modal is callback-wired (QueueMode owns the invoke calls — covered in
 // QueueMode.test.tsx); these tests pin the modal's own contract.
-function render(onError = (m: string) => {}, onConfirm = () => {}, onDeny = () => {}) {
+function render(onError = () => {}, onConfirm = () => {}, onDeny = () => {}) {
   return renderWithTheme(
     <ConfirmDenyModal
       row={ROW}
