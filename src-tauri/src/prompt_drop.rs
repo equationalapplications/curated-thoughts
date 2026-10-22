@@ -166,10 +166,11 @@ pub struct DrainReport {
 
 /// App-side drain (Task 9's Active Verification Prompting): take the oldest
 /// unacked lines (up to `cap`), mark THEM acked, and report the remaining
-/// unacked count. The drop file is otherwise append-only (the emitter never
-/// rewrites); this function is the ONLY rewriter, and it is app-only. A
-/// missing file is an empty drain; a malformed line is never silently dropped
-/// — it is rewritten unchanged (the ledger discipline).
+/// unacked count. The rewrite also PRUNES strictly-acked lines (this function
+/// is the ONLY rewriter; the emitter appends but never rewrites), so the drop
+/// file stays bounded by live state, not by prompting history. A missing file
+/// is an empty drain; a malformed line is never silently dropped — it is
+/// rewritten unchanged (the ledger discipline).
 pub fn drain_unverified_matches(vault_root: &Path, cap: usize) -> Result<DrainReport> {
     let dir = vault_root.join(BRAIN_DIR);
     let path = dir.join(UNVERIFIED_MATCH_FILE);
@@ -203,7 +204,11 @@ pub fn drain_unverified_matches(vault_root: &Path, cap: usize) -> Result<DrainRe
             }
         };
         if v.get("acked_at").is_some() {
-            out_lines.push(line.to_string());
+            // Strictly-acked lines are dead weight: the dedupe is
+            // unacked-scoped and this drain is the ONLY rewriter of the file.
+            // Dropping them here keeps `unverified-match.jsonl` bounded —
+            // keeping them accumulated one line per prompt shown, forever,
+            // and `has_unacked_line` re-parsed the whole file on every hit.
             continue;
         }
         unacked_total += 1;
@@ -385,6 +390,7 @@ pub fn emit_unverified_matches(
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -412,7 +418,9 @@ mod tests {
 
     /// Restores writable permissions on `.brain` even if the assertions panic
     /// (the plan's "restore in catch/finally" — TempDir cleanup needs it too).
+    #[cfg(unix)]
     struct RestorePerm(std::path::PathBuf);
+    #[cfg(unix)]
     impl Drop for RestorePerm {
         fn drop(&mut self) {
             let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
@@ -460,6 +468,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // read-only-dir semantics come from POSIX mode bits
     fn read_only_brain_dir_never_errors_the_call() {
         let dir = TempDir::new().unwrap();
         let brain = dir.path().join(BRAIN_DIR);

@@ -2935,6 +2935,14 @@ pub(crate) fn precompute_entry_embeddings(
 /// (spec §3.3) — a source file's attestation-shaped frontmatter proves
 /// nothing, so this predicate never reads the file; a content-hash mismatch
 /// (file edited after attestation) reads as NOT attested.
+///
+/// Deleted sources are handled UPSTREAM: `curated_proposal_sources.doc_id`
+/// is `REFERENCES documents(id) ON DELETE CASCADE` (okf_ddl.rs), so
+/// `delete_document` (issue #211 D3 records the deletion, then deletes the
+/// row) removes the source from this set atomically — this predicate only
+/// ever sees live sources. (CodeRabbit round-2 claimed the row survives and
+/// the INNER JOIN fails open; the cascade makes that premise false — pinned
+/// by `deleted_source_document_cascades_out_of_attested_set`.)
 fn all_sources_attested(conn: &Connection, proposal_id: &str) -> Result<bool> {
     let source_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM curated_proposal_sources WHERE proposal_id = ?1",
@@ -3281,7 +3289,7 @@ mod tests {
         insert_proposal, NewProposal, NewProposalItem, NewProposalSource, ProposalKind,
         ProposalSourceRole, StoredEvidenceChunk,
     };
-    use crate::db::queries::{insert_chunk, upsert_document};
+    use crate::db::queries::{delete_document, insert_chunk, upsert_document};
 
     /// Re-implementation of the engine's `normalizeSourceRef`
     /// (dist/index.js:4082) plus its five-predicate selector
@@ -4808,6 +4816,87 @@ mod tests {
             stamped_source_type(&conn, &result),
             "user_stated",
             "all-attested sources ⇒ Path B user_stated"
+        );
+    }
+
+    /// The deleted-source cascade must hold at the human-tier arm:
+    /// `curated_proposal_sources.doc_id` is `ON DELETE CASCADE`, so
+    /// `delete_document` removes a deleted source from the attestation set
+    /// atomically (issue #211 D3 records the deletion for provenance) and
+    /// the remaining attested live source resolves `user_stated`. If anyone
+    /// ever drops the FK cascade or changes `delete_document`, this test
+    /// fails instead of silently opening the CodeRabbit-imagined fail-open
+    /// (a dead row dropped by the INNER JOIN while still counted).
+    #[test]
+    fn deleted_source_document_cascades_out_of_attested_set() {
+        let mut conn = open_in_memory().unwrap();
+        let live_id = seed_document(&conn, "/vault/stated/kurt/2026/live.md");
+        let chunk_id = seed_chunk(&conn, live_id);
+        insert_test_proposal(
+            &conn,
+            "prop-del",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-del", chunk_id, "A stated fact.")],
+            live_id,
+        );
+        // Second source: never attested, then deleted through the production
+        // path (records curated_proposal_deleted_sources, deletes documents;
+        // the FK cascade removes the curated_proposal_sources row with it).
+        let dead_id = seed_document(&conn, "/vault/stated/kurt/2026/dead.md");
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES ('prop-del', ?1, 'trigger')",
+            [dead_id],
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        assert_eq!(
+            delete_document(&tx, "/vault/stated/kurt/2026/dead.md").unwrap(),
+            1,
+            "precondition: the dead source's documents row is deleted"
+        );
+        tx.commit().unwrap();
+
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM curated_proposal_sources WHERE proposal_id = 'prop-del'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            remaining, 1,
+            "FK cascade: the deleted source must leave the attestation set"
+        );
+
+        // The live source IS attested (seed_document pins hash "hash") and is
+        // now the ONLY source — the arm must stamp human-tier user_stated.
+        conn.execute(
+            "INSERT INTO stated_attestations
+               (document_path, content_hash, attested_by, attested_at)
+             VALUES ('/vault/stated/kurt/2026/live.md', 'hash', 'kurt',
+                     '2026-10-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let decisions = all_accept_decisions(&conn, "prop-del");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-del",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "user_stated",
+            "post-cascade, the all-attested live source set resolves user_stated"
         );
     }
 

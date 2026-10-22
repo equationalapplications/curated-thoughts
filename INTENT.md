@@ -254,7 +254,10 @@ offers the person a confirmation prompt.
 *Why:* a wrong fact pushed mid-task is worse than a missed one; a labeled
 fact on request is neither.
 
-**Status: Planned.**
+**Status: Built (2026-10).** The confirmation queue, the per-hit
+`source_type`/`verified` recall labels, the widened activity aperture, and
+the Active Verification Prompt modal shipped with the
+user-confirmation-queue delivery.
 
 ## Who verifies: users and scope
 
@@ -295,7 +298,8 @@ Planned Librarian improvements:
 - Recall that skips superseded and expired facts. **Partly built:** only
   `ct wisdom match` does this today.
 - Provenance from attested source documents: a proposal whose every source
-  carries an attestation of record lands as `user_stated`. **Planned.**
+  carries an attestation of record lands as `user_stated`. **Built
+  (2026-10).**
 
 Design target: about 10,000 live facts per brain. Approximate
 nearest-neighbor search (ANN) can wait until about 100,000.

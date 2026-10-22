@@ -8,6 +8,7 @@ use crate::db::outbox_format::OutboxOperation;
 use crate::embedder::{embed_batch, EmbedProfile};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use std::io::Write;
 
 // Task 9 (user-confirmation-queue): the app's DIRECT `user_stated` write is
 // RETIRED (spec §3.7.6, §2 rejected alternative "keeping the direct app write
@@ -161,9 +162,17 @@ fn open_capture_conn(db_path: &std::path::Path) -> Result<Connection> {
 /// FILE is written first (the pipeline reads bytes from the vault), the
 /// attestation row + ledger line second (so the Path B provenance arm finds
 /// a row whose hash matches the ingested document), the kick registration
-/// third, and the kick last. Any failure before the kick leaves NO attested
-/// file behind — file, row, line, and kick row land together or the caller
-/// gets an error.
+/// third, and the kick last.
+///
+/// NOT atomic (verdict-corrected 2026-10-22): the steps are separate
+/// autocommits, so a failure between them can leave the file and its
+/// attestation row behind without a ledger line. That is TOLERATED BY
+/// DESIGN — the ledger line is the durable carrier, and the rebuild
+/// re-derives the table from it, dropping a row whose line is missing
+/// (spec §8; Task-5 E2 ruling). Do not paper over this with a transaction:
+/// hiding the partial state would hide the inconsistency the rebuild
+/// resolves. A kick failure is reported via the kick rows, not the return
+/// (`run_kick_with`).
 fn capture_statement_on(
     conn: &mut Connection,
     ctx: &CaptureContext,
@@ -175,11 +184,37 @@ fn capture_statement_on(
         bail!("statement text must not be empty");
     }
     let at_iso = chrono::Utc::now().to_rfc3339();
-    let (rel, full) = stated_rel_path(&ctx.vault_root, text)?;
-    std::fs::create_dir_all(full.parent().expect("stated dir has a parent"))
-        .with_context(|| format!("creating {}", full.parent().unwrap().display()))?;
-    std::fs::write(&full, render_statement(text, &at_iso))
-        .with_context(|| format!("writing {}", full.display()))?;
+    // Never overwrite an existing statement file: create with
+    // `create_new(true)` — atomic at the FS level, so two concurrent captures
+    // of the same text cannot both win the slug (an exists()-then-write
+    // pre-check races: the loser truncates the winner's file and its
+    // INSERT OR REPLACE steals the attestation row). An AlreadyExists loser
+    // retries with the next `-N` suffix, exactly as the deposit path does.
+    let year = chrono::Utc::now().format("%Y");
+    let base = slugify(text);
+    let dir = ctx.vault_root.join(format!("stated/{STATED_AUTHOR}/{year}"));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut n = 1u32;
+    let (rel, full) = loop {
+        let suffix = if n == 1 { String::new() } else { format!("-{n}") };
+        let rel = format!("stated/{STATED_AUTHOR}/{year}/{base}{suffix}.md");
+        let full = dir.join(format!("{base}{suffix}.md"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&full)
+        {
+            Ok(mut file) => {
+                file.write_all(render_statement(text, &at_iso).as_bytes())
+                    .with_context(|| format!("writing {}", full.display()))?;
+                break (rel, full);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("writing {}", full.display())));
+            }
+        }
+    };
 
     // Attestation of record (spec §3.7.2): the brain-side row is the index
     // the Path B provenance arm joins on; the .attestations.jsonl line is
@@ -214,25 +249,6 @@ fn capture_statement_on(
         kick,
     );
     Ok(rel)
-}
-
-/// Vault-relative `stated/<author>/<year>/<slug>.md` with a dedupe suffix
-/// (`-2`, `-3`, …) when the slug collides — never overwrite an existing
-/// statement file.
-fn stated_rel_path(vault_root: &std::path::Path, text: &str) -> Result<(String, std::path::PathBuf)> {
-    let year = chrono::Utc::now().format("%Y");
-    let base = slugify(text);
-    let dir = vault_root.join(format!("stated/{STATED_AUTHOR}/{year}"));
-    let mut n = 1;
-    loop {
-        let suffix = if n == 1 { String::new() } else { format!("-{n}") };
-        let rel = format!("stated/{STATED_AUTHOR}/{year}/{base}{suffix}.md");
-        let full = dir.join(format!("{base}{suffix}.md"));
-        if !full.exists() {
-            return Ok((rel, full));
-        }
-        n += 1;
-    }
 }
 
 /// Filesystem-safe slug: lowercase ascii alphanumerics and single dashes,
