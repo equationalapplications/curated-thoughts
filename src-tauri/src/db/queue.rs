@@ -29,6 +29,17 @@ use anyhow::Result;
 use notify::EventKind;
 use rusqlite::{params, Connection, OptionalExtension};
 
+/// The virtual-absolute path string that keys `documents.path` (issue #204
+/// contract, `enqueue_vault_event` below): `std::path::absolute` of the path —
+/// NO canonicalization, NO symlink resolution — lossy-converted. Single source
+/// of truth for every derived table joined against `documents.path`
+/// (`stated_attestations`, `deposit_attribution`): keying those tables with
+/// anything else (e.g. the vault-relative ledger handle) makes the joins
+/// silently miss (defect B1). Never hand-roll a divergent string form.
+pub(crate) fn virtual_path_key(p: &Path) -> Result<String> {
+    Ok(std::path::absolute(p)?.to_string_lossy().into_owned())
+}
+
 /// Stage a vault file event into the documents table.
 ///
 /// `conn` is a mutable SQLite connection (caller manages lifecycle — ephemeral
@@ -90,7 +101,7 @@ pub fn enqueue_vault_event(
     // a row keyed by the external canonical path and every reconcile pass
     // then saw that row as vanished). `canonical` is still computed above
     // for the containment check (above) and for `std::fs::read` below.
-    let path_str = abs.to_string_lossy().into_owned();
+    let path_str = virtual_path_key(&abs)?;
 
     // Deletes must run BEFORE the exclusion check: a `documents` row staged
     // by pre-filter code (or another tool) must still be deletable when the

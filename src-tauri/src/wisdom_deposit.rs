@@ -594,10 +594,21 @@ async fn audit_and_seed_kick(
     path: String,
     initial_state: &'static str,
     attribution: Option<DepositAttribution>,
+    vault: &std::path::Path,
 ) -> Result<()> {
     let client = ctx.client.clone();
     let audit_path = path.clone();
     let kick_rel = path;
+    // Deposit-attribution TABLE KEY: the watcher's virtual-absolute
+    // `documents.path` form (`virtual_path_key`, defect B1) — the queue's
+    // attribution join (`da.document_path = d.path`, queue.rs:307) matches
+    // against the watcher-staged row. `kick_rel` stays the ledger/status
+    // handle (vault-relative).
+    let attribution_key = if attribution.is_some() {
+        Some(crate::db::queue::virtual_path_key(&vault.join(&kick_rel))?)
+    } else {
+        None
+    };
     ctx.with_rw(move |conn| {
         let tx = conn
             .transaction()
@@ -622,7 +633,7 @@ async fn audit_and_seed_kick(
                      (document_path, speaker, kind, source, deposited_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![
-                    kick_rel,
+                    attribution_key.expect("key derived whenever attribution is present"),
                     a.speaker,
                     a.kind.as_str(),
                     a.source,
@@ -850,6 +861,7 @@ async fn deposit_inner(
         rel.clone(),
         initial_kick_state(generation_configured),
         p.attribution.clone(),
+        &vault,
     )
     .await
     {
@@ -1103,6 +1115,7 @@ async fn supersession_inner(
         rel.clone(),
         initial_kick_state(generation_configured),
         None,
+        &vault,
     )
     .await
     {
@@ -2175,11 +2188,16 @@ mod tests {
             // committed by the SAME audit_and_seed_kick transaction, so both
             // are visible here, after the dispatch returned.
             let conn = ctx.conn.lock().unwrap();
+            // B1: the attribution TABLE KEY is the watcher's virtual-absolute
+            // documents.path form; `rel` stays the ledger/status handle.
+            let attribution_key =
+                crate::db::queue::virtual_path_key(&ctx.vault_dir.as_deref().unwrap().join(rel))
+                    .unwrap();
             let (speaker, kind, source): (String, String, String) = conn
                 .query_row(
                     "SELECT speaker, kind, source FROM deposit_attribution
                       WHERE document_path = ?1",
-                    [rel],
+                    [&attribution_key],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .unwrap();
@@ -2196,6 +2214,151 @@ mod tests {
             assert!(
                 matches!(state.as_str(), "pending" | "no_ingest_host"),
                 "kick ledger row must exist beside the attribution row, got {state}"
+            );
+        });
+    }
+
+    /// Deterministic librarian stand-in for the watcher-side deposit flow
+    /// (same canned-synthesis shape the task9 capture tests use).
+    struct WatcherLegCompleter {
+        response: String,
+    }
+
+    impl crate::librarian::LlmCompleter for WatcherLegCompleter {
+        fn complete(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
+            Ok(self.response.clone())
+        }
+    }
+
+    /// RED (B1 regression, deposit-attribution twin): the APP's deposit
+    /// regime. The watcher holds the vault lock for its lifetime, so the
+    /// deposit kick falls back to `queued_watcher` and the WATCHER stages and
+    /// ingests the file, keying `documents.path` VIRTUAL-ABSOLUTE (issue
+    /// #204). The `deposit_attribution` row must carry the SAME key form or
+    /// the queue's attribution join (`da.document_path = d.path`,
+    /// queue.rs:307) never matches and the row's `attributed_speaker` is
+    /// lost.
+    #[test]
+    fn deposit_attribution_surfaces_through_watcher_ingest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            let rel = "immutable-source-files/agents/attributed.md";
+
+            // App regime: hold the vault lock so the synchronous kick cannot
+            // ingest (queued_watcher fallback — wisdom_deposit.rs:484-491).
+            let lock = crate::watcher::VaultLock::acquire(&dir).unwrap();
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Kurt's direction".into(),
+                    body: "Deploy the staging stack nightly.".into(),
+                    tags: None,
+                    attribution: Some(DepositAttribution {
+                        speaker: "kurt".into(),
+                        kind: AttributionKind::Verbatim,
+                        source: "discord:123".into(),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+            drop(lock);
+
+            // Watcher leg: stage + ingest keyed by the watcher's absolute
+            // `documents.path` form.
+            let abs = dir.join(rel);
+            let abs_key = std::path::absolute(&abs)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            {
+                let mut guard = ctx.conn.lock().unwrap();
+                crate::db::queue::enqueue_vault_event(
+                    &mut guard,
+                    notify::EventKind::Create(notify::event::CreateKind::Any),
+                    &abs,
+                    Some(&dir),
+                )
+                .unwrap();
+                crate::pipeline::ingest_document_virtual(
+                    &guard,
+                    &ctx.profile,
+                    &abs_key,
+                    &abs.to_string_lossy(),
+                    false,
+                    Some(dir.to_string_lossy().as_ref()),
+                )
+                .unwrap();
+            }
+
+            // Librarian + commit (the folder's auto-approve lane, matching
+            // V25's intent for immutable-source-files/agents): the deposit
+            // fact lands `librarian_inferred` (deposits carry no attestation,
+            // agent-class commit) and shows on the human confirmation queue
+            // with its attribution speaker joined on the document path.
+            // Folder rules match by literal ancestor prefix, so the
+            // watcher-keyed lane gets its own absolute rule.
+            let completer = WatcherLegCompleter {
+                response: serde_json::json!({
+                    "proposals": [{
+                        "target": { "existing_id": "ent-alpha" },
+                        "reasoning": "Deposit capture.",
+                        "summary_update": null,
+                        "facts": [{
+                            "op": "add",
+                            "body": "Deploy the staging stack nightly.",
+                            "tags": [],
+                            "confidence": "inferred",
+                            "evidence": ["C1"]
+                        }],
+                        "edges": [],
+                        "tasks": []
+                    }]
+                })
+                .to_string(),
+            };
+            {
+                let guard = ctx.conn.lock().unwrap();
+                // Seed the entity the canned proposal targets.
+                guard
+                    .execute(
+                        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                         VALUES ('ent-alpha', 'Staging', 'concept', 'Stack notes', 100, 100)",
+                        [],
+                    )
+                    .unwrap();
+                guard
+                    .execute(
+                        "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
+                         VALUES (?1, 'synthesize', 1)",
+                        [dir.join("immutable-source-files/agents")
+                            .to_string_lossy()
+                            .as_ref()],
+                    )
+                    .unwrap();
+            }
+            let mut guard = ctx.conn.lock().unwrap();
+            let model =
+                crate::librarian::active_generation_model(crate::setup::recommended_model());
+            crate::librarian::generate_summary_with(
+                &mut guard, &abs_key, &model, false, &completer,
+            )
+            .unwrap();
+            let rows = crate::db::queue::queue_rows(&guard);
+            drop(guard);
+            let row = rows
+                .iter()
+                .find(|r| r.body == "Deploy the staging stack nightly.")
+                .expect("the deposit fact is on the human confirmation queue");
+            assert_eq!(
+                row.attributed_speaker.as_deref(),
+                Some("kurt"),
+                "RED (B1): deposit_attribution is keyed kick_rel (vault-relative) while \
+                 documents.path is watcher-absolute — the queue's attribution join never matches"
             );
         });
     }

@@ -220,14 +220,20 @@ fn capture_statement_on(
     // the Path B provenance arm joins on; the .attestations.jsonl line is
     // the durable carrier the rebuild re-derives from (spec §3.8). Both are
     // keyed to the SAME hash routine the documents table uses, so the
-    // attested hash matches the ingested document exactly.
+    // attested hash matches the ingested document exactly. The TABLE KEY is
+    // the watcher's virtual-absolute `documents.path` form (`virtual_path_key`,
+    // defect B1): in the running app the watcher — not this synchronous kick —
+    // ingests the capture, and the Path B join (`a.document_path = d.path`)
+    // must match its staged row. The ledger carrier below stays
+    // vault-relative (`rel`, spec §3.8).
     let bytes = std::fs::read(&full)?;
     let content_hash = crate::hasher::hash_bytes(&bytes);
+    let attestation_key = super::queue::virtual_path_key(&ctx.vault_root.join(&rel))?;
     conn.execute(
         "INSERT OR REPLACE INTO stated_attestations
              (document_path, content_hash, attested_by, attested_at)
          VALUES (?1, ?2, ?3, ?4)",
-        params![rel, content_hash, HUMAN_ATTESTER, at_iso],
+        params![attestation_key, content_hash, HUMAN_ATTESTER, at_iso],
     )?;
     crate::db::stated_ledger::append_attestation(
         &ctx.vault_root,
@@ -1038,11 +1044,70 @@ mod tests {
         .unwrap()
     }
 
+    /// Drive the WATCHER-side ingest over a `stated/` file — the app regime:
+    /// the watcher holds the vault lock for its lifetime, so the capture's
+    /// synchronous kick cannot ingest (queued_watcher fallback) and the
+    /// watcher stages + ingests the file, keying `documents.path` in the
+    /// virtual-absolute form (issue #204, defect B1). Shared by the B1
+    /// regression test and the task9 plan tests. Returns the document key.
+    fn task9_watch_ingest(
+        vault: &std::path::Path,
+        conn: &mut Connection,
+        profile: &EmbedProfile,
+        rel: &str,
+    ) -> String {
+        let abs = vault.join(rel);
+        crate::db::queue::enqueue_vault_event(
+            conn,
+            notify::EventKind::Create(notify::event::CreateKind::Any),
+            &abs,
+            Some(vault),
+        )
+        .unwrap();
+        let doc_path = crate::db::queue::virtual_path_key(&abs).unwrap();
+        // Folder rules match by literal ancestor prefix, so the watcher-keyed
+        // lane carries its own absolute rule — the same synthesize +
+        // auto-approve intent V25 seeds for the kick's rel-keyed lane
+        // ('stated').
+        conn.execute(
+            "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
+             VALUES (?1, 'synthesize', 1)",
+            [vault.join("stated").to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        crate::pipeline::ingest_document_virtual(
+            conn,
+            profile,
+            &doc_path,
+            &abs.to_string_lossy(),
+            false,
+            Some(vault.to_string_lossy().as_ref()),
+        )
+        .unwrap();
+        doc_path
+    }
+
+    /// The librarian + commit leg over the watcher-keyed document: the
+    /// `synthesize` folder rule auto-approves, and the auto-approve resolve
+    /// runs the Path B predicate (all_sources_attested).
+    fn task9_librarian_leg(conn: &mut Connection, doc_path: &str, completer: &FixedCompleter) {
+        let model = crate::librarian::active_generation_model(crate::setup::recommended_model());
+        crate::librarian::generate_summary_with(conn, doc_path, &model, false, completer).unwrap();
+    }
+
     /// Pinned plan test 1: capture renders `stated/kurt/<year>/<slug>.md`,
     /// writes the attestation row + `.attestations.jsonl` line (content-hash
-    /// keyed), registers the kick ledger row, runs the kick, and the fact the
-    /// librarian commits is `user_stated` with evidence back to the stated
-    /// file (spec §3.7.4-5: instant confirm, no queue step).
+    /// keyed), registers the kick ledger row, and the fact the librarian
+    /// commits is `user_stated` with evidence back to the stated file (spec
+    /// §3.7.4-5: instant confirm, no queue step).
+    ///
+    /// B1 adaptation (driver only — every §3.7 assertion kept): the test now
+    /// runs under the APP's lock regime. The watcher holds the vault lock for
+    /// its lifetime, so the synchronous kick cannot ingest (the ledger
+    /// honestly records `queued_watcher`) and the watcher-side pipeline does
+    /// the ingest, keying `documents.path` virtual-absolute. Pre-B1 this test
+    /// ran the kick with NO lock holder — a scenario that never occurs in the
+    /// running app — and the rel-keyed ingest masked the key-form defect.
     #[test]
     fn capture_statement_writes_attested_file_and_kicks() {
         let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -1052,7 +1117,7 @@ mod tests {
             // resolvable at open or the migration defers and V25's
             // deposit_kick_state never lands.
             let db_path = brain.join("brain.db");
-            let conn = task9_open_brain(&brain, &vault);
+            let mut conn = task9_open_brain(&brain, &vault);
             task9_seed_entity_with_fact(&conn, "ent-alpha", "fact-alpha");
             let completer = FixedCompleter {
                 response: task9_proposal_json("Alpha renews the Baxter lease on March 1."),
@@ -1067,7 +1132,11 @@ mod tests {
             // name-based (name_match_entities), and the mock proposal targets
             // that entity.
             let text = "Alpha's Baxter warehouse lease renews on March 1.";
+            // App regime: the watcher owns the vault lock while the capture
+            // runs — the synchronous kick cannot ingest.
+            let lock = crate::watcher::VaultLock::acquire(&brain).unwrap();
             let rel = super::capture_statement_with(&ctx, text, Some(&completer)).unwrap();
+            drop(lock);
 
             // 1. The file exists under stated/kurt/<year>/.
             let year = chrono::Utc::now().format("%Y");
@@ -1085,10 +1154,13 @@ mod tests {
 
             // 2. The attestation of record: brain row content-hash keyed to the
             //    SAME hash routine the documents table uses (spec §3.7.2).
+            //    The TABLE KEY is the watcher's virtual-absolute documents.path
+            //    form (defect B1); the readback below mirrors the exact helper.
+            let attestation_key = crate::db::queue::virtual_path_key(&vault.join(&rel)).unwrap();
             let row_hash: String = conn
                 .query_row(
                     "SELECT content_hash FROM stated_attestations WHERE document_path = ?1",
-                    [&rel],
+                    [&attestation_key],
                     |r| r.get(0),
                 )
                 .unwrap();
@@ -1101,7 +1173,7 @@ mod tests {
                 .query_row(
                     "SELECT attested_by, attested_at FROM stated_attestations
                       WHERE document_path = ?1",
-                    [&rel],
+                    [&attestation_key],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .unwrap();
@@ -1117,7 +1189,9 @@ mod tests {
             assert_eq!(line["content_hash"].as_str().unwrap(), row_hash);
 
             // 4. The app registered the kick (spec §3.7.3: a NON-DEPOSIT kick
-            //    path — the kick ledger row is written by the APP).
+            //    path — the kick ledger row is written by the APP). Under the
+            //    app's lock regime the synchronous kick cannot ingest, so the
+            //    ledger honestly records the handoff to the watcher.
             let state: String = conn
                 .query_row(
                     "SELECT state FROM deposit_kick_state WHERE path = ?1",
@@ -1125,7 +1199,15 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(state, "ingested", "the kick must run to completion");
+            assert_eq!(
+                state, "queued_watcher",
+                "the kick must record the watcher handoff"
+            );
+
+            // Watcher-side ingest + librarian commit over the watcher-keyed
+            // document (defect B1's key-form contract).
+            let doc_path = task9_watch_ingest(&vault, &mut conn, &ctx.profile, &rel);
+            task9_librarian_leg(&mut conn, &doc_path, &completer);
 
             // 5. Post-kick: the committed fact is user_stated WITH evidence
             //    pointing back at the stated file.
@@ -1149,7 +1231,7 @@ mod tests {
                       JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id
                       JOIN documents d ON d.id = ps.doc_id
                      WHERE le.entry_id = ?1 AND d.path = ?2",
-                    params![fact_id, rel],
+                    params![fact_id, doc_path],
                     |r| r.get(0),
                 )
                 .unwrap();
@@ -1173,7 +1255,7 @@ mod tests {
             // resolvable at open or the migration defers and V25's
             // deposit_kick_state never lands.
             let db_path = brain.join("brain.db");
-            let conn = task9_open_brain(&brain, &vault);
+            let mut conn = task9_open_brain(&brain, &vault);
             task9_seed_entity_with_fact(&conn, "ent-alpha", "fact-alpha");
             let completer = FixedCompleter {
                 response: task9_proposal_json("Alpha ships the release on Friday."),
@@ -1184,7 +1266,11 @@ mod tests {
                 profile: EmbedProfile::default(),
             };
 
-            // No fact id: the queue's confirm-with-no-fact path.
+            // No fact id: the queue's confirm-with-no-fact path. App lock
+            // regime: the watcher owns the vault lock while the capture runs
+            // (B1 adaptation — the pre-B1 driver ran the kick with no lock
+            // holder, masking the key-form defect).
+            let lock = crate::watcher::VaultLock::acquire(&brain).unwrap();
             let super::QueueStatementOutcome::Captured(rel) =
                 super::confirm_or_capture_with(
                     &ctx,
@@ -1196,10 +1282,17 @@ mod tests {
             else {
                 panic!("no backing fact ⇒ capture, not confirm");
             };
+            drop(lock);
             assert!(
                 vault.join(&rel).is_file(),
                 "a stated/ file backs the fresh statement: {rel}"
             );
+
+            // Watcher-side ingest + librarian commit over the watcher-keyed
+            // document (defect B1's key-form contract).
+            let doc_path = task9_watch_ingest(&vault, &mut conn, &ctx.profile, &rel);
+            task9_librarian_leg(&mut conn, &doc_path, &completer);
+
             assert_eq!(
                 task9_fact_count(&conn, "user_stated"),
                 1,
@@ -1209,6 +1302,117 @@ mod tests {
                 task9_fact_count(&conn, "librarian_inferred"),
                 1,
                 "the pre-seeded entity fact is untouched"
+            );
+        });
+    }
+
+    /// RED (B1 regression): the APP's capture regime. The watcher holds the
+    /// vault lock for its lifetime, so the capture's synchronous kick cannot
+    /// ingest — it falls back to `queued_watcher` and the WATCHER stages and
+    /// ingests the stated file, keying `documents.path` in the VIRTUAL
+    /// ABSOLUTE form (issue #204 contract). The attestation row must carry
+    /// the SAME key form, or the Path B provenance arm (`all_sources_attested`
+    /// joining `a.document_path = d.path`) never matches and the §3.7
+    /// "instant confirm" contract lands `librarian_inferred`.
+    #[test]
+    fn capture_through_watcher_ingest_stamps_user_stated() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, vault, brain) = task9_dirs();
+        task9_with_env(&vault, &brain, || {
+            let db_path = brain.join("brain.db");
+            let mut conn = task9_open_brain(&brain, &vault);
+            task9_seed_entity_with_fact(&conn, "ent-alpha", "fact-alpha");
+            let completer = FixedCompleter {
+                response: task9_proposal_json("Alpha renews the Baxter lease on March 1."),
+            };
+            let ctx = super::CaptureContext {
+                db_path: db_path.clone(),
+                vault_root: vault.clone(),
+                profile: EmbedProfile::default(),
+            };
+            let text = "Alpha's Baxter warehouse lease renews on March 1.";
+
+            // App regime: hold the vault lock so the synchronous kick cannot
+            // ingest (queued_watcher fallback — wisdom_deposit.rs:484-491).
+            let lock = crate::watcher::VaultLock::acquire(&brain).unwrap();
+            let rel = super::capture_statement_with(&ctx, text, Some(&completer)).unwrap();
+            drop(lock);
+
+            // Watcher leg, driven exactly the way the `enqueue_vault_event`
+            // tests do: stage the file event, then ingest the staged row. The
+            // watcher keys `documents.path` by `std::path::absolute` of the
+            // file (queue.rs:93, issue #204) — NOT the vault-relative rel.
+            let abs = vault.join(&rel);
+            let abs_key = std::path::absolute(&abs)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            crate::db::queue::enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Create(notify::event::CreateKind::Any),
+                &abs,
+                Some(&vault),
+            )
+            .unwrap();
+            let doc_path: String = conn
+                .query_row(
+                    "SELECT path FROM documents WHERE path = ?1",
+                    [&abs_key],
+                    |r| r.get(0),
+                )
+                .expect("the watcher staged the stated file under its absolute key form");
+            crate::pipeline::ingest_document_virtual(
+                &conn,
+                &ctx.profile,
+                &doc_path,
+                &abs.to_string_lossy(),
+                false,
+                Some(vault.to_string_lossy().as_ref()),
+            )
+            .unwrap();
+
+            // Librarian + commit over the WATCHER-keyed document. Folder rules
+            // match by literal ancestor prefix, so the watcher-keyed lane is
+            // configured with its own absolute rule — the same synthesize +
+            // auto-approve intent V25 seeds for the kick's rel-keyed lane
+            // ('stated'). The auto-approve resolve runs the Path B predicate.
+            conn.execute(
+                "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
+                 VALUES (?1, 'synthesize', 1)",
+                [vault.join("stated").to_string_lossy().as_ref()],
+            )
+            .unwrap();
+            let model =
+                crate::librarian::active_generation_model(crate::setup::recommended_model());
+            crate::librarian::generate_summary_with(
+                &mut conn, &doc_path, &model, false, &completer,
+            )
+            .unwrap();
+
+            // The B1 contract: the attestation row and the documents row must
+            // share the SAME key form so the Path B arm joins.
+            let att_path: String = conn
+                .query_row("SELECT document_path FROM stated_attestations", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                att_path, doc_path,
+                "RED (B1): the attestation is keyed vault-relative while the watcher keyed \
+                 documents.path absolute — the Path B join can never match"
+            );
+            let source_type: String = conn
+                .query_row(
+                    "SELECT source_type FROM llm_wiki_entries
+                      WHERE body = ?1 AND deleted_at IS NULL",
+                    ["Alpha renews the Baxter lease on March 1."],
+                    |r| r.get(0),
+                )
+                .expect("the stated fact committed");
+            assert_eq!(
+                source_type, "user_stated",
+                "RED (B1): the join miss lands the capture librarian_inferred, breaking \
+                 §3.7 instant confirm"
             );
         });
     }

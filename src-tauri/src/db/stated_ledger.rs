@@ -325,20 +325,34 @@ pub fn rebuild_rederive(conn: &Connection, vault_root: &Path) -> Result<RebuildR
     report.confirmations_applied = apply_confirmations_by_hash(&tx, &hashes)?;
 
     // 2. Attestations → stated_attestations, re-verifying current file hashes.
+    //    The TABLE KEY is the watcher's virtual-absolute `documents.path`
+    //    form (`virtual_path_key`, defect B1) so the Path B provenance join
+    //    (`a.document_path = d.path`) matches the watcher/walker-staged row;
+    //    the ledger carrier itself stays vault-relative (spec §3.8). A ledger
+    //    `document_path` that is absolute or contains a `..` segment is never
+    //    trusted for join-based trust decisions — skipped via the dropped
+    //    counter, same as a hash mismatch.
     tx.execute("DELETE FROM stated_attestations", [])?;
     let attestations: Vec<AttestationLine> = read_lines(&stated.join(ATTESTATIONS_LEDGER))?;
     report.attestations_read = attestations.len();
     for line in attestations {
+        if std::path::Path::new(&line.document_path).is_absolute()
+            || line.document_path.split(['/', '\\']).any(|seg| seg == "..")
+        {
+            report.attestations_dropped += 1;
+            continue;
+        }
         let file = vault_root.join(&line.document_path);
         let kept = std::fs::read(&file)
             .map(|bytes| hash_bytes(&bytes) == line.content_hash)
             .unwrap_or(false); // unreadable/missing file cannot be verified → dropped
         if kept {
+            let key = super::queue::virtual_path_key(&file)?;
             tx.execute(
                 "INSERT OR REPLACE INTO stated_attestations
                      (document_path, content_hash, attested_by, attested_at)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![line.document_path, line.content_hash, line.by, line.at],
+                params![key, line.content_hash, line.by, line.at],
             )?;
         } else {
             report.attestations_dropped += 1;
@@ -374,9 +388,11 @@ pub fn rebuild_rederive(conn: &Connection, vault_root: &Path) -> Result<RebuildR
 }
 
 /// Walk the vault for markdown files carrying attribution frontmatter and
-/// repopulate `deposit_attribution` keyed by vault-relative document path.
-/// A file whose frontmatter is absent or invalid contributes no row (the file
-/// wins, but an unreadable attribution is not one).
+/// repopulate `deposit_attribution` keyed by the watcher's virtual-absolute
+/// `documents.path` form (`virtual_path_key`, defect B1) — the same key the
+/// queue's attribution join (`da.document_path = d.path`, queue.rs:307)
+/// matches against. A file whose frontmatter is absent or invalid contributes
+/// no row (the file wins, but an unreadable attribution is not one).
 fn repopulate_deposit_attribution(conn: &Connection, vault_root: &Path) -> Result<usize> {
     use walkdir::WalkDir;
 
@@ -407,7 +423,10 @@ fn repopulate_deposit_attribution(conn: &Connection, vault_root: &Path) -> Resul
         let Some(a) = parse_attribution_frontmatter(&text) else {
             continue;
         };
-        let rel_path = rel.to_string_lossy().replace('\\', "/");
+        let key = match super::queue::virtual_path_key(entry.path()) {
+            Ok(k) => k,
+            Err(_) => continue, // unplaceable path contributes no row
+        };
         let deposited_at = entry
             .metadata()
             .ok()
@@ -419,7 +438,7 @@ fn repopulate_deposit_attribution(conn: &Connection, vault_root: &Path) -> Resul
             "INSERT OR REPLACE INTO deposit_attribution
                  (document_path, speaker, kind, source, deposited_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![rel_path, a.0, a.1, a.2, deposited_at],
+            params![key, a.0, a.1, a.2, deposited_at],
         )?;
         count += 1;
     }
@@ -605,8 +624,11 @@ mod tests {
                 let (speaker, kind): (String, String) = conn
                     .query_row(
                         "SELECT speaker, kind FROM deposit_attribution
-                         WHERE document_path = 'notes/deposit.md'",
-                        [],
+                         WHERE document_path = ?1",
+                        [super::super::queue::virtual_path_key(
+                            &vault_root.join("notes/deposit.md"),
+                        )
+                        .unwrap()],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .unwrap();
@@ -642,6 +664,12 @@ mod tests {
         let report = rebuild_rederive(&conn, vault_root).unwrap();
         assert_eq!(report.attestations_read, 2);
         assert_eq!(report.attestations_dropped, 1);
+        // B1: rows are keyed by the watcher's virtual-absolute documents.path
+        // form now; the ledger carrier stays relative.
+        let expected_keys: Vec<String> = ["notes/kept.md"]
+            .iter()
+            .map(|rel| super::super::queue::virtual_path_key(&vault_root.join(rel)).unwrap())
+            .collect();
         let rows: Vec<String> = {
             let mut stmt = conn
                 .prepare("SELECT document_path FROM stated_attestations ORDER BY document_path")
@@ -651,7 +679,48 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert_eq!(rows, vec!["notes/kept.md".to_string()]);
+        assert_eq!(rows, expected_keys);
+    }
+
+    /// B1 hardening: a ledger `document_path` that is absolute or contains a
+    /// `..` segment is never trusted for join-based trust decisions — the
+    /// rebuild skips it via the dropped counter instead of staging a row that
+    /// could key Path B provenance.
+    #[test]
+    fn rebuild_rejects_non_relative_attestation_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path();
+        let kept = vault_root.join("notes/kept.md");
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, b"original bytes").unwrap();
+        let h = hash_bytes(b"original bytes");
+
+        append_attestation_line(
+            vault_root,
+            &vault_root.join("notes/kept.md").to_string_lossy(),
+            &h,
+            "human:kurt",
+            "2026-10-21T00:00:00Z",
+        );
+        append_attestation_line(
+            vault_root,
+            "../outside.md",
+            &h,
+            "human:kurt",
+            "2026-10-21T00:00:00Z",
+        );
+
+        let conn = open_in_memory().unwrap();
+        let report = rebuild_rederive(&conn, vault_root).unwrap();
+        assert_eq!(report.attestations_read, 2);
+        assert_eq!(
+            report.attestations_dropped, 2,
+            "absolute and `..` ledger paths are dropped, never staged"
+        );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM stated_attestations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[test]
