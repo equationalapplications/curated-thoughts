@@ -140,13 +140,11 @@ pub fn queue_fact_get_cmd(
 /// unacked first, capped at [`crate::prompt_drop::PROMPT_DRAIN_CAP`] per
 /// drain, plus the remaining count for the modal's digest.
 #[tauri::command]
-pub fn unverified_prompts_drain_cmd(
-    db_state: State<'_, DbState>,
-) -> Result<crate::prompt_drop::DrainReport, String> {
+pub fn unverified_prompts_drain_cmd() -> Result<crate::prompt_drop::DrainReport, String> {
     let vault_root = crate::db::stated_ledger::resolve_vault_root().map_err(|e| e.to_string())?;
-    // The drain touches a vault file; keep the DB lock scope to the root
-    // resolution (the guard above proves the app db is reachable).
-    let _ = db_state;
+    // The drain touches only a vault file (the DB lock was never needed — the
+    // vestigial `DbState` parameter went away with the Tier-1.5 high MINOR-5
+    // cleanup).
     crate::prompt_drop::drain_unverified_matches(&vault_root, crate::prompt_drop::PROMPT_DRAIN_CAP)
         .map_err(|e| e.to_string())
 }

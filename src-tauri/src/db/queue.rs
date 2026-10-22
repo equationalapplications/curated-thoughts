@@ -645,10 +645,6 @@ pub fn deny_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> Resu
                 && l.chunk_hash == chunk_hash
                 && l.fact_text_hash == fact_hash
         });
-    if ledger_has_key {
-        return Ok(());
-    }
-
     let already: i64 = conn.query_row(
         "SELECT COUNT(*) FROM queue_denials
           WHERE document_path = ?1 AND chunk_hash = ?2 AND fact_text_hash = ?3",
@@ -656,7 +652,7 @@ pub fn deny_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> Resu
         |r| r.get(0),
     )?;
     if already > 0 {
-        // Idempotent re-deny: no duplicate ledger line.
+        // Idempotent re-deny: fully applied (ledger + suppression + archive).
         return Ok(());
     }
 
@@ -664,17 +660,31 @@ pub fn deny_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> Resu
     let at_iso = confirm_iso_utc(now_ms)?;
 
     // 1. Ledger first (durable suppression — the rebuild repopulates from it,
-    //    so a failure in the brain write below still converges).
-    crate::db::stated_ledger::append_denial(
-        vault_root,
-        &crate::db::stated_ledger::DenialLine {
-            document_path: document_path.clone(),
-            chunk_hash: chunk_hash.clone(),
-            fact_text_hash: fact_hash.clone(),
-            denied_by: HUMAN_CONFIRMER.to_string(),
-            denied_at: at_iso.clone(),
-        },
-    )?;
+    //    so a failure in the brain write below still converges). SKIPPED when
+    //    the line already landed: Tier-1.5 high BLOCKER-1 (2026-10-22) —
+    //    three independent reviewers (CodeRabbit, Haiku medium, Haiku high)
+    //    converged on the crash-retry shape where the old early-return
+    //    reported success while the fact stayed live, un-archived and
+    //    unsuppressed. Task-11 Info-1 had ruled that acceptable under
+    //    "converges at the next rebuild"; the §8 rederive is now ONCE PER
+    //    BRAIN (connection.rs), so that convergence premise no longer holds
+    //    and the disposition is superseded. The append guard preserves the
+    //    Low-2 no-duplicate discipline; the brain transaction below is
+    //    idempotent (INSERT OR REPLACE + archive no-ops on an archived row)
+    //    and completes the deny on the retry — the same heal the confirm
+    //    side already had.
+    if !ledger_has_key {
+        crate::db::stated_ledger::append_denial(
+            vault_root,
+            &crate::db::stated_ledger::DenialLine {
+                document_path: document_path.clone(),
+                chunk_hash: chunk_hash.clone(),
+                fact_text_hash: fact_hash.clone(),
+                denied_by: HUMAN_CONFIRMER.to_string(),
+                denied_at: at_iso.clone(),
+            },
+        )?;
+    }
 
     // 2. Archive (reused primitive: cluster-rekeyed soft-delete + edge purge
     //    + outbox Delete) + the suppression row, one transaction.
@@ -2298,6 +2308,27 @@ mod confirmation_action_tests {
             1,
             "retry after ledger-landed/brain-failed: no duplicate line"
         );
+        // Tier-1.5 high BLOCKER-1 closeout: the retry must COMPLETE the deny
+        // (the old early-return reported success while the fact stayed live,
+        // un-archived and unsuppressed — superseding Task-11 Info-1, whose
+        // "converges at the next rebuild" premise ended with the once-per-
+        // brain §8 rederive).
+        let suppressed: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM queue_denials", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            suppressed, 1,
+            "crash-retry must land the suppression row"
+        );
+        let archived: i64 = conn2
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries
+                  WHERE id = 'q-crash' AND deleted_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 1, "crash-retry must archive the fact");
     }
 
     /// Tier-1.5 medium MINOR-1 closeout: the confirm path gets the same

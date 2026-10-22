@@ -1114,7 +1114,7 @@ pub async fn dispatch_curated_proposals_list(
 pub async fn dispatch_curated_queue_list(ctx: ToolDispatchContext) -> Result<serde_json::Value> {
     let conn = ctx.conn.clone();
     let rows = tokio::task::spawn_blocking(move || -> Result<_> {
-        let guard = conn.lock().unwrap();
+        let guard = lock_conn(&conn)?;
         Ok(crate::db::queue::queue_rows(&guard))
     })
     .await
