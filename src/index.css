@@ -3773,7 +3773,7 @@ code {
 .queue-capture-label { color: var(--on-surface-var); font-size: 0.9rem; }
 .queue-capture textarea { resize: vertical; min-height: 3rem; }
 .queue-capture-btn { align-self: flex-start; }
-.queue-error { color: var(--danger, var(--outline)); }
+.queue-error { color: var(--error); }
 .queue-notice { color: var(--on-surface-var); }
 .queue-bulkbar { display: flex; align-items: center; gap: var(--sp-3); }
 .queue-rows, .queue-denied-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }

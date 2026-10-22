@@ -74,14 +74,21 @@ export function QueueMode({ onQueueChanged }: Props) {
     if (checked.size === 0 || busy) return;
     setBusy(true);
     setError(null);
+    let completed = 0;
     try {
       for (const factId of checked) {
         await fn(factId);
+        completed += 1;
       }
-      setNotice(`${checked.size} confirmed`);
+      setNotice(`${completed} confirmed`);
       afterAction();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      // Facts confirmed before the throw ARE confirmed in the ledger —
+      // refresh so the list, checked set and rail badge converge instead of
+      // offering already-confirmed rows (confirm is an idempotent UPDATE per
+      // spec §4, so the state was never wrong, just stale).
+      afterAction();
     } finally {
       setBusy(false);
     }

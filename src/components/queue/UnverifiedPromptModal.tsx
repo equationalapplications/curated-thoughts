@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useFocusTrap } from "../../a11y";
 import {
   confirmQueueFact,
   denyQueueFact,
@@ -55,9 +56,26 @@ export function UnverifiedPromptModal({ onAction, pollMs = POLL_MS }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // Drain acks backend-side BEFORE the modal can render; once the modal is
+  // up, a further drain would ack prompts the user is still looking at and
+  // `setFacts` would replace them — acked lines are never prompted again.
+  // The openRef mirror (state can't be read inside the useCallback closure
+  // without re-creating the interval) gates the drain while the modal shows.
+  const openRef = useRef(false);
+  useEffect(() => {
+    openRef.current = open;
+  }, [open]);
+  useFocusTrap(dialogRef, {
+    active: open && facts.length > 0,
+    // Escape = "Not now": close WITHOUT snoozing (the snooze button is the
+    // explicit 7-day action and stays distinct).
+    onEscape: () => setOpen(false),
+  });
 
   const drain = useCallback(async () => {
     if (inFlight.current) return;
+    if (openRef.current) return;
     inFlight.current = true;
     try {
       if (Date.now() < snoozedUntil()) return;
@@ -66,11 +84,18 @@ export function UnverifiedPromptModal({ onAction, pollMs = POLL_MS }: Props) {
       if (prompts.length === 0) return;
       // Re-read every prompt's fact FROM THE BRAIN by id. A payload with a
       // poisoned title/body is ignored by construction: only `fact_id` is
-      // used, and facts the brain no longer has are dropped silently.
+      // used, and facts the brain no longer has are dropped silently. A row
+      // whose brain read fails is SKIPPED, not fatal: the drain already
+      // acked the line, so discarding the whole batch here would silently
+      // lose every still-readable prompt with it.
       const rows: QueueRow[] = [];
       for (const p of prompts) {
-        const row = await getQueueFact(p.fact_id);
-        if (row) rows.push(row);
+        try {
+          const row = await getQueueFact(p.fact_id);
+          if (row) rows.push(row);
+        } catch {
+          // Skip the unreadable row; show the rest of the batch.
+        }
       }
       if (rows.length === 0) return;
       setFacts(rows);
@@ -95,11 +120,12 @@ export function UnverifiedPromptModal({ onAction, pollMs = POLL_MS }: Props) {
     setError(null);
     try {
       await fn(factId);
-      setFacts((prev) => {
-        const next = prev.filter((f) => f.fact_id !== factId);
-        if (next.length === 0) setOpen(false);
-        return next;
-      });
+      // Compute the next list OUTSIDE the updater: updaters must stay pure
+      // (React may invoke them twice). `act` is re-created each render, so
+      // the `facts` closure is current at call time.
+      const next = facts.filter((f) => f.fact_id !== factId);
+      setFacts(next);
+      if (next.length === 0) setOpen(false);
       onAction?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -116,6 +142,7 @@ export function UnverifiedPromptModal({ onAction, pollMs = POLL_MS }: Props) {
       role="presentation"
     >
       <div
+        ref={dialogRef}
         className="queue-modal queue-prompt-modal"
         role="dialog"
         aria-modal="true"

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useFocusTrap } from "../../a11y";
 import type { QueueRow } from "../../lib/tauri";
 
 /**
@@ -23,6 +24,11 @@ export function ConfirmDenyModal({
   onError,
 }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null);
+
+  // House pattern for role="dialog" surfaces (eslint.config.js a11y note;
+  // PeekPanel precedent): move focus in on open, trap Tab, restore on close.
+  // Escape stays on the window listener below so it works wherever focus is.
+  useFocusTrap(dialogRef, { active: true });
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
