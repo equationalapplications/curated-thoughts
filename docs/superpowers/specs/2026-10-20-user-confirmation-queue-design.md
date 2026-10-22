@@ -1,7 +1,7 @@
 # Confirmation queue: human verification of live facts, recall provenance labels, and the widened activity aperture
 
 **Date:** 2026-10-20
-**Status:** Draft
+**Status:** Implemented 2026-10-22 (PR #294) — confirmation queue, per-hit provenance labels, and the widened activity aperture delivered across Tasks 1-11; see the as-built addendum (rev 4.2) below for landed deltas.
 **Branch:** `spec/user-confirmation-queue`
 **Priority:** High — activity mode currently delivers nothing (zero human-tier facts in the live brain); this delivery is the path to a populated, trustworthy delivery set.
 
