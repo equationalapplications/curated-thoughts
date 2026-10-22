@@ -88,7 +88,10 @@ pub struct WisdomProposeSupersessionParams {
 /// derived cache keyed by document path. The agent may attribute only what
 /// Kurt said (`Verbatim`) or faithfully restated at his direction
 /// (`RestatedAtDirection`) — never its own paraphrase or librarian output
-/// (S2); enforced here by argument validation, not by trust.
+/// (S2). The validation here checks SHAPE only (speaker non-empty, source
+/// handle form); S2 itself is NOT machine-enforced — attribution is
+/// agent-asserted and its mitigation is the human confirm step
+/// (comment corrected, Tier-1.5 xhigh MINOR-8).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
 pub struct DepositAttribution {

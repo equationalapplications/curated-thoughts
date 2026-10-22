@@ -203,7 +203,19 @@ pub fn drain_unverified_matches(vault_root: &Path, cap: usize) -> Result<DrainRe
                 continue;
             }
         };
-        if v.get("acked_at").is_some() {
+        // Tier-1.5 xhigh MAJOR-2: a valid-JSON NON-object line (hand-edited or
+        // corrupted file) must degrade like a malformed one — indexing a
+        // non-object Value with a string key panics, and the panic would
+        // repeat on every 30-second poll with no self-recovery. Keep it
+        // verbatim, don't count it, never panic (spec §4 poisoned-file bound).
+        let Some(obj) = v.as_object_mut() else {
+            eprintln!(
+                "curated-thoughts: prompt drain non-object line kept unchanged"
+            );
+            out_lines.push(line.to_string());
+            continue;
+        };
+        if obj.get("acked_at").is_some() {
             // Strictly-acked lines are dead weight: the dedupe is
             // unacked-scoped and this drain is the ONLY rewriter of the file.
             // Dropping them here keeps `unverified-match.jsonl` bounded —
@@ -213,14 +225,14 @@ pub fn drain_unverified_matches(vault_root: &Path, cap: usize) -> Result<DrainRe
         }
         unacked_total += 1;
         if prompts.len() < cap {
-            let fact_id = v
+            let fact_id = obj
                 .get("fact_id")
                 .and_then(|f| f.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let ts = v.get("ts").and_then(|t| t.as_i64()).unwrap_or(0);
+            let ts = obj.get("ts").and_then(|t| t.as_i64()).unwrap_or(0);
             prompts.push(DrainedPrompt { fact_id, ts });
-            v["acked_at"] = serde_json::json!(now_ms);
+            obj.insert("acked_at".to_string(), serde_json::json!(now_ms));
         }
         out_lines.push(serde_json::to_string(&v)?);
     }
@@ -465,6 +477,23 @@ mod tests {
         assert_eq!(text.lines().count(), 2, "acked line no longer suppresses");
         assert!(text.lines().all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok()),
             "every line is a single-line JSON object");
+    }
+
+    #[test]
+    fn drain_degrades_non_object_lines_without_panicking() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(drop_path(root).parent().unwrap()).unwrap();
+        // A valid-JSON non-object line (hand edit / corruption) must degrade
+        // like a malformed line — never panic (spec §4 poisoned-file bound).
+        fs::write(drop_path(root), "42\n{\"fact_id\":\"w9\",\"ts\":1}\n").unwrap();
+        let report = drain_unverified_matches(root, 3).unwrap();
+        assert_eq!(report.prompts.len(), 1, "only the object line drains");
+        let text = fs::read_to_string(drop_path(root)).unwrap();
+        assert!(
+            text.lines().any(|l| l.trim() == "42"),
+            "the non-object line is kept verbatim"
+        );
     }
 
     #[test]

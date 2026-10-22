@@ -102,7 +102,13 @@ fn append_line<T: Serialize>(vault_root: &Path, ledger: &str, line: &T) -> Resul
         .append(true)
         .open(&path)
         .with_context(|| format!("opening ledger {}", path.display()))?;
-    writeln!(f, "{}", serde_json::to_string(line)?)
+    // ONE write syscall for line+newline (Tier-1.5 xhigh MINOR-4): writeln! on
+    // an unbuffered File issues two writes, and a concurrent appender can
+    // interleave between them, tearing the line — read_lines treats that as a
+    // hard error, which would defer the rebuild and fail deny/undeny loudly.
+    let mut buf = serde_json::to_string(line)?;
+    buf.push('\n');
+    f.write_all(buf.as_bytes())
         .with_context(|| format!("appending to {}", path.display()))?;
     Ok(())
 }
