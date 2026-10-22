@@ -502,8 +502,16 @@ pub(crate) fn run_kick_with(
         .with_context(|| format!("open brain {}", db_path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
 
-        // `rel_path` stays the document key (status probe, V25 folder rules);
-        // the bytes are read from the vault, not the process CWD.
+        // B1 round 2 (mechanism v2): the ingest TABLE KEY is the SAME
+        // canonical-root derivation every other regime uses — the
+        // vault-relative `rel_path` would stage `documents.path = rel`,
+        // missing the virtual-absolute attestation/attribution joins
+        // (commit.rs, queue.rs). `rel_path` remains the kick-ledger/status
+        // handle and the read handle below.
+        let doc_key =
+            crate::db::queue::virtual_path_key_at_root(&vault_dir, std::path::Path::new(&rel_path))
+                .map_err(|e| anyhow!("canonical vault root: {e:#}"))?;
+        // The bytes are read from the vault, not the process CWD.
         let read_path = vault_dir.join(&rel_path).to_string_lossy().into_owned();
         // §8(c) caller contract (Task 9, belt-and-suspenders): force is false
         // here, so the funnel never refuses today — but if a future reason
@@ -512,7 +520,7 @@ pub(crate) fn run_kick_with(
         crate::pipeline::ingest_document_virtual(
             &conn,
             &profile,
-            &rel_path,
+            &doc_key,
             &read_path,
             false,
             Some(vault_dir.to_string_lossy().as_ref()),
@@ -543,9 +551,13 @@ pub(crate) fn run_kick_with(
         let model = crate::librarian::active_generation_model(crate::setup::recommended_model());
         let gen_result = match completer {
             Some(c) => {
-                crate::librarian::generate_summary_with(&mut conn, &rel_path, &model, false, c)
+                crate::librarian::generate_summary_with(&mut conn, &doc_key, &model, false, c)
             }
-            None => crate::librarian::generate_summary(&mut conn, &rel_path, &model, false),
+            // B1 round 2: the librarian leg resolves the document under the
+            // SAME canonical `documents.path` key the ingest staged above;
+            // `get_folder_mode` relativizes it against the configured root
+            // for V25's vault-relative folder rules.
+            None => crate::librarian::generate_summary(&mut conn, &doc_key, &model, false),
         };
         match gen_result {
             Ok(()) => {
@@ -604,8 +616,18 @@ async fn audit_and_seed_kick(
     // attribution join (`da.document_path = d.path`, queue.rs:307) matches
     // against the watcher-staged row. `kick_rel` stays the ledger/status
     // handle (vault-relative).
+    // B1 round 2 (mechanism v2): the attribution TABLE KEY is derived
+    // through the CANONICAL root — `vault` may be a symlinked/relative
+    // configured path, and the queue's attribution join
+    // (`da.document_path = d.path`, queue.rs:307) matches against rows
+    // staged/ingested under the canonical form in EVERY regime (watcher and
+    // kick alike). `kick_rel` stays the ledger/status handle
+    // (vault-relative).
     let attribution_key = if attribution.is_some() {
-        Some(crate::db::queue::virtual_path_key(&vault.join(&kick_rel))?)
+        Some(crate::db::queue::virtual_path_key_at_root(
+            vault,
+            std::path::Path::new(&kick_rel),
+        )?)
     } else {
         None
     };
@@ -2228,6 +2250,103 @@ mod tests {
         fn complete(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
             Ok(self.response.clone())
         }
+    }
+
+    /// RED (F2, B1 round 2): the NO-watcher regime (ct CLI deposit,
+    /// headless brain). The kick ingests with the vault-relative key, so
+    /// `documents.path` = `rel` while the round-1 B1 fix keyed
+    /// `deposit_attribution` in the watcher's canonical absolute form — the
+    /// queue's attribution join (`da.document_path = d.path`, queue.rs:307)
+    /// misses. The single-key-form ruling applies to the kick-ingest site
+    /// TOO: the ingest must stage `documents.path` through the SAME
+    /// canonical key derivation; `rel` remains the ledger/kick-status
+    /// handle. Here the configured vault root goes through a SYMLINK so the
+    /// canonical form differs from the configured one. The kick runs via
+    /// `run_kick_with`'s `#[cfg(test)]` completer seam (the dispatch
+    /// dispatcher spawns no kick without a generation host — test env has
+    /// none), which is the exact pinned F2 site.
+    #[test]
+    fn kick_ingest_stages_documents_path_in_canonical_form() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("vault-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            // ctx.vault_dir goes through the SYMLINK; the canonical key the
+            // watcher/rebuild lanes derive for the same file is the real
+            // path.
+            let mut ctx = wisdom_ctx(&real);
+            ctx.vault_dir = Some(link.clone());
+            let rel = "immutable-source-files/agents/attributed.md";
+            let canonical_root = std::fs::canonicalize(&real).unwrap();
+            let expected_key =
+                crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
+
+            // Deposit: the attribution row lands keyed (post-fix) in the
+            // canonical form; no kick spawns (no generation host) and the
+            // vault lock is NOT held — the no-watcher regime.
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Kurt's direction".into(),
+                    body: "Deploy the staging stack nightly.".into(),
+                    tags: None,
+                    attribution: Some(DepositAttribution {
+                        speaker: "kurt".into(),
+                        kind: AttributionKind::Verbatim,
+                        source: "discord:123".into(),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+
+            // The kick ingest itself — the pinned F2 site — with the
+            // deterministic completer seam.
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(
+                    kick_ctx.db_path.clone(),
+                    kick_ctx.vault_dir.clone().unwrap(),
+                    kick_rel,
+                    kick_ctx.profile.clone(),
+                    None,
+                );
+            });
+            handle.await.unwrap();
+
+            let conn = ctx.conn.lock().unwrap();
+            let doc_path: String = conn
+                .query_row(
+                    "SELECT path FROM documents WHERE path = ?1",
+                    [&expected_key],
+                    |r| r.get(0),
+                )
+                .expect(
+                    "RED (F2): the kick ingested documents.path under the vault-RELATIVE key, \
+                     not the canonical absolute form — the attribution join misses",
+                );
+            let attribution_key: String = conn
+                .query_row("SELECT document_path FROM deposit_attribution", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                attribution_key, doc_path,
+                "RED (F2): attribution and documents.path must share ONE canonical key form"
+            );
+            // The rel handle stays the kick-ledger/status key.
+            conn.query_row(
+                "SELECT state FROM deposit_kick_state WHERE path = ?1",
+                [rel],
+                |r| r.get::<_, String>(0),
+            )
+            .expect("the kick ledger keeps the rel handle");
+        });
     }
 
     /// RED (B1 regression, deposit-attribution twin): the APP's deposit

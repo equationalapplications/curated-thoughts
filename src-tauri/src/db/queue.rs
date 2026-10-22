@@ -40,6 +40,23 @@ pub(crate) fn virtual_path_key(p: &Path) -> Result<String> {
     Ok(std::path::absolute(p)?.to_string_lossy().into_owned())
 }
 
+/// Canonical-root key derivation (B1 round 2, mechanism v2): resolve `root`
+/// to its CANONICAL absolute form, then key `root.join(rel)` in the
+/// [`virtual_path_key`] form — the same string the watcher stores and the
+/// rebuild derives, so capture-era, watcher-era, and rebuild-era keys agree
+/// for the same underlying file even when the configured root is a symlink,
+/// relative, or `..`-bearing path. The ROOT is canonicalized, never the
+/// joined path: `virtual_path_key` deliberately keeps its issue-#204
+/// non-canonicalizing contract for trusted links INSIDE the vault (a
+/// symlinked document must stage under its virtual in-vault path, not its
+/// external canonical target). The root itself must exist — every production
+/// caller derives keys right after writing/re-reading the file under it —
+/// and a missing root fails closed (`Err`), exactly as B1 round 1 pinned.
+pub(crate) fn virtual_path_key_at_root(root: &Path, rel: &Path) -> Result<String> {
+    let canonical_root = root.canonicalize()?;
+    virtual_path_key(&canonical_root.join(rel))
+}
+
 /// Stage a vault file event into the documents table.
 ///
 /// `conn` is a mutable SQLite connection (caller manages lifecycle — ephemeral

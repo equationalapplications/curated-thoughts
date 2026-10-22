@@ -4113,6 +4113,46 @@ mod tests {
         );
     }
 
+    /// RED (F2 consumer, B1 round 2): `documents.path` is now the canonical
+    /// ABSOLUTE key in every regime, while V25's `folder_rules` rows are
+    /// vault-relative — so the librarian's literal ancestor walk must
+    /// relativize an absolute source path against the configured vault root
+    /// before matching, or the kick regime loses its synthesize +
+    /// auto-approve lane (V25's stated intent).
+    #[test]
+    fn get_folder_mode_matches_v25_rules_for_absolute_document_paths() {
+        use crate::librarian::get_folder_mode;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(vault.join("stated")).unwrap();
+        let brain = tmp.path().join("brain");
+        std::fs::create_dir_all(&brain).unwrap();
+        std::fs::write(
+            brain.join("config.json"),
+            serde_json::json!({ "vault_path": vault.to_string_lossy() }).to_string(),
+        )
+        .unwrap();
+        // File-backed ROOTED open: V22 settles and V25 seeds the
+        // vault-relative folder rules, and the connection carries its brain
+        // path so get_folder_mode resolves the vault root from the
+        // config.json beside it (never the live user-config resolver —
+        // issue #178 guard).
+        let db = crate::db::connection::AppDb::open_with_config(
+            &brain.join("brain.db"),
+            brain.join("config.json"),
+        )
+        .unwrap();
+        let conn = db.0;
+        let abs = vault.join("stated/kurt/2026/note.md");
+        let (mode, auto) = get_folder_mode(&conn, &abs.to_string_lossy());
+        assert_eq!(
+            (mode.as_str(), auto),
+            ("synthesize", true),
+            "RED (F2): an absolute documents.path no longer matches V25's \
+             vault-relative folder rules — the kick lane loses synthesize+auto"
+        );
+    }
+
     /// Rootless opens must not stamp V25 past a deferred V22 (same masking
     /// hazard V23/V24 document).
     #[test]

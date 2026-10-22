@@ -169,20 +169,59 @@ pub(crate) fn build_structural_context(conn: &Connection, source_chunks: &[Chunk
 }
 
 pub(crate) fn get_folder_mode(conn: &Connection, source_path: &str) -> (String, bool) {
-    let mut p = std::path::Path::new(source_path);
-    loop {
-        let dir = p.parent().unwrap_or(p).to_string_lossy().to_string();
-        let result = conn.query_row(
-            "SELECT librarian_mode, auto_approve FROM folder_rules WHERE folder_path = ?1",
-            [&dir],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
-        );
-        if let Ok((mode, auto)) = result {
-            return (mode, auto);
+    // B1 round 2: `documents.path` is the CANONICAL ABSOLUTE key in every
+    // regime now, while V25's `folder_rules` rows are vault-relative — so an
+    // absolute source path is FIRST relativized against the configured vault
+    // root (canonicalized, same derivation family as the key sites) and both
+    // forms walk the literal ancestor prefixes. Relative inputs behave
+    // exactly as before; a root that is unconfigured/unresolvable degrades to
+    // the absolute-only walk (default summarize), never an error.
+    let mut candidates: Vec<String> = vec![source_path.to_string()];
+    if std::path::Path::new(source_path).is_absolute() {
+        // The root comes from the config.json BESIDE this connection's own
+        // brain.db — the same brain the kick/librarian leg is running
+        // against — canonicalized (same derivation family as the key sites).
+        // Never the live user-config resolver (issue #178 test guard), and
+        // pathless/in-memory connections (tests, ephemeral conns) skip
+        // relativization and behave exactly as before.
+        let root = conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| {
+                std::path::Path::new(p)
+                    .parent()
+                    .map(|dir| dir.to_path_buf())
+            })
+            .map(|dir| crate::retrieval::brain_paths_for(&dir).config_path)
+            .and_then(|cfg| {
+                crate::vault::config::VaultConfig::new(cfg)
+                    .vault_root()
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|root| root.canonicalize().ok());
+        if let Some(root) = root {
+            if let Ok(rel) = std::path::Path::new(source_path).strip_prefix(&root) {
+                candidates.push(rel.to_string_lossy().into_owned());
+            }
         }
-        match p.parent() {
-            Some(parent) if parent != p => p = parent,
-            _ => break,
+    }
+    for candidate in &candidates {
+        let mut p = std::path::Path::new(candidate);
+        loop {
+            let dir = p.parent().unwrap_or(p).to_string_lossy().to_string();
+            let result = conn.query_row(
+                "SELECT librarian_mode, auto_approve FROM folder_rules WHERE folder_path = ?1",
+                [&dir],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
+            );
+            if let Ok((mode, auto)) = result {
+                return (mode, auto);
+            }
+            match p.parent() {
+                Some(parent) if parent != p => p = parent,
+                _ => break,
+            }
         }
     }
     ("summarize".to_string(), false)

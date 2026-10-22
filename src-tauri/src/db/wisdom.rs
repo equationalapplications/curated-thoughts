@@ -226,9 +226,17 @@ fn capture_statement_on(
     // ingests the capture, and the Path B join (`a.document_path = d.path`)
     // must match its staged row. The ledger carrier below stays
     // vault-relative (`rel`, spec §3.8).
+    // B1 round 2 (mechanism v2): derive the TABLE KEY through the CANONICAL
+    // root — `resolve_vault_root` returns the raw configured string, so a
+    // symlinked/relative/`..`-bearing configured path would key the
+    // attestation in a form the watcher's `documents.path` (canonical, via
+    // `canonical_vault_from_config`) never matches. Fail-closed on a
+    // vanished root via `?`. The ledger carrier below stays on the
+    // configured root (`rel`, spec §3.8).
     let bytes = std::fs::read(&full)?;
     let content_hash = crate::hasher::hash_bytes(&bytes);
-    let attestation_key = super::queue::virtual_path_key(&ctx.vault_root.join(&rel))?;
+    let attestation_key =
+        super::queue::virtual_path_key_at_root(&ctx.vault_root, std::path::Path::new(&rel))?;
     conn.execute(
         "INSERT OR REPLACE INTO stated_attestations
              (document_path, content_hash, attested_by, attested_at)
@@ -1415,6 +1423,241 @@ mod tests {
                  §3.7 instant confirm"
             );
         });
+    }
+
+    /// F3 (B1 round 2): the ROOT-ASYMMETRY variant of the regression above.
+    /// The round-1 test passed the same tempdir root to the capture and the
+    /// watcher lane, so it could not detect F1: capture keys
+    /// `stated_attestations` from the RAW configured root
+    /// (`resolve_vault_root`, no canonicalization) while the watcher keys
+    /// `documents.path` from the CANONICAL path (`canonical_vault_from_config`).
+    /// Here the configured capture root goes through a SYMLINK and the
+    /// watcher lane uses the canonical path — the join must still match and
+    /// the fact must still stamp `user_stated`.
+    #[test]
+    fn capture_symlinked_vault_keeps_provenance_join() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, vault, brain) = task9_dirs();
+        let link = _tmp.path().join("vault-through-link");
+        std::os::unix::fs::symlink(&vault, &link).unwrap();
+        task9_with_env(&vault, &brain, || {
+            let db_path = brain.join("brain.db");
+            let mut conn = task9_open_brain(&brain, &vault);
+            task9_seed_entity_with_fact(&conn, "ent-alpha", "fact-alpha");
+            let completer = FixedCompleter {
+                response: task9_proposal_json("Alpha renews the Baxter lease on March 1."),
+            };
+            // The configured capture root is the SYMLINK; the watcher lane
+            // below keys the canonical path — the exact F1 asymmetry.
+            let ctx = super::CaptureContext {
+                db_path: db_path.clone(),
+                vault_root: link.clone(),
+                profile: EmbedProfile::default(),
+            };
+            let text = "Alpha's Baxter warehouse lease renews on March 1.";
+
+            let lock = crate::watcher::VaultLock::acquire(&brain).unwrap();
+            let rel = super::capture_statement_with(&ctx, text, Some(&completer)).unwrap();
+            drop(lock);
+
+            // Watcher leg over the CANONICAL path (what the running app's
+            // watcher sees after `canonical_vault_from_config`).
+            let abs = vault.join(&rel);
+            let abs_key = std::path::absolute(&abs)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            crate::db::queue::enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Create(notify::event::CreateKind::Any),
+                &abs,
+                Some(&vault),
+            )
+            .unwrap();
+            let doc_path: String = conn
+                .query_row(
+                    "SELECT path FROM documents WHERE path = ?1",
+                    [&abs_key],
+                    |r| r.get(0),
+                )
+                .expect("the watcher staged the stated file under its canonical absolute key");
+            crate::pipeline::ingest_document_virtual(
+                &conn,
+                &ctx.profile,
+                &doc_path,
+                &abs.to_string_lossy(),
+                false,
+                Some(vault.to_string_lossy().as_ref()),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
+                 VALUES (?1, 'synthesize', 1)",
+                [vault.join("stated").to_string_lossy().as_ref()],
+            )
+            .unwrap();
+            let model =
+                crate::librarian::active_generation_model(crate::setup::recommended_model());
+            crate::librarian::generate_summary_with(
+                &mut conn, &doc_path, &model, false, &completer,
+            )
+            .unwrap();
+
+            let att_path: String = conn
+                .query_row("SELECT document_path FROM stated_attestations", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                att_path, doc_path,
+                "RED (F1): the capture keyed the attestation through the SYMLINKED root \
+                 while the watcher keyed documents.path canonically — the Path B join \
+                 misses again"
+            );
+            let source_type: String = conn
+                .query_row(
+                    "SELECT source_type FROM llm_wiki_entries
+                      WHERE body = ?1 AND deleted_at IS NULL",
+                    ["Alpha renews the Baxter lease on March 1."],
+                    |r| r.get(0),
+                )
+                .expect("the stated fact committed");
+            assert_eq!(
+                source_type, "user_stated",
+                "RED (F1): the root asymmetry demotes the capture to librarian_inferred"
+            );
+        });
+    }
+
+    /// F1 acceptance law (B1 round 2), pinned across root shapes: for the
+    /// SAME underlying stated file, the capture-era `stated_attestations`
+    /// key == the watcher-era `documents.path` == the rebuild-era key, under
+    /// EACH of a symlinked vault, a relative config path, and a `..`-bearing
+    /// config path. RED at the round-1 code: capture and rebuild derive keys
+    /// from the raw configured root while the watcher keys the canonical
+    /// path, so the capture and rebuild legs fail for every shape here.
+    #[test]
+    fn attestation_key_law_holds_across_configured_root_shapes() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // The relative shape resolves against the process CWD, so chdir into
+        // each shape's tmp root while it runs (restore at the end).
+        let orig_cwd = std::env::current_dir().unwrap();
+
+        type ShapeConfig = fn(&std::path::Path, &std::path::Path) -> std::path::PathBuf;
+        let shapes: Vec<(&str, ShapeConfig)> = vec![
+            (
+                "symlinked",
+                |tmp: &std::path::Path, real: &std::path::Path| {
+                    let link = tmp.join("vault-link");
+                    std::os::unix::fs::symlink(real, &link).unwrap();
+                    link
+                },
+            ),
+            (
+                "relative-through-symlink",
+                |tmp: &std::path::Path, real: &std::path::Path| {
+                    let link = tmp.join("vault-link");
+                    std::os::unix::fs::symlink(real, &link).unwrap();
+                    std::path::PathBuf::from(
+                        link.strip_prefix(tmp).unwrap().to_string_lossy().as_ref(),
+                    )
+                },
+            ),
+            (
+                "dotdot-bearing",
+                |_tmp: &std::path::Path, real: &std::path::Path| real.join("..").join("vault"),
+            ),
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        for (label, configured_of) in shapes {
+            // A FRESH brain per shape: stated_attestations and the ledger
+            // must not accumulate rows across shapes.
+            let tmp = tempfile::TempDir::new().unwrap();
+            let real = tmp.path().join("vault");
+            std::fs::create_dir_all(&real).unwrap();
+            let brain = tmp.path().join("brain");
+            std::fs::create_dir_all(&brain).unwrap();
+            let configured = configured_of(tmp.path(), &real);
+            std::env::set_current_dir(tmp.path()).unwrap();
+            task9_with_env(&real, &brain, || {
+                let mut conn = task9_open_brain(&brain, &real);
+                let ctx = super::CaptureContext {
+                    db_path: brain.join("brain.db"),
+                    vault_root: configured.clone(),
+                    profile: EmbedProfile::default(),
+                };
+                let text = format!("Alpha renews the Baxter lease for the {label} shape.");
+
+                // Hold the vault lock so the capture kick cannot ingest: the
+                // only writers under test are the capture attestation, the
+                // watcher staging, and the rebuild.
+                let lock = crate::watcher::VaultLock::acquire(&brain).unwrap();
+                let rel = super::capture_statement_with(&ctx, &text, None).unwrap();
+                drop(lock);
+
+                // The canonical form is the law's anchor: what the watcher
+                // (canonical_vault_from_config) and the rebuild
+                // (canonical roots) already derive.
+                let canonical_root = std::fs::canonicalize(&real).unwrap();
+                let expected = canonical_root.join(&rel).to_string_lossy().into_owned();
+
+                // Watcher leg over the canonical path.
+                let abs = real.join(&rel);
+                crate::db::queue::enqueue_vault_event(
+                    &mut conn,
+                    notify::EventKind::Create(notify::event::CreateKind::Any),
+                    &abs,
+                    Some(&real),
+                )
+                .unwrap();
+                let watcher_key: String = conn
+                    .query_row(
+                        "SELECT path FROM documents WHERE path = ?1",
+                        [&expected],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("[{label}] watcher staging missing at {expected:?}: {e}")
+                    });
+
+                // Capture-era key.
+                let capture_key: String = conn
+                    .query_row("SELECT document_path FROM stated_attestations", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+
+                // Rebuild-era key, re-derived through the SAME configured root.
+                crate::db::stated_ledger::rebuild_rederive(&conn, &configured).unwrap();
+                let rebuild_key: String = conn
+                    .query_row("SELECT document_path FROM stated_attestations", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+
+                if capture_key != expected {
+                    failures.push(format!(
+                        "[{label}] capture-era key {capture_key:?} != canonical {expected:?}"
+                    ));
+                }
+                if rebuild_key != expected {
+                    failures.push(format!(
+                        "[{label}] rebuild-era key {rebuild_key:?} != canonical {expected:?}"
+                    ));
+                }
+                if watcher_key != expected {
+                    failures.push(format!(
+                        "[{label}] watcher key {watcher_key:?} != canonical {expected:?}"
+                    ));
+                }
+            });
+        }
+        std::env::set_current_dir(orig_cwd).unwrap();
+        assert!(
+            failures.is_empty(),
+            "RED (F1 law): capture/watcher/rebuild keys diverge for the same file:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// Pinned plan test 3: the app's direct `add_wisdom_in_tx` write is

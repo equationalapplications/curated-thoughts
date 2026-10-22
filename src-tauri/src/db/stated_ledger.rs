@@ -306,6 +306,15 @@ fn apply_confirmations_by_hash(conn: &Connection, hashes: &HashSet<String>) -> R
 /// The whole rebuild runs in one transaction: it either lands or the previous
 /// derived state survives.
 pub fn rebuild_rederive(conn: &Connection, vault_root: &Path) -> Result<RebuildReport> {
+    // B1 round 2 (mechanism v2): the rebuild must key derived rows in the
+    // SAME canonical absolute form the watcher stages, regardless of how the
+    // root was spelled by the caller (connection.rs passes `roots.canonical`,
+    // but tests and future callers may hand a symlinked/relative/`..`-bearing
+    // root). Canonicalize ONCE at the top — the ledger reads, the hash
+    // re-verification, and the repopulate walk below all resolve to the
+    // canonical forms, so capture-era == rebuild-era keys by construction.
+    // Fail-closed on a vanished root via `?`.
+    let vault_root = &vault_root.canonicalize()?;
     let tx = conn.unchecked_transaction()?;
     let mut report = RebuildReport::default();
     let stated = vault_root.join(STATED_DIR);
