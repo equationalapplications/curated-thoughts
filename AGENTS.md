@@ -3,9 +3,9 @@
 ## Spec alignment
 
 Every spec must be checked against `INTENT.md` before implementation work
-begins. If a spec contradicts `INTENT.md`, the spec is wrong until
-`INTENT.md` is amended: INTENT wins on *intent* (what we are trying to do),
-specs win on *detail* (exactly how).
+begins. If a spec contradicts `INTENT.md` *on intent*, the spec is wrong
+until `INTENT.md` is amended: INTENT wins on *intent* (what we are trying
+to do), specs win on *detail* (exactly how).
 
 ## Disk storage & build locations (read before running cargo)
 

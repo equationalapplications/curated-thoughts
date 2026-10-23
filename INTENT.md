@@ -154,7 +154,7 @@ it.
 **Status: Partly built.** The outbox exists but only pushes one way, to
 a Postgres replica; machines don't pull from each other. There is no
 "ingested on" machine field, and fact IDs are random. How a machine
-should trust tiers it receives from another is an **open decision**.
+should trust tiers it receives from another is not yet decided.
 
 ### 6. The fast model judges; it never writes
 
