@@ -1,3 +1,36 @@
+## [3.10.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.9.0...v3.10.0) (2026-10-23)
+
+### Features
+
+* **app:** stated capture flow, queue ui, and verification modals ([a69b1e5](https://github.com/equationalapplications/curated-thoughts/commit/a69b1e5e1adaf211ba6cafae3f54a27db1c261e0))
+* **db:** stated verification tables and app-written jsonl ledgers ([a0552ca](https://github.com/equationalapplications/curated-thoughts/commit/a0552ca4aa24bbe28abd58137d66d7dcf66b09cf))
+* **deposit:** attribution frontmatter carrier with deposit-time index ([06811cf](https://github.com/equationalapplications/curated-thoughts/commit/06811cfef426bd55868f4d08caa989f238f404e0))
+* **queue:** app-only confirm and deny with durable ledgers ([764fd4f](https://github.com/equationalapplications/curated-thoughts/commit/764fd4f115a0cdf628e4854e6bc05d3cb0e7af9b))
+* **queue:** confirmation queue query and read-only mcp listing ([d25b102](https://github.com/equationalapplications/curated-thoughts/commit/d25b102cde33923372c21f133625affa76974967))
+* **recall:** per-hit provenance labels and confidence ordinal ([d127d28](https://github.com/equationalapplications/curated-thoughts/commit/d127d282e962237c564c8a3399c93e08dc1d31d7))
+* **recall:** unverified-match prompt drop emitter ([5b86126](https://github.com/equationalapplications/curated-thoughts/commit/5b86126ec2b19a9bc3111cc1a31bd3ceb3c09e90))
+* **wisdom:** human-tier stamps require the desktop surface ([73212ab](https://github.com/equationalapplications/curated-thoughts/commit/73212aba5832b50e73025487905074de637a0d47))
+* **wisdom:** widen activity aperture to user_confirmed and add attested-source arm ([a43d833](https://github.com/equationalapplications/curated-thoughts/commit/a43d833e1326adfba64e230e1ce92d4cf3ed8425))
+
+### Bug Fixes
+
+* **db:** CodeRabbit round-2 Rust-side adjudication — 3 REAL fixes, 1 FP pinned ([753b8b9](https://github.com/equationalapplications/curated-thoughts/commit/753b8b91e4ec531f7659ab78b7ae1bfb66f2b646))
+* **db:** wire §8 rebuild convergence — rederive derived state once per brain ([54082f7](https://github.com/equationalapplications/curated-thoughts/commit/54082f70697a3d96701200e4ee3975605f043d47))
+* **ledger:** length-prefixed confirmation content hash + spec rev 4.2 amendment (CR-2) ([98768f9](https://github.com/equationalapplications/curated-thoughts/commit/98768f9aaafe2a088d6cd8cb5c464a6c63798a12))
+* **prompt_drop:** drain degrades non-object lines; ledger appends in one write ([bad9bab](https://github.com/equationalapplications/curated-thoughts/commit/bad9babe2587393fd0844ce2222f2f672a394c8d))
+* **prompt_drop:** emitter append in one write; unglue wisdom.rs doc comment ([5c34352](https://github.com/equationalapplications/curated-thoughts/commit/5c34352a51e9d3244ed81a5df7cbb83aec778148))
+* **provenance:** key stated_attestations + deposit_attribution in the watcher's virtual-absolute documents.path form (B1) ([0e6c66c](https://github.com/equationalapplications/curated-thoughts/commit/0e6c66c3d060963304895d001acce421e4b7876a)), closes [#204](https://github.com/equationalapplications/curated-thoughts/issues/204)
+* **queue-ui:** CodeRabbit round-2 adjudication — 6 REAL findings ([8b07481](https://github.com/equationalapplications/curated-thoughts/commit/8b074816f3f68a18e7d71ff91bdf6aff435a02bb))
+* **queue:** confirm retry gets the deny-side ledger-duplicate guard ([77dc9f7](https://github.com/equationalapplications/curated-thoughts/commit/77dc9f75c68550d3b0a0e3a201a25de26352dd5c))
+* **queue:** contain and restore focus in UnverifiedPromptModal (a11y dialog pattern) ([f60668b](https://github.com/equationalapplications/curated-thoughts/commit/f60668b2f973427a01ea55860a169d06269d3fd3))
+* **queue:** deny crash-retry completes the deny — supersedes Task-11 Info-1 ([e21d699](https://github.com/equationalapplications/curated-thoughts/commit/e21d699af2116144e58b88871b0ef246cb9c8f1b))
+* **queue:** deterministic evidence pick shared by queue rows and denial key (D4) ([6ef6756](https://github.com/equationalapplications/curated-thoughts/commit/6ef6756ffb22cd810082f60e2a4f160d5daf370a)), closes [#294](https://github.com/equationalapplications/curated-thoughts/issues/294)
+* **review:** attested-source instant-confirm arm skips edited decisions (CR-1) ([1ccee28](https://github.com/equationalapplications/curated-thoughts/commit/1ccee28a1e991cee38670f4af4aca0fb8106638c))
+* **ui:** deny copy says hidden-from-queue; badge keeps last count on fetch error (D6a,D6b) ([9cf306a](https://github.com/equationalapplications/curated-thoughts/commit/9cf306a2cc2d6bd7bd7b5641c7bed02407bb973c))
+* **wisdom:** by-hash confirmations stamp through the full helper (D1 v2) ([a0beba6](https://github.com/equationalapplications/curated-thoughts/commit/a0beba64467c799dd34612d66a833d720be9a75d))
+* **wisdom:** canonical key form across capture, kick-ingest, and rebuild (B1 round 2) ([8635ad9](https://github.com/equationalapplications/curated-thoughts/commit/8635ad9a60e1c8c37d7ae41529d03075bf5abd8d)), closes [issue-#204](https://github.com/equationalapplications/issue-/issues/204)
+* **wisdom:** stamp atomicity on the record path (D1 v2 review F1) ([16f4ace](https://github.com/equationalapplications/curated-thoughts/commit/16f4ace5fa986000c25398ee49f966d3ac6b9c54))
+
 ## [3.9.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.8.1...v3.9.0) (2026-10-19)
 
 ### Features
