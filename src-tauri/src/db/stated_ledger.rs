@@ -248,7 +248,21 @@ pub fn record_confirmation_at(
     // advisory even here — so the live stamp and the rebuild stamp agree.
     // D1 v2: the hash leg stamps through the FULL shared helper, so twins
     // present right now get the same stamp the rebuild will re-derive.
-    apply_confirmations_by_hash(conn, std::slice::from_ref(&line))?;
+    // D1-V2b (review F1 MAJOR): the hash leg runs the FULL three-statement
+    // stamp (UPDATE + outbox + event). On the bare connection that ran in
+    // per-statement autocommit, so a mid-stamp failure (SQLITE_BUSY, disk
+    // I/O, outbox payload failure) could commit the guarded UPDATE but not
+    // the outbox/event — the row then read as fully stamped, the confirm
+    // retry pre-check (queue.rs) returned Ok forever, and the rebuild's
+    // `changed == 0` guard skipped it: permanent divergence, outbox/event
+    // never emitted. Wrap the leg in its OWN transaction: any mid-stamp
+    // error rolls back ALL THREE statements, so a stamp that emits
+    // outbox/event can never be observed partially applied. (The rebuild
+    // leg passes `&tx` from `rebuild_rederive` and is unaffected; every
+    // caller of this function holds no open transaction of its own.)
+    let tx = conn.unchecked_transaction()?;
+    apply_confirmations_by_hash(&tx, std::slice::from_ref(&line))?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -277,7 +291,9 @@ pub fn confirmation_ledger_has_key(vault_root: &Path, content_hash: &str) -> Res
 /// hash-matched rows the leg stamped (idempotent re-stamps count — the
 /// report's "rows the hash leg stamped" semantics is unchanged). Takes
 /// `&Connection` so the rebuild passes `&tx` (outbox rows and events land
-/// atomically with the rebuild) and the record path a plain conn.
+/// atomically with the rebuild); the record path passes its own short
+/// transaction from `record_confirmation_at` (D1-V2b: the record-path stamp
+/// is atomic too).
 fn apply_confirmations_by_hash(conn: &Connection, lines: &[ConfirmationLine]) -> Result<usize> {
     let mut line_by_hash: HashMap<&str, &ConfirmationLine> = HashMap::new();
     for line in lines {
@@ -305,7 +321,9 @@ fn apply_confirmations_by_hash(conn: &Connection, lines: &[ConfirmationLine]) ->
 
 /// ISO-8601 → epoch ms — the inverse of queue.rs `confirm_iso_utc`
 /// (millis precision, `Z` suffix; the roundtrip is exact). `None` on a
-/// malformed stamp; the caller falls back to now.
+/// malformed stamp; the caller falls back to now. Sub-millisecond precision
+/// in a ledger `at` is TRUNCATED to millis (accepted-as-is, D1-V2b ruling:
+/// production lines are millis-exact via `confirm_iso_utc`).
 fn rfc3339_to_ms(at: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(at)
         .ok()
@@ -864,6 +882,158 @@ mod tests {
         assert_eq!(
             events, 1,
             "twin stamp emits exactly one fact_confirmed event"
+        );
+    }
+
+    /// D1-V2b (review F1 MAJOR): the record path (`confirm_fact_at` →
+    /// `record_confirmation_at` → `apply_confirmations_by_hash`) must stamp
+    /// ATOMICALLY. A deterministic mid-stamp failure — a BEFORE INSERT
+    /// trigger on `llm_wiki_events` raising ABORT after the guarded UPDATE
+    /// and the outbox insert have run — must propagate AND leave the entries
+    /// row UNSTAMPED with NO outbox row. On pre-fix code the UPDATE and the
+    /// outbox row autocommitted first, so the row read as fully stamped
+    /// without its event (permanent divergence: the confirm retry pre-check
+    /// returned Ok forever and the rebuild's `changed == 0` guard skipped
+    /// the row — outbox/event never emitted).
+    #[test]
+    fn record_path_mid_stamp_failure_rolls_back_the_full_stamp() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path();
+        let conn = open_in_memory().unwrap();
+        seed_fact(&conn, "f1", "Alpha", "Alpha body");
+
+        conn.execute_batch(
+            "CREATE TRIGGER d1v2b_abort_event BEFORE INSERT ON llm_wiki_events
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+
+        let err = crate::db::queue::confirm_fact_at(&conn, vault_root, "f1")
+            .expect_err("mid-stamp abort must propagate");
+        assert!(
+            err.to_string().contains("boom"),
+            "the error is the trigger abort, not an earlier failure: {err}"
+        );
+
+        // The WHOLE stamp rolled back: row untouched, no orphan outbox row.
+        assert_eq!(
+            source_type_of(&conn, "f1"),
+            "librarian_inferred",
+            "a mid-stamp failure must NOT leave the row stamped"
+        );
+        let outbox: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_outbox WHERE record_id = 'f1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbox, 0, "no orphan outbox row may survive the abort");
+
+        // The trigger is scoped to this test: dropped before any further
+        // assertions, the user's natural retry heals the row completely (the
+        // ledger line from the first attempt is the durable carrier; the
+        // ledger-duplicate guard keeps it at exactly one line).
+        conn.execute_batch("DROP TRIGGER d1v2b_abort_event;")
+            .unwrap();
+        crate::db::queue::confirm_fact_at(&conn, vault_root, "f1").unwrap();
+        assert_eq!(source_type_of(&conn, "f1"), "user_confirmed");
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_events
+                  WHERE related_entry_id = 'f1' AND event_type = 'fact_confirmed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1, "retry emits exactly one fact_confirmed event");
+    }
+
+    /// D1-V2b mirror on the REBUILD path: the rebuild is one big transaction,
+    /// so the same mid-stamp abort must roll back the WHOLE rebuild — prior
+    /// derived state survives verbatim and `rebuild_rederive` returns Err.
+    #[test]
+    fn rebuild_mid_stamp_failure_rolls_back_whole_rebuild() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path();
+        let conn = open_in_memory().unwrap();
+        seed_fact(&conn, "f1", "Alpha", "Alpha body");
+        let h = confirmation_content_hash("Alpha", "Alpha body");
+        append_confirmation_line(vault_root, "f1", &h, "human:kurt", "2026-10-21T00:00:00Z");
+        // Prior derived state the rebuild must not lose on its rollback
+        // (rebuild step 3 DELETEs queue_denials inside the tx).
+        conn.execute(
+            "INSERT INTO queue_denials
+                 (document_path, chunk_hash, fact_text_hash, denied_by, denied_at)
+             VALUES ('docs/a.md', 'ck', 'fh', 'human:kurt', '2026-10-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute_batch(
+            "CREATE TRIGGER d1v2b_abort_event BEFORE INSERT ON llm_wiki_events
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+
+        let err = rebuild_rederive(&conn, vault_root)
+            .expect_err("a mid-stamp abort must fail the whole rebuild");
+        assert!(
+            err.to_string().contains("boom"),
+            "the error is the trigger abort, not an earlier failure: {err}"
+        );
+
+        // Scoped to this test: drop the trigger before the recovery checks.
+        conn.execute_batch("DROP TRIGGER d1v2b_abort_event;")
+            .unwrap();
+
+        // Prior derived state intact, row still unstamped.
+        assert_eq!(
+            source_type_of(&conn, "f1"),
+            "librarian_inferred",
+            "aborted rebuild leaves no partial stamp behind"
+        );
+        let denials: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue_denials", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(denials, 1, "rollback restores the prior derived state");
+
+        // Without the trigger the rebuild lands cleanly.
+        let report = rebuild_rederive(&conn, vault_root).unwrap();
+        assert_eq!(report.confirmations_applied, 1);
+        assert_eq!(source_type_of(&conn, "f1"), "user_confirmed");
+    }
+
+    /// F3 (D1-V2b review, INFO): a ledger line with an unparsable `at` still
+    /// stamps — `apply_confirmations_by_hash` falls back to now-ms instead of
+    /// erroring, and the row carries a NON-EMPTY `okf_verified` entry.
+    #[test]
+    fn rebuild_malformed_at_falls_back_to_now_and_stamps() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path();
+        let conn = open_in_memory().unwrap();
+        seed_fact(&conn, "f1", "Alpha", "Alpha body");
+        let h = confirmation_content_hash("Alpha", "Alpha body");
+        append_confirmation_line(vault_root, "f1", &h, "human:kurt", "not-a-timestamp");
+
+        let report = rebuild_rederive(&conn, vault_root).unwrap();
+        assert_eq!(report.confirmations_read, 1);
+        assert_eq!(
+            report.confirmations_applied, 1,
+            "the malformed-at fallback stamps, it does not error"
+        );
+        assert_eq!(source_type_of(&conn, "f1"), "user_confirmed");
+        let (okf_verified,): (String,) = conn
+            .query_row(
+                "SELECT okf_verified FROM llm_wiki_entries WHERE id = 'f1'",
+                [],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        let verified: serde_json::Value = serde_json::from_str(&okf_verified).unwrap();
+        assert!(
+            verified.as_array().is_some_and(|a| !a.is_empty()),
+            "okf_verified is non-empty after the fallback stamp: {verified}"
         );
     }
 
