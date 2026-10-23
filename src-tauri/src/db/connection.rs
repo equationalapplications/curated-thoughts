@@ -771,6 +771,19 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
              INSERT OR IGNORE INTO folder_rules
                  (folder_path, librarian_mode, auto_approve)
                  VALUES ('immutable-source-files/agents/supersessions', 'summarize', 1);
+             -- Task 9 (user-confirmation-queue, spec §3.7.3): the stated/ tree
+             -- is the APP's capture lane — synthesize + auto-approve so a
+             -- captured statement is human tier the moment the librarian
+             -- finishes (the attested-source provenance arm stamps
+             -- `user_stated`). Agents can NEVER deposit here: the deposit
+             -- path is allow-listed to immutable-source-files/agents/ (the
+             -- folder row only governs the librarian leg of the app's own
+             -- kick). The three `stated/. *.jsonl` ledgers are operational
+             -- state, never documents — walk_vault excludes them by name and
+             -- their extension is not ingestible.
+             INSERT OR IGNORE INTO folder_rules
+                 (folder_path, librarian_mode, auto_approve)
+                 VALUES ('stated', 'synthesize', 1);
              CREATE TABLE IF NOT EXISTS deposit_kick_state (
                  path       TEXT PRIMARY KEY,
                  state      TEXT NOT NULL
@@ -831,6 +844,76 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // V25's re-read.
     apply_v27_embed_scheme(conn)?;
     apply_v28_two_stage_columns(conn)?;
+
+    // Deposit-time attribution index (user-confirmation-queue Task 1, spec
+    // rev 4.1 §1/D4): the deposit file's frontmatter is authoritative; this
+    // derived table is written inside the audit_and_seed_kick transaction.
+    // Ungated, idempotent DDL on every open — no schema_version stamp. (The
+    // ungated precedent is the V27/V28 bodies above, which also run on every
+    // open; V18/V26 themselves DO stamp schema_version.) Task 2 adds its own
+    // migrations/ files.
+    conn.execute_batch(include_str!("migrations/0001_deposit_attribution.sql"))?;
+
+    // Stated verification tables (user-confirmation-queue Task 2, spec rev 4.1
+    // §8): derived indexes for attestations and queue denials, rebuilt from the
+    // app-written stated/.attestations.jsonl / .denials.jsonl vault ledgers by
+    // db::stated_ledger::rebuild_rederive (wired immediately below). Same
+    // ungated, idempotent DDL shape as 0001 — no schema_version stamp.
+    conn.execute_batch(include_str!("migrations/0002_stated_verification.sql"))?;
+
+    // §8 rebuild convergence (PR #294 round-2 review, aws-cloud-agent A3):
+    // `rebuild_rederive` is the ONLY writer that re-derives the Task-1/Task-2
+    // derived tables and the `user_confirmed` stamps from the vault ledgers
+    // (spec §8:511 defines re-derive/reset semantics for the REBUILD path
+    // only — the confirm/deny/attest live writers never reset, Task-5 E2).
+    // It walks the whole vault (attribution frontmatter), so it must NOT run
+    // on every open: it runs ONCE per brain lifetime, stamped in
+    // `llm_wiki_meta` like the V28 fresh-brain marker. A from-scratch brain
+    // rebuild starts with no stamp, so the first rooted open re-derives; a
+    // live brain's tables stay current through their write-time writers and
+    // pay nothing at steady state.
+    if let Some(roots) = vault_root.as_ref() {
+        let already: Option<String> = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'stated_ledger_rederived'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if already.is_none() {
+            match crate::db::stated_ledger::rebuild_rederive(conn, Path::new(&roots.canonical)) {
+                Ok(report) => {
+                    println!(
+                        "[ct::repair] #294 §8 rederive: confirmations read={} applied={} \
+                         attestations read={} dropped={} denials={} deposits={} (once per \
+                         brain; derived state re-derived from stated/ ledgers)",
+                        report.confirmations_read,
+                        report.confirmations_applied,
+                        report.attestations_read,
+                        report.attestations_dropped,
+                        report.denials_read,
+                        report.deposit_attribution_rows,
+                    );
+                    conn.execute(
+                        "INSERT OR IGNORE INTO llm_wiki_meta (key, value) \
+                         VALUES ('stated_ledger_rederived', '1')",
+                        [],
+                    )?;
+                }
+                Err(e) => {
+                    // Fail loud, fail deferred (the V22 shape): keep the
+                    // previous derived state, skip the stamp, and re-warn on
+                    // the next open until the ledger is repaired (spec §4
+                    // residual: a corrupted ledger is operator-visible, not
+                    // papered over).
+                    eprintln!(
+                        "[ct::repair FATAL] #294 §8 rederive DEFERRED: {e:#} — derived tables \
+                         keep prior state; fix the ledger and reopen to retry"
+                    );
+                }
+            }
+        }
+    }
 
     // Phase 5 data migration: fix resolution event taxonomy (run once, gated by version < 8)
     if version < 8 {
@@ -2631,6 +2714,95 @@ mod tests {
         assert_eq!(entity_id_working, expected);
     }
 
+    /// §8 rebuild convergence wiring (PR #294 round-2 review): the first
+    /// ROOTED open of a fresh brain re-derives derived state from the stated/
+    /// ledgers — an `llm_wiki_entries` row matching a `.confirmations.jsonl`
+    /// line's content hash is re-stamped `user_confirmed` — and the one-shot
+    /// is stamped in `llm_wiki_meta` so steady-state opens re-run nothing.
+    #[test]
+    fn fresh_rooted_open_rederives_derived_state_once_per_brain() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(vault.join("stated")).unwrap();
+        let roots = VaultRoots {
+            configured: vault.to_string_lossy().into_owned(),
+            canonical: vault.to_string_lossy().into_owned(),
+        };
+
+        // migrate #1: creates the full schema (OKF DDL + 0001/0002) and runs
+        // the once-per-brain rederive against an empty ledger.
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn, Some(roots.clone()), None).unwrap();
+
+        // Rebuild scenario: a fact re-ingested as librarian_inferred (fresh
+        // brain) plus a durable confirmation ledger line for it.
+        let title = "Confirmed fact";
+        let body = "The body.";
+        let hash = crate::db::stated_ledger::confirmation_content_hash(title, body);
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, \
+             source_type, created_at, updated_at) \
+             VALUES ('fact_x', 'ent_x', ?1, ?2, '[]', 'confirmed', 'librarian_inferred', 1, 1)",
+            rusqlite::params![title, body],
+        )
+        .unwrap();
+        std::fs::write(
+            vault.join("stated/.confirmations.jsonl"),
+            format!(
+                "{{\"fact_id\":\"fact_x\",\"content_hash\":\"{hash}\",\
+                 \"by\":\"kurt\",\"at\":\"2026-10-22T00:00:00Z\"}}\n"
+            ),
+        )
+        .unwrap();
+        // Fresh-brain condition: no rederive stamp (a rebuilt .brain has none).
+        conn.execute(
+            "DELETE FROM llm_wiki_meta WHERE key = 'stated_ledger_rederived'",
+            [],
+        )
+        .unwrap();
+
+        // migrate #2: the rooted open re-derives — the row is re-stamped and
+        // the one-shot marker is (re)written.
+        migrate(&conn, Some(roots.clone()), None).unwrap();
+        let stamped: String = conn
+            .query_row(
+                "SELECT source_type FROM llm_wiki_entries WHERE id = 'fact_x'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamped, "user_confirmed", "§8: rebuild re-derives the stamp");
+        let marker: String = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key = 'stated_ledger_rederived'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, "1");
+
+        // migrate #3: steady state — the marker gates, so a drifted row is
+        // NOT re-derived (live writers own the steady state; the walk costs
+        // nothing on re-open).
+        conn.execute(
+            "UPDATE llm_wiki_entries SET source_type = 'librarian_inferred' WHERE id = 'fact_x'",
+            [],
+        )
+        .unwrap();
+        migrate(&conn, Some(roots), None).unwrap();
+        let after: String = conn
+            .query_row(
+                "SELECT source_type FROM llm_wiki_entries WHERE id = 'fact_x'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            after, "librarian_inferred",
+            "one-shot: a stamped brain must not re-run the rederive on open"
+        );
+    }
+
     #[test]
     fn migration_v4_chunk_columns_roundtrip() {
         let conn = open_in_memory().unwrap();
@@ -3906,6 +4078,89 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    /// Task 9 (user-confirmation-queue, spec §3.7.3): the stated/ tree gets a
+    /// folder rule — synthesize + auto-approve — so a captured statement is
+    /// human tier the moment the librarian finishes (the attested-source arm
+    /// stamps `user_stated`). The rule is seeded on EVERY open (INSERT OR
+    /// IGNORE in the V25 block), so existing brains get it without a new
+    /// schema_version stamp (the task's no-DDL constraint).
+    #[test]
+    fn v25_block_seeds_stated_folder_rule() {
+        use crate::librarian::get_folder_mode;
+        // Rooted re-migrate: the V25 block (folder rules + kick-state ledger)
+        // only runs past a settled V22, so the open must carry a vault root
+        // — same setup as v25_seeds_agent_folder_rules_and_kick_state_table.
+        let conn = open_in_memory().unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 22", [])
+            .unwrap();
+        migrate(
+            &conn,
+            Some(VaultRoots {
+                configured: "/Users/kurt/vault".to_string(),
+                canonical: "/private/var/vault".to_string(),
+            }),
+            None,
+        )
+        .unwrap();
+        let (mode, auto) =
+            get_folder_mode(&conn, "stated/kurt/2026/some-statement.md");
+        assert_eq!(
+            (mode.as_str(), auto),
+            ("synthesize", true),
+            "stated/ must be synthesize + auto-approve for the app capture lane"
+        );
+    }
+
+    /// RED (F2 consumer, B1 round 2): `documents.path` is now the canonical
+    /// ABSOLUTE key in every regime, while V25's `folder_rules` rows are
+    /// vault-relative — so the librarian's literal ancestor walk must
+    /// relativize an absolute source path against the configured vault root
+    /// before matching, or the kick regime loses its synthesize +
+    /// auto-approve lane (V25's stated intent).
+    #[test]
+    fn get_folder_mode_matches_v25_rules_for_absolute_document_paths() {
+        use crate::librarian::get_folder_mode;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(vault.join("stated")).unwrap();
+        let brain = tmp.path().join("brain");
+        std::fs::create_dir_all(&brain).unwrap();
+        std::fs::write(
+            brain.join("config.json"),
+            serde_json::json!({ "vault_path": vault.to_string_lossy() }).to_string(),
+        )
+        .unwrap();
+        // File-backed ROOTED open: V22 settles and V25 seeds the
+        // vault-relative folder rules, and the connection carries its brain
+        // path so get_folder_mode resolves the vault root from the
+        // config.json beside it (never the live user-config resolver —
+        // issue #178 guard).
+        let db = crate::db::connection::AppDb::open_with_config(
+            &brain.join("brain.db"),
+            brain.join("config.json"),
+        )
+        .unwrap();
+        let conn = db.0;
+        // `documents.path` keys are produced by the canonical-root family
+        // (`virtual_path_key_at_root`), so the absolute source path the
+        // librarian sees is the CANONICAL spelling of the file even though
+        // the config.json root spelling above is the raw tempdir form
+        // (macOS: /var/... is a symlink to /private/var/...). Derive the
+        // input the same way production does.
+        let abs = crate::db::queue::virtual_path_key_at_root(
+            &vault,
+            std::path::Path::new("stated/kurt/2026/note.md"),
+        )
+        .unwrap();
+        let (mode, auto) = get_folder_mode(&conn, &abs);
+        assert_eq!(
+            (mode.as_str(), auto),
+            ("synthesize", true),
+            "RED (F2): an absolute documents.path no longer matches V25's \
+             vault-relative folder rules — the kick lane loses synthesize+auto"
+        );
     }
 
     /// Rootless opens must not stamp V25 past a deferred V22 (same masking

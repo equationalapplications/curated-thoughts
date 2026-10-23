@@ -30,6 +30,7 @@ pub mod restore_sync;
 pub mod review_shim;
 pub mod schema;
 pub mod schema_guard;
+pub mod stated_ledger;
 pub mod tasks;
 pub mod wiki_forget;
 pub mod wisdom;

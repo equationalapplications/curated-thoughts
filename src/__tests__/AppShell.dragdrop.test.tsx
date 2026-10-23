@@ -15,6 +15,17 @@ vi.mock('../lib/tauri', () => ({
   peekPendingConfigMalformed: vi.fn(() => Promise.resolve(null)),
   ackPendingConfigMalformed: vi.fn(() => Promise.resolve()),
   listProposals: vi.fn(() => Promise.resolve([])),
+  listQueue: vi.fn(() => Promise.resolve([])),
+  listDenied: vi.fn(() => Promise.resolve([])),
+  confirmQueueFact: vi.fn(() => Promise.resolve()),
+  denyQueueFact: vi.fn(() => Promise.resolve()),
+  unDenyQueueFact: vi.fn(() => Promise.resolve()),
+  captureStatement: vi.fn(() => Promise.resolve("stated/kurt/x.md")),
+  confirmOrCapture: vi.fn(() => Promise.resolve("confirmed")),
+  getQueueFact: vi.fn(() => Promise.resolve(null)),
+  drainUnverifiedPrompts: vi.fn(() =>
+    Promise.resolve({ prompts: [], total_unacked: 0 }),
+  ),
   getPrivacyMode: vi.fn(() => Promise.resolve('standard')),
   listEntities: vi.fn(() => Promise.resolve([])),
   getProviderConfig: vi.fn(() =>

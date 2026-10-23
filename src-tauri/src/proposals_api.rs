@@ -83,6 +83,11 @@ pub fn resolve_proposal_cmd(
         reject_reason.as_deref(),
         ResolveOptions {
             auto_approve: auto_approve.unwrap_or(false),
+            // The desktop desk is the ONLY human-tier surface (spec §3.7-A).
+            // An explicitly auto-approved resolve is not a human decision —
+            // mirrored from `reviewed_by` below — so the flag is honest even
+            // though arm 3 would stamp agent tier regardless.
+            human_surface: !auto_approve.unwrap_or(false),
             embed_profile: None,
             entry_embeddings: Some(entry_embeddings),
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
@@ -159,6 +164,9 @@ pub fn approve_wiki_page(
         None,
         ResolveOptions {
             auto_approve: false,
+            // Desktop legacy-shim approval — the ONLY human-tier surface
+            // (spec §3.7-A).
+            human_surface: true,
             embed_profile: None,
             entry_embeddings: Some(entry_embeddings),
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
@@ -219,6 +227,10 @@ pub fn reject_wiki_page(
         None,
         ResolveOptions {
             auto_approve: false,
+            // Desktop legacy-shim rejection — same surface as
+            // `approve_wiki_page`; no entries land on a pure rejection, so the
+            // flag cannot stamp a human tier here (spec §3.7-A).
+            human_surface: true,
             embed_profile: None,
             entry_embeddings: Some(std::collections::HashMap::new()),
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),

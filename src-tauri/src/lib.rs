@@ -23,7 +23,9 @@ pub mod ontology_config;
 pub mod outbox;
 mod pipeline;
 pub mod privacy;
+pub mod prompt_drop;
 mod proposals_api;
+pub mod queue_api;
 pub mod recall_bench_fixture;
 pub mod reconcile;
 pub mod retrieval;
@@ -82,7 +84,7 @@ use watcher::{spawn_vault_watcher, VaultEvent, VaultLock, WatcherHandle};
 
 pub struct DbState(Mutex<AppDb>);
 struct VaultConfigState(Mutex<VaultConfig>);
-struct EmbedProfileState(Mutex<crate::embedder::EmbedProfile>);
+pub struct EmbedProfileState(Mutex<crate::embedder::EmbedProfile>);
 
 /// Inner components of `PipelineHolder`: the job sender, worker thread, the
 /// consumer-side job counter, the optional channel for `PipelineStatusEvent`
@@ -3966,6 +3968,15 @@ pub fn make_test_app(tmp_path: &std::path::Path) -> tauri::App<tauri::test::Mock
             entities_api::add_entity_fact_cmd,
             entities_api::update_entity_fact_cmd,
             entities_api::archive_entity_fact_cmd,
+            queue_api::queue_list_cmd,
+            queue_api::queue_confirm_cmd,
+            queue_api::queue_deny_cmd,
+            queue_api::queue_undeny_cmd,
+            queue_api::queue_denied_cmd,
+            queue_api::queue_capture_cmd,
+            queue_api::queue_confirm_or_capture_cmd,
+            queue_api::queue_fact_get_cmd,
+            queue_api::unverified_prompts_drain_cmd,
             timeline_api::list_events_cmd,
             timeline_api::list_tasks_cmd,
             timeline_api::create_task_cmd,
@@ -4562,6 +4573,15 @@ pub fn run() {
             entities_api::add_entity_fact_cmd,
             entities_api::update_entity_fact_cmd,
             entities_api::archive_entity_fact_cmd,
+            queue_api::queue_list_cmd,
+            queue_api::queue_confirm_cmd,
+            queue_api::queue_deny_cmd,
+            queue_api::queue_undeny_cmd,
+            queue_api::queue_denied_cmd,
+            queue_api::queue_capture_cmd,
+            queue_api::queue_confirm_or_capture_cmd,
+            queue_api::queue_fact_get_cmd,
+            queue_api::unverified_prompts_drain_cmd,
             timeline_api::list_events_cmd,
             timeline_api::list_tasks_cmd,
             timeline_api::create_task_cmd,

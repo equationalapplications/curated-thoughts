@@ -498,7 +498,7 @@ async fn call_tool(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
+async fn mcp_exposes_all_17_tools_and_curated_crud_roundtrip() {
     if std::env::var("CURATED_MCP_INTEGRATION_TESTS").is_err() {
         eprintln!("Skipping MCP integration test — set CURATED_MCP_INTEGRATION_TESTS=1 to run");
         return;
@@ -541,6 +541,7 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
     let expected = [
         "curated_get_wiki_entry",
         "curated_proposals_list",
+        "curated_queue_list",
         "curated_recall_context",
         "curated_search_code",
         "vault_related_chunks",
@@ -558,7 +559,7 @@ async fn mcp_exposes_all_16_tools_and_curated_crud_roundtrip() {
         "wisdom_pending",
         "wisdom_propose_supersession",
     ];
-    assert_eq!(names, expected, "tools/list must expose all 16 names");
+    assert_eq!(names, expected, "tools/list must expose all 17 names");
 
     // -- INTENT rule 1: the direct-insert write tools are GONE ---------------
     for removed in [

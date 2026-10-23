@@ -2,23 +2,21 @@
 //! (ms timestamps on llm_wiki_entries, outbox rows, curated_entities touch).
 
 use crate::db::commit::{
-    fact_title_from_body, generate_llm_id, now_timestamps, push_entries_outbox,
-    wiki_fact_outbox_payload,
+    fact_title_from_body, now_timestamps, push_entries_outbox, wiki_fact_outbox_payload,
 };
-use crate::db::entities::EntityWisdom;
 use crate::db::outbox_format::OutboxOperation;
 use crate::embedder::{embed_batch, EmbedProfile};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use std::io::Write;
 
-// User-authored wisdom carries NO source_ref: NULL is the "no provenance"
-// value for manual facts. The old JSON sentinel
-// `{"proposal_id":null,"evidence":[]}` was a live mangleable ref (review
-// round 5, finding 1): the engine's setup rewrite collapsed it to the fixed
-// string `proposal_idnullevidence` — identical for every manual row, violating
-// the #186 invariant that a non-NULL source_ref must be a normalizer fixed
-// point. NULL sits outside the engine's selector entirely. The V18 migration
-// normalizes pre-existing sentinel/mangled rows on upgraded brains.
+// Task 9 (user-confirmation-queue): the app's DIRECT `user_stated` write is
+// RETIRED (spec §3.7.6, §2 rejected alternative "keeping the direct app write
+// alongside Path B"). Statements typed in the app are captured as `stated/`
+// files and ingested through the Librarian (`capture_statement`, below) so
+// they gain evidence and become deliverable mid-task. Update/archive of
+// existing facts keep their direct surfaces — only the INSERT path was the
+// two-semantics hole.
 
 fn assert_entity_active(conn: &Connection, entity_id: &str) -> Result<String> {
     // Task 7 (r13-MAJOR-1): a fact mutator keyed by a merged-away loser id
@@ -47,12 +45,258 @@ fn touch_entity(conn: &Connection, entity_id: &str, now_secs: i64) -> Result<()>
     Ok(())
 }
 
-/// Insert a user-authored wisdom entry with outbox row; returns the new entry.
+// ---------------------------------------------------------------------------
+// Path B capture (spec §3.7): statements typed in the app become stated/ files,
+// are attested by the app, and are ingested through the Librarian kick.
+// ---------------------------------------------------------------------------
+
+/// Author of app-captured statements. Single-user, local-first: identity is a
+/// string stamped on paths and frontmatter (spec §3.10 "Who verifies").
+pub const STATED_AUTHOR: &str = "kurt";
+
+/// Attestation identity for app-written statements and queue confirmations.
+pub const HUMAN_ATTESTER: &str = "human:kurt";
+
+/// Frontmatter capture-method marker for statements typed into the app.
+pub const CAPTURE_METHOD: &str = "app-statement";
+
+/// Everything the capture flow needs: where the brain db and the vault live,
+/// and the embed profile the kick's ingest leg should run under.
+pub struct CaptureContext {
+    pub db_path: std::path::PathBuf,
+    pub vault_root: std::path::PathBuf,
+    pub profile: crate::embedder::EmbedProfile,
+}
+
+/// What the queue-level confirm-or-capture entry did.
+pub enum QueueStatementOutcome {
+    /// The fact existed and was confirmed (`queue::confirm_fact_at`).
+    Confirmed,
+    /// No backing fact (or a fresh statement): Path B captured it; the string
+    /// is the vault-relative `stated/` document path.
+    Captured(String),
+}
+
+/// Capture a statement typed into the app (Path B entry point, spec §3.7).
+/// Renders `stated/kurt/<year>/<slug>.md`, writes the attestation of record
+/// and its `.attestations.jsonl` mirror, registers the kick, and runs the
+/// kick synchronously — the caller IS the host (Tauri command / test).
+pub fn capture_statement(ctx: &CaptureContext, text: &str) -> Result<String> {
+    capture_statement_with(ctx, text, None)
+}
+
+/// [`capture_statement`] with an injected librarian completer — Task 9's
+/// deterministic test seam (see `wisdom_deposit::run_kick_with`). Production
+/// callers use [`capture_statement`], which uses the configured provider.
+pub(crate) fn capture_statement_with(
+    ctx: &CaptureContext,
+    text: &str,
+    kick: Option<&dyn crate::librarian::LlmCompleter>,
+) -> Result<String> {
+    let mut conn = open_capture_conn(&ctx.db_path)?;
+    capture_statement_on(&mut conn, ctx, text, kick)
+}
+
+/// Rule 15 / spec §9: the queue-level confirm. `Some(fact_id)` with a live
+/// fact confirms it; a confirm-with-no-fact, or a fresh statement typed into
+/// the queue view, routes through `capture_statement` — the app CREATES the
+/// fact the only pipeline-consistent way (stated/ file, attest, kick), never
+/// a direct insert.
+pub fn confirm_or_capture(
+    ctx: &CaptureContext,
+    fact_id: Option<&str>,
+    fresh_text: Option<&str>,
+) -> Result<QueueStatementOutcome> {
+    confirm_or_capture_with(ctx, fact_id, fresh_text, None)
+}
+
+/// [`confirm_or_capture`] with the test completer seam.
+pub(crate) fn confirm_or_capture_with(
+    ctx: &CaptureContext,
+    fact_id: Option<&str>,
+    fresh_text: Option<&str>,
+    kick: Option<&dyn crate::librarian::LlmCompleter>,
+) -> Result<QueueStatementOutcome> {
+    let mut conn = open_capture_conn(&ctx.db_path)?;
+    if let Some(fact_id) = fact_id {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM llm_wiki_entries WHERE id = ?1 AND deleted_at IS NULL",
+                [fact_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if exists.is_some() {
+            crate::db::queue::confirm_fact_at(&conn, &ctx.vault_root, fact_id)?;
+            return Ok(QueueStatementOutcome::Confirmed);
+        }
+        // Fall through: the fact is gone (superseded/archived/never was) —
+        // spec §9 sends the statement down Path B instead of failing.
+    }
+    let text = fresh_text
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "fact not found or already archived and no statement text given: {fact_id:?}"
+            )
+        })?;
+    let rel = capture_statement_on(&mut conn, ctx, text, kick)?;
+    Ok(QueueStatementOutcome::Captured(rel))
+}
+
+/// Open the brain db READ-WRITE, NO-CREATE (the with_rw contract): a vanished
+/// or misconfigured brain must not be resurrected as an empty database.
+fn open_capture_conn(db_path: &std::path::Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .with_context(|| format!("open brain {}", db_path.display()))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(conn)
+}
+
+/// The whole capture: render + write the file, write the attestation row and
+/// its ledger mirror, register the kick, run the kick. Order matters: the
+/// FILE is written first (the pipeline reads bytes from the vault), the
+/// attestation row + ledger line second (so the Path B provenance arm finds
+/// a row whose hash matches the ingested document), the kick registration
+/// third, and the kick last.
 ///
-/// Equivalent to `add_wisdom_with_blob(conn, entity_id, body, None)` — the
-/// entry lands with a NULL embedding for the sweep to fill.
-pub fn add_wisdom(conn: &mut Connection, entity_id: &str, body: &str) -> Result<EntityWisdom> {
-    add_wisdom_with_blob(conn, entity_id, body, None)
+/// NOT atomic (verdict-corrected 2026-10-22): the steps are separate
+/// autocommits, so a failure between them can leave the file and its
+/// attestation row behind without a ledger line. That is TOLERATED BY
+/// DESIGN — the ledger line is the durable carrier, and the rebuild
+/// re-derives the table from it, dropping a row whose line is missing
+/// (spec §8; Task-5 E2 ruling). Do not paper over this with a transaction:
+/// hiding the partial state would hide the inconsistency the rebuild
+/// resolves. A kick failure is reported via the kick rows, not the return
+/// (`run_kick_with`).
+fn capture_statement_on(
+    conn: &mut Connection,
+    ctx: &CaptureContext,
+    text: &str,
+    kick: Option<&dyn crate::librarian::LlmCompleter>,
+) -> Result<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("statement text must not be empty");
+    }
+    let at_iso = chrono::Utc::now().to_rfc3339();
+    // Never overwrite an existing statement file: create with
+    // `create_new(true)` — atomic at the FS level, so two concurrent captures
+    // of the same text cannot both win the slug (an exists()-then-write
+    // pre-check races: the loser truncates the winner's file and its
+    // INSERT OR REPLACE steals the attestation row). An AlreadyExists loser
+    // retries with the next `-N` suffix, exactly as the deposit path does.
+    let year = chrono::Utc::now().format("%Y");
+    let base = slugify(text);
+    let dir = ctx.vault_root.join(format!("stated/{STATED_AUTHOR}/{year}"));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut n = 1u32;
+    let (rel, full) = loop {
+        let suffix = if n == 1 { String::new() } else { format!("-{n}") };
+        let rel = format!("stated/{STATED_AUTHOR}/{year}/{base}{suffix}.md");
+        let full = dir.join(format!("{base}{suffix}.md"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&full)
+        {
+            Ok(mut file) => {
+                file.write_all(render_statement(text, &at_iso).as_bytes())
+                    .with_context(|| format!("writing {}", full.display()))?;
+                break (rel, full);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("writing {}", full.display())));
+            }
+        }
+    };
+
+    // Attestation of record (spec §3.7.2): the brain-side row is the index
+    // the Path B provenance arm joins on; the .attestations.jsonl line is
+    // the durable carrier the rebuild re-derives from (spec §3.8). Both are
+    // keyed to the SAME hash routine the documents table uses, so the
+    // attested hash matches the ingested document exactly. The TABLE KEY is
+    // the watcher's virtual-absolute `documents.path` form (`virtual_path_key`,
+    // defect B1): in the running app the watcher — not this synchronous kick —
+    // ingests the capture, and the Path B join (`a.document_path = d.path`)
+    // must match its staged row. The ledger carrier below stays
+    // vault-relative (`rel`, spec §3.8).
+    // B1 round 2 (mechanism v2): derive the TABLE KEY through the CANONICAL
+    // root — `resolve_vault_root` returns the raw configured string, so a
+    // symlinked/relative/`..`-bearing configured path would key the
+    // attestation in a form the watcher's `documents.path` (canonical, via
+    // `canonical_vault_from_config`) never matches. Fail-closed on a
+    // vanished root via `?`. The ledger carrier below stays on the
+    // configured root (`rel`, spec §3.8).
+    let bytes = std::fs::read(&full)?;
+    let content_hash = crate::hasher::hash_bytes(&bytes);
+    let attestation_key =
+        super::queue::virtual_path_key_at_root(&ctx.vault_root, std::path::Path::new(&rel))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO stated_attestations
+             (document_path, content_hash, attested_by, attested_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![attestation_key, content_hash, HUMAN_ATTESTER, at_iso],
+    )?;
+    crate::db::stated_ledger::append_attestation(
+        &ctx.vault_root,
+        &crate::db::stated_ledger::AttestationLine {
+            document_path: rel.clone(),
+            content_hash,
+            by: HUMAN_ATTESTER.to_string(),
+            at: at_iso,
+        },
+    )?;
+
+    // App-written kick (spec §3.7.3): the APP registers the ledger row.
+    crate::wisdom_deposit::register_app_kick(conn, &rel)?;
+    crate::wisdom_deposit::run_kick_with(
+        ctx.db_path.clone(),
+        ctx.vault_root.clone(),
+        rel.clone(),
+        ctx.profile.clone(),
+        kick,
+    );
+    Ok(rel)
+}
+
+/// Filesystem-safe slug: lowercase ascii alphanumerics and single dashes,
+/// capped at 48 chars, never empty (`statement` fallback).
+fn slugify(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if out.len() >= 48 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "statement".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// The stated/ note body: YAML frontmatter recording WHO said it, HOW it was
+/// captured, and the human-readable attestation note (spec §3.7.1). Free text
+/// stays in the BODY — frontmatter values are app-controlled constants and a
+/// quoted ISO timestamp only, so no user text can break the YAML.
+fn render_statement(text: &str, at_iso: &str) -> String {
+    format!(
+        "---\nattributed_speaker: {STATED_AUTHOR}\ncapture_method: {CAPTURE_METHOD}\n\
+         attestation: \"{HUMAN_ATTESTER} attested this statement in the Curated Thoughts desktop app at {at_iso}\"\n\
+         ---\n\n{text}\n"
+    )
 }
 
 /// Compute the embedding blob for a single user-authored wisdom entry, OUTSIDE any
@@ -104,133 +348,6 @@ pub fn precompute_entry_embedding(profile: Option<&EmbedProfile>, body: &str) ->
     }
 }
 
-/// Insert a user-authored wisdom entry with an outbox row, taking a precomputed
-/// embedding blob. Callers that want write-time embeddings must compute the
-/// blob up front via [`precompute_entry_embedding`] — outside any lock.
-pub fn add_wisdom_with_blob(
-    conn: &mut Connection,
-    entity_id: &str,
-    body: &str,
-    embedding_blob: Option<Vec<u8>>,
-) -> Result<EntityWisdom> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let wisdom = add_wisdom_in_tx(&tx, entity_id, body, embedding_blob)?;
-    tx.commit()?;
-    Ok(wisdom)
-}
-
-/// Transaction-scoped core of [`add_wisdom_with_blob`]: inserts the entry and
-/// its outbox row on the CALLER's transaction (no BEGIN, no COMMIT) so MCP
-/// write tools can commit mutation + fail-closed audit atomically
-/// (PR #185 review: an audit failure must roll the mutation back, not leave a
-/// committed entry with no audit trail).
-pub fn add_wisdom_in_tx(
-    tx: &Transaction<'_>,
-    entity_id: &str,
-    body: &str,
-    embedding_blob: Option<Vec<u8>>,
-) -> Result<EntityWisdom> {
-    let body = body.trim();
-    if body.is_empty() {
-        bail!("wisdom body must not be empty");
-    }
-    let (now_secs, now_ms) = now_timestamps();
-    let wisdom_id = generate_llm_id("fact_");
-    let title = fact_title_from_body(body);
-
-    let entity_id = assert_entity_active(tx, entity_id)?;
-    // Issue #265: the scheme stamp rides in the same INSERT as the blob.
-    tx.execute(
-        "INSERT INTO llm_wiki_entries (
-            id, entity_id, title, body, tags, confidence, source_type,
-            source_hash, source_ref, created_at, updated_at, last_accessed_at,
-            access_count, deleted_at, embedding_blob, embed_scheme, embedding
-         ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, NULL, ?5, ?5, NULL, 0, NULL, ?6, ?7, NULL)",
-        params![
-            wisdom_id,
-            entity_id,
-            title,
-            body,
-            now_ms,
-            embedding_blob,
-            crate::embed_scheme::WRITE_SCHEME
-        ],
-    )?;
-    push_entries_outbox(
-        tx,
-        &entity_id,
-        &wisdom_id,
-        OutboxOperation::Insert,
-        wiki_fact_outbox_payload(
-            &wisdom_id,
-            &entity_id,
-            &title,
-            body,
-            &[],
-            "confirmed",
-            "user_stated",
-            None,
-            // NULL refs serialize as "" in the payload — the same convention
-            // the update path already uses via COALESCE(source_ref, '') and
-            // bundle apply via `.unwrap_or("")`.
-            "",
-            None,
-            None,
-            None,
-            None,
-            now_ms,
-            now_ms,
-            None,
-            // Manual Brain-mode inserts start without OKF provenance;
-            // the OKF v0.2 fields default to null until something
-            // explicitly populates them (import, verified annotation, etc.).
-            // `lifecycle_status` defaults to "stable" so outbox consumers
-            // reconstruct the persisted lifecycle state without an extra
-            // round-trip to the database.
-            Some("stable"),
-            None,
-            None,
-            None,
-            None,
-        ),
-        now_ms,
-    )?;
-    touch_entity(tx, &entity_id, now_secs)?;
-
-    Ok(EntityWisdom {
-        id: wisdom_id,
-        title,
-        body: body.to_string(),
-        tags: Vec::new(),
-        confidence: "confirmed".into(),
-        source_type: "user_stated".into(),
-        source_docs: Vec::new(),
-        updated_at: now_ms,
-        lifecycle_status: "stable".into(),
-        stale_after: None,
-        generated_by: None,
-        okf_sources: Vec::new(),
-        okf_verified: Vec::new(),
-        okf_usage_window: None,
-        last_verified_at: None,
-        last_verified_by: None,
-    })
-}
-
-/// Insert a user-authored wisdom entry, computing the embedding blob inside the call.
-/// New callers should compute the blob up front via
-/// [`precompute_entry_embedding`] so the blocking network call does not run
-/// under a write lock; this wrapper keeps the old test/library API.
-pub fn add_wisdom_with_profile(
-    conn: &mut Connection,
-    entity_id: &str,
-    body: &str,
-    profile: Option<&EmbedProfile>,
-) -> Result<EntityWisdom> {
-    let embedding_blob = precompute_entry_embedding(profile, body);
-    add_wisdom_with_blob(conn, entity_id, body, embedding_blob)
-}
-
 /// Rewrite a wisdom entry's body (title re-derived); pushes full-payload outbox UPDATE.
 ///
 /// Equivalent to `update_wisdom_with_blob(conn, entity_id, wisdom_id, body, None)`
@@ -248,8 +365,7 @@ pub fn update_wisdom(
 /// Rewrite a wisdom entry's body, storing a caller-computed embedding blob.
 ///
 /// The blob must be computed OUTSIDE the caller's DB lock via
-/// [`precompute_entry_embedding`], for the same reason as
-/// [`add_wisdom_with_blob`]: `embed_batch` is a blocking network round-trip.
+/// [`precompute_entry_embedding`]: `embed_batch` is a blocking network round-trip.
 ///
 /// `None` writes NULL, which is what a provider failure collapses to — the
 /// null-embedding sweep re-derives it later. Passing the fresh blob is what
@@ -270,7 +386,7 @@ pub fn update_wisdom_with_blob(
 }
 
 /// Transaction-scoped core of [`update_wisdom_with_blob`] (no BEGIN/COMMIT;
-/// same atomic audit rationale as [`add_wisdom_in_tx`]).
+/// same fail-closed audit discipline as the other transaction-scoped writers).
 pub fn update_wisdom_in_tx(
     tx: &Transaction<'_>,
     entity_id: &str,
@@ -418,7 +534,7 @@ pub fn archive_wisdom(conn: &mut Connection, entity_id: &str, wisdom_id: &str) -
 }
 
 /// Transaction-scoped core of [`archive_wisdom`] (no BEGIN/COMMIT; same
-/// atomic audit rationale as [`add_wisdom_in_tx`]).
+/// fail-closed audit discipline as the other transaction-scoped writers).
 pub fn archive_wisdom_in_tx(tx: &Transaction<'_>, entity_id: &str, wisdom_id: &str) -> Result<()> {
     let (now_secs, now_ms) = now_timestamps();
 
@@ -473,56 +589,8 @@ pub fn archive_wisdom_in_tx(tx: &Transaction<'_>, entity_id: &str, wisdom_id: &s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::connection::open_in_memory;
+    use crate::db::connection::{open_in_memory, AppDb};
     use crate::db::entities::{create_entity, get_entity, CreateEntityInput};
-
-    // -------------------------------------------------------------------------
-    // add_wisdom_with_profile tests (Task 10)
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn add_wisdom_with_profile_stores_an_embedding() {
-        temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
-            let mut conn = open_in_memory().unwrap();
-            let entity_id = make_entity(&mut conn);
-            let profile = crate::embedder::EmbedProfile::default();
-
-            let fact = add_wisdom_with_profile(
-                &mut conn,
-                &entity_id,
-                "A user-stated fact.",
-                Some(&profile),
-            )
-            .unwrap();
-
-            let blob_len: Option<i64> = conn
-                .query_row(
-                    "SELECT length(embedding_blob) FROM llm_wiki_entries WHERE id = ?1",
-                    [&fact.id],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(blob_len, Some(32));
-        });
-    }
-
-    #[test]
-    fn add_wisdom_without_a_profile_leaves_the_blob_null() {
-        let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&mut conn);
-
-        let fact = add_wisdom(&mut conn, &entity_id, "A user-stated fact.").unwrap();
-
-        let blob: Option<Vec<u8>> = conn
-            .query_row(
-                "SELECT embedding_blob FROM llm_wiki_entries WHERE id = ?1",
-                [&fact.id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(blob, None, "the sweep fills it later");
-    }
-
     // -------------------------------------------------------------------------
     // pre-existing tests
     // -------------------------------------------------------------------------
@@ -540,6 +608,49 @@ mod tests {
         .id
     }
 
+    /// Task 9 fixture: insert one live fact row DIRECTLY. The retired
+    /// `add_wisdom` fixture is gone; update/archive tests only need a row to
+    /// act on. Same column shape the retired INSERT used, so existing
+    /// assertions hold.
+    struct SeededFact {
+        id: String,
+    }
+
+    fn seed_fact(conn: &Connection, entity_id: &str, body: &str) -> SeededFact {
+        let (now_secs, now_ms) = now_timestamps();
+        let id = crate::db::commit::generate_llm_id("fact_");
+        let title = fact_title_from_body(body);
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embed_scheme, embedding
+             ) VALUES (?1, ?2, ?3, ?4, '[]', 'confirmed', 'user_stated', NULL, NULL, ?5, ?5, NULL, 0, NULL, NULL, ?6, NULL)",
+            params![
+                id,
+                entity_id,
+                title,
+                body,
+                now_ms,
+                crate::embed_scheme::WRITE_SCHEME
+            ],
+        )
+        .unwrap();
+        let _ = now_secs;
+        SeededFact { id: id.clone() }
+    }
+
+    /// [`seed_fact`] with a non-NULL embedding blob (for the sweep tests).
+    fn seed_fact_with_blob(conn: &Connection, entity_id: &str, body: &str) -> SeededFact {
+        let fact = seed_fact(conn, entity_id, body);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = ?2",
+            params![vec![7u8; 32], fact.id],
+        )
+        .unwrap();
+        fact
+    }
+
     fn outbox_count(conn: &Connection, record_id: &str, operation: &str) -> i64 {
         conn.query_row(
             "SELECT COUNT(*) FROM llm_wiki_outbox
@@ -551,80 +662,10 @@ mod tests {
     }
 
     #[test]
-    fn add_wisdom_inserts_row_outbox_and_touches_entity() {
-        let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&mut conn);
-        conn.execute(
-            "UPDATE curated_entities SET updated_at = 1 WHERE id = ?1",
-            [&entity_id],
-        )
-        .unwrap();
-
-        let fact = add_wisdom(&mut conn, &entity_id, "  The subject ships on Fridays.  ").unwrap();
-        assert!(fact.id.starts_with("fact_"));
-        assert_eq!(fact.body, "The subject ships on Fridays.");
-        assert_eq!(fact.title, "The subject ships on Fridays.");
-        assert_eq!(fact.confidence, "confirmed");
-        assert_eq!(fact.source_type, "user_stated");
-
-        let loaded = get_entity(&conn, &entity_id).unwrap().unwrap();
-        assert_eq!(loaded.facts.len(), 1);
-        assert_eq!(outbox_count(&conn, &fact.id, "INSERT"), 1);
-        assert!(loaded.updated_at > 1, "entity updated_at must be touched");
-
-        // Outbox payload must carry the persisted lifecycle_status so a
-        // consumer that reconstructs records from insert events does not
-        // lose it.
-        let payload_lifecycle: String = conn
-            .query_row(
-                "SELECT json_extract(payload, '$.lifecycle_status')
-                 FROM llm_wiki_outbox
-                 WHERE record_id = ?1 AND table_name = 'entries' AND operation = 'INSERT'",
-                [&fact.id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(payload_lifecycle, "stable");
-    }
-
-    #[test]
-    fn add_wisdom_writes_null_source_ref_not_a_mangleable_sentinel() {
-        // Review round 5, finding 1: the old JSON sentinel
-        // `{"proposal_id":null,"evidence":[]}` was a live mangleable ref —
-        // the engine's setup rewrite collapsed it to the fixed string
-        // `proposal_idnullevidence`, identical for every manual row. NULL is
-        // the "no provenance" value and sits outside the engine's selector.
-        let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&mut conn);
-
-        let fact = add_wisdom(&mut conn, &entity_id, "A user-stated fact.").unwrap();
-
-        let source_ref: Option<String> = conn
-            .query_row(
-                "SELECT source_ref FROM llm_wiki_entries WHERE id = ?1",
-                [&fact.id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            source_ref, None,
-            "user-authored wisdom must carry a NULL source_ref"
-        );
-    }
-
-    #[test]
-    fn add_wisdom_rejects_empty_body_and_missing_entity() {
-        let mut conn = open_in_memory().unwrap();
-        let entity_id = make_entity(&mut conn);
-        assert!(add_wisdom(&mut conn, &entity_id, "   ").is_err());
-        assert!(add_wisdom(&mut conn, "ent_missing", "Body").is_err());
-    }
-
-    #[test]
     fn update_wisdom_rewrites_body_and_pushes_outbox_update() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&mut conn);
-        let fact = add_wisdom(&mut conn, &entity_id, "Old body.").unwrap();
+        let fact = seed_fact(&conn, &entity_id, "Old body.");
 
         update_wisdom(
             &mut conn,
@@ -645,12 +686,9 @@ mod tests {
         temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
             let mut conn = open_in_memory().unwrap();
             let entity_id = make_entity(&mut conn);
-            let profile = crate::embedder::EmbedProfile::default();
 
             // Seed a fact with a real (non-NULL) embedding blob.
-            let fact =
-                add_wisdom_with_profile(&mut conn, &entity_id, "Original body.", Some(&profile))
-                    .unwrap();
+            let fact = seed_fact_with_blob(&conn, &entity_id, "Original body.");
             let blob_before: Option<Vec<u8>> = conn
                 .query_row(
                     "SELECT embedding_blob FROM llm_wiki_entries WHERE id = ?1",
@@ -685,7 +723,7 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&mut conn);
         assert!(update_wisdom(&mut conn, &entity_id, "fact_missing", "x").is_err());
-        let fact = add_wisdom(&mut conn, &entity_id, "Body.").unwrap();
+        let fact = seed_fact(&conn, &entity_id, "Body.");
         archive_wisdom(&mut conn, &entity_id, &fact.id).unwrap();
         assert!(update_wisdom(&mut conn, &entity_id, &fact.id, "x").is_err());
     }
@@ -694,7 +732,7 @@ mod tests {
     fn archive_wisdom_soft_deletes_and_pushes_outbox_delete() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&mut conn);
-        let fact = add_wisdom(&mut conn, &entity_id, "Ephemeral.").unwrap();
+        let fact = seed_fact(&conn, &entity_id, "Ephemeral.");
 
         archive_wisdom(&mut conn, &entity_id, &fact.id).unwrap();
 
@@ -707,26 +745,17 @@ mod tests {
         );
     }
 
-    /// Issue #265 Test (c) (write path): the user-authored wisdom writers
-    /// stamp `embed_scheme = WRITE_SCHEME` on both the INSERT and the body
-    /// UPDATE, in the same statement that writes the blob.
+    /// Issue #265 Test (c) (write path): the body UPDATE stamps
+    /// `embed_scheme = WRITE_SCHEME` in the same statement that clears the
+    /// blob. (The INSERT half of this test retired WITH the direct app write
+    /// — Task 9: user statements enter through the librarian pipeline, whose
+    /// scheme stamping is commit.rs's own pinned coverage.)
     #[test]
     fn wisdom_writers_stamp_embed_scheme() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&mut conn);
 
-        // INSERT path (add_wisdom_with_blob, also entities_api.rs via the
-        // same function): stamped whether or not a blob is present.
-        let fact = add_wisdom(&mut conn, &entity_id, "A stamped user fact.").unwrap();
-        let (blob, scheme): (Option<Vec<u8>>, String) = conn
-            .query_row(
-                "SELECT embedding_blob, embed_scheme FROM llm_wiki_entries WHERE id = ?1",
-                [&fact.id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(blob, None);
-        assert_eq!(scheme, crate::embed_scheme::WRITE_SCHEME);
+        let fact = seed_fact(&conn, &entity_id, "A stamped user fact.");
 
         // UPDATE path (update_wisdom_with_blob): a pre-#265 raw blob+stamp is
         // replaced — blob NULLed (sweep re-embeds) AND scheme re-stamped.
@@ -753,8 +782,8 @@ mod tests {
     fn archive_wisdom_purges_edges_touching_the_fact() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&mut conn);
-        let fact = add_wisdom(&mut conn, &entity_id, "The archived fact body.").unwrap();
-        let other = add_wisdom(&mut conn, &entity_id, "The surviving fact body.").unwrap();
+        let fact = seed_fact(&conn, &entity_id, "The archived fact body.");
+        let other = seed_fact(&conn, &entity_id, "The surviving fact body.");
 
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
@@ -795,9 +824,9 @@ mod tests {
     fn archive_wisdom_leaves_unrelated_edges_alone() {
         let mut conn = open_in_memory().unwrap();
         let entity_id = make_entity(&mut conn);
-        let fact = add_wisdom(&mut conn, &entity_id, "The archived fact body.").unwrap();
-        let b = add_wisdom(&mut conn, &entity_id, "Fact B body.").unwrap();
-        let c = add_wisdom(&mut conn, &entity_id, "Fact C body.").unwrap();
+        let fact = seed_fact(&conn, &entity_id, "The archived fact body.");
+        let b = seed_fact(&conn, &entity_id, "Fact B body.");
+        let c = seed_fact(&conn, &entity_id, "Fact C body.");
 
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
@@ -823,7 +852,7 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let surv = make_entity(&mut conn);
         let loser = make_entity(&mut conn);
-        let fact = add_wisdom(&mut conn, &surv, "Pre-merge body.").unwrap();
+        let fact = seed_fact(&conn, &surv, "Pre-merge body.");
         // Simulate a pre-merge row: keyed to the entity that later lost the merge.
         conn.execute(
             "UPDATE llm_wiki_entries SET entity_id = ?1 WHERE id = ?2",
@@ -867,7 +896,7 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let surv = make_entity(&mut conn);
         let loser = make_entity(&mut conn);
-        let fact = add_wisdom(&mut conn, &surv, "Pre-merge body.").unwrap();
+        let fact = seed_fact(&conn, &surv, "Pre-merge body.");
         conn.execute(
             "UPDATE llm_wiki_entries SET entity_id = ?1 WHERE id = ?2",
             params![loser, fact.id],
@@ -904,5 +933,882 @@ mod tests {
             "the DELETE payload is keyed to the survivor, never the loser"
         );
         assert_ne!(payload_json["entity_id"].as_str().unwrap(), loser);
+    }
+
+    // =========================================================================
+    // Task 9 (user-confirmation-queue plan): the stated/ capture flow.
+    // Spec §3.7 (Path B), §3.8 (ledger mirror), §9 (confirm with no backing
+    // fact). The three pinned plan tests are here; supporting helpers keep to
+    // this module.
+    // =========================================================================
+
+    /// Serializes every Task 9 test that pins CURATED_* process env.
+    static TASK9_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Deterministic librarian stand-in: returns one canned synthesis
+    /// response, so the kick's extraction leg runs the REAL pipeline
+    /// (chunk → propose → auto-approve → resolve) without an LLM host.
+    struct FixedCompleter {
+        response: String,
+    }
+
+    impl crate::librarian::LlmCompleter for FixedCompleter {
+        fn complete(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
+            Ok(self.response.clone())
+        }
+    }
+
+    /// Temp vault + temp brain with a REAL on-disk app db (the kick opens its
+    /// own connection by path). Returns the TempDir guard so the tree lives
+    /// until the caller's frame ends.
+    fn task9_dirs() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        let brain = tmp.path().join("brain");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&brain).unwrap();
+        (tmp, vault, brain)
+    }
+
+
+    /// Open the temp brain the way the APP does: config.json beside the db
+    /// carries the vault root, so the V22/V25 migration ladder actually
+    /// stamps (a rootless open defers V22 and V25's deposit_kick_state +
+    /// folder rules never land). Returns the raw Connection.
+    fn task9_open_brain(brain: &std::path::Path, vault: &std::path::Path) -> Connection {
+        std::fs::write(
+            brain.join("config.json"),
+            serde_json::json!({ "vault_path": vault.to_string_lossy() }).to_string(),
+        )
+        .unwrap();
+        AppDb::open_with_config(&brain.join("brain.db"), brain.join("config.json"))
+            .expect("open migrated temp brain db")
+            .0
+    }
+
+    fn task9_with_env<T>(vault: &std::path::Path, brain: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.to_str().unwrap())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+                ("CURATED_VAULT_ROOT", Some(vault.to_str().unwrap())),
+                ("CURATED_EMBED_STUB", Some("constant8")),
+            ],
+            f,
+        )
+    }
+
+    /// Seed an existing entity + one live fact so the canned proposal can
+    /// target `existing_id` (no new-entity ontology minting in this path).
+    fn task9_seed_entity_with_fact(conn: &Connection, entity_id: &str, fact_id: &str) {
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1, 'Alpha', 'concept', 'Alpha summary', 100, 100)",
+            [entity_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                source_type, created_at, updated_at)
+             VALUES (?1, ?2, 'Fact', 'Existing fact body', '[]', 'inferred',
+                'librarian_inferred', 100, 100)",
+            params![fact_id, entity_id],
+        )
+        .unwrap();
+    }
+
+    fn task9_proposal_json(body: &str) -> String {
+        serde_json::json!({
+            "proposals": [{
+                "target": { "existing_id": "ent-alpha" },
+                "reasoning": "Stated capture.",
+                "summary_update": null,
+                "facts": [{
+                    "op": "add",
+                    "body": body,
+                    "tags": [],
+                    "confidence": "inferred",
+                    "evidence": ["C1"]
+                }],
+                "edges": [],
+                "tasks": []
+            }]
+        })
+        .to_string()
+    }
+
+    fn task9_fact_count(conn: &Connection, source_type: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM llm_wiki_entries
+              WHERE source_type = ?1 AND deleted_at IS NULL",
+            [source_type],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Drive the WATCHER-side ingest over a `stated/` file — the app regime:
+    /// the watcher holds the vault lock for its lifetime, so the capture's
+    /// synchronous kick cannot ingest (queued_watcher fallback) and the
+    /// watcher stages + ingests the file, keying `documents.path` in the
+    /// virtual-absolute form (issue #204, defect B1). Shared by the B1
+    /// regression test and the task9 plan tests. Returns the document key.
+    fn task9_watch_ingest(
+        vault: &std::path::Path,
+        conn: &mut Connection,
+        profile: &EmbedProfile,
+        rel: &str,
+    ) -> String {
+        // The running watcher resolves the vault root CANONICALLY
+        // (`canonical_vault_from_config`), so the file event it stages is
+        // under the canonical root spelling and `documents.path` keys as
+        // canonical-absolute (macOS: /var/... is a symlink to
+        // /private/var/...). Drive the lane through the same canonical-root
+        // family (`virtual_path_key_at_root`) so the test's key derivation is
+        // platform-independent, never the raw tempdir spelling.
+        let root = vault.canonicalize().unwrap();
+        let abs = root.join(rel);
+        crate::db::queue::enqueue_vault_event(
+            conn,
+            notify::EventKind::Create(notify::event::CreateKind::Any),
+            &abs,
+            Some(&root),
+        )
+        .unwrap();
+        let doc_path = crate::db::queue::virtual_path_key(&abs).unwrap();
+        // Folder rules match by literal ancestor prefix, so the watcher-keyed
+        // lane carries its own absolute rule — the same synthesize +
+        // auto-approve intent V25 seeds for the kick's rel-keyed lane
+        // ('stated').
+        conn.execute(
+            "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
+             VALUES (?1, 'synthesize', 1)",
+            [root.join("stated").to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        crate::pipeline::ingest_document_virtual(
+            conn,
+            profile,
+            &doc_path,
+            &abs.to_string_lossy(),
+            false,
+            Some(root.to_string_lossy().as_ref()),
+        )
+        .unwrap();
+        doc_path
+    }
+
+    /// The librarian + commit leg over the watcher-keyed document: the
+    /// `synthesize` folder rule auto-approves, and the auto-approve resolve
+    /// runs the Path B predicate (all_sources_attested).
+    fn task9_librarian_leg(conn: &mut Connection, doc_path: &str, completer: &FixedCompleter) {
+        let model = crate::librarian::active_generation_model(crate::setup::recommended_model());
+        crate::librarian::generate_summary_with(conn, doc_path, &model, false, completer).unwrap();
+    }
+
+    /// Pinned plan test 1: capture renders `stated/kurt/<year>/<slug>.md`,
+    /// writes the attestation row + `.attestations.jsonl` line (content-hash
+    /// keyed), registers the kick ledger row, and the fact the librarian
+    /// commits is `user_stated` with evidence back to the stated file (spec
+    /// §3.7.4-5: instant confirm, no queue step).
+    ///
+    /// B1 adaptation (driver only — every §3.7 assertion kept): the test now
+    /// runs under the APP's lock regime. The watcher holds the vault lock for
+    /// its lifetime, so the synchronous kick cannot ingest (the ledger
+    /// honestly records `queued_watcher`) and the watcher-side pipeline does
+    /// the ingest, keying `documents.path` virtual-absolute. Pre-B1 this test
+    /// ran the kick with NO lock holder — a scenario that never occurs in the
+    /// running app — and the rel-keyed ingest masked the key-form defect.
+    #[test]
+    fn capture_statement_writes_attested_file_and_kicks() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, vault, brain) = task9_dirs();
+        task9_with_env(&vault, &brain, || {
+            // The brain db opens UNDER the env: V22 needs the vault root
+            // resolvable at open or the migration defers and V25's
+            // deposit_kick_state never lands.
+            let db_path = brain.join("brain.db");
+            let mut conn = task9_open_brain(&brain, &vault);
+            task9_seed_entity_with_fact(&conn, "ent-alpha", "fact-alpha");
+            let completer = FixedCompleter {
+                response: task9_proposal_json("Alpha renews the Baxter lease on March 1."),
+            };
+            let ctx = super::CaptureContext {
+                db_path: db_path.clone(),
+                vault_root: vault.clone(),
+                profile: EmbedProfile::default(),
+            };
+
+            // Names the seeded entity: the librarian's candidate matching is
+            // name-based (name_match_entities), and the mock proposal targets
+            // that entity.
+            let text = "Alpha's Baxter warehouse lease renews on March 1.";
+            // App regime: the watcher owns the vault lock while the capture
+            // runs — the synchronous kick cannot ingest.
+            let lock = crate::watcher::VaultLock::acquire(&brain).unwrap();
+            let rel = super::capture_statement_with(&ctx, text, Some(&completer)).unwrap();
+            drop(lock);
+
+            // 1. The file exists under stated/kurt/<year>/.
+            let year = chrono::Utc::now().format("%Y");
+            assert!(
+                rel.starts_with(&format!("stated/kurt/{year}/")) && rel.ends_with(".md"),
+                "rel path must be stated/kurt/<year>/<slug>.md, got: {rel}"
+            );
+            let full = vault.join(&rel);
+            assert!(full.is_file(), "stated file must exist at {full:?}");
+            let rendered = std::fs::read_to_string(&full).unwrap();
+            assert!(
+                rendered.contains(text),
+                "the statement text is the file body"
+            );
+
+            // 2. The attestation of record: brain row content-hash keyed to the
+            //    SAME hash routine the documents table uses (spec §3.7.2).
+            //    The TABLE KEY is the watcher's virtual-absolute documents.path
+            //    form (defect B1), derived through the canonical-root family
+            //    exactly as production capture does — never the raw tempdir
+            //    spelling (macOS /var/... vs /private/var/...).
+            let attestation_key =
+                crate::db::queue::virtual_path_key_at_root(&vault, std::path::Path::new(&rel))
+                    .unwrap();
+            let row_hash: String = conn
+                .query_row(
+                    "SELECT content_hash FROM stated_attestations WHERE document_path = ?1",
+                    [&attestation_key],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                row_hash,
+                crate::hasher::hash_bytes(&std::fs::read(&full).unwrap()),
+                "attestation hash must match the file bytes exactly"
+            );
+            let (attested_by, attested_at): (String, String) = conn
+                .query_row(
+                    "SELECT attested_by, attested_at FROM stated_attestations
+                      WHERE document_path = ?1",
+                    [&attestation_key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(attested_by, "human:kurt");
+            assert!(!attested_at.is_empty());
+
+            // 3. The vault ledger mirror: exactly one line for this file.
+            let ledger = std::fs::read_to_string(vault.join("stated/.attestations.jsonl")).unwrap();
+            let lines: Vec<&str> = ledger.lines().filter(|l| !l.trim().is_empty()).collect();
+            assert_eq!(lines.len(), 1, "one attestation line, not {lines:?}");
+            let line: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+            assert_eq!(line["document_path"].as_str().unwrap(), rel);
+            assert_eq!(line["content_hash"].as_str().unwrap(), row_hash);
+
+            // 4. The app registered the kick (spec §3.7.3: a NON-DEPOSIT kick
+            //    path — the kick ledger row is written by the APP). Under the
+            //    app's lock regime the synchronous kick cannot ingest, so the
+            //    ledger honestly records the handoff to the watcher.
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM deposit_kick_state WHERE path = ?1",
+                    [&rel],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                state, "queued_watcher",
+                "the kick must record the watcher handoff"
+            );
+
+            // Watcher-side ingest + librarian commit over the watcher-keyed
+            // document (defect B1's key-form contract).
+            let doc_path = task9_watch_ingest(&vault, &mut conn, &ctx.profile, &rel);
+            task9_librarian_leg(&mut conn, &doc_path, &completer);
+
+            // 5. Post-kick: the committed fact is user_stated WITH evidence
+            //    pointing back at the stated file.
+            assert_eq!(
+                task9_fact_count(&conn, "user_stated"),
+                1,
+                "the librarian's fact lands human-tier (instant confirm)"
+            );
+            let (fact_id, body): (String, String) = conn
+                .query_row(
+                    "SELECT id, body FROM llm_wiki_entries
+                      WHERE source_type = 'user_stated' AND deleted_at IS NULL",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(body, "Alpha renews the Baxter lease on March 1.");
+            let evidence_rows: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM librarian_evidence le
+                      JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id
+                      JOIN documents d ON d.id = ps.doc_id
+                     WHERE le.entry_id = ?1 AND d.path = ?2",
+                    params![fact_id, doc_path],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                evidence_rows > 0,
+                "the fact's evidence must trace to the stated/ source document"
+            );
+        });
+    }
+
+    /// Pinned plan test 2 (Rule 15 / spec §9): a fresh statement typed into
+    /// the queue view — confirm-with-no-backing-fact — routes through
+    /// capture_statement, so the fact is created the only pipeline-consistent
+    /// way (stated/ file + attest + kick), never a direct insert.
+    #[test]
+    fn fresh_statement_via_queue_creates_backing_fact() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, vault, brain) = task9_dirs();
+        task9_with_env(&vault, &brain, || {
+            // The brain db opens UNDER the env: V22 needs the vault root
+            // resolvable at open or the migration defers and V25's
+            // deposit_kick_state never lands.
+            let db_path = brain.join("brain.db");
+            let mut conn = task9_open_brain(&brain, &vault);
+            task9_seed_entity_with_fact(&conn, "ent-alpha", "fact-alpha");
+            let completer = FixedCompleter {
+                response: task9_proposal_json("Alpha ships the release on Friday."),
+            };
+            let ctx = super::CaptureContext {
+                db_path: db_path.clone(),
+                vault_root: vault.clone(),
+                profile: EmbedProfile::default(),
+            };
+
+            // No fact id: the queue's confirm-with-no-fact path. App lock
+            // regime: the watcher owns the vault lock while the capture runs
+            // (B1 adaptation — the pre-B1 driver ran the kick with no lock
+            // holder, masking the key-form defect).
+            let lock = crate::watcher::VaultLock::acquire(&brain).unwrap();
+            let super::QueueStatementOutcome::Captured(rel) =
+                super::confirm_or_capture_with(
+                    &ctx,
+                    None,
+                    Some("Alpha ships the release on Friday."),
+                    Some(&completer),
+                )
+                .unwrap()
+            else {
+                panic!("no backing fact ⇒ capture, not confirm");
+            };
+            drop(lock);
+            assert!(
+                vault.join(&rel).is_file(),
+                "a stated/ file backs the fresh statement: {rel}"
+            );
+
+            // Watcher-side ingest + librarian commit over the watcher-keyed
+            // document (defect B1's key-form contract).
+            let doc_path = task9_watch_ingest(&vault, &mut conn, &ctx.profile, &rel);
+            task9_librarian_leg(&mut conn, &doc_path, &completer);
+
+            assert_eq!(
+                task9_fact_count(&conn, "user_stated"),
+                1,
+                "the fresh statement's backing fact exists after the kick"
+            );
+            assert_eq!(
+                task9_fact_count(&conn, "librarian_inferred"),
+                1,
+                "the pre-seeded entity fact is untouched"
+            );
+        });
+    }
+
+    /// RED (B1 regression): the APP's capture regime. The watcher holds the
+    /// vault lock for its lifetime, so the capture's synchronous kick cannot
+    /// ingest — it falls back to `queued_watcher` and the WATCHER stages and
+    /// ingests the stated file, keying `documents.path` in the VIRTUAL
+    /// ABSOLUTE form (issue #204 contract). The attestation row must carry
+    /// the SAME key form, or the Path B provenance arm (`all_sources_attested`
+    /// joining `a.document_path = d.path`) never matches and the §3.7
+    /// "instant confirm" contract lands `librarian_inferred`.
+    #[test]
+    fn capture_through_watcher_ingest_stamps_user_stated() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, vault, brain) = task9_dirs();
+        task9_with_env(&vault, &brain, || {
+            let db_path = brain.join("brain.db");
+            let mut conn = task9_open_brain(&brain, &vault);
+            task9_seed_entity_with_fact(&conn, "ent-alpha", "fact-alpha");
+            let completer = FixedCompleter {
+                response: task9_proposal_json("Alpha renews the Baxter lease on March 1."),
+            };
+            let ctx = super::CaptureContext {
+                db_path: db_path.clone(),
+                vault_root: vault.clone(),
+                profile: EmbedProfile::default(),
+            };
+            let text = "Alpha's Baxter warehouse lease renews on March 1.";
+
+            // App regime: hold the vault lock so the synchronous kick cannot
+            // ingest (queued_watcher fallback — wisdom_deposit.rs:484-491).
+            let lock = crate::watcher::VaultLock::acquire(&brain).unwrap();
+            let rel = super::capture_statement_with(&ctx, text, Some(&completer)).unwrap();
+            drop(lock);
+
+            // Watcher leg, driven exactly the way the running app's watcher
+            // does: it resolves the vault root CANONICALLY
+            // (`canonical_vault_from_config`), so the file event arrives under
+            // the canonical root spelling and `documents.path` keys as
+            // canonical-absolute (queue.rs:93, issue #204) — NOT the
+            // vault-relative rel, and never the raw tempdir spelling (macOS
+            // /var/... is a symlink to /private/var/...).
+            let root = vault.canonicalize().unwrap();
+            let abs = root.join(&rel);
+            let abs_key = crate::db::queue::virtual_path_key(&abs).unwrap();
+            crate::db::queue::enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Create(notify::event::CreateKind::Any),
+                &abs,
+                Some(&root),
+            )
+            .unwrap();
+            let doc_path: String = conn
+                .query_row(
+                    "SELECT path FROM documents WHERE path = ?1",
+                    [&abs_key],
+                    |r| r.get(0),
+                )
+                .expect("the watcher staged the stated file under its absolute key form");
+            crate::pipeline::ingest_document_virtual(
+                &conn,
+                &ctx.profile,
+                &doc_path,
+                &abs.to_string_lossy(),
+                false,
+                Some(root.to_string_lossy().as_ref()),
+            )
+            .unwrap();
+
+            // Librarian + commit over the WATCHER-keyed document. Folder rules
+            // match by literal ancestor prefix, so the watcher-keyed lane is
+            // configured with its own absolute rule — the same synthesize +
+            // auto-approve intent V25 seeds for the kick's rel-keyed lane
+            // ('stated'). The auto-approve resolve runs the Path B predicate.
+            conn.execute(
+                "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
+                 VALUES (?1, 'synthesize', 1)",
+                [root.join("stated").to_string_lossy().as_ref()],
+            )
+            .unwrap();
+            let model =
+                crate::librarian::active_generation_model(crate::setup::recommended_model());
+            crate::librarian::generate_summary_with(
+                &mut conn, &doc_path, &model, false, &completer,
+            )
+            .unwrap();
+
+            // The B1 contract: the attestation row and the documents row must
+            // share the SAME key form so the Path B arm joins.
+            let att_path: String = conn
+                .query_row("SELECT document_path FROM stated_attestations", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                att_path, doc_path,
+                "RED (B1): the attestation is keyed vault-relative while the watcher keyed \
+                 documents.path absolute — the Path B join can never match"
+            );
+            let source_type: String = conn
+                .query_row(
+                    "SELECT source_type FROM llm_wiki_entries
+                      WHERE body = ?1 AND deleted_at IS NULL",
+                    ["Alpha renews the Baxter lease on March 1."],
+                    |r| r.get(0),
+                )
+                .expect("the stated fact committed");
+            assert_eq!(
+                source_type, "user_stated",
+                "RED (B1): the join miss lands the capture librarian_inferred, breaking \
+                 §3.7 instant confirm"
+            );
+        });
+    }
+
+    /// F3 (B1 round 2): the ROOT-ASYMMETRY variant of the regression above.
+    /// The round-1 test passed the same tempdir root to the capture and the
+    /// watcher lane, so it could not detect F1: capture keys
+    /// `stated_attestations` from the RAW configured root
+    /// (`resolve_vault_root`, no canonicalization) while the watcher keys
+    /// `documents.path` from the CANONICAL path (`canonical_vault_from_config`).
+    /// Here the configured capture root goes through a SYMLINK and the
+    /// watcher lane uses the canonical path — the join must still match and
+    /// the fact must still stamp `user_stated`.
+    #[test]
+    fn capture_symlinked_vault_keeps_provenance_join() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, vault, brain) = task9_dirs();
+        let link = _tmp.path().join("vault-through-link");
+        std::os::unix::fs::symlink(&vault, &link).unwrap();
+        task9_with_env(&vault, &brain, || {
+            let db_path = brain.join("brain.db");
+            let mut conn = task9_open_brain(&brain, &vault);
+            task9_seed_entity_with_fact(&conn, "ent-alpha", "fact-alpha");
+            let completer = FixedCompleter {
+                response: task9_proposal_json("Alpha renews the Baxter lease on March 1."),
+            };
+            // The configured capture root is the SYMLINK; the watcher lane
+            // below keys the canonical path — the exact F1 asymmetry.
+            let ctx = super::CaptureContext {
+                db_path: db_path.clone(),
+                vault_root: link.clone(),
+                profile: EmbedProfile::default(),
+            };
+            let text = "Alpha's Baxter warehouse lease renews on March 1.";
+
+            let lock = crate::watcher::VaultLock::acquire(&brain).unwrap();
+            let rel = super::capture_statement_with(&ctx, text, Some(&completer)).unwrap();
+            drop(lock);
+
+            // Watcher leg over the CANONICAL path (what the running app's
+            // watcher sees after `canonical_vault_from_config`); key through
+            // the production canonical-root family, never the raw tempdir
+            // spelling (macOS /var/... vs /private/var/...).
+            let root = vault.canonicalize().unwrap();
+            let abs = root.join(&rel);
+            let abs_key = crate::db::queue::virtual_path_key(&abs).unwrap();
+            crate::db::queue::enqueue_vault_event(
+                &mut conn,
+                notify::EventKind::Create(notify::event::CreateKind::Any),
+                &abs,
+                Some(&root),
+            )
+            .unwrap();
+            let doc_path: String = conn
+                .query_row(
+                    "SELECT path FROM documents WHERE path = ?1",
+                    [&abs_key],
+                    |r| r.get(0),
+                )
+                .expect("the watcher staged the stated file under its canonical absolute key");
+            crate::pipeline::ingest_document_virtual(
+                &conn,
+                &ctx.profile,
+                &doc_path,
+                &abs.to_string_lossy(),
+                false,
+                Some(root.to_string_lossy().as_ref()),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
+                 VALUES (?1, 'synthesize', 1)",
+                [root.join("stated").to_string_lossy().as_ref()],
+            )
+            .unwrap();
+            let model =
+                crate::librarian::active_generation_model(crate::setup::recommended_model());
+            crate::librarian::generate_summary_with(
+                &mut conn, &doc_path, &model, false, &completer,
+            )
+            .unwrap();
+
+            let att_path: String = conn
+                .query_row("SELECT document_path FROM stated_attestations", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                att_path, doc_path,
+                "RED (F1): the capture keyed the attestation through the SYMLINKED root \
+                 while the watcher keyed documents.path canonically — the Path B join \
+                 misses again"
+            );
+            let source_type: String = conn
+                .query_row(
+                    "SELECT source_type FROM llm_wiki_entries
+                      WHERE body = ?1 AND deleted_at IS NULL",
+                    ["Alpha renews the Baxter lease on March 1."],
+                    |r| r.get(0),
+                )
+                .expect("the stated fact committed");
+            assert_eq!(
+                source_type, "user_stated",
+                "RED (F1): the root asymmetry demotes the capture to librarian_inferred"
+            );
+        });
+    }
+
+    /// F1 acceptance law (B1 round 2), pinned across root shapes: for the
+    /// SAME underlying stated file, the capture-era `stated_attestations`
+    /// key == the watcher-era `documents.path` == the rebuild-era key, under
+    /// EACH of a symlinked vault, a relative config path, and a `..`-bearing
+    /// config path. RED at the round-1 code: capture and rebuild derive keys
+    /// from the raw configured root while the watcher keys the canonical
+    /// path, so the capture and rebuild legs fail for every shape here.
+    #[test]
+    fn attestation_key_law_holds_across_configured_root_shapes() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // The relative shape resolves against the process CWD, so chdir into
+        // each shape's tmp root while it runs. The guard restores the CWD on
+        // EVERY scope exit — including a shape's panic unwind, BEFORE that
+        // shape's TempDir deletes the directory the process CWD sits in.
+        // Without it, one failing shape leaves the whole test binary with a
+        // deleted CWD and concurrent tests fail with ENOENT (seen on macOS:
+        // kick_ingests_from_vault_not_cwd died in current_dir()).
+        struct CwdGuard(std::path::PathBuf);
+        impl Drop for CwdGuard {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let orig_cwd = std::env::current_dir().unwrap();
+
+        type ShapeConfig = fn(&std::path::Path, &std::path::Path) -> std::path::PathBuf;
+        let shapes: Vec<(&str, ShapeConfig)> = vec![
+            (
+                "symlinked",
+                |tmp: &std::path::Path, real: &std::path::Path| {
+                    let link = tmp.join("vault-link");
+                    std::os::unix::fs::symlink(real, &link).unwrap();
+                    link
+                },
+            ),
+            (
+                "relative-through-symlink",
+                |tmp: &std::path::Path, real: &std::path::Path| {
+                    let link = tmp.join("vault-link");
+                    std::os::unix::fs::symlink(real, &link).unwrap();
+                    std::path::PathBuf::from(
+                        link.strip_prefix(tmp).unwrap().to_string_lossy().as_ref(),
+                    )
+                },
+            ),
+            (
+                "dotdot-bearing",
+                |_tmp: &std::path::Path, real: &std::path::Path| real.join("..").join("vault"),
+            ),
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        for (label, configured_of) in shapes {
+            // A FRESH brain per shape: stated_attestations and the ledger
+            // must not accumulate rows across shapes. `_cwd` is declared
+            // AFTER `tmp` so it drops FIRST on any exit (normal or unwind):
+            // the process CWD is back at the original directory before the
+            // TempDir deletes the directory it pointed at.
+            let tmp = tempfile::TempDir::new().unwrap();
+            let _cwd = CwdGuard(orig_cwd.clone());
+            let real = tmp.path().join("vault");
+            std::fs::create_dir_all(&real).unwrap();
+            let brain = tmp.path().join("brain");
+            std::fs::create_dir_all(&brain).unwrap();
+            let configured = configured_of(tmp.path(), &real);
+            std::env::set_current_dir(tmp.path()).unwrap();
+            task9_with_env(&real, &brain, || {
+                let mut conn = task9_open_brain(&brain, &real);
+                let ctx = super::CaptureContext {
+                    db_path: brain.join("brain.db"),
+                    vault_root: configured.clone(),
+                    profile: EmbedProfile::default(),
+                };
+                let text = format!("Alpha renews the Baxter lease for the {label} shape.");
+
+                // Hold the vault lock so the capture kick cannot ingest: the
+                // only writers under test are the capture attestation, the
+                // watcher staging, and the rebuild.
+                let lock = crate::watcher::VaultLock::acquire(&brain).unwrap();
+                let rel = super::capture_statement_with(&ctx, &text, None).unwrap();
+                drop(lock);
+
+                // The canonical form is the law's anchor: what the watcher
+                // (canonical_vault_from_config) and the rebuild
+                // (canonical roots) already derive. Derive it through the
+                // SAME production helper, never the raw tempdir spelling
+                // (macOS: /var/... is a symlink to /private/var/...).
+                let expected =
+                    crate::db::queue::virtual_path_key_at_root(&real, std::path::Path::new(&rel))
+                        .unwrap();
+
+                // Watcher leg over the canonical path (the configured root the
+                // watcher runs under is canonical).
+                let canonical_root = std::fs::canonicalize(&real).unwrap();
+                let abs = canonical_root.join(&rel);
+                crate::db::queue::enqueue_vault_event(
+                    &mut conn,
+                    notify::EventKind::Create(notify::event::CreateKind::Any),
+                    &abs,
+                    Some(&canonical_root),
+                )
+                .unwrap();
+                let watcher_key: String = conn
+                    .query_row(
+                        "SELECT path FROM documents WHERE path = ?1",
+                        [&expected],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("[{label}] watcher staging missing at {expected:?}: {e}")
+                    });
+
+                // Capture-era key.
+                let capture_key: String = conn
+                    .query_row("SELECT document_path FROM stated_attestations", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+
+                // Rebuild-era key, re-derived through the SAME configured root.
+                crate::db::stated_ledger::rebuild_rederive(&conn, &configured).unwrap();
+                let rebuild_key: String = conn
+                    .query_row("SELECT document_path FROM stated_attestations", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+
+                if capture_key != expected {
+                    failures.push(format!(
+                        "[{label}] capture-era key {capture_key:?} != canonical {expected:?}"
+                    ));
+                }
+                if rebuild_key != expected {
+                    failures.push(format!(
+                        "[{label}] rebuild-era key {rebuild_key:?} != canonical {expected:?}"
+                    ));
+                }
+                if watcher_key != expected {
+                    failures.push(format!(
+                        "[{label}] watcher key {watcher_key:?} != canonical {expected:?}"
+                    ));
+                }
+            });
+        }
+        assert!(
+            failures.is_empty(),
+            "RED (F1 law): capture/watcher/rebuild keys diverge for the same file:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Pinned plan test 3: the app's direct `add_wisdom_in_tx` write is
+    /// RETIRED (spec §3.7.6 / §2 rejected alternative). Compile-level proof:
+    /// the function no longer exists (this file would not compile if it did);
+    /// the grep guard pins non-reintroduction on the whole retired surface.
+    #[test]
+    fn direct_write_is_gone() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for rel_file in ["src/db/wisdom.rs", "src/entities_api.rs", "src/db/mod.rs"] {
+            let text = std::fs::read_to_string(manifest.join(rel_file)).unwrap();
+            // Needle built by concatenation so the guard does not trip over
+            // its own source text. The "fn " anchor pins the DEFINITION (and
+            // call sites), never this test's documentation of the retirement.
+            let needle = format!("fn add_{}", "wisdom_in_tx");
+            assert!(
+                !text.contains(&needle),
+                "{rel_file} still defines or references the retired direct write"
+            );
+        }
+    }
+
+    // ---- Task 9 supporting tests (capture-path behavior beyond the pins) --
+
+    /// Empty/whitespace statements are rejected BEFORE anything is written —
+    /// no file, no attestation row, no ledger line, no kick row.
+    #[test]
+    fn capture_statement_rejects_empty_text() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, vault, brain) = task9_dirs();
+        task9_with_env(&vault, &brain, || {
+            // The brain db opens UNDER the env: V22 needs the vault root
+            // resolvable at open or the migration defers and V25's
+            // deposit_kick_state never lands.
+            let db_path = brain.join("brain.db");
+            let conn = task9_open_brain(&brain, &vault);
+            let ctx = super::CaptureContext {
+                db_path: db_path.clone(),
+                vault_root: vault.clone(),
+                profile: EmbedProfile::default(),
+            };
+            assert!(super::capture_statement_with(&ctx, "   ", None).is_err());
+            assert!(
+                !vault.join("stated").exists(),
+                "no stated tree is created for an empty statement"
+            );
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM stated_attestations", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(rows, 0, "no attestation row for an empty statement");
+        });
+    }
+
+    /// Two statements with the same opening words never collide: the second
+    /// capture gets a `-2` suffix — a statement file is never overwritten.
+    #[test]
+    fn capture_statement_dedupes_duplicate_slugs() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, vault, brain) = task9_dirs();
+        task9_with_env(&vault, &brain, || {
+            // The brain db opens UNDER the env: V22 needs the vault root
+            // resolvable at open or the migration defers and V25's
+            // deposit_kick_state never lands.
+            let db_path = brain.join("brain.db");
+            let conn = task9_open_brain(&brain, &vault);
+            let ctx = super::CaptureContext {
+                db_path: db_path.clone(),
+                vault_root: vault.clone(),
+                profile: EmbedProfile::default(),
+            };
+            let text = "The warehouse lease renews on March 1, 2027 per the landlord notice!";
+            let rel1 = super::capture_statement_with(&ctx, text, None).unwrap();
+            let rel2 = super::capture_statement_with(&ctx, text, None).unwrap();
+            assert_ne!(rel1, rel2, "same slug twice must dedupe, not overwrite");
+            assert!(rel2.trim_end_matches(".md").ends_with("-2"));
+            assert!(vault.join(&rel1).is_file());
+            assert!(vault.join(&rel2).is_file());
+            // No generation host in this env: the kicks recorded `chunked`
+            // honestly instead of pretending the librarian ran.
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM deposit_kick_state WHERE path = ?1",
+                    [&rel1],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(state, "chunked");
+        });
+    }
+
+    /// The stated file's frontmatter records WHO said it, HOW it was
+    /// captured, and the human-readable attestation note (spec §3.7.1);
+    /// the statement text itself stays in the BODY.
+    #[test]
+    fn capture_statement_renders_speaker_capture_attestation_frontmatter() {
+        let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, vault, brain) = task9_dirs();
+        let db_path = brain.join("brain.db");
+        let _conn = task9_open_brain(&brain, &vault);
+        task9_with_env(&vault, &brain, || {
+            let ctx = super::CaptureContext {
+                db_path: db_path.clone(),
+                vault_root: vault.clone(),
+                profile: EmbedProfile::default(),
+            };
+            let text = "Alpha is the preferred vendor for print work.";
+            let rel = super::capture_statement_with(&ctx, text, None).unwrap();
+            let rendered = std::fs::read_to_string(vault.join(&rel)).unwrap();
+            assert!(rendered.starts_with("---\n"), "frontmatter opens the file");
+            assert!(rendered.contains("attributed_speaker: kurt"));
+            assert!(rendered.contains("capture_method: app-statement"));
+            assert!(
+                rendered.contains("attestation: \"human:kurt attested this statement"),
+                "a human-readable attestation note is in the frontmatter"
+            );
+            assert!(
+                rendered.trim_end().ends_with(text),
+                "the statement text is the body, untouched"
+            );
+        });
     }
 }

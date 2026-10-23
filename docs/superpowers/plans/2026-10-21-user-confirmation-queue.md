@@ -1,0 +1,459 @@
+# User Confirmation Queue Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Chat-stated and app-stated facts become human-verifiable through an in-app confirmation queue; confirmed facts join the activity delivery aperture; all agent-facing recall results carry provenance labels.
+
+**Architecture:** Two entry paths (Path A: agent deposits with attribution frontmatter; Path B: app-written `stated/` files with an attestation table) feed one queue query (live ∧ not-human-tier ∧ not-denied). Confirm/deny are app-only writes shaped on `drafts.rs:62-74`, mirrored to app-written JSONL ledgers in `stated/` for rebuild. Recall gains per-hit `source_type`/`verified` labels and a confidence ordinal; the #282 §5 aperture widens to `["user_stated", "user_confirmed"]` via `provenance_filter: Option<&[&str]>`.
+
+**Tech Stack:** Rust (src-tauri), SQLite (brain), Tauri 2 desktop app (React/TS frontend), `ct` CLI (tools/).
+
+**Spec:** `docs/superpowers/specs/2026-10-20-user-confirmation-queue-design.md` (rev 4.1 — the binding authority; the plan argues from it, and on conflict the spec wins).
+
+## Global Constraints
+
+- Working tree: branch `spec/user-confirmation-queue`, repo `/home/kv-thinkpad-t420-ubuntu/src/curated-thoughts`. NEVER push; the controller pushes.
+- Rust gates are SERIAL: `CARGO_BUILD_JOBS=2`, shared target dir `.cargo-shared-target` (absolute `CARGO_TARGET_DIR` per repo AGENTS.md), debuginfo stripped; exactly ONE build tree; `target/` is banned.
+- Every cargo gate redirects FULL output to a log file (never pipe-judge an exit code); `cargo check` gates include `--tests`.
+- `pnpm install --frozen-lockfile` before the first frontend gate (ddl_compat fixture).
+- Message mode is byte-identical: no `SCHEMA_VERSION` bump for any change in Tasks 1–9 except where a migration adds tables/columns (migrations do not bump the cached-output schema version); the `ct wisdom match` cached-output replay test must stay green after every task.
+- Provenance vocabulary verbatim: `librarian_inferred`, `user_stated`, `user_confirmed`, `immutable_document` (`wisdom_match.rs:47-52`). Human tier = `user_stated` + `user_confirmed` only.
+- `user_confirmed` is stamped ONLY where `human_surface: true` (Task 3). No other surface may pass it.
+- New DB objects use one migration; table names: `stated_attestations`, `queue_denials`. Ledger files: `stated/.confirmations.jsonl`, `stated/.attestations.jsonl`, `stated/.denials.jsonl` (ingest tier NONE).
+- Commit style: conventional commits, one commit per task, exact messages pinned per task.
+- Harness noise: `bash: .../snap/code/.../bin/env: No such file or directory` lines are noise, not failures.
+
+---
+
+### Task 1: Attribution carrier — deposit frontmatter + deposit-time index
+
+**Files:**
+- Modify: `src-tauri/src/wisdom_deposit.rs` (`render_deposit_file` ~`:89-104`; `audit_and_seed_kick` closure ~`:454-480`)
+- Modify: `src-tauri/src/wisdom_deposit.rs` (deposit argument struct — the type the MCP deposit tool and internal callers pass)
+- Test: `src-tauri/src/wisdom_deposit.rs` (test module)
+
+**Interfaces:**
+- Produces: `DepositAttribution { speaker: String, kind: AttributionKind, source: String }`, `enum AttributionKind { Verbatim, RestatedAtDirection }`, `TryFrom<&str> for AttributionKind`, fn `validate_handle(&str) -> Result<(), String>` (regex `^[a-z]+:[A-Za-z0-9_.-]+$`); `render_deposit_file` gains `attribution: Option<&DepositAttribution>`; brain table `deposit_attribution(document_path TEXT PRIMARY KEY, speaker TEXT, kind TEXT, source TEXT, deposited_at TEXT)`.
+
+- [x] **Step 1: Write the failing tests**
+
+```rust
+#[test]
+fn attribution_frontmatter_renders_and_parses_back() {
+    let a = DepositAttribution { speaker: "kurt".into(), kind: AttributionKind::RestatedAtDirection, source: "discord:1562137256498569278".into() };
+    let md = render_test_deposit(Some(&a));          // harness helper: renders a minimal deposit note
+    assert!(md.starts_with("---\nattributed_speaker: kurt\nattribution_kind: restated_at_direction\nattribution_source: discord:1562137256498569278\n---\n"));
+    assert_eq!(AttributionKind::try_from("verbatim").unwrap(), AttributionKind::Verbatim);
+    assert!(AttributionKind::try_from("paraphrase").is_err());
+    assert!(validate_handle("discord:123").is_ok());
+    assert!(validate_handle("has space:123").is_err());
+    assert!(validate_handle("discord:").is_err());
+}
+
+#[test]
+fn unattributed_deposit_renders_byte_identical() {
+    assert_eq!(render_test_deposit(None), BASELINE_NOTE); // BASELINE_NOTE: exact pre-change render, pinned verbatim in the test
+}
+
+#[test]
+fn attribution_index_lands_in_audit_and_seed_kick_transaction() {
+    // scratch brain: deposit with attribution via the internal deposit path
+    // assert deposit_attribution has the row AND kick ledger row exists in the SAME sqlite transaction scope (query both after)
+}
+```
+
+- [x] **Step 2: Run to verify RED**
+
+Run: `cargo test -p curated-thoughts --lib wisdom_deposit 2>&1 | tee /tmp/t1.log` (with the repo gate wrapper/env per AGENTS.md). Expected: compile FAIL — `DepositAttribution` not found.
+
+- [x] **Step 3: Implement**
+
+Add the struct/enum/validation; extend `render_deposit_file` to emit the three frontmatter lines when `attribution` is `Some` (else byte-identical output); inside the `audit_and_seed_kick` `with_rw` closure, insert the `deposit_attribution` row (migration in Task 2's migration file — coordinate: this task adds the migration SQL file, Task 2 extends it; if Task 2 has not landed, add ONLY `deposit_attribution` here).
+
+- [x] **Step 4: Gates**
+
+`cargo check --tests` warning-free on touched files; full `wisdom_deposit` test module green; counts = baseline + 3.
+
+- [x] **Step 5: Commit** — `feat(deposit): attribution frontmatter carrier with deposit-time index`
+
+> **Controller tick (2026-10-21):** Task 1 DONE — commit `06811cfe`; gates verified (lib 1456+59
+> exact, replay 17/17 byte-identical, clippy clean); SOR clean (0 findings); task-review verdict
+> **APPROVE** (`.superpowers/sdd/confirm-queue/task1-review-verdict.md`).
+
+### Task 2: Migration — `stated_attestations`, `queue_denials` + ledger JSONL writers/rebuild
+
+> **Controller note (Task-1 review ruling, binding):** the plan's `migrations/NNNN_…sql` +
+> `db/mod.rs` registration assumption does not match repo reality (DDL lives in Rust consts
+> `MIGRATION_V1..V28` in `schema.rs`, applied by `connection.rs::migrate()`; `db/mod.rs` is a
+> chunk-hash data migration, not a DDL point). Follow the `06811cfe` pattern exactly:
+> `src-tauri/src/db/migrations/0002_stated_verification.sql`, `CREATE TABLE IF NOT EXISTS`,
+> registered with one `conn.execute_batch(include_str!(…))?;` in `migrate()` after the
+> deposit_attribution line — **no** `schema_version` stamp, **no** `db/mod.rs` edit.
+> Ride-along (comment-only): correct the imprecise "V18/V26 DDL-only precedent" citation
+> introduced by Task 1 (V18/V26 stamp; the ungated precedent is the V27/V28 bodies).
+
+**Files:**
+- Create: `src-tauri/src/db/migrations/NNNN_stated_verification.sql` (next number; check `migrations/` for the current max)
+- Modify: `src-tauri/src/db/mod.rs` (migration registration), new module `src-tauri/src/db/stated_ledger.rs`
+- Test: `src-tauri/src/db/stated_ledger.rs` (test module)
+
+**Interfaces:**
+- Produces: `stated_attestations(document_path TEXT PRIMARY KEY, content_hash TEXT NOT NULL, attested_by TEXT NOT NULL, attested_at TEXT NOT NULL)`; `queue_denials(document_path TEXT NOT NULL, chunk_hash TEXT NOT NULL, fact_text_hash TEXT NOT NULL, denied_by TEXT NOT NULL, denied_at TEXT NOT NULL, PRIMARY KEY(document_path, chunk_hash, fact_text_hash))`; `fn record_confirmation(conn, fact_id, content_hash, by, at) -> Result<()>` (appends JSONL + returns the row to upsert); `fn rebuild_rederive(conn, vault_root) -> Result<RebuildReport>` (repopulates all three tables from the JSONL ledgers, re-verifying hashes; attestations mismatched → dropped).
+
+- [x] **Step 1: Failing tests**
+
+```rust
+#[test]
+fn confirmation_jsonl_append_and_rebuild_roundtrip() {
+    // scratch brain + scratch vault root; record_confirmation twice; delete brain rows;
+    // rebuild_rederive re-inserts; second rebuild is idempotent (counts unchanged)
+}
+#[test]
+fn rebuild_drops_attestation_with_hash_mismatch() {
+    // write .attestations.jsonl line for a file, then EDIT the file; rebuild → row dropped
+}
+#[test]
+fn confirmation_rebuild_matches_by_content_hash_fact_id_advisory() {
+    // ledger line whose fact_id does not exist but hash matches a rebuilt row → row confirmed
+}
+```
+
+- [x] **Step 2: RED** — same gate recipe. Expected: module/file missing → compile FAIL.
+- [x] **Step 3: Implement** — migration SQL (two tables, `IF NOT EXISTS`), registration, `stated_ledger` module (single-line JSON appends via `OpenOptions::append`; SHA-256 via the same `hasher::hash_bytes` routine the `documents` table uses).
+- [x] **Step 4: Gates** — `cargo check --tests`; `stated_ledger` + migration tests green (baseline + 3).
+- [x] **Step 5: Commit** — `feat(db): stated verification tables and app-written jsonl ledgers`
+
+> **Controller tick (2026-10-22):** Task 2 DONE — commit `a0552ca4`; gates verified (lib 1459+59
+> exact, replay 17/17 byte-identical, clippy clean); SOR clean (0 findings, 10 clusters); verdict
+> **APPROVE** (`task2-review-verdict.md`). Rulings: B1 internal-upsert correct (spec §8);
+> B2 `pub mod` declarations in mod.rs OK, DDL registration never; B3/B4/B5 accepted;
+> B6 stale V18/V26 comment in `0001_deposit_attribution.sql` → controller Task-11 docs pass.
+> Parked (non-blocking, revisit Task 5/11): rebuild doesn't reset orphan `user_confirmed` stamps
+> on ledger truncation.
+
+### Task 3: Human-tier hardening — `human_surface` flag + provenance arms
+
+**Files:**
+- Modify: `src-tauri/src/db/commit.rs` (`ResolveOptions` struct ~`:39`; `resolve_proposal` arm `:2926-2930`)
+- Modify: `src-tauri/src/db/proposals_review.rs` (`:161-168`, `:263-265` — the two `auto_approve:false` call sites pass `human_surface: false`; the DESKTOP caller passes `true`; test at `:633-640` updated)
+- Modify: `src-tauri/src/proposals_api.rs` (`:21` — `DESKTOP_REVIEWER` stays a label; add the flag to `ResolveOptions` construction)
+- Test: `src-tauri/src/db/proposals_review.rs` (test module)
+
+**Interfaces:**
+- Produces: `ResolveOptions { ..., human_surface: bool }` (default `false` via existing construction sites); `resolve_proposal` provenance decision: (1) if `human_surface && auto_approve == false` → `user_confirmed`; (2) else if `!human_surface && auto_approve == false` → `librarian_inferred` + event `approved_at_agent_tier`; (3) `auto_approve == true` → `librarian_inferred` (unchanged). Path B's `user_stated` arm lands in Task 8 (same decision point).
+
+- [x] **Step 1: Failing tests**
+
+```rust
+#[test]
+fn desktop_surface_stamps_user_confirmed() { /* auto_approve:false + human_surface:true → provenance user_confirmed, confidence unchanged at proposal stage */ }
+#[test]
+fn cli_and_internal_approvals_resolve_at_agent_tier() {
+    // auto_approve:false, human_surface:false → librarian_inferred + event approved_at_agent_tier
+    // includes the UPDATED legacy case: reviewed_by="tessera" now yields agent tier
+}
+#[test]
+fn auto_approve_unchanged() { /* librarian_inferred, no event */ }
+```
+
+- [x] **Step 2: RED** → **Step 3: Implement** (arm reorder per spec §3.7-A; thread ALL `ResolveOptions` construction sites in one pass; gate with `cargo check --tests`) → **Step 4: Gates** (baseline + 3) → **Step 5: Commit** — `feat(wisdom): human-tier stamps require the desktop surface`
+
+> **Controller tick (2026-10-22):** Task 3 DONE — commit `73212aba`; gates verified (lib 1462+59
+> exact, replay 17/17, clippy clean); SOR clean (0 findings, 20 clusters); verdict **APPROVE**
+> (`task3-review-verdict.md`). C1-C4 all accepted (C1 nit: prefer literal `true` when
+> `resolve_proposal_cmd` is next touched; C4: review_shim docs note + 2-line comment fix →
+> **Task 10**). Forward items: spec §5 N1 spoof test → **Task 11** whole-branch pass;
+> audit result: only 3 non-test `human_surface: true` sites, all desktop (proposals_api.rs).
+
+### Task 4: Confirmation queue query + read-only MCP listing
+
+**Files:**
+- Modify: `src-tauri/src/db/queue.rs` (new file — queue query)
+- Modify: `src-tauri/src/tool_dispatch.rs` (new read-only tool `curated_queue_list`, registered beside `curated_proposals_list` ~`:1310`; NO mutate tool)
+- Test: `src-tauri/src/db/queue.rs` (test module)
+
+**Interfaces:**
+- Produces: `QueueRow { fact_id, title, body, provenance, entity_id, evidence_quote: Option<String>, source_document: Option<String>, attributed_speaker: Option<String>, instruction_source: Option<String>, age_days }`; fn `queue_rows(conn) -> Vec<QueueRow>` — SQL: live entries (`lifecycle_status='stable'`, not superseded/expired per the existing supersede filters) with `source_type NOT IN ('user_stated','user_confirmed')` (NULL/out-of-vocab included) LEFT JOIN anti-match against `queue_denials` (document path + chunk hash + fact-text hash), evidence quote via the `deposit_status_row` join chain (`wisdom_deposit.rs:183-187`), ORDER BY age DESC.
+
+- [x] **Step 1: Failing tests**
+
+```rust
+#[test]
+fn queue_membership_live_not_human_tier() { /* librarian_inferred + immutable_document in; user_stated/user_confirmed out; NULL source_type in; superseded/expired out */ }
+#[test]
+fn denied_fact_excluded_sibling_included() { /* deny (doc,chunk,textA): fact A out, sibling fact B (same doc+chunk, different text) STILL in */ }
+#[test]
+fn evidence_quote_and_attribution_surfaces_on_row() { /* attributed deposit row shows speaker + quote */ }
+```
+
+- [x] **Step 2: RED** → **Step 3: Implement** → **Step 4: Gates** (baseline + 3; also run the MCP tool registration test module) → **Step 5: Commit** — `feat(queue): confirmation queue query and read-only mcp listing`
+
+> **Controller tick (2026-10-22):** Task 4 DONE — commit `d25b102c`; gates verified (lib 1465+59
+> exact, mcp_integration 4/4 via `--features mcp-server` recipe, clippy clean); SOR clean
+> (0 findings, 13 clusters); verdict **APPROVE** (`task4-review-verdict.md`). D1-D5 accepted
+> (D1: additive section in pre-existing db/queue.rs; D5: non-feature lib run is the canonical
+> count). **D6 ruling (binding):** replay-gate 16/17 failure = pre-existing wall-clock flake in
+> `target_of`'s byte-compare of two `ct` processes — convention: one re-run; timestamp-only diff +
+> green = PASS; ts-normalization fix rides Task 5's brief as a declared test-only deviation.
+
+### Task 5: App confirm/deny actions (stamp + suppression + ledger append)
+
+**Files:**
+- Modify: `src-tauri/src/db/queue.rs` (actions)
+- Modify: `src-tauri/src/db/drafts.rs` (reuse the `:62-74` UPDATE shape — extract or mirror exactly)
+- Test: `src-tauri/src/db/queue.rs` (test module)
+
+**Interfaces:**
+- Produces: `fn confirm_fact(app_ctx, fact_id) -> Result<()>` — one UPDATE: `source_type='user_confirmed', confidence='confirmed'`, `okf_verified` json_insert `{by:"human:kurt", at}`, `last_verified_by`/`last_verified_at` mirror, outbox Update row, event; `lifecycle_status` UNTOUCHED; `.confirmations.jsonl` append; idempotent on re-confirm. `fn deny_fact(app_ctx, fact_id) -> Result<()>` — archive + `queue_denials` insert + `.denials.jsonl` append. `fn undeny_fact(app_ctx, denial_key) -> Result<()>`. These are exposed to the FRONTEND ONLY (Tauri command layer, Task 9) — no MCP/CLI wrapper.
+
+- [x] **Step 1: Failing tests**
+
+```rust
+#[test]
+fn confirm_stamps_the_full_shape() { /* provenance, confidence, verified list, last_verified_by/at, outbox row, event, jsonl line; lifecycle_status untouched */ }
+#[test]
+fn confirm_is_idempotent() { /* second confirm: no-op, no duplicate event, no duplicate jsonl line */ }
+#[test]
+fn deny_suppresses_and_undeny_restores() { /* deny → out of queue; undeny → back; jsonl line written */ }
+```
+
+- [x] **Step 2: RED** → **Step 3: Implement** → **Step 4: Gates** (baseline + 3) → **Step 5: Commit** — `feat(queue): app-only confirm and deny with durable ledgers`
+
+> **Controller tick (2026-10-22):** Task 5 DONE — commit `764fd4f1` (+ declared test-only D6
+> ride-along); gates verified (lib 1468+59 exact; replay 17/17 TWICE — D6 ts-normalization fix is
+> deterministic; clippy clean); SOR clean (0 findings, 16 clusters); verdict **APPROVE**
+> (`task5-review-verdict.md`). E1-E6 all accepted (E1 two-layer confirm converges with spec §8
+> rebuild semantics; E2 orphan-stamp reset DEFERRED to Task 11 — spec §8 authorizes reset ONLY
+> on the rebuild path, §4 double-confirm makes an existing stamp terminal, do NOT add
+> confirm-path reset; E3 jsonl rewrite forced, Low-1 atomic tmp+rename → Task 11; E4 refusal
+> spec-correct, Task 9 UI must surface the deny error; E5 extraction byte-identical, verified
+> programmatically; E6 conventions held). Low-2 (deny-retry duplicate ledger line) and Low-3
+> (hash-only un-deny restore) → Task 11.
+
+### Task 6: Active Verification Prompting — emitter + drop file
+
+**Files:**
+- Modify: `src-tauri/src/tool_dispatch.rs` (emit hook inside the three recall paths, after results are computed, BEFORE returning — never blocking)
+- Create: `src-tauri/src/prompt_drop.rs`
+- Test: `src-tauri/src/prompt_drop.rs` (test module)
+
+**Interfaces:**
+- Produces: `fn emit_unverified_match(vault_root, ev: UnverifiedMatch) -> ()` — infallible from the caller's perspective (I/O errors logged + swallowed); appends JSONL `{fact_id, title, body, quote, query, surface, ts}` to `<vault>/.brain/unverified-match.jsonl` ONLY if no UNACKED line for that fact_id (read-before-append); app-side drain/ack contract documented in the module doc comment.
+
+- [x] **Step 1: Failing tests**
+
+```rust
+#[test]
+fn emitter_writes_jsonl_and_dedupes_unacked() { /* two emits, one line */ }
+#[test]
+fn read_only_brain_dir_never_errors_the_call() { /* chmod 0o500 .brain (restore in catch/finally); emit returns normally, no line */ }
+#[test]
+fn sidecar_shape_has_no_tauri_dependency() { /* prompt_drop compiles without any tauri import — enforced by module location */ }
+```
+
+- [x] **Step 2: RED** → **Step 3: Implement** (wire into `wiki_context`, `wiki_search`, `curated_recall_context` result paths; emit only for non-human-tier matches) → **Step 4: Gates** (baseline + 3; `ct wisdom match` replay test green) → **Step 5: Commit** — `feat(recall): unverified-match prompt drop emitter`
+
+> **Controller tick (2026-10-22):** Task 6 DONE — commit `5b86126e`; gates verified personally
+> (canonical lib 1471/0 exact; replay 17/17 FIRST run — D6 fix holding deterministic; clippy
+> clean); SOR clean (0 findings, 11 clusters, n_unjudged=0, fail_open=false); verdict **APPROVE**
+> (`task6-review-verdict.md`). E1-E8 all accepted (hooks in exactly the 3 recall paths inside
+> spawn_blocking; tier via `provenance_for` reuse, N+1 lookup deliberately closed by Task 7;
+> infallible `()` contract with error-path-only stderr; UNACKED advisory dedupe, TOCTOU race
+> bounded by spec M2-rev2; malformed-lines-logged deviation forced by m7; M1 payload bound
+> intact; drop-file `<vault>/.brain/unverified-match.jsonl` matches spec §4 verbatim). Low-1
+> (malformed-line dedupe behavior unpinned by a test) → Task 11 (or Task 9 drain tests);
+> Info-4 (emit holds DB lock during bounded file I/O) — do not let per-hit work grow.
+
+### Task 7: Recall labels + confidence ordinal
+
+**Files:**
+- Modify: `src-tauri/src/wiki_graph.rs` (`WikiSearchHit` `:19-27` — add `source_type: Option<String>`, `verified: Option<VerifiedInfo>`; population where hits are built)
+- Modify: `src-tauri/src/tool_dispatch.rs` (`rank_wiki_entries` `:437-443` SELECT + emit; ordinal at `:480-491` — `ORDER BY` replacement: map `confidence` via `CASE confirmed=3, inferred=2, ELSE 0` before sort)
+- Test: `src-tauri/src/wiki_graph.rs` + `src-tauri/src/tool_dispatch.rs` (test modules)
+
+**Interfaces:**
+- Produces: per-hit `source_type` (from `provenance_for`, `wisdom_match.rs:264-268`, `None` outside vocab) + `verified {by, at}` on all three tools; `ct wisdom match` untouched (top-level `WikiContextResult.provenance` trace list at `wiki_graph.rs:1953` untouched).
+
+- [ ] **Step 1: Failing tests**
+
+```rust
+#[test]
+fn hits_carry_source_type_and_verified() { /* confirmed hit has Some; inferred has None verified */ }
+#[test]
+fn confidence_ordinal_ranks_confirmed_above_inferred() { /* equal term overlap: confirmed ranks FIRST — the old string compare ranked it below */ }
+#[test]
+fn message_mode_output_byte_identical() { /* ct wisdom match fixture: cached-output replay stays green, byte compare */ }
+```
+
+- [ ] **Step 2: RED** → **Step 3: Implement** → **Step 4: Gates** (baseline + 3 + replay test) → **Step 5: Commit** — `feat(recall): per-hit provenance labels and confidence ordinal`
+
+### Task 8: Aperture widening (#282 §5 rev-15) + Path B provenance arm
+
+**Files:**
+- Modify: `src-tauri/src/wisdom_match.rs` (`provenance_filter: Option<&[&str]>` at `:524`; predicate `:603-607` → membership test; activity arm `:762-765` → `Some(&["user_stated","user_confirmed"])`; all four `gated_entries` call sites)
+- Modify: `src-tauri/src/db/commit.rs` (`resolve_proposal`: BEFORE the Task-3 arms — if `human_surface` is false AND every source document has a `stated_attestations` row with matching `content_hash` AND source count ≥ 1 → `user_stated`)
+- Test: `src-tauri/src/wisdom_match.rs` + `src-tauri/src/db/commit.rs` (test modules)
+
+**Interfaces:**
+- Produces: widened activity aperture; `stated_attestations`-driven `user_stated` stamp.
+
+- [x] **Step 1: Failing tests**
+
+```rust
+#[test]
+fn activity_admits_confirmed_and_stated() { /* user_stated + user_confirmed delivered; immutable_document NOT; NULL provenance NOT */ }
+#[test]
+fn non_admitted_fact_never_shadows_admitted_below() { /* non-shadowing pin, pre-truncate */ }
+#[test]
+fn attested_sources_stamp_user_stated() { /* all-attested → user_stated */ }
+#[test]
+fn mixed_or_zero_sources_stay_agent_tier() { /* mixed → librarian_inferred; zero sources → librarian_inferred */ }
+#[test]
+fn attestation_frontmatter_in_agent_deposit_forges_nothing() { /* deposit file WITH attestation-shaped frontmatter, no table row → librarian_inferred */ }
+```
+
+- [x] **Step 2: RED** → **Step 3: Implement** → **Step 4: Gates** (baseline + 5; message-mode replay green) → **Step 5: Commit** — `feat(wisdom): widen activity aperture to user_confirmed and add attested-source arm`
+
+> **Controller tick (2026-10-22):** Task 7 DONE — commit `d127d282`; gates verified personally
+> (canonical lib 1474/0 exact; replay 17/17; clippy clean); SOR clean (0 findings, 35 clusters,
+> n_unjudged=0); verdict **APPROVE** (`task7-review-verdict.md`). E1-E8 all accepted; **E2
+> RULED:** `verified` labels read the latest `okf_verified` json entry gated on
+> `confidence='confirmed'` (all three writers mirror the json atomically — data-identical to the
+> columns; MORE §3.3-faithful ISO `at`); one-line §5 wording clarification → docs pass (Task 10/
+> 11). Task-6 N+1 CLOSED via `ResolvedHit` + batched payload query. Routed to Task 11's carried
+> list: Low-1 stale tie-break comment (`tool_dispatch.rs:417`), Info-1 batch-level query_map
+> swallow, Info-2 plural log token, Info-3 silent non-array degradation.
+
+### Task 9: App capture flow — stated/ folder, kick registration, confirm UI wiring, direct-write retirement
+
+**Files:**
+- Modify: `src-tauri/src/db/connection.rs` (`:770-773` pattern — folder-mode/ingest-tier rows for `stated/`: app-writable, agent-non-deposit; ingest tier NONE for the three `.jsonl` ledgers)
+- Modify: `src-tauri/src/wisdom_deposit.rs` (`walk_vault`/`ingest_tier_for` entry for `stated/`)
+- Modify: `src-tauri/src/db/wisdom.rs` (`add_wisdom_in_tx` `:127-218` REMOVED; replacement `capture_statement(app_ctx, text) -> Result<()>`: renders `stated/kurt/<year>/<slug>.md` with speaker/capture/attestation frontmatter, writes `stated_attestations` row + `.attestations.jsonl`, registers kick via `set_kick_state` `:474`, runs the kick)
+- Modify: Tauri command layer (`src-tauri/src/lib.rs` commands) + frontend (`src/` React): queue screen (rows + evidence quote + aging + bulk select + denied section), confirm/deny modal, Active Verification Prompting modal (watches `.brain/unverified-match.jsonl`, renders from brain by fact id, per-drain cap 3 + digest + snooze preference)
+- Test: `src-tauri/src/db/wisdom.rs` (test module)
+
+**Interfaces:**
+- Produces: `capture_statement` (Path B entry); frontend queue + modal components (contract: modal re-reads fact by id from the brain API, never renders drop-file payload text).
+
+- [x] **Step 1: Failing tests (backend)**
+
+```rust
+#[test]
+fn capture_statement_writes_attested_file_and_kicks() { /* file exists under stated/kurt/<year>/, attestation row + jsonl line, kick ledger row, post-kick fact is user_stated with evidence */ }
+#[test]
+fn fresh_statement_via_queue_creates_backing_fact() { /* Rule-15: confirm-with-no-fact routes through capture_statement */ }
+#[test]
+fn direct_write_is_gone() { /* compile-level: add_wisdom_in_tx no longer exists (#[cfg(test)] grep guard or deletion assertion via cargo check failure expectation) */ }
+```
+
+- [x] **Step 2: RED** → **Step 3: Implement** (backend first, then frontend components; `pnpm install --frozen-lockfile`, `pnpm build` + vitest for the queue/modal components with a mocked brain API: payload-tampering test = modal shows brain content not payload text) → **Step 4: Gates** (cargo baseline + 3; frontend suite green) → **Step 5: Commit** — `feat(app): stated capture flow, queue ui, and verification modals`
+
+> **Controller tick (2026-10-22):** Task 9 DONE — commit `a69b1e5e` (23 files, +2331/−340);
+> gates verified personally (canonical lib 1482/0 exact — 1483 with test-utils is the
+> feature-gated superset; replay 17/17; clippy clean; pnpm build 0; vitest 612/0, payload-
+> tampering green); SOR full-coverage re-run 120/120 judged (first run hit the run ceiling);
+> verdict **APPROVE** (`task9-review-verdict.md`). **E9 (SOR blocker-class) REFUTED** with code
+> evidence — denied-list key IS the `queue_denials` PK triple; no stale closure; no fix needed.
+> E1-E8, E10 all accepted: hash read back FROM DISK (byte-exact vs ingest); direct-write
+> retirement complete repo-wide; stated/ seeded in V25 INSERT OR IGNORE (no schema bump); kick
+> seam test-only; 9 commands registered in both handler lists; M1 by-id re-read pinned NOWHERE.
+> Outside-allowance touches accepted (stated_ledger wrapper, prompt_drop drain). Carried-list
+> updates: **Task-5 Low-1 atomic-rewrite scope EXTENDED to `drain_unverified_matches`**;
+> docs-pass inputs (a)-(d) in verdict §Task-10 items.
+
+> **Controller tick (2026-10-22):** Task 8 DONE — commit `a43d833e`; gates verified personally
+> (canonical lib 1479/0 exact; replay 17/17; clippy clean); SOR clean (0 findings, 11 clusters,
+> n_unjudged=0); verdict **APPROVE** (`task8-review-verdict.md`). E1-E3 accepted (membership
+> predicate pre-truncate verified in code; Path B arm at `commit.rs:2994` structurally disjoint
+> from Task-3 arms; `all_sources_attested` sibling-safe against real schemas — `documents.path`
+> UNIQUE, attestation PK). **E4 RULED:** Path B arm not gated on `auto_approve` is
+> spec-conformant (§7.5 condition exhaustive; §2 instant-confirm requires auto path).
+> **E5 RULED:** mixed `user_stated` stamp + agent-tier event on a hypothetical manual resolve is
+> cosmetic, unreachable via shipped flows — carried to Task 11 (suppress-event-on-attested OR
+> document-as-behavior; silence not allowed). Adversarial checks: anti-forge test uses real file
+> + real hash + no row; no test touches the real vault.
+
+### Task 10: Charter + spec-delta text (docs task)
+
+> **Controller note (Task-3 review ruling C4):** ride-along docs fix here —
+> `review_shim.rs`'s docs claim desk-reachability, but its shims resolve at agent tier under the
+> human-surface rule (fail-closed, zero live callers). Correct the doc claim + add the 2-line
+> comment fix; the verdict file `task3-review-verdict.md` has the exact wording guidance.
+
+**Files:**
+- Modify: `INTENT.md` — apply ALL amendments quoted in spec §3.10 verbatim (Rules 2/3/8 + statuses, new Rule 10, "Who verifies: users and scope", Glossary, Active Librarian planned list)
+- Modify: `docs/superpowers/specs/2026-10-18-issue282-activity-query-mode-design.md` — §5 rev-15 delta (admitted set + rationale), "Out of scope" `:865-866` and "Rulings carried" `:883-885` lines
+- Modify: this plan — tick annotations
+
+> **Task 10 implementer note (2026-10-21, docs-pass inputs a/b — checkboxes left
+> unticked for the controller):** (a) queue digit shortcut: NONE is intended — the
+> queue is rail-reachable only (`AppShell.tsx:44-46` comment is the source;
+> renumbering rail 3-5 would break muscle memory and a pinned test). (b)
+> `add_entity_fact_cmd` semantics change: now an async capture command — keeps its
+> name/arguments, routes through `capture_statement` (Path B), drops entity
+> binding (spec-§9 consequence commented at the site), and returns the `stated/`
+> path (`Promise<string>` frontend wrapper). No living repo doc described the old
+> add-fact semantics; the record lives in the confirmation-queue spec's as-built
+> addendum (rev 4.2).
+
+- [x] **Step 1: Apply INTENT.md amendments** (exact text from spec §3.10 — no paraphrase)
+- [x] **Step 2: Apply #282 §5 delta** (rev-15 entry: aperture admits `user_stated` + `user_confirmed`; `immutable_document` excluded; non-shadowing preserved; precondition (a) met by the kernel calibration argument + the Task 8/10 benchmark)
+- [x] **Step 3: Verify** — every quoted old passage matches what INTENT.md actually had (git diff shows pure replacements); no other INTENT edits
+- [x] **Step 4: Commit** — `docs(intent): confirmation queue, provenance labels, and user-scope documentation`
+
+> **Controller tick (2026-10-22):** Task 10 DONE — commit `09bc787b`; controller verified
+> personally (review_shim diff COMMENT-ONLY line by line; canonical lib **1482/0 re-derived
+> empirically** — closes the implementer's flagged gap, their run was machine-killed mid-build);
+> SOR clean (3 clusters, docs triaged); verdict **APPROVE** (`task10-review-verdict.md`).
+> Verbatim-match audit MECHANICAL: all 11 §3.10 quoted passages diffed programmatically — 9
+> exact, 2 verbatim modulo the house-style status-marker wrapper (E2 RULED authorized — the
+> quotes themselves say "Partly built"); zero unauthorized INTENT edits; adversarial
+> vocabulary/meaning-flip sweep clean; C4 proven comment-only byte-identical after comment
+> strip. E1 accepted (Task 11 citation factually correct; plan line 401 stale — ERRATA-worthy
+> only). One INFO (Rule 10 heading period, cosmetic).
+
+### Task 11: Kernel seeding + benchmark + whole-branch verification
+
+> **Controller note (Task-1 review ruling):** Task 11's gate sweep must additionally include
+> `cargo check --tests --features mcp-server` (the `cfg_attr(mcp-server)` schemars derive on
+> `WisdomDepositParams` is not covered by the default-feature gates). Plain
+> `cargo check --tests` FAILS at baseline — always use `--features test-utils`.
+> **Task-3 review additions:** include the spec §5 N1 spoof test (plan-level gap assigned here);
+> controller docs pass must also fix the stale "V18/V26" comment inside
+> `0001_deposit_attribution.sql` (Task-2 verdict B6) and the review_shim desk-reachability
+> docs note + 2-line comment fix (Task-3 verdict C4).
+
+**Files:**
+- Create: scratch-brain seeding script (scratch only — NOT committed) confirming the 14 kernel facts as `user_confirmed` fixtures
+- Modify: `src-tauri/src/wisdom_match.rs` bench module (`--features slow-tests`; `wisdom_gate_bench` needs the feature flag or it silently runs 0 tests)
+
+- [x] **Step 1: Benchmark** — activity FP stays 0 with the widened aperture on the seeded scratch brain (spec §3.6 by-construction argument, made empirical)
+- [x] **Step 2: Full gate sweep** — entire suite + clippy `--all-targets -- -D warnings` on touched manifests + frontend build + message-mode replay
+- [x] **Step 3: End-to-end smoke (local)** — deposit attributed note → appears in queue → confirm → `ct wisdom match --path=…` delivers it; message-mode replay byte-identical
+- [x] **Step 4: Commit** — `test(wisdom): activity fp-0 benchmark on confirmed kernel set`
+
+> **Errata (Task-11 review):** (1) Task-1 ruling's mcp-server gate form is
+> `cargo check --tests --features mcp-server,test-utils` — the literal
+> `--features mcp-server` form fails pre-existing on test-utils-gated
+> `tests/pipeline_config.rs` exports (lib.rs:62-68). (2) Plan line 401
+> "Task 8/10 benchmark" reads "Task 11" (Task-10 verdict E1/INFO-1).
+
+> **Controller tick (2026-10-22):** Task 11 DONE — commit `68d0dcf2`; ALL 14 work items landed;
+> gates verified personally (canonical lib **1487/0 exact**, +5 attributable; replay **17/17**;
+> clippy clean; mcp-server,test-utils combined gate exit 0; bench **6/0** — FP **0.000** over
+> 154 irrelevant probes, opens 14, hit@1 0.262; pnpm build 0; vitest 612/0; E2E smoke
+> byte-identical ×2); SOR clean (0 findings, 19 clusters); verdict **APPROVE**
+> (`task11-review-verdict.md`). E1-E9 all accepted: FP-0 test asserts the PRODUCTION floor from
+> `WISDOM_GATE_FLOORS`; E5 resolved choice (a) — agent-tier event suppressed on Path-B stamps,
+> pinned both directions; all carried items (Tasks 2/5/6/7/8/9) closed verbatim; atomic
+> rewrites via house `safe_write_bytes`; N1 spoof covers env + label forms. Adversarial all
+> pass (fps asserted; crash-shape non-vacuous; env restore on panic). Findings: none blocking,
+> 4 informational (recorded in completion handoff). **IMPLEMENTATION COMPLETE — Tasks 1-11 all
+> APPROVED. PR #294 leaves draft.**
+
+## Execution notes
+
+- Controller: run EVERY gate at baseline before Task 1 dispatch; record exact counts + the backing-service recipe (none needed — SQLite scratch brains) in `.superpowers/sdd/<plan-id>/progress.md`.
+- Tasks are strictly serial (shared `wisdom_match.rs`/`commit.rs` surfaces). Task 9's frontend half may overlap Task 7's review ONLY if cargo never runs concurrently.
+- On any spec/plan conflict: the spec (rev 4.1) wins; record an ERRATA blockquote in this plan.

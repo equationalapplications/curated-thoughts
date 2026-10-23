@@ -24,6 +24,54 @@ pub struct WikiSearchHit {
     /// Stored entry tier: `fact`, `wisdom`, or None for an ordinary live entry.
     /// Independent of `entity_id` — tier is not a namespace (spec §3.4).
     pub tier: Option<String>,
+    /// Vocabulary-filtered provenance label for this hit (spec §5 D6):
+    /// `wisdom_match::provenance_for(stored source_type)` — `None` outside the
+    /// vocabulary. Named `source_type` (not `provenance`) precisely to avoid a
+    /// same-named, different-typed homonym with the top-level
+    /// `WikiContextResult.provenance` trace list (rev 4 M5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    /// Latest `{by, at}` of the OKF `verified` list — CONFIRMED facts only;
+    /// `None` (absent key) when absent or non-confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<VerifiedInfo>,
+}
+
+/// Who verified a fact, and when (spec §5 D6). Mirrors the LAST entry of the
+/// row's `okf_verified` JSON list — `by` the verifier actor, `at` the ISO
+/// timestamp as stored in the json field (not the ms-epoch
+/// `last_verified_at` mirror).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VerifiedInfo {
+    pub by: String,
+    pub at: String,
+}
+
+/// Per-hit `verified` label (spec §5 D6, controller note 6): the latest
+/// `{by, at}` entry of the row's `okf_verified` json list, gated on the fact
+/// being CONFIRMED (`confidence = 'confirmed'`). INFALLIBLE per controller
+/// note 5: absent list, non-confirmed fact, or a malformed list degrade to
+/// `None` (absent key) — parse failures are logged, never propagated.
+pub(crate) fn verified_label(
+    confidence: Option<&str>,
+    okf_verified: Option<&str>,
+) -> Option<VerifiedInfo> {
+    if confidence != Some("confirmed") {
+        return None;
+    }
+    let raw = okf_verified?;
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("curated-thoughts-mcp: verified label skipped (malformed okf_verified): {e}");
+            return None;
+        }
+    };
+    let last = parsed.as_array()?.last()?;
+    Some(VerifiedInfo {
+        by: last.get("by")?.as_str()?.to_string(),
+        at: last.get("at")?.as_str()?.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -343,7 +391,7 @@ pub fn wiki_search_in_scheme(
     // temporal-column degradation.
     let scheme_filter = crate::embed_scheme::scheme_filter_sql(scheme);
     let sql = format!(
-        "SELECT id, entity_id, title, embedding_blob, tier
+        "SELECT id, entity_id, title, embedding_blob, tier, confidence, source_type, okf_verified
          FROM llm_wiki_entries
          WHERE {entity_filter}{tier_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL{scheme_filter}"
     );
@@ -361,6 +409,9 @@ pub fn wiki_search_in_scheme(
         let title: String = row.get(2)?;
         let bytes: Option<Vec<u8>> = row.get(3)?;
         let tier_value: Option<String> = row.get(4)?;
+        let confidence: Option<String> = row.get(5)?;
+        let stored_source_type: Option<String> = row.get(6)?;
+        let okf_verified: Option<String> = row.get(7)?;
         let Some(bytes) = bytes else {
             continue;
         };
@@ -379,6 +430,11 @@ pub fn wiki_search_in_scheme(
             title,
             score,
             tier: tier_value,
+            // Labels are populated where the hits are built (spec §5): the
+            // tier goes through the ONE approved vocabulary filter; the
+            // verified label degrades to `None` outside confirmed facts.
+            source_type: crate::wisdom_match::provenance_for(stored_source_type.as_deref()),
+            verified: verified_label(confidence.as_deref(), okf_verified.as_deref()),
         });
     }
     scored.sort_by(|a, b| {
@@ -1799,14 +1855,22 @@ mod unit_tests {
     fn wiki_search_pre_v27_table_reads_without_scheme_filter() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
+            // Pre-V27 shape: no `embed_scheme` column. The label columns are
+            // NOT pre-V27 gaps — `confidence`/`source_type`/`okf_verified` are
+            // original package DDL, so they stay present under the degraded
+            // reader too.
             "CREATE TABLE llm_wiki_entries (
                 id TEXT PRIMARY KEY, entity_id TEXT NOT NULL, title TEXT,
-                embedding_blob BLOB, tier TEXT, deleted_at INTEGER)",
+                embedding_blob BLOB, tier TEXT, deleted_at INTEGER,
+                confidence TEXT NOT NULL DEFAULT 'inferred',
+                source_type TEXT NOT NULL DEFAULT 'librarian_inferred',
+                okf_verified TEXT)",
         )
         .unwrap();
         let blob: Vec<u8> = [1.0f32; 8].iter().flat_map(|f| f.to_le_bytes()).collect();
         conn.execute(
-            "INSERT INTO llm_wiki_entries VALUES ('a', 'ent', 'T', ?1, NULL, NULL)",
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, embedding_blob, tier, deleted_at)
+             VALUES ('a', 'ent', 'T', ?1, NULL, NULL)",
             params![blob],
         )
         .unwrap();
@@ -1913,6 +1977,65 @@ mod unit_tests {
             "the loser's edge must be reached from a loser seed, got: {:?}",
             walk.edges
         );
+    }
+
+    /// Task 7 (D6): every search hit carries the vocabulary-filtered
+    /// `source_type` label (via `wisdom_match::provenance_for` — `None`
+    /// outside the vocabulary) and, for CONFIRMED facts only, the LATEST
+    /// `{by, at}` entry of the OKF `verified` list. Labels are populated where
+    /// the hits are built; a `None` label degrades to an absent JSON key
+    /// (additive keys, never an error — controller note 5).
+    #[test]
+    fn hits_carry_source_type_and_verified() {
+        let conn = open_in_memory().unwrap();
+        let blob: Vec<u8> = [1.0f32; 8].iter().flat_map(|f| f.to_le_bytes()).collect();
+        // Two verifier entries: the label must carry the LATEST one.
+        let verified_json = r#"[{"by":"librarian","at":"2026-01-01T00:00:00.000Z"},{"by":"human:kurt","at":"2026-10-21T12:00:00.000Z"}]"#;
+        for (id, confidence, source_type, okf_verified) in [
+            ("fact_c", "confirmed", "user_confirmed", Some(verified_json)),
+            ("fact_i", "inferred", "librarian_inferred", None),
+            // Out-of-vocabulary stored value: the label degrades to an
+            // absent key, never a made-up tier.
+            ("fact_x", "inferred", "agent_tier_of_the_future", None),
+        ] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type,
+                    source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                    access_count, deleted_at, embedding_blob, embedding, okf_verified
+                 ) VALUES (?1, 'ent-1', ?1, 'Body', '[]', ?2, ?3,
+                       NULL, NULL, 100, 100, NULL, 0, NULL, ?4, NULL, ?5)",
+                rusqlite::params![id, confidence, source_type, blob, okf_verified],
+            )
+            .unwrap();
+        }
+        let hits = wiki_search(&conn, &[1.0f32; 8], None, None, 25).unwrap();
+        assert_eq!(hits.len(), 3, "all three seeded facts must surface");
+        let by_id: HashMap<String, serde_json::Value> = hits
+            .iter()
+            .map(|h| (h.id.clone(), serde_json::to_value(h).unwrap()))
+            .collect();
+        // Confirmed hit: tier label + latest verifier of the OKF `verified`
+        // list (`by` = verifier, `at` = ISO timestamp — the json field, not
+        // the ms-epoch `last_verified_at` mirror).
+        let c = &by_id["fact_c"];
+        assert_eq!(c["source_type"], "user_confirmed");
+        assert_eq!(c["verified"]["by"], "human:kurt");
+        assert_eq!(c["verified"]["at"], "2026-10-21T12:00:00.000Z");
+        // Inferred hit: tier labeled, but NEVER `verified`.
+        let i = &by_id["fact_i"];
+        assert_eq!(i["source_type"], "librarian_inferred");
+        assert!(
+            i.get("verified").is_none(),
+            "inferred hit must carry no verified label: {i}"
+        );
+        // Out-of-vocabulary stored value: absent key, not a guessed label.
+        let x = &by_id["fact_x"];
+        assert!(
+            x.get("source_type").is_none(),
+            "out-of-vocabulary source_type must degrade to an absent key: {x}"
+        );
+        assert!(x.get("verified").is_none());
     }
 }
 

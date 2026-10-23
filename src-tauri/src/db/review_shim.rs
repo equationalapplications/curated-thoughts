@@ -204,18 +204,22 @@ pub fn approve_proposal_shim(
         ResolveOptions {
             auto_approve: false,
             embed_profile: embed_profile.cloned(),
-            // Honour the on-disk `wiki.deposit_default_tier` setting. The
-            // shim is reached from the legacy review desk (a Tauri
-            // command), so a deposit approved through it must stamp the
-            // same tier as one approved through the native
-            // `resolve_proposal_cmd` (which already plumbs this).
+            // Honour the on-disk `wiki.deposit_default_tier` setting, as
+            // the native `resolve_proposal_cmd` path does. Reachability
+            // note: these shims have NO live callers today and resolve at
+            // AGENT tier under the human-surface rule (no
+            // `human_surface: true` is passed here) — fail-closed. Any
+            // future desk rewiring MUST pass `human_surface: true`
+            // explicitly first.
             deposit_default_tier: Some(crate::config::BrainConfig::deposit_default_tier_on_disk()),
             // `auto_approve: false` declares this a HUMAN decision, and
             // ResolveOptions' contract is that such a decision names its
             // reviewer. Leaving it NULL would make a desk approval
             // indistinguishable from an automatic commit — the exact
-            // distinction the column exists to record. The shims are reached
-            // only from the legacy review desk, so they carry its identity.
+            // distinction the column exists to record. `DESKTOP_REVIEWER`
+            // is carried as a LABEL only: with no `human_surface: true`
+            // these shims resolve at agent tier (fail-closed, zero live
+            // callers).
             reviewed_by: Some(crate::proposals_api::DESKTOP_REVIEWER.to_string()),
             ..Default::default()
         },
@@ -248,7 +252,9 @@ pub fn reject_proposal_shim(
         ResolveOptions {
             auto_approve: false,
             embed_profile: embed_profile.cloned(),
-            // See `approve_proposal_shim`: a human decision names its reviewer.
+            // See `approve_proposal_shim`: the reviewer is a LABEL only —
+            // no `human_surface: true` here, so this resolves at agent
+            // tier (fail-closed; zero live callers).
             reviewed_by: Some(crate::proposals_api::DESKTOP_REVIEWER.to_string()),
             ..Default::default()
         },

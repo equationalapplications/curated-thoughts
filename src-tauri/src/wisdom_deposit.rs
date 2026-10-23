@@ -46,6 +46,11 @@ pub struct WisdomDepositParams {
     /// Optional tags.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Optional attribution carrier (Task 1, spec rev 4.1 §1): rendered as an
+    /// OKF frontmatter block and indexed at deposit time. `None` renders
+    /// byte-identically to the pre-attribution format.
+    #[serde(default)]
+    pub attribution: Option<DepositAttribution>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -74,6 +79,89 @@ pub struct WisdomProposeSupersessionParams {
 }
 
 // ---------------------------------------------------------------------------
+// Attribution carrier (user-confirmation-queue Task 1, spec rev 4.1 §1/D4)
+// ---------------------------------------------------------------------------
+
+/// Who said what a deposit records, supplied by the calling agent at deposit
+/// time and rendered into the note's OKF frontmatter — the FILE is the
+/// authoritative carrier; the brain-side `deposit_attribution` row is a
+/// derived cache keyed by document path. The agent may attribute only what
+/// Kurt said (`Verbatim`) or faithfully restated at his direction
+/// (`RestatedAtDirection`) — never its own paraphrase or librarian output
+/// (S2). The validation here checks SHAPE only (speaker non-empty, source
+/// handle form); S2 itself is NOT machine-enforced — attribution is
+/// agent-asserted and its mitigation is the human confirm step
+/// (comment corrected, Tier-1.5 xhigh MINOR-8).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+pub struct DepositAttribution {
+    /// Speaker handle (e.g. `kurt`).
+    pub speaker: String,
+    /// Vocabulary kind — see [`AttributionKind`].
+    pub kind: AttributionKind,
+    /// Source handle for the attribution, e.g. `discord:1562137256498569278`.
+    /// Validated against [`validate_handle`] — these values are rendered into
+    /// YAML frontmatter and parsed back, so free text is rejected at the door.
+    pub source: String,
+}
+
+/// Attribution vocabulary: `verbatim` and `restated_at_direction` only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "mcp-server", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AttributionKind {
+    /// Kurt said exactly this.
+    Verbatim,
+    /// The agent restated this at Kurt's direction.
+    RestatedAtDirection,
+}
+
+impl AttributionKind {
+    /// Frontmatter token (the pinned kebab-lowercase vocabulary).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Verbatim => "verbatim",
+            Self::RestatedAtDirection => "restated_at_direction",
+        }
+    }
+}
+
+impl TryFrom<&str> for AttributionKind {
+    type Error = String;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "verbatim" => Ok(Self::Verbatim),
+            "restated_at_direction" => Ok(Self::RestatedAtDirection),
+            other => Err(format!(
+                "unknown attribution kind {other:?} (expected \"verbatim\" or \
+                 \"restated_at_direction\")"
+            )),
+        }
+    }
+}
+
+/// Handle values (`attribution_source`, and later `approval_instruction_source`)
+/// are rendered into YAML frontmatter and parsed back, so they must match
+/// `^[a-z]+:[A-Za-z0-9_.-]+$` — free text is rejected at the door (rev 4 m8).
+pub fn validate_handle(handle: &str) -> Result<(), String> {
+    let ok = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-');
+    match handle.split_once(':') {
+        Some((scheme, rest))
+            if !scheme.is_empty()
+                && scheme.bytes().all(|b| b.is_ascii_lowercase())
+                && !rest.is_empty()
+                && rest.bytes().all(ok) =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "invalid handle {handle:?} (must match ^[a-z]+:[A-Za-z0-9_.-]+$)"
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Deposit file rendering
 // ---------------------------------------------------------------------------
 
@@ -86,9 +174,26 @@ fn flatten_line(s: &str) -> String {
     s.replace(['\n', '\r'], " ")
 }
 
-fn render_deposit_file(title: &str, body: &str, tags: &[String]) -> String {
+fn render_deposit_file(
+    title: &str,
+    body: &str,
+    tags: &[String],
+    attribution: Option<&DepositAttribution>,
+) -> String {
     let title = flatten_line(title);
     let mut out = String::new();
+    // Attribution frontmatter rides FIRST (D4): the deposit file itself is the
+    // authoritative carrier, downstream copies inherit it. No attribution →
+    // no frontmatter, byte-identical to the pre-attribution render (pinned by
+    // test). The speaker is line-flattened so a newline cannot forge
+    // frontmatter lines; `source` is regex-validated at argument validation.
+    if let Some(a) = attribution {
+        out.push_str("---\n");
+        out.push_str(&format!("attributed_speaker: {}\n", flatten_line(&a.speaker)));
+        out.push_str(&format!("attribution_kind: {}\n", a.kind.as_str()));
+        out.push_str(&format!("attribution_source: {}\n", a.source));
+        out.push_str("---\n");
+    }
     out.push_str(&format!("# {title}\n\n"));
     if !tags.is_empty() {
         let list = tags
@@ -131,7 +236,7 @@ fn render_supersession_file(
 // Kick-state ledger helpers
 // ---------------------------------------------------------------------------
 
-fn set_kick_state(
+pub(crate) fn set_kick_state(
     conn: &rusqlite::Connection,
     path: &str,
     state: &str,
@@ -328,11 +433,35 @@ const KICK_LOCK_RETRY_MS: u64 = 500;
 /// VaultLock retry loop below.
 static KICK_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// App-side kick registration (spec §3.7.3): the APP — never an agent kick —
+/// writes the initial kick-ledger row when it creates a `stated/` file. The
+/// initial state is `pending`: unlike the MCP deposit path there is no
+/// spawn/await split to reflect (the capture call runs the kick itself).
+pub(crate) fn register_app_kick(conn: &rusqlite::Connection, rel_path: &str) -> Result<()> {
+    set_kick_state(conn, rel_path, "pending", None)
+}
+
 fn run_kick(
     db_path: PathBuf,
     vault_dir: PathBuf,
     rel_path: String,
     profile: crate::embedder::EmbedProfile,
+) {
+    run_kick_with(db_path, vault_dir, rel_path, profile, None)
+}
+
+/// [`run_kick`] with an injected LLM completer for the librarian leg —
+/// Task 9's stated/ capture test seam (spec §3.7.4: the extraction pipeline
+/// itself is unchanged; only the completion call site is substituted).
+/// `Some(_)` skips the `llm_generation_configured` gate, since the caller is
+/// the host. Not an agent surface: nothing outside `#[cfg(test)]` passes a
+/// completer.
+pub(crate) fn run_kick_with(
+    db_path: PathBuf,
+    vault_dir: PathBuf,
+    rel_path: String,
+    profile: crate::embedder::EmbedProfile,
+    completer: Option<&dyn crate::librarian::LlmCompleter>,
 ) {
     let _serial = KICK_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let outcome = (|| -> Result<String> {
@@ -373,8 +502,16 @@ fn run_kick(
         .with_context(|| format!("open brain {}", db_path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
 
-        // `rel_path` stays the document key (status probe, V25 folder rules);
-        // the bytes are read from the vault, not the process CWD.
+        // B1 round 2 (mechanism v2): the ingest TABLE KEY is the SAME
+        // canonical-root derivation every other regime uses — the
+        // vault-relative `rel_path` would stage `documents.path = rel`,
+        // missing the virtual-absolute attestation/attribution joins
+        // (commit.rs, queue.rs). `rel_path` remains the kick-ledger/status
+        // handle and the read handle below.
+        let doc_key =
+            crate::db::queue::virtual_path_key_at_root(&vault_dir, std::path::Path::new(&rel_path))
+                .map_err(|e| anyhow!("canonical vault root: {e:#}"))?;
+        // The bytes are read from the vault, not the process CWD.
         let read_path = vault_dir.join(&rel_path).to_string_lossy().into_owned();
         // §8(c) caller contract (Task 9, belt-and-suspenders): force is false
         // here, so the funnel never refuses today — but if a future reason
@@ -383,7 +520,7 @@ fn run_kick(
         crate::pipeline::ingest_document_virtual(
             &conn,
             &profile,
-            &rel_path,
+            &doc_key,
             &read_path,
             false,
             Some(vault_dir.to_string_lossy().as_ref()),
@@ -399,18 +536,30 @@ fn run_kick(
         set_kick_state(&conn, &rel_path, "chunked", None)?;
 
         // Librarian leg. `generate_summary` consults folder rules itself
-        // (agents = synthesize + auto_approve after V25); with no configured
-        // generation provider it errors — that's `chunked` (no librarian
-        // host), not `failed`. Config is re-checked HERE rather than passed
-        // in from the spawn site so the ledger decision always matches the
-        // config this kick actually runs under.
-        if !crate::librarian::llm_generation_configured() {
+        // (agents = synthesize + auto_approve after V25; stated = Task 9's
+        // `synthesize` + auto-approve row); with no configured generation
+        // provider it errors — that's `chunked` (no librarian host), not
+        // `failed`. Config is re-checked HERE rather than passed in from the
+        // spawn site so the ledger decision always matches the config this
+        // kick actually runs under. An injected completer (test seam) skips
+        // the config gate — the caller IS the host.
+        if completer.is_none() && !crate::librarian::llm_generation_configured() {
             // The ledger already reads `chunked` from the ingest leg above —
             // this check only decides whether the librarian leg runs.
             return Ok("chunked".to_string());
         }
         let model = crate::librarian::active_generation_model(crate::setup::recommended_model());
-        match crate::librarian::generate_summary(&mut conn, &rel_path, &model, false) {
+        let gen_result = match completer {
+            Some(c) => {
+                crate::librarian::generate_summary_with(&mut conn, &doc_key, &model, false, c)
+            }
+            // B1 round 2: the librarian leg resolves the document under the
+            // SAME canonical `documents.path` key the ingest staged above;
+            // `get_folder_mode` relativizes it against the configured root
+            // for V25's vault-relative folder rules.
+            None => crate::librarian::generate_summary(&mut conn, &doc_key, &model, false),
+        };
+        match gen_result {
             Ok(()) => {
                 set_kick_state(&conn, &rel_path, "ingested", None)?;
                 Ok("ingested".to_string())
@@ -456,10 +605,32 @@ async fn audit_and_seed_kick(
     tool: &'static str,
     path: String,
     initial_state: &'static str,
+    attribution: Option<DepositAttribution>,
+    vault: &std::path::Path,
 ) -> Result<()> {
     let client = ctx.client.clone();
     let audit_path = path.clone();
     let kick_rel = path;
+    // Deposit-attribution TABLE KEY: the watcher's virtual-absolute
+    // `documents.path` form (`virtual_path_key`, defect B1) — the queue's
+    // attribution join (`da.document_path = d.path`, queue.rs:307) matches
+    // against the watcher-staged row. `kick_rel` stays the ledger/status
+    // handle (vault-relative).
+    // B1 round 2 (mechanism v2): the attribution TABLE KEY is derived
+    // through the CANONICAL root — `vault` may be a symlinked/relative
+    // configured path, and the queue's attribution join
+    // (`da.document_path = d.path`, queue.rs:307) matches against rows
+    // staged/ingested under the canonical form in EVERY regime (watcher and
+    // kick alike). `kick_rel` stays the ledger/status handle
+    // (vault-relative).
+    let attribution_key = if attribution.is_some() {
+        Some(crate::db::queue::virtual_path_key_at_root(
+            vault,
+            std::path::Path::new(&kick_rel),
+        )?)
+    } else {
+        None
+    };
     ctx.with_rw(move |conn| {
         let tx = conn
             .transaction()
@@ -472,6 +643,27 @@ async fn audit_and_seed_kick(
             "write",
         )?;
         set_kick_state(&tx, &kick_rel, initial_state, None)?;
+        // Deposit-time attribution index (Task 1, spec rev 4.1 §1): the
+        // frontmatter is parsed HERE — inside the same transaction as the
+        // audit + kick-ledger writes — so file, audit, ledger, and index all
+        // land or vanish together. The table is a derived cache keyed by
+        // document path; the FILE remains authoritative (a re-ingest
+        // repopulates the index from it).
+        if let Some(a) = attribution {
+            tx.execute(
+                "INSERT OR REPLACE INTO deposit_attribution
+                     (document_path, speaker, kind, source, deposited_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    attribution_key.expect("key derived whenever attribution is present"),
+                    a.speaker,
+                    a.kind.as_str(),
+                    a.source,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|e| anyhow!("deposit_attribution insert failed: {e}"))?;
+        }
         tx.commit()
             .map_err(|e| anyhow!("kick ledger tx commit failed: {e}"))
     })
@@ -597,12 +789,27 @@ async fn deposit_inner(
     if p.title.trim().is_empty() || p.body.trim().is_empty() {
         bail!("title and body are required");
     }
+    // Argument validation (spec rev 4.1 §1, rev 4 m8): attribution handles are
+    // rendered into YAML frontmatter and parsed back, so free text is rejected
+    // at the door — before any file is created.
+    if let Some(a) = &p.attribution {
+        if a.speaker.trim().is_empty() {
+            bail!("attribution speaker is required");
+        }
+        validate_handle(&a.source)
+            .map_err(|e| anyhow!("invalid attribution_source: {e}"))?;
+    }
     let target = vault.join(&rel);
     if target.symlink_metadata().is_ok() {
         bail!("deposit_exists: {} (append-only; supersede instead)", rel);
     }
 
-    let content = render_deposit_file(&p.title, &p.body, p.tags.as_deref().unwrap_or(&[]));
+    let content = render_deposit_file(
+        &p.title,
+        &p.body,
+        p.tags.as_deref().unwrap_or(&[]),
+        p.attribution.as_ref(),
+    );
     // The whole lane chain down to the deposit's parent must exist before
     // validation: safe_vault_path's MayCreate canonicalizes the parent and
     // reports "parent directory not found" for a fresh vault (CI caught this
@@ -675,6 +882,8 @@ async fn deposit_inner(
         "wisdom_deposit",
         rel.clone(),
         initial_kick_state(generation_configured),
+        p.attribution.clone(),
+        &vault,
     )
     .await
     {
@@ -927,6 +1136,8 @@ async fn supersession_inner(
         "wisdom_propose_supersession",
         rel.clone(),
         initial_kick_state(generation_configured),
+        None,
+        &vault,
     )
     .await
     {
@@ -1034,6 +1245,7 @@ mod tests {
                     title: "Alpha ships v2".into(),
                     body: "Alpha v2 ships 2026-11-01 behind a flag.".into(),
                     tags: Some(vec!["alpha".into()]),
+                    attribution: None,
                 },
             )
             .await
@@ -1052,6 +1264,7 @@ mod tests {
                     title: "x".into(),
                     body: "y".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1074,6 +1287,7 @@ mod tests {
                     title: "x".into(),
                     body: "y".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1101,6 +1315,7 @@ mod tests {
                     title: "Evidence note".into(),
                     body: "body".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1211,6 +1426,7 @@ mod tests {
                         title: "t".into(),
                         body: "b".into(),
                         tags: None,
+                        attribution: None,
                     },
                 )
                 .await
@@ -1224,6 +1440,7 @@ mod tests {
                     title: " ".into(),
                     body: "b".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1247,6 +1464,7 @@ mod tests {
                     title: "Beta facts".into(),
                     body: "Beta is written in Rust.".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1479,6 +1697,7 @@ mod tests {
                     title: "t".into(),
                     body: "b".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1515,6 +1734,7 @@ mod tests {
             "Alpha ships v2\n\n# Unrelated heading",
             "body",
             &["tag\nwith newline".to_string()],
+            None,
         );
         assert_eq!(
             deposit.lines().next().unwrap(),
@@ -1800,6 +2020,7 @@ mod tests {
                     title: "Nested".into(),
                     body: "Nested deposits land in fresh topic dirs.".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1825,6 +2046,7 @@ mod tests {
                     title: "t".into(),
                     body: "b".into(),
                     tags: None,
+                    attribution: None,
                 },
             )
             .await
@@ -1907,6 +2129,364 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(state, "chunked", "kick error: {error:?}");
+        });
+    }
+
+    // ------------------------------------------------------------------------
+    // Attribution carrier (user-confirmation-queue Task 1): deposit-file
+    // frontmatter (D4) + deposit-time index written inside the
+    // audit_and_seed_kick transaction. The FILE is authoritative; the brain
+    // table is a derived cache keyed by document path (spec rev 4.1 §1).
+    // ------------------------------------------------------------------------
+
+    /// Exact pre-change `render_deposit_file` output, captured verbatim from
+    /// the code at HEAD c149b3cf (H1, blank line, inline-code tag list, blank
+    /// line, `body.trim_end()`, trailing newline). The unattributed-render
+    /// test proves byte-identity against it.
+    const BASELINE_NOTE: &str = "# Test title\n\n`alpha`\n\nBeta is written in Rust.\n";
+
+    /// Harness helper: renders a minimal deposit note with an optional
+    /// attribution carrier.
+    fn render_test_deposit(attribution: Option<&DepositAttribution>) -> String {
+        render_deposit_file(
+            "Test title",
+            "Beta is written in Rust.",
+            &["alpha".to_string()],
+            attribution,
+        )
+    }
+
+    #[test]
+    fn attribution_frontmatter_renders_and_parses_back() {
+        let a = DepositAttribution {
+            speaker: "kurt".into(),
+            kind: AttributionKind::RestatedAtDirection,
+            source: "discord:1562137256498569278".into(),
+        };
+        let md = render_test_deposit(Some(&a));
+        assert!(md.starts_with(
+            "---\nattributed_speaker: kurt\nattribution_kind: restated_at_direction\nattribution_source: discord:1562137256498569278\n---\n"
+        ));
+        assert_eq!(
+            AttributionKind::try_from("verbatim").unwrap(),
+            AttributionKind::Verbatim
+        );
+        assert!(AttributionKind::try_from("paraphrase").is_err());
+        assert!(validate_handle("discord:123").is_ok());
+        assert!(validate_handle("has space:123").is_err());
+        assert!(validate_handle("discord:").is_err());
+    }
+
+    #[test]
+    fn unattributed_deposit_renders_byte_identical() {
+        assert_eq!(render_test_deposit(None), BASELINE_NOTE);
+    }
+
+    #[test]
+    fn attribution_index_lands_in_audit_and_seed_kick_transaction() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            let rel = "immutable-source-files/agents/attributed.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Kurt's direction".into(),
+                    body: "Deploy the staging stack nightly.".into(),
+                    tags: None,
+                    attribution: Some(DepositAttribution {
+                        speaker: "kurt".into(),
+                        kind: AttributionKind::RestatedAtDirection,
+                        source: "discord:1562137256498569278".into(),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+            // The attribution index row and the initial kick-ledger row are
+            // committed by the SAME audit_and_seed_kick transaction, so both
+            // are visible here, after the dispatch returned.
+            let conn = ctx.conn.lock().unwrap();
+            // B1: the attribution TABLE KEY is the watcher's virtual-absolute
+            // documents.path form; `rel` stays the ledger/status handle.
+            // Derive the expected key through the SAME canonical-root family
+            // production uses — never the raw tempdir spelling (macOS:
+            // /var/... is a symlink to /private/var/...).
+            let attribution_key = crate::db::queue::virtual_path_key_at_root(
+                ctx.vault_dir.as_deref().unwrap(),
+                std::path::Path::new(rel),
+            )
+            .unwrap();
+            let (speaker, kind, source): (String, String, String) = conn
+                .query_row(
+                    "SELECT speaker, kind, source FROM deposit_attribution
+                      WHERE document_path = ?1",
+                    [&attribution_key],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(speaker, "kurt");
+            assert_eq!(kind, "restated_at_direction");
+            assert_eq!(source, "discord:1562137256498569278");
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM deposit_kick_state WHERE path = ?1",
+                    [rel],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                matches!(state.as_str(), "pending" | "no_ingest_host"),
+                "kick ledger row must exist beside the attribution row, got {state}"
+            );
+        });
+    }
+
+    /// Deterministic librarian stand-in for the watcher-side deposit flow
+    /// (same canned-synthesis shape the task9 capture tests use).
+    struct WatcherLegCompleter {
+        response: String,
+    }
+
+    impl crate::librarian::LlmCompleter for WatcherLegCompleter {
+        fn complete(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
+            Ok(self.response.clone())
+        }
+    }
+
+    /// RED (F2, B1 round 2): the NO-watcher regime (ct CLI deposit,
+    /// headless brain). The kick ingests with the vault-relative key, so
+    /// `documents.path` = `rel` while the round-1 B1 fix keyed
+    /// `deposit_attribution` in the watcher's canonical absolute form — the
+    /// queue's attribution join (`da.document_path = d.path`, queue.rs:307)
+    /// misses. The single-key-form ruling applies to the kick-ingest site
+    /// TOO: the ingest must stage `documents.path` through the SAME
+    /// canonical key derivation; `rel` remains the ledger/kick-status
+    /// handle. Here the configured vault root goes through a SYMLINK so the
+    /// canonical form differs from the configured one. The kick runs via
+    /// `run_kick_with`'s `#[cfg(test)]` completer seam (the dispatch
+    /// dispatcher spawns no kick without a generation host — test env has
+    /// none), which is the exact pinned F2 site.
+    #[test]
+    fn kick_ingest_stages_documents_path_in_canonical_form() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("vault-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            // ctx.vault_dir goes through the SYMLINK; the canonical key the
+            // watcher/rebuild lanes derive for the same file is the real
+            // path.
+            let mut ctx = wisdom_ctx(&real);
+            ctx.vault_dir = Some(link.clone());
+            let rel = "immutable-source-files/agents/attributed.md";
+            let canonical_root = std::fs::canonicalize(&real).unwrap();
+            let expected_key =
+                crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
+
+            // Deposit: the attribution row lands keyed (post-fix) in the
+            // canonical form; no kick spawns (no generation host) and the
+            // vault lock is NOT held — the no-watcher regime.
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Kurt's direction".into(),
+                    body: "Deploy the staging stack nightly.".into(),
+                    tags: None,
+                    attribution: Some(DepositAttribution {
+                        speaker: "kurt".into(),
+                        kind: AttributionKind::Verbatim,
+                        source: "discord:123".into(),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+
+            // The kick ingest itself — the pinned F2 site — with the
+            // deterministic completer seam.
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(
+                    kick_ctx.db_path.clone(),
+                    kick_ctx.vault_dir.clone().unwrap(),
+                    kick_rel,
+                    kick_ctx.profile.clone(),
+                    None,
+                );
+            });
+            handle.await.unwrap();
+
+            let conn = ctx.conn.lock().unwrap();
+            let doc_path: String = conn
+                .query_row(
+                    "SELECT path FROM documents WHERE path = ?1",
+                    [&expected_key],
+                    |r| r.get(0),
+                )
+                .expect(
+                    "RED (F2): the kick ingested documents.path under the vault-RELATIVE key, \
+                     not the canonical absolute form — the attribution join misses",
+                );
+            let attribution_key: String = conn
+                .query_row("SELECT document_path FROM deposit_attribution", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                attribution_key, doc_path,
+                "RED (F2): attribution and documents.path must share ONE canonical key form"
+            );
+            // The rel handle stays the kick-ledger/status key.
+            conn.query_row(
+                "SELECT state FROM deposit_kick_state WHERE path = ?1",
+                [rel],
+                |r| r.get::<_, String>(0),
+            )
+            .expect("the kick ledger keeps the rel handle");
+        });
+    }
+
+    /// RED (B1 regression, deposit-attribution twin): the APP's deposit
+    /// regime. The watcher holds the vault lock for its lifetime, so the
+    /// deposit kick falls back to `queued_watcher` and the WATCHER stages and
+    /// ingests the file, keying `documents.path` VIRTUAL-ABSOLUTE (issue
+    /// #204). The `deposit_attribution` row must carry the SAME key form or
+    /// the queue's attribution join (`da.document_path = d.path`,
+    /// queue.rs:307) never matches and the row's `attributed_speaker` is
+    /// lost.
+    #[test]
+    fn deposit_attribution_surfaces_through_watcher_ingest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            let rel = "immutable-source-files/agents/attributed.md";
+
+            // App regime: hold the vault lock so the synchronous kick cannot
+            // ingest (queued_watcher fallback — wisdom_deposit.rs:484-491).
+            let lock = crate::watcher::VaultLock::acquire(&dir).unwrap();
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Kurt's direction".into(),
+                    body: "Deploy the staging stack nightly.".into(),
+                    tags: None,
+                    attribution: Some(DepositAttribution {
+                        speaker: "kurt".into(),
+                        kind: AttributionKind::Verbatim,
+                        source: "discord:123".into(),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+            drop(lock);
+
+            // Watcher leg: stage + ingest keyed by the watcher's absolute
+            // `documents.path` form. The running watcher resolves the vault
+            // root CANONICALLY (`canonical_vault_from_config`), so drive the
+            // lane through the same canonical-root family — never the raw
+            // tempdir spelling (macOS: /var/... is a symlink to
+            // /private/var/...).
+            let root = dir.canonicalize().unwrap();
+            let abs = root.join(rel);
+            let abs_key = crate::db::queue::virtual_path_key(&abs).unwrap();
+            {
+                let mut guard = ctx.conn.lock().unwrap();
+                crate::db::queue::enqueue_vault_event(
+                    &mut guard,
+                    notify::EventKind::Create(notify::event::CreateKind::Any),
+                    &abs,
+                    Some(&root),
+                )
+                .unwrap();
+                crate::pipeline::ingest_document_virtual(
+                    &guard,
+                    &ctx.profile,
+                    &abs_key,
+                    &abs.to_string_lossy(),
+                    false,
+                    Some(root.to_string_lossy().as_ref()),
+                )
+                .unwrap();
+            }
+
+            // Librarian + commit (the folder's auto-approve lane, matching
+            // V25's intent for immutable-source-files/agents): the deposit
+            // fact lands `librarian_inferred` (deposits carry no attestation,
+            // agent-class commit) and shows on the human confirmation queue
+            // with its attribution speaker joined on the document path.
+            // Folder rules match by literal ancestor prefix, so the
+            // watcher-keyed lane gets its own absolute rule.
+            let completer = WatcherLegCompleter {
+                response: serde_json::json!({
+                    "proposals": [{
+                        "target": { "existing_id": "ent-alpha" },
+                        "reasoning": "Deposit capture.",
+                        "summary_update": null,
+                        "facts": [{
+                            "op": "add",
+                            "body": "Deploy the staging stack nightly.",
+                            "tags": [],
+                            "confidence": "inferred",
+                            "evidence": ["C1"]
+                        }],
+                        "edges": [],
+                        "tasks": []
+                    }]
+                })
+                .to_string(),
+            };
+            {
+                let guard = ctx.conn.lock().unwrap();
+                // Seed the entity the canned proposal targets.
+                guard
+                    .execute(
+                        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                         VALUES ('ent-alpha', 'Staging', 'concept', 'Stack notes', 100, 100)",
+                        [],
+                    )
+                    .unwrap();
+                guard
+                    .execute(
+                        "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
+                         VALUES (?1, 'synthesize', 1)",
+                        [root
+                            .join("immutable-source-files/agents")
+                            .to_string_lossy()
+                            .as_ref()],
+                    )
+                    .unwrap();
+            }
+            let mut guard = ctx.conn.lock().unwrap();
+            let model =
+                crate::librarian::active_generation_model(crate::setup::recommended_model());
+            crate::librarian::generate_summary_with(
+                &mut guard, &abs_key, &model, false, &completer,
+            )
+            .unwrap();
+            let rows = crate::db::queue::queue_rows(&guard);
+            drop(guard);
+            let row = rows
+                .iter()
+                .find(|r| r.body == "Deploy the staging stack nightly.")
+                .expect("the deposit fact is on the human confirmation queue");
+            assert_eq!(
+                row.attributed_speaker.as_deref(),
+                Some("kurt"),
+                "RED (B1): deposit_attribution is keyed kick_rel (vault-relative) while \
+                 documents.path is watcher-absolute — the queue's attribution join never matches"
+            );
         });
     }
 }

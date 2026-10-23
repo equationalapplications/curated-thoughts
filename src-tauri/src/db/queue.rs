@@ -27,7 +27,35 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use notify::EventKind;
-use rusqlite::Connection;
+use rusqlite::{params, Connection, OptionalExtension};
+
+/// The virtual-absolute path string that keys `documents.path` (issue #204
+/// contract, `enqueue_vault_event` below): `std::path::absolute` of the path —
+/// NO canonicalization, NO symlink resolution — lossy-converted. Single source
+/// of truth for every derived table joined against `documents.path`
+/// (`stated_attestations`, `deposit_attribution`): keying those tables with
+/// anything else (e.g. the vault-relative ledger handle) makes the joins
+/// silently miss (defect B1). Never hand-roll a divergent string form.
+pub(crate) fn virtual_path_key(p: &Path) -> Result<String> {
+    Ok(std::path::absolute(p)?.to_string_lossy().into_owned())
+}
+
+/// Canonical-root key derivation (B1 round 2, mechanism v2): resolve `root`
+/// to its CANONICAL absolute form, then key `root.join(rel)` in the
+/// [`virtual_path_key`] form — the same string the watcher stores and the
+/// rebuild derives, so capture-era, watcher-era, and rebuild-era keys agree
+/// for the same underlying file even when the configured root is a symlink,
+/// relative, or `..`-bearing path. The ROOT is canonicalized, never the
+/// joined path: `virtual_path_key` deliberately keeps its issue-#204
+/// non-canonicalizing contract for trusted links INSIDE the vault (a
+/// symlinked document must stage under its virtual in-vault path, not its
+/// external canonical target). The root itself must exist — every production
+/// caller derives keys right after writing/re-reading the file under it —
+/// and a missing root fails closed (`Err`), exactly as B1 round 1 pinned.
+pub(crate) fn virtual_path_key_at_root(root: &Path, rel: &Path) -> Result<String> {
+    let canonical_root = root.canonicalize()?;
+    virtual_path_key(&canonical_root.join(rel))
+}
 
 /// Stage a vault file event into the documents table.
 ///
@@ -90,7 +118,7 @@ pub fn enqueue_vault_event(
     // a row keyed by the external canonical path and every reconcile pass
     // then saw that row as vanished). `canonical` is still computed above
     // for the containment check (above) and for `std::fs::read` below.
-    let path_str = abs.to_string_lossy().into_owned();
+    let path_str = virtual_path_key(&abs)?;
 
     // Deletes must run BEFORE the exclusion check: a `documents` row staged
     // by pre-filter code (or another tool) must still be deletable when the
@@ -198,6 +226,633 @@ fn warn_no_vault_root_once() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// Confirmation queue (user-confirmation-queue plan Task 4; spec rev 4.1 §3.2)
+//
+// The queue is a QUERY, not a table. Membership: (a) live — deleted_at IS NULL
+// AND lifecycle_status='stable' AND not superseded/expired per the EXISTING
+// temporal filters (same probe + fragment semantics as
+// wisdom_match::entry_eligibility_where); (b) provenance NOT human-tier —
+// `source_type IS NULL OR source_type NOT IN ('user_stated','user_confirmed')`
+// (NULL/out-of-vocab counts as unverified; delivery, by contrast, admits only
+// exact vocabulary values); (c) not deny-suppressed by a queue_denials row
+// keyed (document path, chunk hash, fact-text hash) — sibling-safe, because a
+// sibling extracted from the same chunk has a DIFFERENT fact-text hash.
+// ---------------------------------------------------------------------------
+
+/// One row of the human confirmation queue (`curated_queue_list`, read-only —
+/// NO mutate tool: Task 5 owns confirm/deny and exposes them frontend-only).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct QueueRow {
+    pub fact_id: String,
+    pub title: String,
+    pub body: String,
+    /// `provenance_for(source_type)` — verbatim vocabulary value, `None`
+    /// outside the vocab (wisdom_match.rs).
+    pub provenance: Option<String>,
+    pub entity_id: String,
+    /// First stored evidence quote, via the `deposit_status_row` join chain
+    /// (librarian_evidence → curated_proposal_sources → documents).
+    pub evidence_quote: Option<String>,
+    pub source_document: Option<String>,
+    /// Deposit attribution speaker (Task 1's `deposit_attribution` table),
+    /// joined on the source document path. Display only.
+    pub attributed_speaker: Option<String>,
+    /// `approval_instruction_source` was DROPPED (spec rev 4.1 §6 — no
+    /// carrier exists); the field stays in the row shape for the frontend
+    /// contract and is always `None` until a carrier lands.
+    pub instruction_source: Option<String>,
+    /// Whole days since `created_at` (aging indicator; floor).
+    pub age_days: i64,
+}
+
+/// Normalized fact-text hash — the third `queue_denials` key component. The
+/// chunk hash is stable across re-extraction, so the fact-text hash pins the
+/// SPECIFIC fact: a verbatim re-extraction stays suppressed, while a sibling
+/// extracted from the same chunk (different text) keeps its vouch opportunity
+/// (spec rev 4.1 §3.3, rev-4 M3). Normalization: whitespace-collapsed +
+/// lowercased title, one newline, same-normalized body, SHA-256 hex.
+///
+/// Task 5's `deny_fact` MUST write denials with THIS function so the queue
+/// anti-match and the ledger agree.
+pub fn fact_text_hash(title: &str, body: &str) -> String {
+    fn normalize(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    }
+    let mut bytes = normalize(title).into_bytes();
+    bytes.push(b'\n');
+    bytes.extend_from_slice(normalize(body).as_bytes());
+    sha256_hex(&bytes)
+}
+
+/// The confirmation queue: live, non-human-tier, non-denied facts, oldest
+/// first (`ORDER BY age DESC`). Infallible by contract (the plan pins
+/// `-> Vec<QueueRow>`): a query failure degrades to an empty queue with a
+/// logged error — a broken queue read must never take down a caller.
+pub fn queue_rows(conn: &Connection) -> Vec<QueueRow> {
+    match queue_rows_inner(conn) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("[queue] confirmation queue query failed: {e:#}");
+            Vec::new()
+        }
+    }
+}
+
+fn queue_rows_inner(conn: &Connection) -> anyhow::Result<Vec<QueueRow>> {
+    // Supersede/expiry: reuse the EXISTING temporal filters. `temporal_columns`
+    // is wisdom_match's ONE column probe; the two fragments below are the exact
+    // eligibility predicate `entry_eligibility_where` applies (future-stamped
+    // supersessions stay eligible). The embedding/scheme legs of that fragment
+    // are DELIVERY gates, not membership gates — the queue must surface a fact
+    // whose embedding failed, so they are deliberately not carried over (spec
+    // §3.2: membership is live + non-human-tier + not denied, nothing else).
+    let t = crate::wisdom_match::temporal_columns(conn, None)?;
+    let now = crate::wisdom_deposit::now_ms();
+    let mut where_sql = String::from(
+        "e.deleted_at IS NULL \
+         AND e.lifecycle_status = 'stable' \
+         AND (e.source_type IS NULL OR e.source_type NOT IN ('user_stated','user_confirmed'))",
+    );
+    if t.has_superseded_by {
+        where_sql.push_str(" AND (e.superseded_by IS NULL OR e.superseded_at > :now)");
+    }
+    if t.has_valid_to {
+        where_sql.push_str(" AND (e.valid_to IS NULL OR e.valid_to > :now)");
+    }
+
+    // Evidence quote via the `deposit_status_row` join chain (the trace entry →
+    // librarian_evidence → proposal → curated_proposal_sources → documents
+    // path), attribution joined on the source document path.
+    // D4 (PR #294 round 2): the evidence fan-out (a fact's proposal with
+    // several source documents) must resolve to a DETERMINISTIC first row —
+    // `ps.role, d.id` as the created_at tie-break — shared verbatim with
+    // `deny_fact_at` below, so the denial key is built from the SAME evidence
+    // row the queue displays. The tie-break is total for the emitted row set:
+    // `librarian_evidence.entry_id` is a PRIMARY KEY (one evidence blob per
+    // fact), `curated_proposal_sources` is keyed (proposal_id, doc_id) with
+    // proposal_id pinned by that single blob, and `documents.id` is the
+    // documents PRIMARY KEY — so (ps.role, d.id) is unique per joined row;
+    // `deposit_attribution` joins 1:1 on `document_path`. Both components are
+    // stored values, stable across runs and planner/index changes
+    // ('evidence' < 'trigger').
+    let sql = format!(
+        "SELECT e.id, e.title, e.body, e.source_type, e.entity_id, e.created_at, \
+                le.evidence_json, d.path, da.speaker \
+           FROM llm_wiki_entries e \
+           LEFT JOIN librarian_evidence le ON le.entry_id = e.id \
+           LEFT JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id \
+           LEFT JOIN documents d ON d.id = ps.doc_id \
+           LEFT JOIN deposit_attribution da ON da.document_path = d.path \
+          WHERE {where_sql} \
+          ORDER BY e.created_at ASC, ps.role, d.id"
+    );
+
+    // Denial anti-match: the plan's "LEFT JOIN anti-match" against
+    // queue_denials. The key's third component is a SHA-256 computed in Rust
+    // (SQLite ships no hash function), so the triple match cannot execute
+    // inside the statement; the (document_path, chunk_hash, fact_text_hash)
+    // triple is enforced per row below — same semantics, sibling-safe.
+    let mut denied: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT document_path, chunk_hash, fact_text_hash FROM queue_denials",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        for row in rows {
+            let (p, c, f) = row?;
+            denied.insert((p, c, f));
+        }
+    }
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::named_params! {":now": now}, |r| {
+        let fact_id: String = r.get(0)?;
+        let title: String = r.get(1)?;
+        let body: String = r.get(2)?;
+        let source_type: Option<String> = r.get(3)?;
+        let entity_id: String = r.get(4)?;
+        let created_at: i64 = r.get(5)?;
+        let evidence_json: Option<String> = r.get(6)?;
+        let doc_path: Option<String> = r.get(7)?;
+        let speaker: Option<String> = r.get(8)?;
+
+        // evidence_json shape is pinned by `evidence_json_with_hashes`
+        // (commit.rs): {"proposal_id", "evidence":[{chunk_id, content_hash,
+        // quote, ...}]}. First entry wins; a malformed blob degrades to None.
+        let (quote, chunk_hash) = evidence_json
+            .as_deref()
+            .and_then(|ej| serde_json::from_str::<serde_json::Value>(ej).ok())
+            .map(|v| {
+                (
+                    v["evidence"][0]["quote"].as_str().map(str::to_string),
+                    v["evidence"][0]["content_hash"].as_str().map(str::to_string),
+                )
+            })
+            .unwrap_or((None, None));
+
+        Ok((
+            fact_id,
+            title,
+            body,
+            source_type,
+            entity_id,
+            created_at,
+            quote,
+            doc_path,
+            chunk_hash,
+            speaker,
+        ))
+    })?;
+
+    let mut out: Vec<QueueRow> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in rows {
+        let (
+            fact_id,
+            title,
+            body,
+            source_type,
+            entity_id,
+            created_at,
+            quote,
+            doc_path,
+            chunk_hash,
+            speaker,
+        ) = row?;
+        // Join fan-out guard: a fact with several evidence rows / source docs
+        // must appear once (first row wins — the quote is illustrative, not
+        // exhaustive).
+        if !seen.insert(fact_id.clone()) {
+            continue;
+        }
+        // Sibling-safe denial check: only an exact triple suppresses.
+        if let (Some(doc), Some(chunk)) = (&doc_path, &chunk_hash) {
+            let key = (doc.clone(), chunk.clone(), fact_text_hash(&title, &body));
+            if denied.contains(&key) {
+                continue;
+            }
+        }
+        out.push(QueueRow {
+            age_days: (now - created_at).div_euclid(86_400_000),
+            provenance: crate::wisdom_match::provenance_for(source_type.as_deref()),
+            fact_id,
+            title,
+            body,
+            entity_id,
+            evidence_quote: quote,
+            source_document: doc_path,
+            attributed_speaker: speaker,
+            instruction_source: None,
+        });
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Confirm / deny / undeny actions (user-confirmation-queue plan Task 5; spec
+// rev 4.1 §3.3 + §8). FRONTEND-ONLY exposure: the Tauri command layer (Task 9)
+// is the only caller. NO MCP tool, NO CLI wrapper, NO dispatch registration —
+// D2 closes the trust hole by leaving every non-app surface at agent tier.
+// ---------------------------------------------------------------------------
+
+/// The actor every app confirm/deny stamps (spec §3 pins `human:kurt`).
+pub const HUMAN_CONFIRMER: &str = "human:kurt";
+
+/// The denial key: (source document path, evidence chunk hash, normalized
+/// fact-text hash). The `queue_denials` primary key and the
+/// `stated/.denials.jsonl` match key — the chunk hash is stable across
+/// re-extraction while the fact-text hash pins the SPECIFIC fact, so denying
+/// one fact never hides a sibling from the same chunk (rev-4 M3, pinned by
+/// `deny_suppresses_and_undeny_restores`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DenialKey {
+    pub document_path: String,
+    pub chunk_hash: String,
+    pub fact_text_hash: String,
+}
+
+/// Confirm a queue fact (spec §3.3). One UPDATE in the `drafts.rs:62-74`
+/// json_insert shape — MINUS the `lifecycle_status` line, which confirm must
+/// not touch — plus an outbox Update row (Rule 5 sync), an event, and the
+/// `stated/.confirmations.jsonl` append via Task 2's `record_confirmation`
+/// primitive (REUSED, not forked: it owns the ledger append and — since the
+/// D1 v2 ruling — the hash-keyed FULL stamp through the shared
+/// `stamp_user_confirmed` helper, so same-text twins present at confirm time
+/// get the complete stamp immediately; spec §3.3). Idempotent on re-confirm:
+/// no duplicate event, no duplicate ledger line (spec §4 double-confirm).
+pub fn confirm_fact(conn: &Connection, fact_id: &str) -> Result<()> {
+    let vault_root = crate::db::stated_ledger::resolve_vault_root()?;
+    confirm_fact_at(conn, &vault_root, fact_id)
+}
+
+/// Explicit-root form of [`confirm_fact`] (tests and callers that already
+/// hold the vault root).
+///
+/// Orphan `user_confirmed` reset ruling (Task-5 verdict E2): a fact that
+/// carries a `user_confirmed` stamp whose backing `.confirmations.jsonl`
+/// line is gone (an "orphan" stamp) is REBUILT-ONLY by spec §8:511 — the
+/// rebuild re-derives the stamp from the ledger by content hash, so a
+/// mismatched/gone line simply does not re-stamp. The confirm path here
+/// does NOT reset it: spec §4:628-630 makes an existing stamp terminal
+/// (idempotent re-confirm), so this path treats `user_confirmed` as
+/// terminal and never demotes it. No reset logic lives here.
+pub fn confirm_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> Result<()> {
+    let (entity_id, title, body, source_type, confidence): (String, String, String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT entity_id, title, body, source_type, confidence
+               FROM llm_wiki_entries WHERE id = ?1 AND deleted_at IS NULL",
+            params![fact_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("fact not found or already archived: {fact_id}"))?;
+
+    // Idempotent re-confirm (spec §4): an already fully-stamped fact is a
+    // no-op BEFORE the ledger append, so neither the event nor the jsonl line
+    // can duplicate.
+    if source_type.as_deref() == Some("user_confirmed")
+        && confidence.as_deref() == Some("confirmed")
+    {
+        return Ok(());
+    }
+
+    let now_ms = crate::wisdom_deposit::now_ms();
+    let at_iso = confirm_iso_utc(now_ms)?;
+
+    // 1. Ledger first (spec §8 durable carrier): Task 2's primitive, verbatim
+    //    — append the content-hash-keyed line AND its own `source_type`
+    //    upsert. If the stamp below fails after this, the rebuild still
+    //    re-derives the confirmation from the ledger.
+    let content_hash =
+        crate::db::stated_ledger::confirmation_content_hash(&title, &body);
+    // Tier-1.5 medium MINOR-1 closeout: mirror of the deny-side ledger-
+    // duplicate guard (Task-5 Low-2 / Task-11 A2). A retry whose earlier
+    // brain transaction failed must not append a duplicate
+    // `.confirmations.jsonl` line. The rebuild is hash-idempotent, so the
+    // duplicate was harmless — this is ledger hygiene, not lost-state repair;
+    // the full stamp below (tx) re-applies everything on the retry.
+    let already_in_ledger = crate::db::stated_ledger::confirmation_ledger_has_key(
+        vault_root,
+        &content_hash,
+    )?;
+    if !already_in_ledger {
+        crate::db::stated_ledger::record_confirmation_at(
+            conn,
+            vault_root,
+            fact_id,
+            &content_hash,
+            HUMAN_CONFIRMER,
+            &at_iso,
+        )?;
+    }
+
+    // 2. The full stamp, one transaction: UPDATE + outbox Update + event
+    //    (D1 v2: the shared helper, also used by the by-hash rebuild leg).
+    //    `updated_at` untouched (drafts.rs discipline), `lifecycle_status`
+    //    untouched (already `stable`; spec §3.3).
+    let tx = conn.unchecked_transaction()?;
+    stamp_user_confirmed(&tx, fact_id, &entity_id, HUMAN_CONFIRMER, now_ms, &at_iso)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The full user-confirmation stamp, shared by BOTH stamping routes (D1 v2
+/// ruling, 2026-10-22): the clicked path ([`confirm_fact_at`]) and the
+/// by-hash rebuild path (`stated_ledger::apply_confirmations_by_hash`).
+/// One stamp body: guarded UPDATE (`source_type` + `confidence` +
+/// `okf_verified` append + `last_verified_by/at` mirror), an outbox Update
+/// row (Rule 5 sync), and a `fact_confirmed` event. `updated_at` and
+/// `lifecycle_status` untouched (drafts.rs discipline, spec §3.3).
+///
+/// Idempotence via the `NOT (fully stamped)` guard: an already fully-stamped
+/// row yields `changed == 0` and emits NEITHER the outbox row NOR the event
+/// (event-once, spec §4) — a rebuild re-run over the same ledger is a no-op.
+///
+/// Takes `&Connection` so callers pass either a plain conn or an open
+/// transaction (`&tx` derefs): the CALLER owns the transaction (confirm: its
+/// own tx; rebuild: the single rebuild tx, so outbox rows and events land
+/// atomically with the rebuild or not at all). Returns the number of rows
+/// stamped (0 = already fully stamped).
+pub(crate) fn stamp_user_confirmed(
+    conn: &Connection,
+    fact_id: &str,
+    entity_id: &str,
+    confirmer: &str,
+    now_ms: i64,
+    at_iso: &str,
+) -> Result<usize> {
+    let changed = conn.execute(
+        "UPDATE llm_wiki_entries
+            SET source_type = 'user_confirmed',
+                confidence = 'confirmed',
+                okf_verified = json_insert(
+                    COALESCE(NULLIF(okf_verified, ''), '[]'),
+                    '$[#]',
+                    json_object('by', ?3, 'at', ?4)
+                ),
+                last_verified_by = ?3,
+                last_verified_at = ?5
+          WHERE id = ?1 AND entity_id = ?2
+            AND NOT (source_type = 'user_confirmed' AND confidence = 'confirmed')",
+        params![fact_id, entity_id, confirmer, at_iso, now_ms],
+    )?;
+    if changed == 0 {
+        // Event-once guard (spec §4: the same rows_affected pattern proposal
+        // resolution uses) — a concurrent confirm converged elsewhere.
+        return Ok(0);
+    }
+    crate::db::commit::push_entries_outbox(
+        conn,
+        entity_id,
+        fact_id,
+        crate::db::outbox_format::OutboxOperation::Update,
+        crate::db::drafts::fact_row_outbox_payload(conn, fact_id, entity_id)?,
+        now_ms,
+    )?;
+    conn.execute(
+        "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
+         VALUES (?1, ?2, 'fact_confirmed', ?3, ?4, ?5)",
+        params![
+            crate::db::commit::generate_llm_id("evt_"),
+            entity_id,
+            "Confirmed by Kurt in the desktop app — human tier (spec §3.3)",
+            fact_id,
+            now_ms
+        ],
+    )?;
+    Ok(changed)
+}
+
+/// Deny a queue fact (spec §3.3: deny = archive + suppress). Archive reuses
+/// the existing `archive_wisdom_in_tx` primitive (soft-delete + edge purge +
+/// outbox Delete); the suppression row keys the (document path, chunk hash,
+/// fact-text hash) triple from `fact_text_hash` (Task 4, sibling-safe), and
+/// the durable denial rides `stated/.denials.jsonl` through Task 2's append
+/// primitive. Idempotent: an already-denied key is a no-op.
+pub fn deny_fact(conn: &Connection, fact_id: &str) -> Result<()> {
+    let vault_root = crate::db::stated_ledger::resolve_vault_root()?;
+    deny_fact_at(conn, &vault_root, fact_id)
+}
+
+/// The `deny_fact_at` source row: the fact plus the first evidence row's
+/// document path / evidence JSON (factored out for clippy::type_complexity).
+struct DenySourceRow {
+    entity_id: String,
+    title: String,
+    body: String,
+    document_path: Option<String>,
+    evidence_json: Option<String>,
+}
+
+/// Explicit-root form of [`deny_fact`].
+pub fn deny_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> Result<()> {
+    // Row + denial key via the same join chain the queue reads (first
+    // evidence row wins — the same fan-out rule queue_rows applies). A fact
+    // with no evidence source document/chunk cannot form the key (spec §3.3)
+    // and is REFUSED rather than suppressed keyless.
+    //
+    // D4 (PR #294 round 2): the pick MUST carry the queue's deterministic
+    // tie-break (`ORDER BY ps.role, d.id`, see queue_rows_inner) so the
+    // denial key is keyed to the SAME evidence row the queue displays —
+    // without it, an unordered multi-source fan-out could key the denial
+    // against a different (document, chunk) and the denied fact would
+    // survive the queue's anti-match.
+    let row: Option<DenySourceRow> = conn
+        .query_row(
+            "SELECT e.entity_id, e.title, e.body, d.path, le.evidence_json
+               FROM llm_wiki_entries e
+               LEFT JOIN librarian_evidence le ON le.entry_id = e.id
+               LEFT JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id
+               LEFT JOIN documents d ON d.id = ps.doc_id
+              WHERE e.id = ?1 AND e.deleted_at IS NULL
+              ORDER BY ps.role, d.id",
+            params![fact_id],
+            |r| {
+                Ok(DenySourceRow {
+                    entity_id: r.get(0)?,
+                    title: r.get(1)?,
+                    body: r.get(2)?,
+                    document_path: r.get(3)?,
+                    evidence_json: r.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(DenySourceRow {
+        entity_id,
+        title,
+        body,
+        document_path: doc_path,
+        evidence_json,
+    }) = row
+    else {
+        anyhow::bail!("fact not found or already archived: {fact_id}");
+    };
+    // Evidence JSON shape pinned by commit.rs: {"proposal_id",
+    // "evidence":[{chunk_id, content_hash, quote, ...}]} — first entry wins.
+    let chunk_hash = evidence_json
+        .as_deref()
+        .and_then(|ej| serde_json::from_str::<serde_json::Value>(ej).ok())
+        .and_then(|v| {
+            v["evidence"][0]["content_hash"]
+                .as_str()
+                .map(str::to_string)
+        });
+    let (Some(document_path), Some(chunk_hash)) = (doc_path, chunk_hash) else {
+        anyhow::bail!(
+            "cannot deny {fact_id}: no evidence source document/chunk to key \
+             the denial (spec §3.3)"
+        );
+    };
+    let fact_hash = fact_text_hash(&title, &body);
+
+    // Task-5 Low-2 closeout: the LEDGER is the durable carrier, so the
+    // retry guard checks IT first — a retry whose earlier brain transaction
+    // failed (queue_denials row absent) would otherwise append a duplicate
+    // `.denials.jsonl` line. The brain-table check below stays (it also
+    // no-ops a re-deny whose ledger line was already removed by un-deny).
+    let ledger_has_key =
+        crate::db::stated_ledger::read_denial_lines(vault_root)?.iter().any(|l| {
+            l.document_path == document_path
+                && l.chunk_hash == chunk_hash
+                && l.fact_text_hash == fact_hash
+        });
+    let already: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM queue_denials
+          WHERE document_path = ?1 AND chunk_hash = ?2 AND fact_text_hash = ?3",
+        params![document_path, chunk_hash, fact_hash],
+        |r| r.get(0),
+    )?;
+    if already > 0 {
+        // Idempotent re-deny: fully applied (ledger + suppression + archive).
+        return Ok(());
+    }
+
+    let now_ms = crate::wisdom_deposit::now_ms();
+    let at_iso = confirm_iso_utc(now_ms)?;
+
+    // 1. Ledger first (durable suppression — the rebuild repopulates from it,
+    //    so a failure in the brain write below still converges). SKIPPED when
+    //    the line already landed: Tier-1.5 high BLOCKER-1 (2026-10-22) —
+    //    three independent reviewers (CodeRabbit, Haiku medium, Haiku high)
+    //    converged on the crash-retry shape where the old early-return
+    //    reported success while the fact stayed live, un-archived and
+    //    unsuppressed. Task-11 Info-1 had ruled that acceptable under
+    //    "converges at the next rebuild"; the §8 rederive is now ONCE PER
+    //    BRAIN (connection.rs), so that convergence premise no longer holds
+    //    and the disposition is superseded. The append guard preserves the
+    //    Low-2 no-duplicate discipline; the brain transaction below is
+    //    idempotent (INSERT OR REPLACE + archive no-ops on an archived row)
+    //    and completes the deny on the retry — the same heal the confirm
+    //    side already had.
+    if !ledger_has_key {
+        crate::db::stated_ledger::append_denial(
+            vault_root,
+            &crate::db::stated_ledger::DenialLine {
+                document_path: document_path.clone(),
+                chunk_hash: chunk_hash.clone(),
+                fact_text_hash: fact_hash.clone(),
+                denied_by: HUMAN_CONFIRMER.to_string(),
+                denied_at: at_iso.clone(),
+            },
+        )?;
+    }
+
+    // 2. Archive (reused primitive: cluster-rekeyed soft-delete + edge purge
+    //    + outbox Delete) + the suppression row, one transaction.
+    let tx = conn.unchecked_transaction()?;
+    crate::db::wisdom::archive_wisdom_in_tx(&tx, &entity_id, fact_id)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO queue_denials
+            (document_path, chunk_hash, fact_text_hash, denied_by, denied_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![document_path, chunk_hash, fact_hash, HUMAN_CONFIRMER, at_iso],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Un-deny: drop the suppression everywhere and un-archive the denied fact
+/// (spec §3.3 "un-denying un-archives the fact").
+pub fn undeny_fact(conn: &Connection, key: &DenialKey) -> Result<()> {
+    let vault_root = crate::db::stated_ledger::resolve_vault_root()?;
+    undeny_fact_at(conn, &vault_root, key)
+}
+
+/// Explicit-root form of [`undeny_fact`].
+pub fn undeny_fact_at(conn: &Connection, vault_root: &Path, key: &DenialKey) -> Result<()> {
+    let now_ms = crate::wisdom_deposit::now_ms();
+    // 1. Durable side first: drop the ledger line. `DenialLine` has no
+    //    tombstone shape and the rebuild repopulates verbatim, so un-denying
+    //    rewrites the ledger without the line (Task-2 `remove_denial`). A
+    //    missing line is fine — the key may already be gone; the remaining
+    //    drops are then no-ops.
+    crate::db::stated_ledger::remove_denial(
+        vault_root,
+        &key.document_path,
+        &key.chunk_hash,
+        &key.fact_text_hash,
+    )?;
+
+    // 2. Brain side, one transaction: drop the suppression row, then
+    //    un-archive every archived fact whose normalized text matches the
+    //    key's fact-text hash, pushing an outbox Update per restored row so
+    //    replicas resurrect it (same payload builder as promote_draft).
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM queue_denials
+          WHERE document_path = ?1 AND chunk_hash = ?2 AND fact_text_hash = ?3",
+        params![key.document_path, key.chunk_hash, key.fact_text_hash],
+    )?;
+    let archived: Vec<(String, String, String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, entity_id, title, body
+               FROM llm_wiki_entries WHERE deleted_at IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, entity_id, title, body) in archived {
+        if fact_text_hash(&title, &body) != key.fact_text_hash {
+            continue;
+        }
+        tx.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        crate::db::commit::push_entries_outbox(
+            &tx,
+            &entity_id,
+            &id,
+            crate::db::outbox_format::OutboxOperation::Update,
+            crate::db::drafts::fact_row_outbox_payload(&tx, &id, &entity_id)?,
+            now_ms,
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// ISO-8601 UTC millis, `Z` suffix — the same stamp format `promote_draft`
+/// writes (drafts.rs:56-58).
+fn confirm_iso_utc(now_ms: i64) -> Result<String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms)
+        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .ok_or_else(|| anyhow::anyhow!("timestamp out of range: {now_ms}"))
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1109,5 +1764,868 @@ mod tests {
             "the row must not outlive the file"
         );
         assert_eq!(deleted_source_rows(&conn, "prop-vanished").len(), 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation queue tests (user-confirmation-queue plan Task 4; spec rev 4.1
+// §3.2). The queue is a QUERY over llm_wiki_entries, not a table: live entries
+// whose provenance is not human-tier, minus deny-suppressed rows.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod confirmation_queue_tests {
+    use super::{fact_text_hash, queue_rows, QueueRow};
+    use crate::db::connection::open_in_memory;
+    use rusqlite::params;
+    use std::collections::HashSet;
+
+    const DAY_MS: i64 = 86_400_000;
+
+    fn conn() -> rusqlite::Connection {
+        open_in_memory().expect("open migrated in-memory brain db")
+    }
+
+    fn insert_entry(conn: &rusqlite::Connection, id: &str, source_type: &str, title: &str, created_at: i64) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, source_type, created_at, updated_at)
+             VALUES (?1, 'ent_queue', ?2, ?3, ?4, ?5, ?5)",
+            params![id, title, format!("body of {title}"), source_type, created_at],
+        )
+        .unwrap();
+    }
+
+    /// Evidence-chain fixture: one proposal bound to one source document
+    /// (curated_proposal_sources) — the `deposit_status_row` join chain's
+    /// proposal→documents leg.
+    fn seed_proposal_doc(conn: &rusqlite::Connection, proposal_id: &str, doc_path: &str) {
+        let doc_id = crate::db::queries::upsert_document(conn, doc_path, "hash-q").unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, created_at)
+             VALUES (?1, 'new_entity', 'test', ?2)",
+            params![proposal_id, crate::wisdom_deposit::now_ms()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES (?1, ?2, 'evidence')",
+            params![proposal_id, doc_id],
+        )
+        .unwrap();
+    }
+
+    /// One librarian_evidence row binding `entry_id` to the proposal, whose
+    /// evidence_json carries the chunk hash + quote exactly like
+    /// `evidence_json_with_hashes` writes them (commit.rs).
+    fn seed_evidence_row(
+        conn: &rusqlite::Connection,
+        entry_id: &str,
+        proposal_id: &str,
+        chunk_hash: &str,
+        quote: &str,
+    ) {
+        let evidence_json = serde_json::json!({
+            "proposal_id": proposal_id,
+            "evidence": [{
+                "chunk_id": 1,
+                "content_hash": chunk_hash,
+                "quote": quote,
+                "start_line": 1,
+                "end_line": 2,
+                "source_kind": null,
+            }]
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, unanchored, created_at)
+             VALUES (?1, ?2, ?3, 0, ?4)",
+            params![entry_id, proposal_id, evidence_json, crate::wisdom_deposit::now_ms()],
+        )
+        .unwrap();
+    }
+
+    fn ids_of(rows: Vec<QueueRow>) -> HashSet<String> {
+        rows.into_iter().map(|r| r.fact_id).collect()
+    }
+
+    #[test]
+    fn queue_membership_live_not_human_tier() {
+        let conn = conn();
+        let now = crate::wisdom_deposit::now_ms();
+
+        // In: agent-tier provenance.
+        insert_entry(&conn, "q-inferred", "librarian_inferred", "Inferred fact", now);
+        insert_entry(&conn, "q-immutable", "immutable_document", "Document fact", now);
+        // In: out-of-vocabulary provenance counts as unverified (spec §3.2).
+        // (The NULL case is admitted by the same SQL clause but is not
+        // insertable on the current schema: source_type is NOT NULL there.)
+        insert_entry(&conn, "q-future-tier", "some_future_tier", "Future tier fact", now);
+
+        // Out: human tier.
+        insert_entry(&conn, "q-stated", "user_stated", "Stated fact", now);
+        insert_entry(&conn, "q-confirmed", "user_confirmed", "Confirmed fact", now);
+
+        // Out: not live.
+        insert_entry(&conn, "q-superseded", "librarian_inferred", "Superseded fact", now);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET superseded_by = 'q-inferred', superseded_at = ?1
+             WHERE id = 'q-superseded'",
+            params![now],
+        )
+        .unwrap();
+        insert_entry(&conn, "q-expired", "librarian_inferred", "Expired fact", now);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET valid_to = ?1 WHERE id = 'q-expired'",
+            params![now - 1],
+        )
+        .unwrap();
+        insert_entry(&conn, "q-deleted", "librarian_inferred", "Deleted fact", now);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = ?1 WHERE id = 'q-deleted'",
+            params![now],
+        )
+        .unwrap();
+        insert_entry(&conn, "q-draft", "librarian_inferred", "Draft fact", now);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET lifecycle_status = 'draft' WHERE id = 'q-draft'",
+            [],
+        )
+        .unwrap();
+
+        let ids = ids_of(queue_rows(&conn));
+        assert!(ids.contains("q-inferred"), "librarian_inferred in: {ids:?}");
+        assert!(ids.contains("q-immutable"), "immutable_document in: {ids:?}");
+        assert!(
+            ids.contains("q-future-tier"),
+            "out-of-vocab provenance in: {ids:?}"
+        );
+        assert!(!ids.contains("q-stated"), "user_stated out: {ids:?}");
+        assert!(!ids.contains("q-confirmed"), "user_confirmed out: {ids:?}");
+        assert!(!ids.contains("q-superseded"), "superseded out: {ids:?}");
+        assert!(!ids.contains("q-expired"), "expired out: {ids:?}");
+        assert!(!ids.contains("q-deleted"), "deleted out: {ids:?}");
+        assert!(!ids.contains("q-draft"), "non-stable lifecycle out: {ids:?}");
+
+        // ORDER BY age DESC: the older fact comes FIRST.
+        insert_entry(&conn, "q-older", "librarian_inferred", "Older fact", now - 30 * DAY_MS);
+        let rows = queue_rows(&conn);
+        let pos = |id: &str| {
+            rows.iter()
+                .position(|r| r.fact_id == id)
+                .unwrap_or_else(|| panic!("{id} present"))
+        };
+        assert!(
+            pos("q-older") < pos("q-inferred"),
+            "ORDER BY age DESC puts the oldest fact first"
+        );
+    }
+
+    #[test]
+    fn denied_fact_excluded_sibling_included() {
+        let conn = conn();
+        let now = crate::wisdom_deposit::now_ms();
+
+        // Two facts extracted from the SAME document chunk: same doc path +
+        // same chunk hash, different fact text.
+        insert_entry(&conn, "q-sib-a", "librarian_inferred", "Denied fact title", now);
+        insert_entry(&conn, "q-sib-b", "librarian_inferred", "Sibling fact title", now);
+        seed_proposal_doc(&conn, "p-sib", "documents/note.md");
+        seed_evidence_row(&conn, "q-sib-a", "p-sib", "chunkhash-sib", "shared quote");
+        seed_evidence_row(&conn, "q-sib-b", "p-sib", "chunkhash-sib", "shared quote");
+
+        // Deny fact A only: key = (doc path, chunk hash, A's fact-text hash).
+        conn.execute(
+            "INSERT INTO queue_denials (document_path, chunk_hash, fact_text_hash, denied_by, denied_at)
+             VALUES ('documents/note.md', 'chunkhash-sib', ?1, 'test', ?2)",
+            params![
+                fact_text_hash("Denied fact title", "body of Denied fact title"),
+                now
+            ],
+        )
+        .unwrap();
+
+        let ids = ids_of(queue_rows(&conn));
+        assert!(
+            !ids.contains("q-sib-a"),
+            "denied fact is suppressed: {ids:?}"
+        );
+        assert!(
+            ids.contains("q-sib-b"),
+            "sibling fact (same doc+chunk, different text) stays in: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn evidence_quote_and_attribution_surfaces_on_row() {
+        let conn = conn();
+        let now = crate::wisdom_deposit::now_ms();
+
+        insert_entry(
+            &conn,
+            "q-attr",
+            "librarian_inferred",
+            "Attributed fact",
+            now - 2 * DAY_MS,
+        );
+        seed_proposal_doc(&conn, "p-attr", "documents/talk.md");
+        seed_evidence_row(&conn, "q-attr", "p-attr", "chunkhash-attr", "the quoted sentence");
+        conn.execute(
+            "INSERT INTO deposit_attribution (document_path, speaker, kind, source, deposited_at)
+             VALUES ('documents/talk.md', 'kurt', 'verbatim', 'discord:123', ?1)",
+            params![now],
+        )
+        .unwrap();
+
+        let rows = queue_rows(&conn);
+        assert_eq!(rows.len(), 1, "one queue row, no join fan-out: {rows:?}");
+        let r = &rows[0];
+        assert_eq!(r.fact_id, "q-attr");
+        assert_eq!(r.title, "Attributed fact");
+        assert_eq!(r.provenance.as_deref(), Some("librarian_inferred"));
+        assert_eq!(r.entity_id, "ent_queue");
+        assert_eq!(
+            r.evidence_quote.as_deref(),
+            Some("the quoted sentence"),
+            "evidence quote via the deposit_status_row join chain"
+        );
+        assert_eq!(r.source_document.as_deref(), Some("documents/talk.md"));
+        assert_eq!(
+            r.attributed_speaker.as_deref(),
+            Some("kurt"),
+            "attributed deposit speaker joins on the source document path"
+        );
+        assert_eq!(
+            r.instruction_source, None,
+            "approval_instruction_source was DROPPED (spec rev 4.1 §6) — no carrier exists"
+        );
+        assert_eq!(r.age_days, 2, "age_days floors the ms age to whole days");
+    }
+}
+
+// Task 5 (user-confirmation-queue plan): confirm/deny/undeny action tests.
+#[cfg(test)]
+mod confirmation_action_tests {
+    use super::{confirm_fact_at, deny_fact_at, fact_text_hash, queue_rows, undeny_fact_at, DenialKey};
+    use crate::db::connection::open_in_memory;
+    use rusqlite::params;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn conn() -> rusqlite::Connection {
+        open_in_memory().expect("open migrated in-memory brain db")
+    }
+
+    /// Scratch vault root for the JSONL ledgers (explicit form — no env).
+    fn vault() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+        (tmp, root)
+    }
+
+    fn insert_entry(conn: &rusqlite::Connection, id: &str, title: &str, created_at: i64) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, source_type, created_at, updated_at)
+             VALUES (?1, 'ent_queue', ?2, ?3, 'librarian_inferred', ?4, ?4)",
+            params![id, title, format!("body of {title}"), created_at],
+        )
+        .unwrap();
+    }
+
+    /// `archive_wisdom_in_tx` requires a live entity (production reality:
+    /// every fact belongs to one).
+    fn seed_entity(conn: &rusqlite::Connection) {
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_queue', 'Queue', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn seed_proposal_doc(conn: &rusqlite::Connection, proposal_id: &str, doc_path: &str) {
+        let doc_id = crate::db::queries::upsert_document(conn, doc_path, "hash-q").unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, created_at)
+             VALUES (?1, 'new_entity', 'test', ?2)",
+            params![proposal_id, crate::wisdom_deposit::now_ms()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES (?1, ?2, 'evidence')",
+            params![proposal_id, doc_id],
+        )
+        .unwrap();
+    }
+
+    fn seed_evidence_row(
+        conn: &rusqlite::Connection,
+        entry_id: &str,
+        proposal_id: &str,
+        chunk_hash: &str,
+        quote: &str,
+    ) {
+        let evidence_json = serde_json::json!({
+            "proposal_id": proposal_id,
+            "evidence": [{
+                "chunk_id": 1,
+                "content_hash": chunk_hash,
+                "quote": quote,
+                "start_line": 1,
+                "end_line": 2,
+                "source_kind": null,
+            }]
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO librarian_evidence (entry_id, proposal_id, evidence_json, unanchored, created_at)
+             VALUES (?1, ?2, ?3, 0, ?4)",
+            params![entry_id, proposal_id, evidence_json, crate::wisdom_deposit::now_ms()],
+        )
+        .unwrap();
+    }
+
+    fn ids_of(rows: Vec<super::QueueRow>) -> HashSet<String> {
+        rows.into_iter().map(|r| r.fact_id).collect()
+    }
+
+    fn ledger_lines(vault: &std::path::Path, name: &str) -> Vec<serde_json::Value> {
+        let path = vault.join("stated").join(name);
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        raw.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("ledger line is JSON"))
+            .collect()
+    }
+
+    #[test]
+    fn confirm_stamps_the_full_shape() {
+        let conn = conn();
+        let (_tmp, vault) = vault();
+        let now = crate::wisdom_deposit::now_ms();
+        insert_entry(&conn, "c1", "Confirmed fact", now);
+
+        confirm_fact_at(&conn, &vault, "c1").unwrap();
+
+        // The brain row: provenance + confidence + verified append + mirror;
+        // lifecycle_status and updated_at UNTOUCHED (spec §3.3).
+        let (source_type, confidence, okf_verified, last_verified_by, last_verified_at, lifecycle_status, updated_at): (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            String,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT source_type, confidence, okf_verified, last_verified_by,
+                        last_verified_at, lifecycle_status, updated_at
+                   FROM llm_wiki_entries WHERE id = 'c1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(source_type, "user_confirmed");
+        assert_eq!(confidence, "confirmed", "D7: the app's own direct-write convention");
+        let verified: serde_json::Value = serde_json::from_str(&okf_verified).unwrap();
+        assert_eq!(verified.as_array().unwrap().len(), 1);
+        assert_eq!(verified[0]["by"], "human:kurt", "spec §3 pins the confirmer");
+        assert!(
+            verified[0]["at"]
+                .as_str()
+                .and_then(|a| chrono::DateTime::parse_from_rfc3339(a).ok())
+                .is_some(),
+            "okf_verified at is ISO-8601: {:?}",
+            verified[0]["at"]
+        );
+        assert_eq!(last_verified_by.as_deref(), Some("human:kurt"), "mirror");
+        assert!(
+            last_verified_at.is_some_and(|at| at >= now),
+            "last_verified_at mirrors in ms: {last_verified_at:?}"
+        );
+        assert_eq!(lifecycle_status, "stable", "lifecycle_status is NOT touched");
+        assert_eq!(updated_at, now, "updated_at is not bumped (drafts.rs shape)");
+
+        // Outbox Update row carrying the stamped state (Rule 5 sync).
+        let (table, operation, payload): (String, String, String) = conn
+            .query_row(
+                "SELECT table_name, operation, payload FROM llm_wiki_outbox
+                  WHERE record_id = 'c1' ORDER BY rowid",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((table.as_str(), operation.as_str()), ("entries", "UPDATE"));
+        let p: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(p["source_type"], "user_confirmed");
+        assert_eq!(p["confidence"], "confirmed");
+        assert_eq!(p["last_verified_by"], "human:kurt");
+
+        // One event.
+        let (event_type, related): (String, Option<String>) = conn
+            .query_row(
+                "SELECT event_type, related_entry_id FROM llm_wiki_events
+                  WHERE entity_id = 'ent_queue'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(event_type, "fact_confirmed");
+        assert_eq!(related.as_deref(), Some("c1"));
+
+        // The durable ledger line (spec §8): fact_id, content_hash, by, at.
+        let lines = ledger_lines(&vault, ".confirmations.jsonl");
+        assert_eq!(lines.len(), 1, "exactly one ledger line: {lines:?}");
+        assert_eq!(lines[0]["fact_id"], "c1");
+        assert_eq!(
+            lines[0]["content_hash"],
+            crate::db::stated_ledger::confirmation_content_hash(
+                "Confirmed fact",
+                "body of Confirmed fact"
+            ),
+            "ledger is keyed by content hash, the rebuild's stable key"
+        );
+        assert_eq!(lines[0]["by"], "human:kurt");
+        assert!(lines[0]["at"].is_string());
+    }
+
+    #[test]
+    fn confirm_is_idempotent() {
+        let conn = conn();
+        let (_tmp, vault) = vault();
+        let now = crate::wisdom_deposit::now_ms();
+        insert_entry(&conn, "c1", "Confirmed fact", now);
+        // A pre-existing agent trust entry so the append is observable.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET okf_verified = ?1 WHERE id = 'c1'",
+            params![r#"[{"by":"agent:librarian","at":"2026-01-01T00:00:00.000Z"}]"#],
+        )
+        .unwrap();
+
+        confirm_fact_at(&conn, &vault, "c1").unwrap();
+        confirm_fact_at(&conn, &vault, "c1").unwrap();
+
+        let (events, ledger): (i64, Vec<serde_json::Value>) = (
+            conn.query_row(
+                "SELECT COUNT(*) FROM llm_wiki_events WHERE entity_id = 'ent_queue'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+            ledger_lines(&vault, ".confirmations.jsonl"),
+        );
+        assert_eq!(events, 1, "no duplicate event on re-confirm");
+        assert_eq!(ledger.len(), 1, "no duplicate ledger line on re-confirm");
+
+        let okf_verified: String = conn
+            .query_row(
+                "SELECT okf_verified FROM llm_wiki_entries WHERE id = 'c1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let verified: serde_json::Value = serde_json::from_str(&okf_verified).unwrap();
+        assert_eq!(
+            verified.as_array().unwrap().len(),
+            2,
+            "agent entry preserved, exactly one human append"
+        );
+    }
+
+    #[test]
+    fn deny_suppresses_and_undeny_restores() {
+        let conn = conn();
+        let (_tmp, vault) = vault();
+        seed_entity(&conn);
+        let now = crate::wisdom_deposit::now_ms();
+
+        // Two facts from the SAME chunk — denying one must not hide the other.
+        insert_entry(&conn, "q-denied", "Denied fact title", now);
+        insert_entry(&conn, "q-sibling", "Sibling fact title", now);
+        seed_proposal_doc(&conn, "p-deny", "documents/note.md");
+        seed_evidence_row(&conn, "q-denied", "p-deny", "chunkhash-deny", "shared quote");
+        seed_evidence_row(&conn, "q-sibling", "p-deny", "chunkhash-deny", "shared quote");
+
+        deny_fact_at(&conn, &vault, "q-denied").unwrap();
+
+        let ids = ids_of(queue_rows(&conn));
+        assert!(!ids.contains("q-denied"), "denied fact is out of the queue: {ids:?}");
+        assert!(ids.contains("q-sibling"), "sibling stays in: {ids:?}");
+
+        // Archived (spec §3.3 deny = archive + suppress) + suppression row.
+        let deleted_at: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'q-denied'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(deleted_at.is_some(), "deny archives the fact");
+
+        let key = DenialKey {
+            document_path: "documents/note.md".into(),
+            chunk_hash: "chunkhash-deny".into(),
+            fact_text_hash: fact_text_hash("Denied fact title", "body of Denied fact title"),
+        };
+        let in_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM queue_denials
+                  WHERE document_path = ?1 AND chunk_hash = ?2 AND fact_text_hash = ?3",
+                params![key.document_path, key.chunk_hash, key.fact_text_hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(in_table, 1, "queue_denials row keyed by the triple");
+
+        let lines = ledger_lines(&vault, ".denials.jsonl");
+        assert_eq!(lines.len(), 1, "durable denial ledger line: {lines:?}");
+        assert_eq!(lines[0]["document_path"], key.document_path);
+        assert_eq!(lines[0]["chunk_hash"], key.chunk_hash);
+        assert_eq!(lines[0]["fact_text_hash"], key.fact_text_hash);
+        assert_eq!(lines[0]["denied_by"], "human:kurt");
+        assert!(lines[0]["denied_at"].is_string());
+
+        // Un-deny: suppression drops everywhere, the fact is un-archived and
+        // returns to the queue.
+        undeny_fact_at(&conn, &vault, &key).unwrap();
+
+        let ids = ids_of(queue_rows(&conn));
+        assert!(ids.contains("q-denied"), "un-denied fact is back: {ids:?}");
+        assert!(ids.contains("q-sibling"), "sibling unaffected: {ids:?}");
+        let deleted_at: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM llm_wiki_entries WHERE id = 'q-denied'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(deleted_at.is_none(), "un-denying un-archives the fact");
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue_denials", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "suppression row dropped");
+        let lines = ledger_lines(&vault, ".denials.jsonl");
+        assert!(
+            lines.is_empty(),
+            "ledger no longer carries the denial: {lines:?}"
+        );
+    }
+
+    /// D4 (PR #294 round 2): a fact whose proposal carries MULTIPLE source
+    /// documents must get its denial keyed to the SAME evidence row the
+    /// queue displays. `queue_rows_inner` and `deny_fact_at` both take the
+    /// "first" row of the same fan-out join (librarian_evidence →
+    /// curated_proposal_sources → documents); without a shared deterministic
+    /// ORDER BY the pick is plan-dependent, so the denial could key a
+    /// different (document, chunk) than the queue's anti-match — the denied
+    /// fact would then SURVIVE in the queue. The sibling pins the negative
+    /// direction: denying via the displayed key removes exactly this fact,
+    /// not its same-text sibling seeded WITHOUT that evidence.
+    #[test]
+    fn deny_keys_the_evidence_row_the_queue_displays_for_multi_source_facts() {
+        let conn = conn();
+        let (_tmp, vault) = vault();
+        seed_entity(&conn);
+        let now = crate::wisdom_deposit::now_ms();
+
+        // Canonical-form document keys (B1): the virtual-absolute key the
+        // watcher stores — derived via the shared helper, not hand-rolled.
+        let doc_a =
+            super::virtual_path_key_at_root(&vault, std::path::Path::new("documents/d4-a.md"))
+                .unwrap();
+        let doc_b =
+            super::virtual_path_key_at_root(&vault, std::path::Path::new("documents/d4-b.md"))
+                .unwrap();
+        let doc_c =
+            super::virtual_path_key_at_root(&vault, std::path::Path::new("documents/d4-c.md"))
+                .unwrap();
+
+        // The fact and a same-normalized-text sibling.
+        insert_entry(&conn, "q-d4", "D4 twin fact", now);
+        insert_entry(&conn, "q-d4-sib", "D4 twin fact", now);
+
+        // ONE evidence blob for the fact, TWO proposal sources: role
+        // 'trigger' on the LATER-inserted document, 'evidence' on the
+        // earlier one — so rowid order and d.id order disagree and an
+        // unordered pick is plan-dependent. (`librarian_evidence.entry_id`
+        // is a PRIMARY KEY, so the fan-out comes from
+        // `curated_proposal_sources` alone.)
+        let id_a = crate::db::queries::upsert_document(&conn, &doc_a, "hash-d4").unwrap();
+        let id_b = crate::db::queries::upsert_document(&conn, &doc_b, "hash-d4").unwrap();
+        assert!(id_a < id_b, "documents.id follows insert order");
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, created_at)
+             VALUES ('p-d4', 'new_entity', 'test', ?1)",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES ('p-d4', ?1, 'trigger')",
+            params![id_b],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES ('p-d4', ?1, 'evidence')",
+            params![id_a],
+        )
+        .unwrap();
+        seed_evidence_row(&conn, "q-d4", "p-d4", "chunkhash-d4", "d4 quote");
+
+        // The sibling: its OWN single-source proposal on a THIRD document —
+        // it never carries the denial evidence.
+        seed_proposal_doc(&conn, "p-d4-sib", &doc_c);
+        seed_evidence_row(&conn, "q-d4-sib", "p-d4-sib", "chunkhash-d4", "d4 quote");
+
+        // The queue's displayed evidence document...
+        let rows = queue_rows(&conn);
+        let displayed = rows
+            .iter()
+            .find(|r| r.fact_id == "q-d4")
+            .map(|r| r.source_document.clone().unwrap())
+            .expect("multi-source fact is in the queue");
+        assert!(
+            rows.iter().any(|r| r.fact_id == "q-d4-sib"),
+            "sibling seeded live"
+        );
+
+        // ...must be the document the denial is keyed to.
+        deny_fact_at(&conn, &vault, "q-d4").unwrap();
+
+        let (denied_doc, denied_chunk): (String, String) = conn
+            .query_row(
+                "SELECT document_path, chunk_hash FROM queue_denials",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            denied_doc, displayed,
+            "D4: deny keys the SAME evidence row the queue displays"
+        );
+        assert_eq!(denied_chunk, "chunkhash-d4");
+
+        let ids = ids_of(queue_rows(&conn));
+        assert!(
+            !ids.contains("q-d4"),
+            "denied fact leaves the queue: {ids:?}"
+        );
+        assert!(
+            ids.contains("q-d4-sib"),
+            "same-text sibling WITHOUT that evidence stays: {ids:?}"
+        );
+    }
+
+    /// Task-5 Low-2 closeout pin: a second deny arriving on the same key
+    /// never appends a duplicate `.denials.jsonl` line — in BOTH retry
+    /// shapes. (1) The landed idempotency semantics: a re-kicked duplicate
+    /// fact (identical normalized text, same source document/chunk) denied
+    /// after the original. (2) The Low-2 crash shape: the ledger append
+    /// landed but the brain transaction did not (queue_denials empty) — the
+    /// retry presence-checks the LEDGER itself, so no duplicate line.
+    #[test]
+    fn deny_retry_does_not_duplicate_ledger_line() {
+        let now = crate::wisdom_deposit::now_ms();
+        // Aliases: the second part binds `conn`-shaped locals of its own, and
+        // a local binding would shadow the module fns for the whole body.
+        let mk_conn = conn;
+        let mk_vault = vault;
+
+        // (1) Landed semantics: duplicate fact, same key, both live rows.
+        let conn = mk_conn();
+        let (_tmp, vault) = mk_vault();
+        seed_entity(&conn);
+        insert_entry(&conn, "q-dup-1", "Dup deny title", now);
+        insert_entry(&conn, "q-dup-2", "Dup deny title", now);
+        seed_proposal_doc(&conn, "p-dup", "documents/dup.md");
+        seed_evidence_row(&conn, "q-dup-1", "p-dup", "chunkhash-dup", "dup quote");
+        seed_evidence_row(&conn, "q-dup-2", "p-dup", "chunkhash-dup", "dup quote");
+        deny_fact_at(&conn, &vault, "q-dup-1").unwrap();
+        deny_fact_at(&conn, &vault, "q-dup-2").unwrap();
+        let lines = ledger_lines(&vault, ".denials.jsonl");
+        assert_eq!(lines.len(), 1, "re-deny on the same key: ONE ledger line");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue_denials", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "re-deny on the same key: ONE suppression row");
+
+        // (2) Low-2 crash shape: ledger line present, brain row absent.
+        let conn2 = mk_conn();
+        let (_tmp2, vault2) = mk_vault();
+        seed_entity(&conn2);
+        insert_entry(&conn2, "q-crash", "Crash retry title", now);
+        seed_proposal_doc(&conn2, "p-crash", "documents/crash.md");
+        seed_evidence_row(&conn2, "q-crash", "p-crash", "chunkhash-crash", "crash quote");
+        crate::db::stated_ledger::append_denial(
+            &vault2,
+            &crate::db::stated_ledger::DenialLine {
+                document_path: "documents/crash.md".into(),
+                chunk_hash: "chunkhash-crash".into(),
+                fact_text_hash: fact_text_hash("Crash retry title", "body of Crash retry title"),
+                denied_by: "human:kurt".into(),
+                denied_at: "2026-10-21T00:00:00Z".into(),
+            },
+        )
+        .unwrap();
+        let in_table: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM queue_denials", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(in_table, 0, "brain tx never landed (the Low-2 shape)");
+        deny_fact_at(&conn2, &vault2, "q-crash").unwrap();
+        let lines = ledger_lines(&vault2, ".denials.jsonl");
+        assert_eq!(
+            lines.len(),
+            1,
+            "retry after ledger-landed/brain-failed: no duplicate line"
+        );
+        // Tier-1.5 high BLOCKER-1 closeout: the retry must COMPLETE the deny
+        // (the old early-return reported success while the fact stayed live,
+        // un-archived and unsuppressed — superseding Task-11 Info-1, whose
+        // "converges at the next rebuild" premise ended with the once-per-
+        // brain §8 rederive).
+        let suppressed: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM queue_denials", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            suppressed, 1,
+            "crash-retry must land the suppression row"
+        );
+        let archived: i64 = conn2
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries
+                  WHERE id = 'q-crash' AND deleted_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 1, "crash-retry must archive the fact");
+    }
+
+    /// Tier-1.5 medium MINOR-1 closeout: the confirm path gets the same
+    /// ledger-duplicate guard the deny path has (Task-5 Low-2 / Task-11 A2
+    /// mirror). Crash shape: the first confirm landed the ledger line, then
+    /// the brain transaction failed (confidence never set). The retry must
+    /// (a) NOT append a duplicate `.confirmations.jsonl` line, and (b) still
+    /// complete the stamp — the two-condition early-return guard
+    /// (`source_type` AND `confidence`) deliberately lets a half-applied row
+    /// back into the full transaction.
+    #[test]
+    fn confirm_retry_does_not_duplicate_ledger_line_and_heals() {
+        let now = crate::wisdom_deposit::now_ms();
+        let conn = conn();
+        let (_tmp, vault) = vault();
+        seed_entity(&conn);
+        insert_entry(&conn, "q-confirm-retry", "Confirm retry title", now);
+
+        confirm_fact_at(&conn, &vault, "q-confirm-retry").unwrap();
+        let lines = ledger_lines(&vault, ".confirmations.jsonl");
+        assert_eq!(lines.len(), 1, "first confirm: one ledger line");
+
+        // Simulate the crash: the tx rolled back its half (confidence back to
+        // a non-confirmed value), leaving the autocommit hash-stamp from
+        // record_confirmation_at in place.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET confidence = 'inferred'
+              WHERE id = 'q-confirm-retry'",
+            [],
+        )
+        .unwrap();
+
+        // The user's natural retry: full stamp must complete, ledger grows
+        // by ZERO lines.
+        confirm_fact_at(&conn, &vault, "q-confirm-retry").unwrap();
+        let lines = ledger_lines(&vault, ".confirmations.jsonl");
+        assert_eq!(
+            lines.len(),
+            1,
+            "retry after ledger-landed/tx-failed: no duplicate line"
+        );
+        let (source_type, confidence): (String, String) = conn
+            .query_row(
+                "SELECT source_type, confidence FROM llm_wiki_entries
+                  WHERE id = 'q-confirm-retry'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            source_type, "user_confirmed",
+            "retry completes the stamp"
+        );
+        assert_eq!(
+            confidence, "confirmed",
+            "retry heals the half-applied row (the MAJOR-2 refute: nothing is stuck)"
+        );
+    }
+
+    /// Task-5 Low-3 closeout pin (documented behavior, no code change): the
+    /// un-deny restore matches by FACT-TEXT HASH alone — it restores ALL
+    /// archived rows sharing the hash (including one archived from a
+    /// DIFFERENT source document) and ONLY those. Identical content makes
+    /// this semantically correct (Task-5 verdict Low-3: acceptable for v1).
+    #[test]
+    fn undeny_restores_all_rows_sharing_the_fact_text_hash_only() {
+        let conn = conn();
+        let (_tmp, vault) = vault();
+        seed_entity(&conn);
+        let now = crate::wisdom_deposit::now_ms();
+
+        // fact A: the fact we actually deny. fact B: identical normalized
+        // text, DIFFERENT source document, archived directly (simulating an
+        // independently archived same-text fact). fact C: different text.
+        insert_entry(&conn, "q-hash-a", "Hash twin title", now);
+        insert_entry(&conn, "q-hash-b", "Hash twin title", now);
+        insert_entry(&conn, "q-hash-c", "Unrelated title", now);
+        seed_proposal_doc(&conn, "p-hash-a", "documents/a.md");
+        seed_evidence_row(&conn, "q-hash-a", "p-hash-a", "chunkhash-a", "quote a");
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 12345 WHERE id = 'q-hash-b'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 12345 WHERE id = 'q-hash-c'",
+            [],
+        )
+        .unwrap();
+
+        deny_fact_at(&conn, &vault, "q-hash-a").unwrap();
+        let key = DenialKey {
+            document_path: "documents/a.md".into(),
+            chunk_hash: "chunkhash-a".into(),
+            fact_text_hash: fact_text_hash("Hash twin title", "body of Hash twin title"),
+        };
+
+        undeny_fact_at(&conn, &vault, &key).unwrap();
+
+        let deleted: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM llm_wiki_entries WHERE deleted_at IS NOT NULL")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(
+            deleted,
+            vec!["q-hash-c".to_string()],
+            "un-deny restores every hash-matching archived row (a AND b) and ONLY those (c stays archived): {deleted:?}"
+        );
     }
 }

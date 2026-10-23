@@ -1,10 +1,17 @@
 import type { ReactElement } from "react";
 
-export type AppMode = "brain" | "review" | "library" | "timeline" | "tasks" | "settings" | "setup";
+export type AppMode = "brain" | "review" | "queue" | "library" | "timeline" | "tasks" | "settings" | "setup";
 
 interface Props {
   mode: AppMode;
   reviewCount: number;
+  /**
+   * Unconfirmed-fact count for the queue rail badge (Task 9). `null` means
+   * the count is UNKNOWN (the queue fetch failed) — the badge then renders
+   * "?" rather than disappearing, which would read as "nothing pending"
+   * (D6b).
+   */
+  queueCount?: number | null;
   errorCount?: number;
   onModeChange: (mode: AppMode) => void;
   canGoBack: boolean;
@@ -67,6 +74,12 @@ const ICONS: Record<string, ReactElement> = {
     </>
   ),
   activity: <path d="M3 12h3.5l2-5.5 3.5 11 2.5-8 1.8 2.5H21" />,
+  queue: (
+    <>
+      <path d="M4 6h9M4 12h9M4 18h9" />
+      <path d="m15.5 10 2 2 3.5-3.5" />
+    </>
+  ),
   settings: (
     <>
       <circle cx="12" cy="12" r="2.9" />
@@ -80,6 +93,7 @@ const ICONS: Record<string, ReactElement> = {
 const MAIN_MODES: { id: AppMode; label: string; icon: string }[] = [
   { id: "brain", label: "Brain", icon: "brain" },
   { id: "review", label: "Review", icon: "review" },
+  { id: "queue", label: "Queue", icon: "queue" },
   { id: "library", label: "Library", icon: "library" },
   { id: "timeline", label: "Timeline", icon: "timeline" },
   { id: "tasks", label: "Tasks", icon: "tasks" },
@@ -97,7 +111,7 @@ function RailButton({
   label: string;
   icon: string;
   active: boolean;
-  badge?: number;
+  badge?: number | null;
   onClick: (mode: AppMode) => void;
 }) {
   return (
@@ -109,8 +123,8 @@ function RailButton({
       onClick={() => onClick(id)}
     >
       <Icon path={ICONS[icon]} />
-      {badge !== undefined && badge > 0 && (
-        <span className="mode-rail-badge">{badge}</span>
+      {badge !== undefined && (badge === null || badge > 0) && (
+        <span className="mode-rail-badge">{badge === null ? "?" : badge}</span>
       )}
     </button>
   );
@@ -119,6 +133,7 @@ function RailButton({
 export function ModeRail({
   mode,
   reviewCount,
+  queueCount,
   errorCount,
   onModeChange,
   canGoBack,
@@ -154,7 +169,13 @@ export function ModeRail({
           label={m.label}
           icon={m.icon}
           active={mode === m.id}
-          badge={m.id === "review" ? reviewCount : undefined}
+          badge={
+            m.id === "review"
+              ? reviewCount
+              : m.id === "queue"
+                ? queueCount
+                : undefined
+          }
           onClick={onModeChange}
         />
       ))}

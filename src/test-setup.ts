@@ -167,6 +167,17 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "add_entity_fact_cmd") return Promise.resolve(null);
     if (cmd === "update_entity_fact_cmd") return Promise.resolve();
     if (cmd === "archive_entity_fact_cmd") return Promise.resolve();
+    if (cmd === "queue_list_cmd") return Promise.resolve([]);
+    if (cmd === "queue_denied_cmd") return Promise.resolve([]);
+    if (cmd === "unverified_prompts_drain_cmd") {
+      return Promise.resolve({ prompts: [], total_unacked: 0 });
+    }
+    if (cmd === "queue_fact_get_cmd") return Promise.resolve(null);
+    if (cmd === "queue_confirm_cmd") return Promise.resolve();
+    if (cmd === "queue_deny_cmd") return Promise.resolve();
+    if (cmd === "queue_undeny_cmd") return Promise.resolve();
+    if (cmd === "queue_capture_cmd") return Promise.resolve("stated/kurt/x.md");
+    if (cmd === "queue_confirm_or_capture_cmd") return Promise.resolve("confirmed");
     if (cmd === "update_entity_summary_cmd") return Promise.resolve();
     if (cmd === "archive_entity_cmd") return Promise.resolve();
     if (cmd === "fetch_chunk_content") return Promise.resolve("Chunk passage text.");

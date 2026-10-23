@@ -14,6 +14,16 @@ use crate::db::entity_gate::ImmediateTx;
 pub struct ResolveOptions {
     /// When true, summary-update conflicts are skipped silently (auto-approve path).
     pub auto_approve: bool,
+    /// Human-tier gate (spec §3.7-A): `user_confirmed` provenance is stamped
+    /// ONLY when this flag is `true` AND `auto_approve` is `false`. Set ONLY
+    /// by the desktop app's resolve path (`proposals_api.rs`); CLI, MCP, and
+    /// internal-API approvals resolve at agent tier (`librarian_inferred`)
+    /// and write an `approved_at_agent_tier` event — UNLESS the Path B
+    /// attested-source arm stamped `user_stated` (human tier from the app's
+    /// attestation table), which suppresses the event (Task-8 verdict E5,
+    /// choice (a)). Never derived from a string — `reviewed_by` is a label,
+    /// not the predicate.
+    pub human_surface: bool,
     /// When `Some`, entry embeddings are computed before the commit transaction
     /// opens and stored with the new facts. `None` disables write-time
     /// embedding — rows land with NULL and the sweep fills them later. Either
@@ -2795,6 +2805,29 @@ fn finalize_proposal_status(accepted: usize, rejected: usize) -> &'static str {
     }
 }
 
+/// Spec §3.7-A arm 2: the `approved_at_agent_tier` event, written when a
+/// manual (non-`auto_approve`) resolution arrived WITHOUT the desktop
+/// `human_surface` flag and content actually landed. Summary deliberately
+/// avoids the `Approved`/`Rejected` prefixes so `resolution_events_use_approved_rejected_types`-style
+/// event_type lookups keep resolving to the regular resolution event.
+fn write_agent_tier_event(
+    conn: &Connection,
+    ctx: &CommitContext,
+    source_label: &str,
+) -> Result<()> {
+    let event_id = generate_llm_id("evt_");
+    let summary = format!(
+        "Agent-tier approval for *{}* from *{}* — no desktop human_surface flag (spec §3.7-A)",
+        ctx.entity_name, source_label
+    );
+    conn.execute(
+        "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
+         VALUES (?1, ?2, 'approved_at_agent_tier', ?3, NULL, ?4)",
+        params![event_id, ctx.entity_id, summary, ctx.now_ms],
+    )?;
+    Ok(())
+}
+
 /// Embed the bodies of every accepted `fact_add` in one batch.
 ///
 /// Returns an empty map when no profile is configured or the provider fails —
@@ -2895,6 +2928,44 @@ pub(crate) fn precompute_entry_embeddings(
     out
 }
 
+/// Path B's attested-source predicate (spec §7.5, user-confirmation-queue
+/// Task 8): the proposal has AT LEAST ONE source document AND EVERY source
+/// document has a `stated_attestations` row whose `content_hash` matches the
+/// ingested `documents.hash`. THE TABLE is the only attestation authority
+/// (spec §3.3) — a source file's attestation-shaped frontmatter proves
+/// nothing, so this predicate never reads the file; a content-hash mismatch
+/// (file edited after attestation) reads as NOT attested.
+///
+/// Deleted sources are handled UPSTREAM: `curated_proposal_sources.doc_id`
+/// is `REFERENCES documents(id) ON DELETE CASCADE` (okf_ddl.rs), so
+/// `delete_document` (issue #211 D3 records the deletion, then deletes the
+/// row) removes the source from this set atomically — this predicate only
+/// ever sees live sources. (CodeRabbit round-2 claimed the row survives and
+/// the INNER JOIN fails open; the cascade makes that premise false — pinned
+/// by `deleted_source_document_cascades_out_of_attested_set`.)
+fn all_sources_attested(conn: &Connection, proposal_id: &str) -> Result<bool> {
+    let source_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM curated_proposal_sources WHERE proposal_id = ?1",
+        [proposal_id],
+        |r| r.get(0),
+    )?;
+    if source_count < 1 {
+        // Zero sources can never be human-tier (spec §7.5).
+        return Ok(false);
+    }
+    let unattested: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM curated_proposal_sources s
+         JOIN documents d ON d.id = s.doc_id
+         LEFT JOIN stated_attestations a
+           ON a.document_path = d.path AND a.content_hash = d.hash
+         WHERE s.proposal_id = ?1 AND a.document_path IS NULL",
+        [proposal_id],
+        |r| r.get(0),
+    )?;
+    Ok(unattested == 0)
+}
+
 /// Resolve a pending proposal inside `BEGIN IMMEDIATE` — all mutations and outbox rows roll back together on failure.
 pub fn resolve_proposal(
     conn: &mut Connection,
@@ -2923,11 +2994,51 @@ pub fn resolve_proposal(
     });
 
     let (now_secs, now_ms) = now_timestamps();
-    let source_type = if options.auto_approve {
-        "librarian_inferred"
-    } else {
-        "user_confirmed"
-    };
+    // Provenance arms (spec §3.7-A + §7.5): Path B FIRST — a proposal with
+    // at least one source document where EVERY source document carries an
+    // app-written `stated_attestations` row (content-hash matched) stamps
+    // `user_stated` with no queue step ("instant confirm"). Then the
+    // Task-3 arms: (1) desktop-surface manual decision → `user_confirmed`;
+    // (2) manual decision without the desktop surface (CLI, MCP, internal
+    // API) → agent tier + `approved_at_agent_tier` event; (3)
+    // `auto_approve` → agent tier, unchanged, no event.
+    // CR-1 (spec §3.7-A): the Path B arm fires ONLY when no accepted decision
+    // carries an edit — caller-supplied on the decision OR stored on the
+    // proposal item row. The production review paths (`review_approve`,
+    // `review_approve_with_profile`) build decision sets with
+    // `edited_payload: None`, so the stored `curated_proposal_items
+    // .edited_payload` is what the commit applies via `effective_payload`;
+    // both carriers must gate. Edited text was never seen by the person whose
+    // attestations Path B leans on, so an edited resolve falls through to the
+    // ordinary arms below (human surface → `user_confirmed`, else agent tier
+    // + `approved_at_agent_tier` event).
+    let has_accepted_edit = items
+        .iter()
+        .any(|item| match decisions_by_id.get(item.id.as_str()) {
+            Some(d) if d.decision == ItemDecisionKind::Accept => {
+                d.edited_payload.is_some() || item.edited_payload.is_some()
+            }
+            _ => false,
+        });
+    let source_type =
+        if !options.human_surface && !has_accepted_edit && all_sources_attested(conn, proposal_id)?
+        {
+            "user_stated"
+        } else if !options.auto_approve && options.human_surface {
+            "user_confirmed"
+        } else {
+            "librarian_inferred"
+        };
+    // Arm 2's durable marker: a manual approval that did NOT happen on the
+    // desktop surface resolves at agent tier, and the resolution says so.
+    // Task-8 E5 closeout — choice (a), suppress-event-on-attested: when the
+    // arms above stamped `user_stated` via the Path B attested-source arm,
+    // the tier is HUMAN (it derives from the app-written attestation table
+    // over the person's own statements, §2/§7.5 — not from the approval),
+    // so the "approved at agent tier" event is suppressed: writing it beside
+    // a human-tier stamp was semantically mixed (Task-8 verdict E5).
+    let approved_at_agent_tier =
+        !options.auto_approve && !options.human_surface && source_type != "user_stated";
 
     // Compute entry embeddings BEFORE opening the transaction: embed_batch is a
     // blocking network call and must never run while a write lock is held.
@@ -3146,6 +3257,13 @@ pub fn resolve_proposal(
     let source_label = trigger_source_label(&tx, proposal_id)?;
     if entity_id.is_some() {
         write_resolution_event(&tx, &ctx, proposal_status, &source_label)?;
+        // Spec §3.7-A arm 2: a manual approval that did not happen on the
+        // desktop surface resolved at agent tier — record that durably, once,
+        // when content actually landed (a pure rejection approved nothing, so
+        // there is nothing to have approved at any tier).
+        if approved_at_agent_tier && proposal_status != "rejected" {
+            write_agent_tier_event(&tx, &ctx, &source_label)?;
+        }
     }
 
     finalize_proposal_status_guarded(
@@ -3191,7 +3309,7 @@ mod tests {
         insert_proposal, NewProposal, NewProposalItem, NewProposalSource, ProposalKind,
         ProposalSourceRole, StoredEvidenceChunk,
     };
-    use crate::db::queries::{insert_chunk, upsert_document};
+    use crate::db::queries::{delete_document, insert_chunk, upsert_document};
 
     /// Re-implementation of the engine's `normalizeSourceRef`
     /// (dist/index.js:4082) plus its five-predicate selector
@@ -4389,7 +4507,9 @@ mod tests {
 
     /// Spec §2: the reviewer identity carried on ResolveOptions must be
     /// stamped into `curated_proposals.reviewed_by` on resolution, and the
-    /// entries must land as `user_confirmed` (manual review path).
+    /// resolution stays at AGENT tier (spec §3.7-A): an internal-API resolve
+    /// by an agent (`reviewed_by="tessera"`, no `human_surface` flag) stamps
+    /// `librarian_inferred`, never `user_confirmed`.
     #[test]
     fn resolve_proposal_stamps_reviewed_by_on_resolution() {
         let mut conn = open_in_memory().unwrap();
@@ -4420,6 +4540,14 @@ mod tests {
         assert_eq!(st, "approved");
         assert_eq!(result.proposal_status, "approved");
 
+        let lt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'librarian_inferred'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(lt >= 1, "agent-tier resolution must stamp librarian_inferred");
         let ut: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
@@ -4427,7 +4555,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(ut >= 1, "manual resolution must stamp user_confirmed");
+        assert_eq!(ut, 0, "no human tier without the desktop surface flag");
     }
 
     /// Characterization of the auto path: no reviewer on ResolveOptions →
@@ -4592,6 +4720,11 @@ mod tests {
             None,
             ResolveOptions {
                 auto_approve: false,
+                // Desktop-surface shaped (spec §3.7-A arm 1): this test pins
+                // entity/fact/outbox mechanics for the human-tier provenance
+                // path; the agent-tier provenance path is covered by
+                // `resolve_proposal_stamps_reviewed_by_on_resolution`.
+                human_surface: true,
                 embed_profile: None,
                 ..Default::default()
             },
@@ -4643,6 +4776,581 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM llm_wiki_events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(event_count, 1);
+    }
+
+    // ── Task 8: Path B attested-source provenance arm (spec §2/§7.5) ───────
+
+    fn stamped_source_type(conn: &Connection, result: &CommitResult) -> String {
+        assert_eq!(result.committed.len(), 1, "exactly one committed record");
+        conn.query_row(
+            "SELECT source_type FROM llm_wiki_entries WHERE id = ?1",
+            params![result.committed[0].record_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Task 8: a proposal whose source documents are ALL attested (a
+    /// `stated_attestations` row per document, `content_hash` matching the
+    /// ingested `documents.hash`, at least one source) stamps `user_stated`
+    /// without any queue step — the desktop app wrote the attestations, so
+    /// the fact is human-tier when the librarian finishes.
+    #[test]
+    fn attested_sources_stamp_user_stated() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/stated/kurt/2026/note.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        insert_test_proposal(
+            &conn,
+            "prop-att",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-att", chunk_id, "A stated fact.")],
+            doc_id,
+        );
+        // The app's attestation of record: `seed_document` pins the
+        // documents.hash literal "hash", so the row matches both keys.
+        conn.execute(
+            "INSERT INTO stated_attestations
+               (document_path, content_hash, attested_by, attested_at)
+             VALUES ('/vault/stated/kurt/2026/note.md', 'hash', 'kurt',
+                     '2026-10-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let decisions = all_accept_decisions(&conn, "prop-att");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-att",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "user_stated",
+            "all-attested sources ⇒ Path B user_stated"
+        );
+    }
+
+    // ── CR-1: edited decisions must NOT ride the Path B instant-confirm arm ──
+
+    /// Run `body` with brain-path resolution redirected into a temp dir.
+    /// The production `review_approve` entry reads `wiki.deposit_default_tier`
+    /// from the resolved config, so an unredirected test would resolve the
+    /// LIVE `~/.brain` (issue #178 guard). Same shape as the review-shim /
+    /// proposals_review test helpers.
+    fn with_scratch_brain<T>(body: impl FnOnce() -> T) -> T {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // An inherited value would override the redirected dir.
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            body,
+        )
+    }
+
+    /// Seed the stored `edited_payload` the production review paths pick up
+    /// from `curated_proposal_items` (their decision sets carry
+    /// `edited_payload: None`; the commit applies the stored edit via
+    /// `effective_payload`).
+    fn seed_stored_edit(conn: &Connection, item_id: &str, body: &str) {
+        conn.execute(
+            "UPDATE curated_proposal_items SET edited_payload = ?2 WHERE id = ?1",
+            params![item_id, serde_json::json!({ "body": body }).to_string()],
+        )
+        .unwrap();
+    }
+
+    /// Seed a pending attested-source proposal with one fact_add item and an
+    /// optional stored edit — the Path B fixture plus the CR-1 hook.
+    fn seed_attested_proposal(
+        conn: &Connection,
+        id: &str,
+        item_id: &str,
+        edited_body: Option<&str>,
+    ) {
+        let doc_path = format!("/vault/stated/kurt/2026/{id}.md");
+        let doc_id = seed_document(conn, &doc_path);
+        let chunk_id = seed_chunk(conn, doc_id);
+        insert_test_proposal(
+            conn,
+            id,
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item(item_id, chunk_id, "A stated fact.")],
+            doc_id,
+        );
+        if let Some(body) = edited_body {
+            seed_stored_edit(conn, item_id, body);
+        }
+        // Path B precondition: the source document is app-attested (the
+        // person's own statement — the basis for the human-tier stamp).
+        let doc_hash: String = conn
+            .query_row(
+                "SELECT hash FROM documents WHERE id = ?1",
+                params![doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO stated_attestations (document_path, content_hash, attested_by, attested_at)
+             VALUES (?1, ?2, 'human:kurt', '2026-10-21T00:00:00Z')",
+            params![doc_path, doc_hash],
+        )
+        .unwrap();
+    }
+
+    /// CR-1 (spec §3.7-A): a proposal whose every source is attested but
+    /// which carries an EDIT — stored on the item row, riding the production
+    /// `review_approve` entry path (`decisions: None`, human_surface: false) —
+    /// must NOT stamp `user_stated`. The edited text was never seen by the
+    /// person whose attestations Path B leans on, so the resolve falls
+    /// through to the agent-tier arm: `librarian_inferred` plus the
+    /// `approved_at_agent_tier` event.
+    #[test]
+    fn cr1_edited_decision_blocks_attested_instant_confirm_agent_tier() {
+        with_scratch_brain(|| {
+            let mut conn = open_in_memory().unwrap();
+            seed_attested_proposal(
+                &conn,
+                "prop-cr1-a",
+                "item-cr1-a",
+                Some("Agent-edited body."),
+            );
+
+            let outcome = crate::db::proposals_review::review_approve(
+                &mut conn,
+                "prop-cr1-a",
+                "agent:reviewer",
+            )
+            .unwrap();
+            assert_eq!(outcome.status, "approved");
+
+            let st: String = conn
+                .query_row(
+                    "SELECT source_type FROM llm_wiki_entries LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                st, "librarian_inferred",
+                "edited content must resolve at agent tier, not the human Path B stamp"
+            );
+            let events: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_events WHERE event_type = 'approved_at_agent_tier'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(events >= 1, "agent-tier resolve must write the tier event");
+        });
+    }
+
+    /// CR-1: the same edited proposal resolved through the DESKTOP surface
+    /// (human_surface: true) stamps `user_confirmed` — the ordinary Task-3
+    /// arm-2 behavior is unchanged; the guard only blocks the Path B arm.
+    #[test]
+    fn cr1_edited_decision_with_human_surface_stamps_user_confirmed() {
+        let mut conn = open_in_memory().unwrap();
+        seed_attested_proposal(
+            &conn,
+            "prop-cr1-b",
+            "item-cr1-b",
+            Some("Agent-edited body."),
+        );
+        let decisions = all_accept_decisions(&conn, "prop-cr1-b");
+
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-cr1-b",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                human_surface: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "user_confirmed",
+            "human-surface resolve of an edited proposal keeps the ordinary arm-2 stamp"
+        );
+    }
+
+    /// CR-1 control: the same production entry path over the same attested
+    /// fixture WITHOUT any edit (stored or decision-carried) still stamps
+    /// `user_stated` with no tier event — the instant-confirm arm is intact
+    /// for genuinely stated content.
+    #[test]
+    fn cr1_unedited_attested_still_stamps_user_stated_via_review_approve() {
+        with_scratch_brain(|| {
+            let mut conn = open_in_memory().unwrap();
+            seed_attested_proposal(&conn, "prop-cr1-c", "item-cr1-c", None);
+
+            let outcome = crate::db::proposals_review::review_approve(
+                &mut conn,
+                "prop-cr1-c",
+                "agent:reviewer",
+            )
+            .unwrap();
+            assert_eq!(outcome.status, "approved");
+
+            let st: String = conn
+                .query_row(
+                    "SELECT source_type FROM llm_wiki_entries LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(st, "user_stated", "unedited stated content keeps Path B");
+            let events: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_events WHERE event_type = 'approved_at_agent_tier'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(events, 0, "human-tier Path B stamp writes no tier event");
+        });
+    }
+
+    /// The deleted-source cascade must hold at the human-tier arm:
+    /// `curated_proposal_sources.doc_id` is `ON DELETE CASCADE`, so
+    /// `delete_document` removes a deleted source from the attestation set
+    /// atomically (issue #211 D3 records the deletion for provenance) and
+    /// the remaining attested live source resolves `user_stated`. If anyone
+    /// ever drops the FK cascade or changes `delete_document`, this test
+    /// fails instead of silently opening the CodeRabbit-imagined fail-open
+    /// (a dead row dropped by the INNER JOIN while still counted).
+    #[test]
+    fn deleted_source_document_cascades_out_of_attested_set() {
+        let mut conn = open_in_memory().unwrap();
+        let live_id = seed_document(&conn, "/vault/stated/kurt/2026/live.md");
+        let chunk_id = seed_chunk(&conn, live_id);
+        insert_test_proposal(
+            &conn,
+            "prop-del",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-del", chunk_id, "A stated fact.")],
+            live_id,
+        );
+        // Second source: never attested, then deleted through the production
+        // path (records curated_proposal_deleted_sources, deletes documents;
+        // the FK cascade removes the curated_proposal_sources row with it).
+        let dead_id = seed_document(&conn, "/vault/stated/kurt/2026/dead.md");
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES ('prop-del', ?1, 'trigger')",
+            [dead_id],
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        assert_eq!(
+            delete_document(&tx, "/vault/stated/kurt/2026/dead.md").unwrap(),
+            1,
+            "precondition: the dead source's documents row is deleted"
+        );
+        tx.commit().unwrap();
+
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM curated_proposal_sources WHERE proposal_id = 'prop-del'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            remaining, 1,
+            "FK cascade: the deleted source must leave the attestation set"
+        );
+
+        // The live source IS attested (seed_document pins hash "hash") and is
+        // now the ONLY source — the arm must stamp human-tier user_stated.
+        conn.execute(
+            "INSERT INTO stated_attestations
+               (document_path, content_hash, attested_by, attested_at)
+             VALUES ('/vault/stated/kurt/2026/live.md', 'hash', 'kurt',
+                     '2026-10-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let decisions = all_accept_decisions(&conn, "prop-del");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-del",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "user_stated",
+            "post-cascade, the all-attested live source set resolves user_stated"
+        );
+    }
+
+    /// Task-8 E5 closeout — choice (a) suppress-event-on-attested: a MANUAL
+    /// (non-auto, non-desktop) resolve over an ALL-attested proposal stamps
+    /// `user_stated` (human tier via Path B) and does NOT write the
+    /// `approved_at_agent_tier` event — the event would sit semantically
+    /// mixed beside a human-tier stamp. Contrast: an equivalent resolve over
+    /// an UNATTESTED proposal stamps agent tier and DOES write the event.
+    #[test]
+    fn path_b_stamp_suppresses_agent_tier_event() {
+        let mut conn = open_in_memory().unwrap();
+        let doc_id = seed_document(&conn, "/vault/stated/kurt/2026/note.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        insert_test_proposal(
+            &conn,
+            "prop-att-manual",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-att-manual", chunk_id, "A stated fact.")],
+            doc_id,
+        );
+        conn.execute(
+            "INSERT INTO stated_attestations
+               (document_path, content_hash, attested_by, attested_at)
+             VALUES ('/vault/stated/kurt/2026/note.md', 'hash', 'kurt',
+                     '2026-10-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let decisions = all_accept_decisions(&conn, "prop-att-manual");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-att-manual",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "user_stated",
+            "all-attested sources ⇒ Path B user_stated (manual resolve included)"
+        );
+        let event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_events
+                 WHERE event_type = 'approved_at_agent_tier'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            event_count, 0,
+            "human-tier Path B stamp ⇒ NO approved_at_agent_tier event"
+        );
+
+        // Contrast arm: same manual resolve, unattested source ⇒ agent tier
+        // + the event, exactly as §3.7-A arm 2 pins.
+        let mut conn2 = open_in_memory().unwrap();
+        let doc2 = seed_document(&conn2, "/vault/documents/plain.md");
+        let chunk2 = seed_chunk(&conn2, doc2);
+        insert_test_proposal(
+            &conn2,
+            "prop-agent-manual",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-agent-manual", chunk2, "A plain fact.")],
+            doc2,
+        );
+        let decisions2 = all_accept_decisions(&conn2, "prop-agent-manual");
+        resolve_proposal(
+            &mut conn2,
+            "prop-agent-manual",
+            &decisions2,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let event_count2: i64 = conn2
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_events
+                 WHERE event_type = 'approved_at_agent_tier'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count2, 1, "agent-tier manual resolve writes the event");
+    }
+
+    /// Task 8 anti-arms: MIXED sources (one attested, one not) and ZERO
+    /// sources both stay agent tier — every source must be attested and at
+    /// least one source must exist before `user_stated` may stamp.
+    #[test]
+    fn mixed_or_zero_sources_stay_agent_tier() {
+        // (a) Mixed: one attested source + one unattested source.
+        let mut conn = open_in_memory().unwrap();
+        let doc_a = seed_document(&conn, "/vault/stated/kurt/2026/attested.md");
+        let doc_b = seed_document(&conn, "/vault/documents/plain.md");
+        let chunk_id = seed_chunk(&conn, doc_a);
+        insert_test_proposal(
+            &conn,
+            "prop-mixed",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-mixed", chunk_id, "A mixed-source fact.")],
+            doc_a,
+        );
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES ('prop-mixed', ?1, 'evidence')",
+            params![doc_b],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stated_attestations
+               (document_path, content_hash, attested_by, attested_at)
+             VALUES ('/vault/stated/kurt/2026/attested.md', 'hash', 'kurt',
+                     '2026-10-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let decisions = all_accept_decisions(&conn, "prop-mixed");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-mixed",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "librarian_inferred",
+            "mixed attested/unattested ⇒ agent tier"
+        );
+
+        // (b) Zero sources: no curated_proposal_sources row at all.
+        // `insert_proposal` refuses source-less proposals at insert time, so
+        // the zero-source brain is reached by deleting the row after the
+        // insert (the resolver must judge the TABLE, not the insert path).
+        let doc_c = seed_document(&conn, "/vault/documents/solo.md");
+        let chunk_c = seed_chunk(&conn, doc_c);
+        insert_test_proposal(
+            &conn,
+            "prop-zero",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-zero", chunk_c, "A sourceless fact.")],
+            doc_c,
+        );
+        conn.execute(
+            "DELETE FROM curated_proposal_sources WHERE proposal_id = 'prop-zero'",
+            [],
+        )
+        .unwrap();
+        let sources: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM curated_proposal_sources WHERE proposal_id = 'prop-zero'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sources, 0, "fixture: the zero-source proposal has no sources");
+        let decisions = all_accept_decisions(&conn, "prop-zero");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-zero",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "librarian_inferred",
+            "zero sources can never be human tier"
+        );
+    }
+
+    /// Task 8 anti-forge pin (spec §3.3): an agent deposit file carrying
+    /// attestation-SHAPED frontmatter but NO `stated_attestations` row
+    /// stamps `librarian_inferred` — the table is the only attestation
+    /// authority, so file content proves nothing and the resolver never
+    /// reads it back.
+    #[test]
+    fn attestation_frontmatter_in_agent_deposit_forges_nothing() {
+        let mut conn = open_in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("ct-task8-forge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("agent_deposit.md");
+        std::fs::write(
+            &file,
+            "---\n\
+             attested_by: kurt\n\
+             attested_at: '2026-10-21T00:00:00Z'\n\
+             ---\n\n\
+             An agent deposit wearing attestation-shaped frontmatter.\n",
+        )
+        .unwrap();
+        let content_hash = crate::hasher::hash_bytes(&std::fs::read(&file).unwrap());
+        let doc_id = upsert_document(&conn, &file.to_string_lossy(), &content_hash).unwrap();
+        let chunk_id = seed_chunk(&conn, doc_id);
+        insert_test_proposal(
+            &conn,
+            "prop-forge",
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item("item-forge", chunk_id, "A forged-tier fact.")],
+            doc_id,
+        );
+
+        let decisions = all_accept_decisions(&conn, "prop-forge");
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-forge",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "librarian_inferred",
+            "attestation-shaped frontmatter with no table row forges nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
