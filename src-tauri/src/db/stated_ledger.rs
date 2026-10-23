@@ -6,8 +6,9 @@
 //!
 //! There is NO vault fact file for confirmations (spec §8, B2-rev4): the JSONL
 //! ledger is the only durable carrier, the brain rows are derived, and the
-//! match key is the SHA-256 of title+body — `fact_id` is advisory (rev 4.1
-//! gate N3: fact ids are random and change across rebuilds).
+//! match key is the length-prefixed content hash of title+body (rev 4.2,
+//! CR-2) — `fact_id` is advisory (rev 4.1 gate N3: fact ids are random and
+//! change across rebuilds).
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -26,12 +27,17 @@ pub const CONFIRMATIONS_LEDGER: &str = ".confirmations.jsonl";
 pub const ATTESTATIONS_LEDGER: &str = ".attestations.jsonl";
 pub const DENIALS_LEDGER: &str = ".denials.jsonl";
 
-/// The stable confirmation match key (spec §8 "content_hash(title+body)"):
-/// SHA-256 over the title bytes immediately followed by the body bytes. Fact
-/// ids are random and change across rebuilds; this hash is what both the live
-/// confirm path and the rebuild match on (rev 4.1 gate N3).
+/// The stable confirmation match key (spec §8 "content_hash", rev 4.2):
+/// SHA-256 over the title's byte length as a big-endian u64, then the title
+/// bytes, then the body bytes. The length prefix makes the title/body split
+/// unambiguous — the previous raw `title+body` concatenation was
+/// boundary-ambiguous (CR-2: `("ab", "c")` and `("a", "bc")` hashed alike, so
+/// the rebuild could confirm a fact the person never confirmed). Fact ids are
+/// random and change across rebuilds; this hash is what both the live confirm
+/// path and the rebuild match on (rev 4.1 gate N3).
 pub fn confirmation_content_hash(title: &str, body: &str) -> String {
-    let mut bytes = Vec::with_capacity(title.len() + body.len());
+    let mut bytes = Vec::with_capacity(8 + title.len() + body.len());
+    bytes.extend_from_slice(&(title.len() as u64).to_be_bytes());
     bytes.extend_from_slice(title.as_bytes());
     bytes.extend_from_slice(body.as_bytes());
     hash_bytes(&bytes)
@@ -694,6 +700,48 @@ mod tests {
                 assert_eq!(report, again);
                 assert_eq!(source_type_of(&conn, "f1"), "user_confirmed");
             },
+        );
+    }
+
+    // ── CR-2: the confirmation hash must be boundary-unambiguous ───────────
+
+    /// CR-2 (rev 4.2): the title/body split must be recoverable from the
+    /// hashed bytes — `("ab", "c")` and `("a", "bc")` are different
+    /// (title, body) pairs over the same concatenation, so their hashes must
+    /// differ. The raw `title+body` concatenation collided.
+    #[test]
+    fn confirmation_content_hash_is_boundary_unambiguous() {
+        assert_ne!(
+            confirmation_content_hash("ab", "c"),
+            confirmation_content_hash("a", "bc"),
+            "CR-2: raw title+body concatenation is boundary-ambiguous"
+        );
+    }
+
+    /// CR-2 end-to-end through the spec §8 rebuild: a ledger line confirming
+    /// the fact ("a", "bc") must stamp ONLY that fact — the boundary
+    /// colliding ("ab", "c") stays at agent tier.
+    #[test]
+    fn rebuild_does_not_confirm_boundary_colliding_fact() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path();
+        let h = confirmation_content_hash("a", "bc");
+        append_confirmation_line(vault_root, "f1", &h, "human:kurt", "2026-10-21T00:00:00Z");
+
+        let conn = open_in_memory().unwrap();
+        seed_fact(&conn, "f1", "a", "bc");
+        seed_fact(&conn, "f2", "ab", "c");
+
+        let report = rebuild_rederive(&conn, vault_root).unwrap();
+        assert_eq!(
+            report.confirmations_applied, 1,
+            "exactly the confirmed fact may be stamped"
+        );
+        assert_eq!(source_type_of(&conn, "f1"), "user_confirmed");
+        assert_eq!(
+            source_type_of(&conn, "f2"),
+            "librarian_inferred",
+            "a fact whose title+body only boundary-collides must NOT be confirmed"
         );
     }
 

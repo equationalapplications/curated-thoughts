@@ -504,10 +504,14 @@ mid-task delivery vector for non-human-approved content. Fix, enforcing D2
 
 - **Confirmations:** the app confirm updates the brain row (§3) AND appends
   to `stated/.confirmations.jsonl` —
-  `{fact_id, content_hash(title+body), by, at}`, app-written (rev 4 B2:
+  `{fact_id, content_hash, by, at}`, app-written (rev 4 B2:
   there is NO vault fact file to update — facts are `llm_wiki_entries`
   rows; a frontmatter-trusted rebuild would violate Rule 2 and Rule 5's "a
-  machine never raises the trust tier of a fact it received"). A brain
+  machine never raises the trust tier of a fact it received").
+  `content_hash` = SHA-256 over the title's byte length as a big-endian u64, the title
+  bytes, then the body bytes (rev 4.2, CR-2: the raw `title+body` concatenation was
+  boundary-ambiguous — `("ab","c")` and `("a","bc")` collided; the length prefix makes the
+  title/body split unambiguous). Rebuild matching is unchanged (rev 4.1 gate N3). A brain
   rebuild re-derives `user_confirmed` ONLY from `.confirmations.jsonl`,
   matching by `content_hash` against the rebuilt row's title+body —
   `fact_id` is ADVISORY only (rev 4.1, gate N3: fact ids are random and
