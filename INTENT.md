@@ -174,10 +174,10 @@ they cover.
 *Why:* several machines should agree on one brain without fighting over
 it.
 
-**Status: Mostly planned.** The outbox exists but only pushes one way, to
+**Status: Partly built.** The outbox exists but only pushes one way, to
 a Postgres replica; machines don't pull from each other. There is no
 "ingested on" machine field, and fact IDs are random. How a machine
-should trust tiers it receives from another is an **open decision**.
+should trust tiers it receives from another is not yet decided.
 
 ### 6. The fast model judges; it never writes
 
@@ -188,7 +188,7 @@ questions, or decides trust. It is optional: recall works without it.
 
 *Why:* a small model is useful for sorting, not for deciding what is true.
 
-**Status: Partly built, used differently.** Jev exists only as an optional
+**Status: Partly built.** Jev exists only as an optional
 classifier that assigns types to untyped facts. It is not used for ingest
 triage or recall relevance, and its judgments are not logged for
 evaluation. Laya is not integrated yet.
