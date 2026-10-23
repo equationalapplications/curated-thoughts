@@ -57,6 +57,32 @@ export function UnverifiedPromptModal({ onAction, pollMs = POLL_MS }: Props) {
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  // R3b focus handoff: after confirm/deny, the acted-on row unmounts and its
+  // button goes with it — without intervention focus falls to <body> while
+  // the dialog stays open, and keyboard/AT users lose the dialog. The index
+  // is stashed here and consumed by the effect below AFTER React commits
+  // (the new buttons are enabled by then; focusing a disabled button is a
+  // no-op).
+  const focusRowIndex = useRef<number | null>(null);
+  useEffect(() => {
+    if (focusRowIndex.current === null) return;
+    const idx = focusRowIndex.current;
+    focusRowIndex.current = null;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (dialog.contains(document.activeElement)) return;
+    const rows = dialog.querySelectorAll<HTMLElement>("[data-fact-id]");
+    if (rows.length === 0) return;
+    // The row that took the acted-on row's place; else the last remaining row.
+    const row = rows[Math.min(idx, rows.length - 1)];
+    const target =
+      row.querySelector<HTMLElement>("button:not([disabled])") ??
+      dialog.querySelector<HTMLElement>("button:not([disabled])") ??
+      // Last fallback: the dialog container itself (tabIndex={-1} keeps it
+      // programmatically focusable).
+      dialog;
+    target.focus();
+  });
   // Drain acks backend-side BEFORE the modal can render; once the modal is
   // up, a further drain would ack prompts the user is still looking at and
   // `setFacts` would replace them — acked lines are never prompted again.
@@ -124,6 +150,13 @@ export function UnverifiedPromptModal({ onAction, pollMs = POLL_MS }: Props) {
       // (React may invoke them twice). `act` is re-created each render, so
       // the `facts` closure is current at call time.
       const next = facts.filter((f) => f.fact_id !== factId);
+      // R3b: record the acted-on row's index BEFORE removal so the effect
+      // above can hand focus to the next remaining action button after the
+      // commit (fallbacks: first action button → dialog container).
+      focusRowIndex.current = Math.max(
+        facts.findIndex((f) => f.fact_id === factId),
+        0,
+      );
       setFacts(next);
       if (next.length === 0) setOpen(false);
       onAction?.();
@@ -143,6 +176,9 @@ export function UnverifiedPromptModal({ onAction, pollMs = POLL_MS }: Props) {
     >
       <div
         ref={dialogRef}
+        // R3b: programmatically focusable so the last-resort focus fallback
+        // (no enabled buttons left) can still move focus into the dialog.
+        tabIndex={-1}
         className="queue-modal queue-prompt-modal"
         role="dialog"
         aria-modal="true"
@@ -160,7 +196,11 @@ export function UnverifiedPromptModal({ onAction, pollMs = POLL_MS }: Props) {
         )}
         <ul className="queue-prompt-list">
           {facts.map((f) => (
-            <li key={f.fact_id} className="queue-prompt-item">
+            <li
+              key={f.fact_id}
+              data-fact-id={f.fact_id}
+              className="queue-prompt-item"
+            >
               <h4>{f.title}</h4>
               <p>{f.body}</p>
               {f.evidence_quote && (
