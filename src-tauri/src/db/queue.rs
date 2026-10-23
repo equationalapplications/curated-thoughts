@@ -325,6 +325,18 @@ fn queue_rows_inner(conn: &Connection) -> anyhow::Result<Vec<QueueRow>> {
     // Evidence quote via the `deposit_status_row` join chain (the trace entry →
     // librarian_evidence → proposal → curated_proposal_sources → documents
     // path), attribution joined on the source document path.
+    // D4 (PR #294 round 2): the evidence fan-out (a fact's proposal with
+    // several source documents) must resolve to a DETERMINISTIC first row —
+    // `ps.role, d.id` as the created_at tie-break — shared verbatim with
+    // `deny_fact_at` below, so the denial key is built from the SAME evidence
+    // row the queue displays. The tie-break is total for the emitted row set:
+    // `librarian_evidence.entry_id` is a PRIMARY KEY (one evidence blob per
+    // fact), `curated_proposal_sources` is keyed (proposal_id, doc_id) with
+    // proposal_id pinned by that single blob, and `documents.id` is the
+    // documents PRIMARY KEY — so (ps.role, d.id) is unique per joined row;
+    // `deposit_attribution` joins 1:1 on `document_path`. Both components are
+    // stored values, stable across runs and planner/index changes
+    // ('evidence' < 'trigger').
     let sql = format!(
         "SELECT e.id, e.title, e.body, e.source_type, e.entity_id, e.created_at, \
                 le.evidence_json, d.path, da.speaker \
@@ -334,7 +346,7 @@ fn queue_rows_inner(conn: &Connection) -> anyhow::Result<Vec<QueueRow>> {
            LEFT JOIN documents d ON d.id = ps.doc_id \
            LEFT JOIN deposit_attribution da ON da.document_path = d.path \
           WHERE {where_sql} \
-          ORDER BY e.created_at ASC"
+          ORDER BY e.created_at ASC, ps.role, d.id"
     );
 
     // Denial anti-match: the plan's "LEFT JOIN anti-match" against
@@ -614,6 +626,13 @@ pub fn deny_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> Resu
     // evidence row wins — the same fan-out rule queue_rows applies). A fact
     // with no evidence source document/chunk cannot form the key (spec §3.3)
     // and is REFUSED rather than suppressed keyless.
+    //
+    // D4 (PR #294 round 2): the pick MUST carry the queue's deterministic
+    // tie-break (`ORDER BY ps.role, d.id`, see queue_rows_inner) so the
+    // denial key is keyed to the SAME evidence row the queue displays —
+    // without it, an unordered multi-source fan-out could key the denial
+    // against a different (document, chunk) and the denied fact would
+    // survive the queue's anti-match.
     let row: Option<DenySourceRow> = conn
         .query_row(
             "SELECT e.entity_id, e.title, e.body, d.path, le.evidence_json
@@ -621,7 +640,8 @@ pub fn deny_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> Resu
                LEFT JOIN librarian_evidence le ON le.entry_id = e.id
                LEFT JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id
                LEFT JOIN documents d ON d.id = ps.doc_id
-              WHERE e.id = ?1 AND e.deleted_at IS NULL",
+              WHERE e.id = ?1 AND e.deleted_at IS NULL
+              ORDER BY ps.role, d.id",
             params![fact_id],
             |r| {
                 Ok(DenySourceRow {
@@ -2271,6 +2291,112 @@ mod confirmation_action_tests {
         assert!(
             lines.is_empty(),
             "ledger no longer carries the denial: {lines:?}"
+        );
+    }
+
+    /// D4 (PR #294 round 2): a fact whose proposal carries MULTIPLE source
+    /// documents must get its denial keyed to the SAME evidence row the
+    /// queue displays. `queue_rows_inner` and `deny_fact_at` both take the
+    /// "first" row of the same fan-out join (librarian_evidence →
+    /// curated_proposal_sources → documents); without a shared deterministic
+    /// ORDER BY the pick is plan-dependent, so the denial could key a
+    /// different (document, chunk) than the queue's anti-match — the denied
+    /// fact would then SURVIVE in the queue. The sibling pins the negative
+    /// direction: denying via the displayed key removes exactly this fact,
+    /// not its same-text sibling seeded WITHOUT that evidence.
+    #[test]
+    fn deny_keys_the_evidence_row_the_queue_displays_for_multi_source_facts() {
+        let conn = conn();
+        let (_tmp, vault) = vault();
+        seed_entity(&conn);
+        let now = crate::wisdom_deposit::now_ms();
+
+        // Canonical-form document keys (B1): the virtual-absolute key the
+        // watcher stores — derived via the shared helper, not hand-rolled.
+        let doc_a =
+            super::virtual_path_key_at_root(&vault, std::path::Path::new("documents/d4-a.md"))
+                .unwrap();
+        let doc_b =
+            super::virtual_path_key_at_root(&vault, std::path::Path::new("documents/d4-b.md"))
+                .unwrap();
+        let doc_c =
+            super::virtual_path_key_at_root(&vault, std::path::Path::new("documents/d4-c.md"))
+                .unwrap();
+
+        // The fact and a same-normalized-text sibling.
+        insert_entry(&conn, "q-d4", "D4 twin fact", now);
+        insert_entry(&conn, "q-d4-sib", "D4 twin fact", now);
+
+        // ONE evidence blob for the fact, TWO proposal sources: role
+        // 'trigger' on the LATER-inserted document, 'evidence' on the
+        // earlier one — so rowid order and d.id order disagree and an
+        // unordered pick is plan-dependent. (`librarian_evidence.entry_id`
+        // is a PRIMARY KEY, so the fan-out comes from
+        // `curated_proposal_sources` alone.)
+        let id_a = crate::db::queries::upsert_document(&conn, &doc_a, "hash-d4").unwrap();
+        let id_b = crate::db::queries::upsert_document(&conn, &doc_b, "hash-d4").unwrap();
+        assert!(id_a < id_b, "documents.id follows insert order");
+        conn.execute(
+            "INSERT INTO curated_proposals (id, kind, model, created_at)
+             VALUES ('p-d4', 'new_entity', 'test', ?1)",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES ('p-d4', ?1, 'trigger')",
+            params![id_b],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+             VALUES ('p-d4', ?1, 'evidence')",
+            params![id_a],
+        )
+        .unwrap();
+        seed_evidence_row(&conn, "q-d4", "p-d4", "chunkhash-d4", "d4 quote");
+
+        // The sibling: its OWN single-source proposal on a THIRD document —
+        // it never carries the denial evidence.
+        seed_proposal_doc(&conn, "p-d4-sib", &doc_c);
+        seed_evidence_row(&conn, "q-d4-sib", "p-d4-sib", "chunkhash-d4", "d4 quote");
+
+        // The queue's displayed evidence document...
+        let rows = queue_rows(&conn);
+        let displayed = rows
+            .iter()
+            .find(|r| r.fact_id == "q-d4")
+            .map(|r| r.source_document.clone().unwrap())
+            .expect("multi-source fact is in the queue");
+        assert!(
+            rows.iter().any(|r| r.fact_id == "q-d4-sib"),
+            "sibling seeded live"
+        );
+
+        // ...must be the document the denial is keyed to.
+        deny_fact_at(&conn, &vault, "q-d4").unwrap();
+
+        let (denied_doc, denied_chunk): (String, String) = conn
+            .query_row(
+                "SELECT document_path, chunk_hash FROM queue_denials",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            denied_doc, displayed,
+            "D4: deny keys the SAME evidence row the queue displays"
+        );
+        assert_eq!(denied_chunk, "chunkhash-d4");
+
+        let ids = ids_of(queue_rows(&conn));
+        assert!(
+            !ids.contains("q-d4"),
+            "denied fact leaves the queue: {ids:?}"
+        );
+        assert!(
+            ids.contains("q-d4-sib"),
+            "same-text sibling WITHOUT that evidence stays: {ids:?}"
         );
     }
 
