@@ -3002,13 +3002,33 @@ pub fn resolve_proposal(
     // (2) manual decision without the desktop surface (CLI, MCP, internal
     // API) → agent tier + `approved_at_agent_tier` event; (3)
     // `auto_approve` → agent tier, unchanged, no event.
-    let source_type = if !options.human_surface && all_sources_attested(conn, proposal_id)? {
-        "user_stated"
-    } else if !options.auto_approve && options.human_surface {
-        "user_confirmed"
-    } else {
-        "librarian_inferred"
-    };
+    // CR-1 (spec §3.7-A): the Path B arm fires ONLY when no accepted decision
+    // carries an edit — caller-supplied on the decision OR stored on the
+    // proposal item row. The production review paths (`review_approve`,
+    // `review_approve_with_profile`) build decision sets with
+    // `edited_payload: None`, so the stored `curated_proposal_items
+    // .edited_payload` is what the commit applies via `effective_payload`;
+    // both carriers must gate. Edited text was never seen by the person whose
+    // attestations Path B leans on, so an edited resolve falls through to the
+    // ordinary arms below (human surface → `user_confirmed`, else agent tier
+    // + `approved_at_agent_tier` event).
+    let has_accepted_edit = items
+        .iter()
+        .any(|item| match decisions_by_id.get(item.id.as_str()) {
+            Some(d) if d.decision == ItemDecisionKind::Accept => {
+                d.edited_payload.is_some() || item.edited_payload.is_some()
+            }
+            _ => false,
+        });
+    let source_type =
+        if !options.human_surface && !has_accepted_edit && all_sources_attested(conn, proposal_id)?
+        {
+            "user_stated"
+        } else if !options.auto_approve && options.human_surface {
+            "user_confirmed"
+        } else {
+            "librarian_inferred"
+        };
     // Arm 2's durable marker: a manual approval that did NOT happen on the
     // desktop surface resolves at agent tier, and the resolution says so.
     // Task-8 E5 closeout — choice (a), suppress-event-on-attested: when the
@@ -4817,6 +4837,197 @@ mod tests {
             "user_stated",
             "all-attested sources ⇒ Path B user_stated"
         );
+    }
+
+    // ── CR-1: edited decisions must NOT ride the Path B instant-confirm arm ──
+
+    /// Run `body` with brain-path resolution redirected into a temp dir.
+    /// The production `review_approve` entry reads `wiki.deposit_default_tier`
+    /// from the resolved config, so an unredirected test would resolve the
+    /// LIVE `~/.brain` (issue #178 guard). Same shape as the review-shim /
+    /// proposals_review test helpers.
+    fn with_scratch_brain<T>(body: impl FnOnce() -> T) -> T {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let brain = tmp.path().to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                // An inherited value would override the redirected dir.
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            body,
+        )
+    }
+
+    /// Seed the stored `edited_payload` the production review paths pick up
+    /// from `curated_proposal_items` (their decision sets carry
+    /// `edited_payload: None`; the commit applies the stored edit via
+    /// `effective_payload`).
+    fn seed_stored_edit(conn: &Connection, item_id: &str, body: &str) {
+        conn.execute(
+            "UPDATE curated_proposal_items SET edited_payload = ?2 WHERE id = ?1",
+            params![item_id, serde_json::json!({ "body": body }).to_string()],
+        )
+        .unwrap();
+    }
+
+    /// Seed a pending attested-source proposal with one fact_add item and an
+    /// optional stored edit — the Path B fixture plus the CR-1 hook.
+    fn seed_attested_proposal(
+        conn: &Connection,
+        id: &str,
+        item_id: &str,
+        edited_body: Option<&str>,
+    ) {
+        let doc_path = format!("/vault/stated/kurt/2026/{id}.md");
+        let doc_id = seed_document(conn, &doc_path);
+        let chunk_id = seed_chunk(conn, doc_id);
+        insert_test_proposal(
+            conn,
+            id,
+            ProposalKind::NewEntity,
+            None,
+            vec![fact_item(item_id, chunk_id, "A stated fact.")],
+            doc_id,
+        );
+        if let Some(body) = edited_body {
+            seed_stored_edit(conn, item_id, body);
+        }
+        // Path B precondition: the source document is app-attested (the
+        // person's own statement — the basis for the human-tier stamp).
+        let doc_hash: String = conn
+            .query_row(
+                "SELECT hash FROM documents WHERE id = ?1",
+                params![doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO stated_attestations (document_path, content_hash, attested_by, attested_at)
+             VALUES (?1, ?2, 'human:kurt', '2026-10-21T00:00:00Z')",
+            params![doc_path, doc_hash],
+        )
+        .unwrap();
+    }
+
+    /// CR-1 (spec §3.7-A): a proposal whose every source is attested but
+    /// which carries an EDIT — stored on the item row, riding the production
+    /// `review_approve` entry path (`decisions: None`, human_surface: false) —
+    /// must NOT stamp `user_stated`. The edited text was never seen by the
+    /// person whose attestations Path B leans on, so the resolve falls
+    /// through to the agent-tier arm: `librarian_inferred` plus the
+    /// `approved_at_agent_tier` event.
+    #[test]
+    fn cr1_edited_decision_blocks_attested_instant_confirm_agent_tier() {
+        with_scratch_brain(|| {
+            let mut conn = open_in_memory().unwrap();
+            seed_attested_proposal(
+                &conn,
+                "prop-cr1-a",
+                "item-cr1-a",
+                Some("Agent-edited body."),
+            );
+
+            let outcome = crate::db::proposals_review::review_approve(
+                &mut conn,
+                "prop-cr1-a",
+                "agent:reviewer",
+            )
+            .unwrap();
+            assert_eq!(outcome.status, "approved");
+
+            let st: String = conn
+                .query_row(
+                    "SELECT source_type FROM llm_wiki_entries LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                st, "librarian_inferred",
+                "edited content must resolve at agent tier, not the human Path B stamp"
+            );
+            let events: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_events WHERE event_type = 'approved_at_agent_tier'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(events >= 1, "agent-tier resolve must write the tier event");
+        });
+    }
+
+    /// CR-1: the same edited proposal resolved through the DESKTOP surface
+    /// (human_surface: true) stamps `user_confirmed` — the ordinary Task-3
+    /// arm-2 behavior is unchanged; the guard only blocks the Path B arm.
+    #[test]
+    fn cr1_edited_decision_with_human_surface_stamps_user_confirmed() {
+        let mut conn = open_in_memory().unwrap();
+        seed_attested_proposal(
+            &conn,
+            "prop-cr1-b",
+            "item-cr1-b",
+            Some("Agent-edited body."),
+        );
+        let decisions = all_accept_decisions(&conn, "prop-cr1-b");
+
+        let result = resolve_proposal(
+            &mut conn,
+            "prop-cr1-b",
+            &decisions,
+            None,
+            ResolveOptions {
+                auto_approve: false,
+                human_surface: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            stamped_source_type(&conn, &result),
+            "user_confirmed",
+            "human-surface resolve of an edited proposal keeps the ordinary arm-2 stamp"
+        );
+    }
+
+    /// CR-1 control: the same production entry path over the same attested
+    /// fixture WITHOUT any edit (stored or decision-carried) still stamps
+    /// `user_stated` with no tier event — the instant-confirm arm is intact
+    /// for genuinely stated content.
+    #[test]
+    fn cr1_unedited_attested_still_stamps_user_stated_via_review_approve() {
+        with_scratch_brain(|| {
+            let mut conn = open_in_memory().unwrap();
+            seed_attested_proposal(&conn, "prop-cr1-c", "item-cr1-c", None);
+
+            let outcome = crate::db::proposals_review::review_approve(
+                &mut conn,
+                "prop-cr1-c",
+                "agent:reviewer",
+            )
+            .unwrap();
+            assert_eq!(outcome.status, "approved");
+
+            let st: String = conn
+                .query_row(
+                    "SELECT source_type FROM llm_wiki_entries LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(st, "user_stated", "unedited stated content keeps Path B");
+            let events: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_events WHERE event_type = 'approved_at_agent_tier'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(events, 0, "human-tier Path B stamp writes no tier event");
+        });
     }
 
     /// The deleted-source cascade must hold at the human-tier arm:
