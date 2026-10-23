@@ -480,12 +480,11 @@ pub struct DenialKey {
 /// json_insert shape — MINUS the `lifecycle_status` line, which confirm must
 /// not touch — plus an outbox Update row (Rule 5 sync), an event, and the
 /// `stated/.confirmations.jsonl` append via Task 2's `record_confirmation`
-/// primitive (REUSED, not forked: it owns the ledger append and its
-/// hash-keyed `source_type` upsert; `confidence`, the `okf_verified` entry,
-/// the `last_verified_by/at` mirror and the outbox/event legs are not covered
-/// by that primitive and live in the stamp below — flagged in the Task 5
-/// report rather than forked silently). Idempotent on re-confirm: no
-/// duplicate event, no duplicate ledger line (spec §4 double-confirm).
+/// primitive (REUSED, not forked: it owns the ledger append and — since the
+/// D1 v2 ruling — the hash-keyed FULL stamp through the shared
+/// `stamp_user_confirmed` helper, so same-text twins present at confirm time
+/// get the complete stamp immediately; spec §3.3). Idempotent on re-confirm:
+/// no duplicate event, no duplicate ledger line (spec §4 double-confirm).
 pub fn confirm_fact(conn: &Connection, fact_id: &str) -> Result<()> {
     let vault_root = crate::db::stated_ledger::resolve_vault_root()?;
     confirm_fact_at(conn, &vault_root, fact_id)
@@ -552,11 +551,42 @@ pub fn confirm_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> R
         )?;
     }
 
-    // 2. The full stamp, one transaction: UPDATE + outbox Update + event.
+    // 2. The full stamp, one transaction: UPDATE + outbox Update + event
+    //    (D1 v2: the shared helper, also used by the by-hash rebuild leg).
     //    `updated_at` untouched (drafts.rs discipline), `lifecycle_status`
     //    untouched (already `stable`; spec §3.3).
     let tx = conn.unchecked_transaction()?;
-    let changed = tx.execute(
+    stamp_user_confirmed(&tx, fact_id, &entity_id, HUMAN_CONFIRMER, now_ms, &at_iso)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The full user-confirmation stamp, shared by BOTH stamping routes (D1 v2
+/// ruling, 2026-10-22): the clicked path ([`confirm_fact_at`]) and the
+/// by-hash rebuild path (`stated_ledger::apply_confirmations_by_hash`).
+/// One stamp body: guarded UPDATE (`source_type` + `confidence` +
+/// `okf_verified` append + `last_verified_by/at` mirror), an outbox Update
+/// row (Rule 5 sync), and a `fact_confirmed` event. `updated_at` and
+/// `lifecycle_status` untouched (drafts.rs discipline, spec §3.3).
+///
+/// Idempotence via the `NOT (fully stamped)` guard: an already fully-stamped
+/// row yields `changed == 0` and emits NEITHER the outbox row NOR the event
+/// (event-once, spec §4) — a rebuild re-run over the same ledger is a no-op.
+///
+/// Takes `&Connection` so callers pass either a plain conn or an open
+/// transaction (`&tx` derefs): the CALLER owns the transaction (confirm: its
+/// own tx; rebuild: the single rebuild tx, so outbox rows and events land
+/// atomically with the rebuild or not at all). Returns the number of rows
+/// stamped (0 = already fully stamped).
+pub(crate) fn stamp_user_confirmed(
+    conn: &Connection,
+    fact_id: &str,
+    entity_id: &str,
+    confirmer: &str,
+    now_ms: i64,
+    at_iso: &str,
+) -> Result<usize> {
+    let changed = conn.execute(
         "UPDATE llm_wiki_entries
             SET source_type = 'user_confirmed',
                 confidence = 'confirmed',
@@ -569,22 +599,22 @@ pub fn confirm_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> R
                 last_verified_at = ?5
           WHERE id = ?1 AND entity_id = ?2
             AND NOT (source_type = 'user_confirmed' AND confidence = 'confirmed')",
-        params![fact_id, entity_id, HUMAN_CONFIRMER, at_iso, now_ms],
+        params![fact_id, entity_id, confirmer, at_iso, now_ms],
     )?;
     if changed == 0 {
         // Event-once guard (spec §4: the same rows_affected pattern proposal
         // resolution uses) — a concurrent confirm converged elsewhere.
-        return Ok(());
+        return Ok(0);
     }
     crate::db::commit::push_entries_outbox(
-        &tx,
-        &entity_id,
+        conn,
+        entity_id,
         fact_id,
         crate::db::outbox_format::OutboxOperation::Update,
-        crate::db::drafts::fact_row_outbox_payload(&tx, fact_id, &entity_id)?,
+        crate::db::drafts::fact_row_outbox_payload(conn, fact_id, entity_id)?,
         now_ms,
     )?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
          VALUES (?1, ?2, 'fact_confirmed', ?3, ?4, ?5)",
         params![
@@ -595,8 +625,7 @@ pub fn confirm_fact_at(conn: &Connection, vault_root: &Path, fact_id: &str) -> R
             now_ms
         ],
     )?;
-    tx.commit()?;
-    Ok(())
+    Ok(changed)
 }
 
 /// Deny a queue fact (spec §3.3: deny = archive + suppress). Archive reuses

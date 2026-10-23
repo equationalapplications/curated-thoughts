@@ -9,7 +9,7 @@
 //! match key is the SHA-256 of title+body — `fact_id` is advisory (rev 4.1
 //! gate N3: fact ids are random and change across rebuilds).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -74,7 +74,9 @@ pub struct RebuildReport {
     /// Lines read from `stated/.confirmations.jsonl`.
     pub confirmations_read: usize,
     /// `llm_wiki_entries` rows whose hash matched a ledger line and were
-    /// stamped `source_type = 'user_confirmed'`.
+    /// stamped through the FULL shared helper (D1 v2): `source_type =
+    /// 'user_confirmed'` plus confidence/okf_verified/outbox/event, idempotent
+    /// on already-stamped rows.
     pub confirmations_applied: usize,
     /// Lines read from `stated/.attestations.jsonl`.
     pub attestations_read: usize,
@@ -234,22 +236,19 @@ pub fn record_confirmation_at(
     by: &str,
     at: &str,
 ) -> Result<()> {
-    append_line(
-        vault_root,
-        CONFIRMATIONS_LEDGER,
-        &ConfirmationLine {
-            fact_id: fact_id.to_string(),
-            content_hash: content_hash.to_string(),
-            by: by.to_string(),
-            at: at.to_string(),
-        },
-    )?;
+    let line = ConfirmationLine {
+        fact_id: fact_id.to_string(),
+        content_hash: content_hash.to_string(),
+        by: by.to_string(),
+        at: at.to_string(),
+    };
+    append_line(vault_root, CONFIRMATIONS_LEDGER, &line)?;
     // Upsert the brain-side stamp now (spec §3: the confirm updates the brain
     // row AND appends to the ledger). Matching is by content hash — fact_id is
     // advisory even here — so the live stamp and the rebuild stamp agree.
-    let mut hashes = HashSet::new();
-    hashes.insert(content_hash.to_string());
-    apply_confirmations_by_hash(conn, &hashes)?;
+    // D1 v2: the hash leg stamps through the FULL shared helper, so twins
+    // present right now get the same stamp the rebuild will re-derive.
+    apply_confirmations_by_hash(conn, std::slice::from_ref(&line))?;
     Ok(())
 }
 
@@ -265,27 +264,52 @@ pub fn confirmation_ledger_has_key(vault_root: &Path, content_hash: &str) -> Res
         .any(|l| l.content_hash == content_hash))
 }
 
-/// Stamp `source_type = 'user_confirmed'` on every non-deleted entry whose
-/// current title+body hash is in `hashes`. Returns the number of rows stamped.
-fn apply_confirmations_by_hash(conn: &Connection, hashes: &HashSet<String>) -> Result<usize> {
+/// Stamp every non-deleted entry whose current title+body hash matches a
+/// ledger line through the FULL shared stamp helper (D1 v2 ruling,
+/// 2026-10-22): `source_type` + `confidence` + `okf_verified` entry + outbox
+/// Update + `fact_confirmed` event — identical to the clicked path, via the
+/// ONE helper `queue::stamp_user_confirmed` (no forked bare upsert).
+/// `by`/`at` come from the ledger line (first line per hash wins — duplicate
+/// appends stamp the same row once); `at` is parsed back to ms so the stamp
+/// carries the confirmation's own moment. Idempotent: the helper's
+/// `NOT (fully stamped)` guard makes an already-stamped row a no-op with no
+/// new outbox row or event (event-once, spec §4). Returns the number of
+/// hash-matched rows the leg stamped (idempotent re-stamps count — the
+/// report's "rows the hash leg stamped" semantics is unchanged). Takes
+/// `&Connection` so the rebuild passes `&tx` (outbox rows and events land
+/// atomically with the rebuild) and the record path a plain conn.
+fn apply_confirmations_by_hash(conn: &Connection, lines: &[ConfirmationLine]) -> Result<usize> {
+    let mut line_by_hash: HashMap<&str, &ConfirmationLine> = HashMap::new();
+    for line in lines {
+        line_by_hash
+            .entry(line.content_hash.as_str())
+            .or_insert(line);
+    }
     let mut stmt = conn.prepare(
-        "SELECT id, title, body FROM llm_wiki_entries WHERE deleted_at IS NULL",
+        "SELECT id, entity_id, title, body FROM llm_wiki_entries WHERE deleted_at IS NULL",
     )?;
-    let rows: Vec<(String, String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    let rows: Vec<(String, String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<std::result::Result<_, _>>()?;
     drop(stmt);
     let mut stamped = 0;
-    for (id, title, body) in rows {
-        if hashes.contains(&confirmation_content_hash(&title, &body)) {
-            conn.execute(
-                "UPDATE llm_wiki_entries SET source_type = 'user_confirmed' WHERE id = ?1",
-                params![id],
-            )?;
+    for (id, entity_id, title, body) in rows {
+        if let Some(line) = line_by_hash.get(confirmation_content_hash(&title, &body).as_str()) {
+            let now_ms = rfc3339_to_ms(&line.at).unwrap_or_else(crate::wisdom_deposit::now_ms);
+            super::queue::stamp_user_confirmed(conn, &id, &entity_id, &line.by, now_ms, &line.at)?;
             stamped += 1;
         }
     }
     Ok(stamped)
+}
+
+/// ISO-8601 → epoch ms — the inverse of queue.rs `confirm_iso_utc`
+/// (millis precision, `Z` suffix; the roundtrip is exact). `None` on a
+/// malformed stamp; the caller falls back to now.
+fn rfc3339_to_ms(at: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(at)
+        .ok()
+        .map(|d| d.timestamp_millis())
 }
 
 /// Re-derive every stated-verification table from the durable carriers:
@@ -330,8 +354,7 @@ pub fn rebuild_rederive(conn: &Connection, vault_root: &Path) -> Result<RebuildR
     //    terminal. No explicit reset logic exists or is needed here.
     let confirmations: Vec<ConfirmationLine> = read_lines(&stated.join(CONFIRMATIONS_LEDGER))?;
     report.confirmations_read = confirmations.len();
-    let hashes: HashSet<String> = confirmations.into_iter().map(|l| l.content_hash).collect();
-    report.confirmations_applied = apply_confirmations_by_hash(&tx, &hashes)?;
+    report.confirmations_applied = apply_confirmations_by_hash(&tx, &confirmations)?;
 
     // 2. Attestations → stated_attestations, re-verifying current file hashes.
     //    The TABLE KEY is the watcher's virtual-absolute `documents.path`
@@ -757,5 +780,141 @@ mod tests {
         assert_eq!(report.confirmations_read, 1);
         assert_eq!(report.confirmations_applied, 1);
         assert_eq!(source_type_of(&conn, "f9"), "user_confirmed");
+    }
+
+    /// D1-v2 (ruling 2026-10-22): a same-text TWIN — identical title+body,
+    /// different fact id — must receive the FULL stamp through the shared
+    /// helper (`source_type` AND `confidence` AND an `okf_verified` entry AND
+    /// an outbox Update row AND a `fact_confirmed` event), identical to the
+    /// clicked fact, not the old bare `source_type` upsert.
+    #[test]
+    fn rebuild_stamps_by_hash_twin_through_full_helper() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path();
+        let conn = open_in_memory().unwrap();
+        seed_fact(&conn, "f1", "Alpha", "Alpha body");
+        // The twin: identical text, different id (fixture entity shared).
+        seed_fact(&conn, "f2", "Alpha", "Alpha body");
+
+        // Clicked path confirms f1 (one ledger line); the rebuild then
+        // re-derives the stamp for BOTH rows by content hash.
+        crate::db::queue::confirm_fact_at(&conn, vault_root, "f1").unwrap();
+
+        let report = rebuild_rederive(&conn, vault_root).unwrap();
+        assert_eq!(report.confirmations_read, 1);
+        assert_eq!(
+            report.confirmations_applied, 2,
+            "both the clicked fact and its twin stamp through the hash leg"
+        );
+
+        // The twin carries the FULL stamp, the same shape the clicked path
+        // writes (queue.rs confirm stamp).
+        let (source_type, confidence, okf_verified, last_verified_by): (
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT source_type, confidence, okf_verified, last_verified_by
+                   FROM llm_wiki_entries WHERE id = 'f2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(source_type, "user_confirmed");
+        assert_eq!(
+            confidence, "confirmed",
+            "twin gets the full stamp, not the bare source_type upsert"
+        );
+        let verified: serde_json::Value = serde_json::from_str(&okf_verified).unwrap();
+        let human = verified
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["by"] == "human:kurt")
+            .expect("twin okf_verified gains the human:kurt entry")
+            .clone();
+        assert!(
+            human["at"].as_str().is_some(),
+            "okf_verified entry carries an ISO timestamp: {human:?}"
+        );
+        assert_eq!(last_verified_by.as_deref(), Some("human:kurt"), "mirror");
+
+        // Rule-5 sync: an outbox Update row for the twin.
+        let outbox: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_outbox
+                  WHERE record_id = 'f2' AND operation = 'UPDATE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbox, 1, "twin stamp emits exactly one outbox Update row");
+
+        // And one `fact_confirmed` event.
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_events
+                  WHERE related_entry_id = 'f2' AND event_type = 'fact_confirmed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            events, 1,
+            "twin stamp emits exactly one fact_confirmed event"
+        );
+    }
+
+    /// Event-once idempotence (D1-v2): a second rebuild over the same ledger
+    /// emits NO new outbox rows or events — the shared helper's
+    /// `NOT (fully stamped)` guard makes an already-stamped row a no-op
+    /// (spec §4). Re-run cleanliness is the property that keeps rebuild
+    /// re-runs clean.
+    #[test]
+    fn rebuild_full_stamp_is_event_once_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path();
+        let conn = open_in_memory().unwrap();
+        seed_fact(&conn, "f1", "Alpha", "Alpha body");
+        seed_fact(&conn, "f2", "Alpha", "Alpha body");
+        crate::db::queue::confirm_fact_at(&conn, vault_root, "f1").unwrap();
+
+        let report = rebuild_rederive(&conn, vault_root).unwrap();
+        let twin_counts = || -> (i64, i64) {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM llm_wiki_outbox WHERE record_id = 'f2'),
+                        (SELECT COUNT(*) FROM llm_wiki_events
+                          WHERE related_entry_id = 'f2' AND event_type = 'fact_confirmed')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        let before = twin_counts();
+
+        let again = rebuild_rederive(&conn, vault_root).unwrap();
+
+        assert_eq!(
+            before,
+            twin_counts(),
+            "second rebuild emits NO new outbox rows or events"
+        );
+        assert_eq!(
+            report, again,
+            "rebuild report is stable across re-runs (counts unchanged)"
+        );
+        assert_eq!(again.confirmations_applied, 2);
+        // The full stamp itself persists untouched.
+        assert_eq!(source_type_of(&conn, "f2"), "user_confirmed");
+        let (confidence,): (String,) = conn
+            .query_row(
+                "SELECT confidence FROM llm_wiki_entries WHERE id = 'f2'",
+                [],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        assert_eq!(confidence, "confirmed");
     }
 }
