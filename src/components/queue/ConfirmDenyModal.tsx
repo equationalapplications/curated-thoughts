@@ -3,8 +3,9 @@ import { useFocusTrap } from "../../a11y";
 import type { QueueRow } from "../../lib/tauri";
 
 /**
- * Confirm / deny / deny-with-suppression modal for one queue fact (spec
- * §3.3). Denial errors are surfaced, never swallowed (Task 8 review note).
+ * Confirm / deny modal for one queue fact (spec §3.3). Denial hides the
+ * fact from the queue only (undoable); errors are surfaced, never swallowed
+ * (Task 8 review note).
  */
 interface Props {
   row: QueueRow;
@@ -73,8 +74,8 @@ export function ConfirmDenyModal({
           </blockquote>
         )}
         <p className="queue-modal-hint">
-          Confirming stamps this fact as verified by you. Denying archives it
-          and suppresses re-extraction of the same statement.
+          Confirming stamps this fact as verified by you. Denying hides it
+          from the queue — undoable from the denied list.
         </p>
         <div className="queue-modal-actions">
           <button

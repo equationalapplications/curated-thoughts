@@ -287,7 +287,7 @@ export function QueueMode({ onQueueChanged }: Props) {
           }}
           onDeny={async (factId) => {
             await denyQueueFact(factId);
-            setNotice("Denied — re-extractions of this fact are suppressed");
+            setNotice("Denied — this fact is hidden from the queue");
             afterAction();
           }}
           onError={setError}

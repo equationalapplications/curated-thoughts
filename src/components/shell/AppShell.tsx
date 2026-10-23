@@ -79,11 +79,17 @@ export function AppShell({ vaultPath, onVaultChanged, needsSetup }: Props) {
   // Task 9: unconfirmed-fact count for the Queue rail badge + the prompting
   // modal's refresh hook. Both degrade silently when the backend has no
   // queue (fresh installs / tests that mock the command away).
-  const [unconfirmedCount, setUnconfirmedCount] = useState(0);
+  // `null` = count unknown (never fetched / every fetch so far failed).
+  const [unconfirmedCount, setUnconfirmedCount] = useState<number | null>(null);
   const refreshUnconfirmed = useCallback(() => {
     listQueue()
       .then((rows) => setUnconfirmedCount(Array.isArray(rows) ? rows.length : 0))
-      .catch(() => setUnconfirmedCount(0));
+      .catch(() => {
+        // D6b: a failed refresh must not overwrite the count with zero —
+        // zero reads as "nothing pending", which may be false. Keep the last
+        // known count; the rail renders the never-known case ("?") as an
+        // explicit unknown (ModeRail).
+      });
   }, []);
   useEffect(() => {
     refreshUnconfirmed();

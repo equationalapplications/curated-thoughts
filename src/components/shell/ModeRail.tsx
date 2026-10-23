@@ -5,8 +5,13 @@ export type AppMode = "brain" | "review" | "queue" | "library" | "timeline" | "t
 interface Props {
   mode: AppMode;
   reviewCount: number;
-  /** Unconfirmed-fact count for the queue rail badge (Task 9). */
-  queueCount?: number;
+  /**
+   * Unconfirmed-fact count for the queue rail badge (Task 9). `null` means
+   * the count is UNKNOWN (the queue fetch failed) — the badge then renders
+   * "?" rather than disappearing, which would read as "nothing pending"
+   * (D6b).
+   */
+  queueCount?: number | null;
   errorCount?: number;
   onModeChange: (mode: AppMode) => void;
   canGoBack: boolean;
@@ -106,7 +111,7 @@ function RailButton({
   label: string;
   icon: string;
   active: boolean;
-  badge?: number;
+  badge?: number | null;
   onClick: (mode: AppMode) => void;
 }) {
   return (
@@ -118,8 +123,8 @@ function RailButton({
       onClick={() => onClick(id)}
     >
       <Icon path={ICONS[icon]} />
-      {badge !== undefined && badge > 0 && (
-        <span className="mode-rail-badge">{badge}</span>
+      {badge !== undefined && (badge === null || badge > 0) && (
+        <span className="mode-rail-badge">{badge === null ? "?" : badge}</span>
       )}
     </button>
   );
