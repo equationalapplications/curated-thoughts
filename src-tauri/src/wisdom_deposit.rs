@@ -2212,9 +2212,14 @@ mod tests {
             let conn = ctx.conn.lock().unwrap();
             // B1: the attribution TABLE KEY is the watcher's virtual-absolute
             // documents.path form; `rel` stays the ledger/status handle.
-            let attribution_key =
-                crate::db::queue::virtual_path_key(&ctx.vault_dir.as_deref().unwrap().join(rel))
-                    .unwrap();
+            // Derive the expected key through the SAME canonical-root family
+            // production uses — never the raw tempdir spelling (macOS:
+            // /var/... is a symlink to /private/var/...).
+            let attribution_key = crate::db::queue::virtual_path_key_at_root(
+                ctx.vault_dir.as_deref().unwrap(),
+                std::path::Path::new(rel),
+            )
+            .unwrap();
             let (speaker, kind, source): (String, String, String) = conn
                 .query_row(
                     "SELECT speaker, kind, source FROM deposit_attribution
@@ -2388,19 +2393,21 @@ mod tests {
             drop(lock);
 
             // Watcher leg: stage + ingest keyed by the watcher's absolute
-            // `documents.path` form.
-            let abs = dir.join(rel);
-            let abs_key = std::path::absolute(&abs)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
+            // `documents.path` form. The running watcher resolves the vault
+            // root CANONICALLY (`canonical_vault_from_config`), so drive the
+            // lane through the same canonical-root family — never the raw
+            // tempdir spelling (macOS: /var/... is a symlink to
+            // /private/var/...).
+            let root = dir.canonicalize().unwrap();
+            let abs = root.join(rel);
+            let abs_key = crate::db::queue::virtual_path_key(&abs).unwrap();
             {
                 let mut guard = ctx.conn.lock().unwrap();
                 crate::db::queue::enqueue_vault_event(
                     &mut guard,
                     notify::EventKind::Create(notify::event::CreateKind::Any),
                     &abs,
-                    Some(&dir),
+                    Some(&root),
                 )
                 .unwrap();
                 crate::pipeline::ingest_document_virtual(
@@ -2409,7 +2416,7 @@ mod tests {
                     &abs_key,
                     &abs.to_string_lossy(),
                     false,
-                    Some(dir.to_string_lossy().as_ref()),
+                    Some(root.to_string_lossy().as_ref()),
                 )
                 .unwrap();
             }
@@ -2454,7 +2461,8 @@ mod tests {
                     .execute(
                         "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
                          VALUES (?1, 'synthesize', 1)",
-                        [dir.join("immutable-source-files/agents")
+                        [root
+                            .join("immutable-source-files/agents")
                             .to_string_lossy()
                             .as_ref()],
                     )

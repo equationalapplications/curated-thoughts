@@ -634,8 +634,13 @@ mod tests {
                     .query_row(
                         "SELECT speaker, kind FROM deposit_attribution
                          WHERE document_path = ?1",
-                        [super::super::queue::virtual_path_key(
-                            &vault_root.join("notes/deposit.md"),
+                        // Rebuild keys through the CANONICAL root
+                        // (`virtual_path_key_at_root`) — derive the expected
+                        // key the same way, never the raw tempdir spelling
+                        // (macOS: /var/... is a symlink to /private/var/...).
+                        [super::super::queue::virtual_path_key_at_root(
+                            &vault_root,
+                            std::path::Path::new("notes/deposit.md"),
                         )
                         .unwrap()],
                         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -674,10 +679,15 @@ mod tests {
         assert_eq!(report.attestations_read, 2);
         assert_eq!(report.attestations_dropped, 1);
         // B1: rows are keyed by the watcher's virtual-absolute documents.path
-        // form now; the ledger carrier stays relative.
+        // form now; the ledger carrier stays relative. Derive the expected
+        // keys through the SAME canonical-root family the rebuild uses —
+        // never the raw tempdir spelling (macOS /var/... vs /private/var/...).
         let expected_keys: Vec<String> = ["notes/kept.md"]
             .iter()
-            .map(|rel| super::super::queue::virtual_path_key(&vault_root.join(rel)).unwrap())
+            .map(|rel| {
+                super::super::queue::virtual_path_key_at_root(vault_root, std::path::Path::new(rel))
+                    .unwrap()
+            })
             .collect();
         let rows: Vec<String> = {
             let mut stmt = conn

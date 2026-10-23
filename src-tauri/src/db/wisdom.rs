@@ -1064,12 +1064,20 @@ mod tests {
         profile: &EmbedProfile,
         rel: &str,
     ) -> String {
-        let abs = vault.join(rel);
+        // The running watcher resolves the vault root CANONICALLY
+        // (`canonical_vault_from_config`), so the file event it stages is
+        // under the canonical root spelling and `documents.path` keys as
+        // canonical-absolute (macOS: /var/... is a symlink to
+        // /private/var/...). Drive the lane through the same canonical-root
+        // family (`virtual_path_key_at_root`) so the test's key derivation is
+        // platform-independent, never the raw tempdir spelling.
+        let root = vault.canonicalize().unwrap();
+        let abs = root.join(rel);
         crate::db::queue::enqueue_vault_event(
             conn,
             notify::EventKind::Create(notify::event::CreateKind::Any),
             &abs,
-            Some(vault),
+            Some(&root),
         )
         .unwrap();
         let doc_path = crate::db::queue::virtual_path_key(&abs).unwrap();
@@ -1080,7 +1088,7 @@ mod tests {
         conn.execute(
             "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
              VALUES (?1, 'synthesize', 1)",
-            [vault.join("stated").to_string_lossy().as_ref()],
+            [root.join("stated").to_string_lossy().as_ref()],
         )
         .unwrap();
         crate::pipeline::ingest_document_virtual(
@@ -1089,7 +1097,7 @@ mod tests {
             &doc_path,
             &abs.to_string_lossy(),
             false,
-            Some(vault.to_string_lossy().as_ref()),
+            Some(root.to_string_lossy().as_ref()),
         )
         .unwrap();
         doc_path
@@ -1163,8 +1171,12 @@ mod tests {
             // 2. The attestation of record: brain row content-hash keyed to the
             //    SAME hash routine the documents table uses (spec §3.7.2).
             //    The TABLE KEY is the watcher's virtual-absolute documents.path
-            //    form (defect B1); the readback below mirrors the exact helper.
-            let attestation_key = crate::db::queue::virtual_path_key(&vault.join(&rel)).unwrap();
+            //    form (defect B1), derived through the canonical-root family
+            //    exactly as production capture does — never the raw tempdir
+            //    spelling (macOS /var/... vs /private/var/...).
+            let attestation_key =
+                crate::db::queue::virtual_path_key_at_root(&vault, std::path::Path::new(&rel))
+                    .unwrap();
             let row_hash: String = conn
                 .query_row(
                     "SELECT content_hash FROM stated_attestations WHERE document_path = ?1",
@@ -1346,20 +1358,21 @@ mod tests {
             let rel = super::capture_statement_with(&ctx, text, Some(&completer)).unwrap();
             drop(lock);
 
-            // Watcher leg, driven exactly the way the `enqueue_vault_event`
-            // tests do: stage the file event, then ingest the staged row. The
-            // watcher keys `documents.path` by `std::path::absolute` of the
-            // file (queue.rs:93, issue #204) — NOT the vault-relative rel.
-            let abs = vault.join(&rel);
-            let abs_key = std::path::absolute(&abs)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
+            // Watcher leg, driven exactly the way the running app's watcher
+            // does: it resolves the vault root CANONICALLY
+            // (`canonical_vault_from_config`), so the file event arrives under
+            // the canonical root spelling and `documents.path` keys as
+            // canonical-absolute (queue.rs:93, issue #204) — NOT the
+            // vault-relative rel, and never the raw tempdir spelling (macOS
+            // /var/... is a symlink to /private/var/...).
+            let root = vault.canonicalize().unwrap();
+            let abs = root.join(&rel);
+            let abs_key = crate::db::queue::virtual_path_key(&abs).unwrap();
             crate::db::queue::enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Create(notify::event::CreateKind::Any),
                 &abs,
-                Some(&vault),
+                Some(&root),
             )
             .unwrap();
             let doc_path: String = conn
@@ -1375,7 +1388,7 @@ mod tests {
                 &doc_path,
                 &abs.to_string_lossy(),
                 false,
-                Some(vault.to_string_lossy().as_ref()),
+                Some(root.to_string_lossy().as_ref()),
             )
             .unwrap();
 
@@ -1387,7 +1400,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
                  VALUES (?1, 'synthesize', 1)",
-                [vault.join("stated").to_string_lossy().as_ref()],
+                [root.join("stated").to_string_lossy().as_ref()],
             )
             .unwrap();
             let model =
@@ -1461,17 +1474,17 @@ mod tests {
             drop(lock);
 
             // Watcher leg over the CANONICAL path (what the running app's
-            // watcher sees after `canonical_vault_from_config`).
-            let abs = vault.join(&rel);
-            let abs_key = std::path::absolute(&abs)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
+            // watcher sees after `canonical_vault_from_config`); key through
+            // the production canonical-root family, never the raw tempdir
+            // spelling (macOS /var/... vs /private/var/...).
+            let root = vault.canonicalize().unwrap();
+            let abs = root.join(&rel);
+            let abs_key = crate::db::queue::virtual_path_key(&abs).unwrap();
             crate::db::queue::enqueue_vault_event(
                 &mut conn,
                 notify::EventKind::Create(notify::event::CreateKind::Any),
                 &abs,
-                Some(&vault),
+                Some(&root),
             )
             .unwrap();
             let doc_path: String = conn
@@ -1487,13 +1500,13 @@ mod tests {
                 &doc_path,
                 &abs.to_string_lossy(),
                 false,
-                Some(vault.to_string_lossy().as_ref()),
+                Some(root.to_string_lossy().as_ref()),
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve)
                  VALUES (?1, 'synthesize', 1)",
-                [vault.join("stated").to_string_lossy().as_ref()],
+                [root.join("stated").to_string_lossy().as_ref()],
             )
             .unwrap();
             let model =
@@ -1540,7 +1553,18 @@ mod tests {
     fn attestation_key_law_holds_across_configured_root_shapes() {
         let _env = TASK9_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // The relative shape resolves against the process CWD, so chdir into
-        // each shape's tmp root while it runs (restore at the end).
+        // each shape's tmp root while it runs. The guard restores the CWD on
+        // EVERY scope exit — including a shape's panic unwind, BEFORE that
+        // shape's TempDir deletes the directory the process CWD sits in.
+        // Without it, one failing shape leaves the whole test binary with a
+        // deleted CWD and concurrent tests fail with ENOENT (seen on macOS:
+        // kick_ingests_from_vault_not_cwd died in current_dir()).
+        struct CwdGuard(std::path::PathBuf);
+        impl Drop for CwdGuard {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
         let orig_cwd = std::env::current_dir().unwrap();
 
         type ShapeConfig = fn(&std::path::Path, &std::path::Path) -> std::path::PathBuf;
@@ -1571,8 +1595,12 @@ mod tests {
         let mut failures: Vec<String> = Vec::new();
         for (label, configured_of) in shapes {
             // A FRESH brain per shape: stated_attestations and the ledger
-            // must not accumulate rows across shapes.
+            // must not accumulate rows across shapes. `_cwd` is declared
+            // AFTER `tmp` so it drops FIRST on any exit (normal or unwind):
+            // the process CWD is back at the original directory before the
+            // TempDir deletes the directory it pointed at.
             let tmp = tempfile::TempDir::new().unwrap();
+            let _cwd = CwdGuard(orig_cwd.clone());
             let real = tmp.path().join("vault");
             std::fs::create_dir_all(&real).unwrap();
             let brain = tmp.path().join("brain");
@@ -1597,17 +1625,22 @@ mod tests {
 
                 // The canonical form is the law's anchor: what the watcher
                 // (canonical_vault_from_config) and the rebuild
-                // (canonical roots) already derive.
-                let canonical_root = std::fs::canonicalize(&real).unwrap();
-                let expected = canonical_root.join(&rel).to_string_lossy().into_owned();
+                // (canonical roots) already derive. Derive it through the
+                // SAME production helper, never the raw tempdir spelling
+                // (macOS: /var/... is a symlink to /private/var/...).
+                let expected =
+                    crate::db::queue::virtual_path_key_at_root(&real, std::path::Path::new(&rel))
+                        .unwrap();
 
-                // Watcher leg over the canonical path.
-                let abs = real.join(&rel);
+                // Watcher leg over the canonical path (the configured root the
+                // watcher runs under is canonical).
+                let canonical_root = std::fs::canonicalize(&real).unwrap();
+                let abs = canonical_root.join(&rel);
                 crate::db::queue::enqueue_vault_event(
                     &mut conn,
                     notify::EventKind::Create(notify::event::CreateKind::Any),
                     &abs,
-                    Some(&real),
+                    Some(&canonical_root),
                 )
                 .unwrap();
                 let watcher_key: String = conn
@@ -1652,7 +1685,6 @@ mod tests {
                 }
             });
         }
-        std::env::set_current_dir(orig_cwd).unwrap();
         assert!(
             failures.is_empty(),
             "RED (F1 law): capture/watcher/rebuild keys diverge for the same file:\n{}",

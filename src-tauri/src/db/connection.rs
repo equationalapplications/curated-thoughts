@@ -4143,8 +4143,18 @@ mod tests {
         )
         .unwrap();
         let conn = db.0;
-        let abs = vault.join("stated/kurt/2026/note.md");
-        let (mode, auto) = get_folder_mode(&conn, &abs.to_string_lossy());
+        // `documents.path` keys are produced by the canonical-root family
+        // (`virtual_path_key_at_root`), so the absolute source path the
+        // librarian sees is the CANONICAL spelling of the file even though
+        // the config.json root spelling above is the raw tempdir form
+        // (macOS: /var/... is a symlink to /private/var/...). Derive the
+        // input the same way production does.
+        let abs = crate::db::queue::virtual_path_key_at_root(
+            &vault,
+            std::path::Path::new("stated/kurt/2026/note.md"),
+        )
+        .unwrap();
+        let (mode, auto) = get_folder_mode(&conn, &abs);
         assert_eq!(
             (mode.as_str(), auto),
             ("synthesize", true),
