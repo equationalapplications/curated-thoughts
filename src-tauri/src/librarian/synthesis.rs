@@ -1343,7 +1343,7 @@ pub(crate) fn run_synthesis_with_completer(
         // production no-op, compiled out of non-test builds.
         #[cfg(test)]
         test_mid_loop_delete_hook(conn, source_path)?;
-        if let Err(e) = write_proposal_bundle(conn, &bundle, auto_approve) {
+        if let Err(e) = write_proposal_bundle(conn, source_path, &bundle, auto_approve) {
             // Belt-and-braces for the same race one bundle later (the
             // delete can land BETWEEN bundle writes): a constraint refusal
             // is only benign when the trigger row is actually gone — if the
@@ -1353,7 +1353,15 @@ pub(crate) fn run_synthesis_with_completer(
             // skip line so an entity/edge FK refusal swallowed here stays
             // diagnosable in the journal.
             let doc_gone = matches!(trigger_document_exists(conn, trigger_doc_id), Ok(false));
-            if is_fk_violation(&e) && doc_gone {
+            // Two benign refusals share this skip: (1) the sources FK — the
+            // trigger document itself is gone; (2) the typed D1 bail from
+            // `resolve_proposal` — a cited source was deleted before the
+            // auto-approve could commit (the proposal stays pending with
+            // its D3 provenance). Anything else stays loud.
+            let source_vanished = e
+                .downcast_ref::<crate::db::commit::SourceVanished>()
+                .is_some();
+            if (is_fk_violation(&e) && doc_gone) || source_vanished {
                 // The pending-proposal suffix is only truthful when the
                 // proposal row actually survived: a refused insert_proposal
                 // rolls back (no row), so probe before claiming it.
@@ -1374,7 +1382,7 @@ pub(crate) fn run_synthesis_with_completer(
                     " (no proposal row written)".to_string()
                 };
                 eprintln!(
-                    "[synthesis] source vanished mid-synthesis (fk: {e:#}), skipped proposal writes: {source_path}{suffix}"
+                    "[synthesis] source vanished mid-synthesis ({e:#}), skipped proposal writes: {source_path}{suffix}"
                 );
                 return Ok(());
             }
@@ -1487,6 +1495,31 @@ fn test_mid_loop_delete_hook(_conn: &Connection, source_path: &str) -> Result<()
     Ok(())
 }
 
+/// Tier-1.5 rung-4 seam: delete the trigger document AFTER the proposal
+/// insert commits but BEFORE auto-approve runs — the window the D1 guard
+/// in `resolve_proposal` closes. Path-keyed, self-disarming, test-only.
+#[cfg(test)]
+static TEST_DELETE_BEFORE_APPROVE: std::sync::Mutex<Option<(std::path::PathBuf, String)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn test_delete_before_approve_hook(_conn: &Connection, source_path: &str) -> Result<()> {
+    let armed = TEST_DELETE_BEFORE_APPROVE.lock().unwrap().clone();
+    let Some((db_path, armed_path)) = armed else {
+        return Ok(());
+    };
+    if armed_path != source_path {
+        return Ok(());
+    }
+    *TEST_DELETE_BEFORE_APPROVE.lock().unwrap() = None;
+    let mut other = crate::db::connection::open_app_db(&db_path, None)?;
+    let tx = other.transaction()?;
+    let deleted = crate::db::queries::delete_document(&tx, source_path)?;
+    tx.commit()?;
+    assert_eq!(deleted, 1, "seam must remove the trigger row");
+    Ok(())
+}
+
 /// One validated proposal's full write: insert + auto-approve, or the
 /// pending-proposal event. Extracted verbatim from the former inline loop
 /// body so the caller can arbitrate the issue-#299 race around the whole
@@ -1499,11 +1532,19 @@ fn test_mid_loop_delete_hook(_conn: &Connection, source_path: &str) -> Result<()
 /// facts whose source vanished must not silently auto-commit.
 fn write_proposal_bundle(
     conn: &mut Connection,
+    _source_path: &str,
     bundle: &ValidatedProposal,
     auto_approve: bool,
 ) -> Result<()> {
     let proposal_id = bundle.proposal.id.clone();
     insert_proposal(conn, &bundle.proposal, &bundle.items, &bundle.sources)?;
+
+    // Test-only seam (Tier-1.5 rung 4): deletes the trigger document AFTER
+    // the insert commits but BEFORE auto-approve — the exact window the D1
+    // guard in `resolve_proposal` exists for. Path-keyed, self-disarming,
+    // compiled out of non-test builds.
+    #[cfg(test)]
+    test_delete_before_approve_hook(conn, _source_path)?;
 
     if auto_approve {
         auto_approve_proposal(conn, &proposal_id)?;
@@ -2069,6 +2110,121 @@ mod tests {
             queue.is_empty(),
             "no proposal may reference the deleted note: {queue:?}"
         );
+    }
+
+    /// Tier-1.5 rung-4 MAJOR, Kurt option A: with `auto_approve=true`, a
+    /// source deletion landing between the proposal insert and the approve
+    /// must NOT commit facts (spec D1 — a pending proposal that loses
+    /// sources stays pending for human decision). `resolve_proposal` bails
+    /// typed `SourceVanished` inside its transaction; the arbiter skips
+    /// benignly; the proposal must still exist, `pending`, unresolved, with
+    /// no new wiki entries for the target entity.
+    #[test]
+    fn auto_approve_with_vanished_source_stays_pending() {
+        // Redirect the brain dir: the auto-approve path loads the embed
+        // profile through resolve_brain_paths, and the #178 guard refuses
+        // to touch the live ~/.brain from tests.
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                run_auto_approve_vanished_source_case();
+            },
+        );
+    }
+
+    fn run_auto_approve_vanished_source_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let mut conn = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        let path = "/vault/documents/shortlived-auto.md";
+        let (doc_id, chunk_id) = seed_doc_and_chunk(&conn, path, "Alpha project details here");
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-1");
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "Alpha project details here".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: path.into(),
+        }];
+
+        let json = serde_json::json!({
+            "proposals": [{
+                "target": { "existing_id": "ent-alpha" },
+                "reasoning": "Doc adds a fact.",
+                "summary_update": null,
+                "facts": [{
+                    "op": "add",
+                    "target_id": null,
+                    "body": "Alpha uses Rust.",
+                    "tags": [],
+                    "confidence": "inferred",
+                    "evidence": ["C1"]
+                }],
+                "edges": [],
+                "tasks": []
+            }]
+        })
+        .to_string();
+        let mock = MockCompleter::new(vec![json]);
+
+        // Arm the seam: the trigger row dies AFTER the insert commits,
+        // BEFORE auto-approve runs.
+        *TEST_DELETE_BEFORE_APPROVE.lock().unwrap() = Some((db_path.clone(), path.to_string()));
+
+        let result = run_synthesis_with_completer(
+            &mut conn,
+            path,
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            true, // auto_approve — the arm rung 4 showed was ungated
+            Some(tmp.path()),
+            &mock,
+            "test-model",
+            false,
+        );
+
+        let err_repr = format!("{:?}", result.as_ref().err());
+        assert!(
+            result.is_ok(),
+            "D1 guard must make the skip benign, got error: {err_repr}"
+        );
+
+        // The proposal survives, pending, unresolved.
+        let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
+        assert_eq!(queue.len(), 1, "the proposal must remain: {queue:?}");
+
+        let (status, resolved_at): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, resolved_at FROM curated_proposals WHERE id = ?1",
+                [queue[0].id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "must stay pending: {status}");
+        assert!(
+            resolved_at.is_none(),
+            "must not be resolved: {resolved_at:?}"
+        );
+
+        // No facts committed: only the seeded entry exists for ent-alpha.
+        let entries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE entity_id = 'ent-alpha'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(entries, 1, "no new facts may be committed: {entries}");
     }
 
     #[test]

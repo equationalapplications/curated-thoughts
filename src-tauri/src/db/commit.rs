@@ -2966,6 +2966,27 @@ fn all_sources_attested(conn: &Connection, proposal_id: &str) -> Result<bool> {
     Ok(unattested == 0)
 }
 
+/// Typed D1 refusal (issue #299, Tier-1.5 rung 4, Kurt option A): an
+/// AUTO-approve resolve refuses to commit facts whose source document has
+/// vanished — the proposal stays pending with its D3 provenance for human
+/// decision. The librarian's arbiter treats this error as a benign skip.
+#[derive(Debug)]
+pub struct SourceVanished {
+    pub proposal_id: String,
+}
+
+impl std::fmt::Display for SourceVanished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "auto-approve refused: a source of proposal {} was deleted; D1 keeps it pending for human review",
+            self.proposal_id
+        )
+    }
+}
+
+impl std::error::Error for SourceVanished {}
+
 /// Resolve a pending proposal inside `BEGIN IMMEDIATE` — all mutations and outbox rows roll back together on failure.
 pub fn resolve_proposal(
     conn: &mut Connection,
@@ -3070,6 +3091,32 @@ pub fn resolve_proposal(
     };
 
     let tx = ImmediateTx::begin(conn)?;
+
+    // D1 (2026-09-15-deletion-side-effects-design) + issue #299 (Tier-1.5
+    // rung 4, Kurt option A): an AUTO-approve must never commit facts whose
+    // source document has vanished. Any `curated_proposal_deleted_sources`
+    // row for this proposal means a cited document was removed while the
+    // proposal was pending; `all_sources_attested` only downgrades tier and
+    // nothing else in the resolve write path refuses, so without this guard
+    // a delete landing between insert and auto-approve would commit
+    // zero-source facts. Bail typed INSIDE the transaction: the rollback
+    // leaves the proposal pending with its D3 provenance for human review,
+    // and the librarian's arbiter treats the typed error as a benign skip.
+    // Human-surface resolves are NOT gated — the human IS the decision D1
+    // reserves for a person.
+    if options.auto_approve {
+        let vanished: i64 = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM curated_proposal_deleted_sources
+              WHERE proposal_id = ?1)",
+            [proposal_id],
+            |r| r.get(0),
+        )?;
+        if vanished == 1 {
+            return Err(anyhow::Error::new(SourceVanished {
+                proposal_id: proposal_id.to_string(),
+            }));
+        }
+    }
 
     let (minted_entity, entity_was_created_here) =
         create_entity_if_needed(&tx, &gate_policy, &proposal, accepted_any, now_secs)?;
@@ -4547,7 +4594,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(lt >= 1, "agent-tier resolution must stamp librarian_inferred");
+        assert!(
+            lt >= 1,
+            "agent-tier resolution must stamp librarian_inferred"
+        );
         let ut: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
@@ -5201,7 +5251,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(event_count2, 1, "agent-tier manual resolve writes the event");
+        assert_eq!(
+            event_count2, 1,
+            "agent-tier manual resolve writes the event"
+        );
     }
 
     /// Task 8 anti-arms: MIXED sources (one attested, one not) and ZERO
@@ -5280,7 +5333,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(sources, 0, "fixture: the zero-source proposal has no sources");
+        assert_eq!(
+            sources, 0,
+            "fixture: the zero-source proposal has no sources"
+        );
         let decisions = all_accept_decisions(&conn, "prop-zero");
         let result = resolve_proposal(
             &mut conn,
