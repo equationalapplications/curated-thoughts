@@ -1355,7 +1355,12 @@ pub(crate) fn run_synthesis_with_completer(
             let doc_gone = matches!(trigger_document_exists(conn, trigger_doc_id), Ok(false));
             if is_fk_violation(&e) && doc_gone {
                 eprintln!(
-                    "[synthesis] source vanished mid-synthesis (fk: {e:#}), skipped proposal writes: {source_path}"
+                    "[synthesis] source vanished mid-synthesis (fk: {e:#}), skipped proposal writes: {source_path}{}",
+                    if auto_approve {
+                        format!(" (proposal {} left pending with D3 provenance)", bundle.proposal.id)
+                    } else {
+                        String::new()
+                    }
                 );
                 return Ok(());
             }
@@ -1472,6 +1477,12 @@ fn test_mid_loop_delete_hook(_conn: &Connection, source_path: &str) -> Result<()
 /// pending-proposal event. Extracted verbatim from the former inline loop
 /// body so the caller can arbitrate the issue-#299 race around the whole
 /// write instead of at each `?`.
+///
+/// NOT atomic across insert→approve: `insert_proposal` commits before
+/// `auto_approve_proposal` runs, so if the source deletion lands between
+/// them the arbiter leaves the proposal PENDING (with its issue-#211 D3
+/// deleted-source provenance) rather than auto-approved — deliberate:
+/// facts whose source vanished must not silently auto-commit.
 fn write_proposal_bundle(
     conn: &mut Connection,
     bundle: &ValidatedProposal,
@@ -1965,12 +1976,9 @@ mod tests {
             queue.is_empty(),
             "no proposal may reference the deleted note: {queue:?}"
         );
-        let log_path = tmp.path().join(".brain").join("errors.log");
-        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-        assert!(
-            !log.contains("FOREIGN KEY"),
-            "FK residue must not reach errors.log: {log}"
-        );
+        // (No errors.log assertion here: neither skip path writes that file
+        // from this unit — the pipeline mirrors `Err` returns into it. The
+        // meaningful invariants are the Ok above and the empty queue.)
     }
 
     /// Tier-1.5 rung-1 finding: the complement of
