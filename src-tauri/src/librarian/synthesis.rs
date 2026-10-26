@@ -1516,24 +1516,28 @@ fn test_mid_loop_delete_hook(_conn: &Connection, source_path: &str) -> Result<()
     Ok(())
 }
 
-/// Tier-1.5 rung-4 seam: delete the trigger document AFTER the proposal
-/// insert commits but BEFORE auto-approve runs — the window the D1 guard
-/// in `resolve_proposal` closes. Path-keyed, self-disarming, test-only.
+/// Tier-1.5 rung-4 seam: delete a document AFTER a proposal insert commits
+/// but BEFORE auto-approve runs — the window the D1 guard in
+/// `resolve_proposal` closes. Armed as (brain-db path, fire-when-source-is,
+/// path-to-delete): the delete target is usually the trigger document, but
+/// the Tier-2 multi-bundle test arms it on an EVIDENCE document so bundle 1
+/// D1-bails while later bundles keep writing. Path-keyed, self-disarming,
+/// test-only.
 #[cfg(test)]
-static TEST_DELETE_BEFORE_APPROVE: std::sync::Mutex<Option<(std::path::PathBuf, String)>> =
+static TEST_DELETE_BEFORE_APPROVE: std::sync::Mutex<Option<(std::path::PathBuf, String, String)>> =
     std::sync::Mutex::new(None);
 
 #[cfg(test)]
 fn test_delete_before_approve_hook(_conn: &Connection, source_path: &str) -> Result<()> {
     let armed = TEST_DELETE_BEFORE_APPROVE.lock().unwrap().clone();
-    let Some((db_path, armed_path)) = armed else {
+    let Some((db_path, fire_on, delete_path)) = armed else {
         return Ok(());
     };
-    if armed_path != source_path {
+    if fire_on != source_path {
         return Ok(());
     }
     *TEST_DELETE_BEFORE_APPROVE.lock().unwrap() = None;
-    seam_delete_doc_via_second_conn(&db_path, source_path);
+    seam_delete_doc_via_second_conn(&db_path, &delete_path);
     Ok(())
 }
 
@@ -2195,7 +2199,8 @@ mod tests {
 
         // Arm the seam: the trigger row dies AFTER the insert commits,
         // BEFORE auto-approve runs.
-        *TEST_DELETE_BEFORE_APPROVE.lock().unwrap() = Some((db_path.clone(), path.to_string()));
+        *TEST_DELETE_BEFORE_APPROVE.lock().unwrap() =
+            Some((db_path.clone(), path.to_string(), path.to_string()));
 
         let result = run_synthesis_with_completer(
             &mut conn,
@@ -2233,6 +2238,20 @@ mod tests {
             "must not be resolved: {resolved_at:?}"
         );
 
+        // Tier-2 finding 4: the D3 provenance claim must be witnessed, not
+        // just asserted in prose — the seam's delete went through the REAL
+        // delete_document, so the provenance row must exist for THIS
+        // proposal.
+        let d3: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM curated_proposal_deleted_sources
+                  WHERE proposal_id = ?1)",
+                [queue[0].id.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(d3, 1, "D3 provenance row must exist: {d3}");
+
         // No facts committed: only the seeded entry exists for ent-alpha.
         let entries: i64 = conn
             .query_row(
@@ -2242,6 +2261,270 @@ mod tests {
             )
             .unwrap();
         assert_eq!(entries, 1, "no new facts may be committed: {entries}");
+    }
+
+    /// Tier-2 finding 1: the rung-5 `continue` (a D1 bail on an EVIDENCE
+    /// source must not abandon later bundles) is observationally identical
+    /// to `return Ok(())` in every single-bundle test. This is the
+    /// two-bundle witness: bundle 1 cites an evidence document that dies
+    /// between its insert and its approve (typed `SourceVanished`,
+    /// `continue`), bundle 2 cites only the trigger and must still write.
+    #[test]
+    fn evidence_vanish_continues_to_next_bundle() {
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                run_evidence_vanish_continue_case();
+            },
+        );
+    }
+
+    fn run_evidence_vanish_continue_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let mut conn = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        let trigger = "/vault/documents/multi-bundle.md";
+        let evidence = "/vault/documents/evidence-src.md";
+        let (doc_id, chunk_id) = seed_doc_and_chunk(&conn, trigger, "Alpha project details");
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-1");
+        // Evidence document: its own doc row + chunk, cited as C2.
+        let (_evidence_doc_id, evidence_chunk_id) =
+            seed_doc_and_chunk(&conn, evidence, "Evidence corpus line");
+        let chunks = vec![
+            ChunkRow {
+                id: chunk_id,
+                entity_id: "tier_working::abc".into(),
+                text: "Alpha project details".into(),
+                symbol_name: None,
+                start_line: 1,
+                end_line: 3,
+                tier: "user_doc".into(),
+                path: trigger.into(),
+            },
+            ChunkRow {
+                id: evidence_chunk_id,
+                entity_id: "tier_working::def".into(),
+                text: "Evidence corpus line".into(),
+                symbol_name: None,
+                start_line: 1,
+                end_line: 1,
+                tier: "user_doc".into(),
+                path: evidence.into(),
+            },
+        ];
+
+        // Bundle 1 cites C2 (the evidence doc); bundle 2 cites only C1.
+        let json = serde_json::json!({
+            "proposals": [
+                {
+                    "target": { "existing_id": "ent-alpha" },
+                    "reasoning": "Bundle one leans on evidence.",
+                    "summary_update": null,
+                    "facts": [{
+                        "op": "add",
+                        "target_id": null,
+                        "body": "Alpha evidence fact.",
+                        "tags": [],
+                        "confidence": "inferred",
+                        "evidence": ["C2"]
+                    }],
+                    "edges": [],
+                    "tasks": []
+                },
+                {
+                    "target": { "existing_id": "ent-alpha" },
+                    "reasoning": "Bundle two is trigger-only.",
+                    "summary_update": null,
+                    "facts": [{
+                        "op": "add",
+                        "target_id": null,
+                        "body": "Alpha trigger fact.",
+                        "tags": [],
+                        "confidence": "inferred",
+                        "evidence": ["C1"]
+                    }],
+                    "edges": [],
+                    "tasks": []
+                }
+            ]
+        })
+        .to_string();
+        let mock = MockCompleter::new(vec![json]);
+
+        // Arm the seam: when bundle writes fire for the TRIGGER path,
+        // delete the EVIDENCE document (after bundle 1's insert commits —
+        // D3 provenance records — before its approve).
+        *TEST_DELETE_BEFORE_APPROVE.lock().unwrap() =
+            Some((db_path.clone(), trigger.to_string(), evidence.to_string()));
+
+        let result = run_synthesis_with_completer(
+            &mut conn,
+            trigger,
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            true, // auto_approve — bundle 2 must commit
+            Some(tmp.path()),
+            &mock,
+            "test-model",
+            false,
+        );
+
+        let err_repr = format!("{:?}", result.as_ref().err());
+        assert!(
+            result.is_ok(),
+            "evidence-vanish must skip bundle 1 benignly and continue, got: {err_repr}"
+        );
+
+        // Both bundles must exist, in creation order. Bundle 1's terminal
+        // status is the commit layer's dedupe rule, not the arbiter's:
+        // `supersede_stale_pending` (proposals.rs) supersedes an older
+        // pending for the same entity+trigger when bundle 2's insert
+        // arrives — so `pending` OR `superseded` is design-conformant.
+        // What D1 forbids is bundle 1 COMMITTING.
+        let statuses: Vec<(String, String)> = conn
+            .prepare("SELECT id, status FROM curated_proposals ORDER BY created_at")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(statuses.len(), 2, "both proposals must exist: {statuses:?}");
+        assert!(
+            statuses[0].1 == "pending" || statuses[0].1 == "superseded",
+            "bundle 1 must not be committed: {statuses:?}"
+        );
+
+        // Bundle 2: committed. This is the assertion that fails under a
+        // `return Ok(())` regression — its proposal would never land.
+        let (s2, r2): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, resolved_at FROM curated_proposals WHERE id = ?1",
+                [&statuses[1].0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(s2, "approved", "bundle 2 must have committed: {s2}");
+        assert!(r2.is_some(), "bundle 2 must be resolved: {r2:?}");
+
+        // Seed (1) + bundle 2's fact = 2 entries. Under a `return Ok(())`
+        // regression this is 1 — bundle 2's fact silently lost while the
+        // watermark stamps.
+        let entries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE entity_id = 'ent-alpha'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(entries, 2, "bundle 2's fact must be committed: {entries}");
+    }
+
+    /// Tier-2 finding 2: the arbiter's loud half. An insert-time FK refusal
+    /// with the TRIGGER row still alive must propagate as Err — if the
+    /// `&& doc_gone` half ever degrades out of the guard, a real FK bug
+    /// would be swallowed as a benign skip and this test is the witness.
+    #[test]
+    fn insert_fk_with_live_trigger_stays_loud() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let mut conn = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        let trigger = "/vault/documents/live-trigger.md";
+        let evidence = "/vault/documents/doomed-evidence.md";
+        let (doc_id, chunk_id) = seed_doc_and_chunk(&conn, trigger, "Alpha project details");
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-1");
+        // Evidence document: seeded so C2 is numbered (load_numbered_chunks
+        // runs pre-LLM), then its documents row is hard-deleted during the
+        // LLM leg — the chunk row cascades, but the in-memory ChunkRow and
+        // the numbered label survive, so collect_sources still cites the
+        // now-nonexistent doc_id and the insert must FK-refuse.
+        let (_evidence_doc_id, evidence_chunk_id) =
+            seed_doc_and_chunk(&conn, evidence, "Evidence corpus line");
+        let chunks = vec![
+            ChunkRow {
+                id: chunk_id,
+                entity_id: "tier_working::abc".into(),
+                text: "Alpha project details".into(),
+                symbol_name: None,
+                start_line: 1,
+                end_line: 3,
+                tier: "user_doc".into(),
+                path: trigger.into(),
+            },
+            ChunkRow {
+                id: evidence_chunk_id,
+                entity_id: "tier_working::def".into(),
+                text: "Evidence corpus line".into(),
+                symbol_name: None,
+                start_line: 1,
+                end_line: 1,
+                tier: "user_doc".into(),
+                path: evidence.into(),
+            },
+        ];
+
+        struct DeleteEvidenceMidFlight {
+            db_path: std::path::PathBuf,
+            json: String,
+        }
+        impl LlmCompleter for DeleteEvidenceMidFlight {
+            fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+                let mut other = crate::db::connection::open_app_db(&self.db_path, None).unwrap();
+                other.execute(
+                    "DELETE FROM documents WHERE path = '/vault/documents/doomed-evidence.md'",
+                    [],
+                )?;
+                Ok(self.json.clone())
+            }
+        }
+
+        let json = serde_json::json!({
+            "proposals": [{
+                "target": { "existing_id": "ent-alpha" },
+                "reasoning": "Cites the doomed evidence doc.",
+                "summary_update": null,
+                "facts": [{
+                    "op": "add",
+                    "target_id": null,
+                    "body": "Alpha evidence fact.",
+                    "tags": [],
+                    "confidence": "inferred",
+                    "evidence": ["C2"]
+                }],
+                "edges": [],
+                "tasks": []
+            }]
+        })
+        .to_string();
+        let completer = DeleteEvidenceMidFlight {
+            db_path: db_path.clone(),
+            json,
+        };
+
+        let result = run_synthesis_with_completer(
+            &mut conn,
+            trigger,
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            Some(tmp.path()),
+            &completer,
+            "test-model",
+            false,
+        );
+
+        let err = result.expect_err("FK refusal with a LIVE trigger must stay loud");
+        assert!(
+            err.to_string().contains("FOREIGN KEY"),
+            "expected the raw FK refusal, got: {err:#}"
+        );
     }
 
     #[test]
