@@ -1372,19 +1372,59 @@ fn trigger_document_exists(conn: &Connection, doc_id: i64) -> Result<bool> {
     Ok(found.is_some())
 }
 
-/// True when the error chain is SQLite refusing a foreign-key reference
-/// (SQLITE_CONSTRAINT, extended code 787). Used only alongside a confirmed
-/// missing trigger row — see the issue-#299 skip in
-/// [`run_synthesis_with_completer`].
+/// True when the error chain is SQLite refusing a foreign-key reference —
+/// extended code 787 (`SQLITE_CONSTRAINT_FOREIGNKEY`), not the primary
+/// `ConstraintViolation` class, which also covers UNIQUE/NOT NULL/CHECK
+/// refusals that must NOT be classified as the benign source-vanished skip.
+/// Used only alongside a confirmed missing trigger row — see the issue-#299
+/// skip in [`run_synthesis_with_completer`].
 fn is_fk_violation(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| {
-        cause.downcast_ref::<rusqlite::Error>().is_some_and(|re| {
-            matches!(
-                re.sqlite_error_code(),
-                Some(rusqlite::ErrorCode::ConstraintViolation)
-            )
-        })
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(|re| re.sqlite_error())
+            .is_some_and(|se| se.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY)
     })
+}
+
+#[cfg(test)]
+mod fk_violation_tests {
+    use super::is_fk_violation;
+
+    fn err(extended_code: i32) -> anyhow::Error {
+        anyhow::Error::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(extended_code),
+            None,
+        ))
+    }
+
+    #[test]
+    fn foreign_key_refusal_is_fk_violation() {
+        // Issue-#299 production signature (SQLITE_CONSTRAINT_FOREIGNKEY).
+        assert!(is_fk_violation(&err(
+            rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+        )));
+    }
+
+    #[test]
+    fn other_constraint_refusals_are_not_fk_violations() {
+        // Same primary class (19, ConstraintViolation) but NOT a foreign-key
+        // refusal: UNIQUE (2067), NOT NULL (1299), CHECK (275).
+        for code in [
+            rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE,
+            rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL,
+            rusqlite::ffi::SQLITE_CONSTRAINT_CHECK,
+        ] {
+            assert!(
+                !is_fk_violation(&err(code)),
+                "extended code {code} must not classify as FK"
+            );
+        }
+        // Non-SQLite errors (e.g. the wrapper's own bails) classify false.
+        assert!(!is_fk_violation(&anyhow::anyhow!(
+            "proposal requires at least one item"
+        )));
+    }
 }
 
 /// One validated proposal's full write: insert + auto-approve, or the
