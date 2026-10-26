@@ -1327,31 +1327,95 @@ pub(crate) fn run_synthesis_with_completer(
         return Ok(());
     }
 
-    for bundle in validated {
-        let proposal_id = bundle.proposal.id.clone();
-        insert_proposal(conn, &bundle.proposal, &bundle.items, &bundle.sources)?;
+    // Issue #299: the delete-event pass can remove the note's `documents`
+    // row while synthesis sits in its LLM leg (nightly heal-trigger dotfiles
+    // live only ~3s). The DB correctly refuses writes that reference the
+    // deleted note, and the delete+heal pass already owns that state — so
+    // before writing anything, skip quietly when the trigger row is gone.
+    if !trigger_document_exists(conn, trigger_doc_id)? {
+        eprintln!("[synthesis] source vanished mid-synthesis, skipping writes: {source_path}");
+        return Ok(());
+    }
 
-        if auto_approve {
-            auto_approve_proposal(conn, &proposal_id)?;
-        } else if let Some(entity_id) = bundle.proposal.entity_id.as_deref() {
-            let label = bundle
-                .proposal
-                .proposed_name
-                .as_deref()
-                .unwrap_or(entity_id);
-            write_synthesized_event(
-                conn,
-                entity_id,
-                &format!("Synthesized proposal for *{label}*"),
-            )?;
-        } else if let Some(name) = bundle.proposal.proposed_name.as_deref() {
-            // new_entity — entity_id assigned at commit; event written by resolve_proposal on auto_approve
-            let _ = name;
+    for bundle in validated {
+        if let Err(e) = write_proposal_bundle(conn, &bundle, auto_approve) {
+            // Belt-and-braces for the same race one bundle later (the
+            // delete can land BETWEEN bundle writes): a constraint refusal
+            // is only benign when the trigger row is actually gone — if the
+            // document still exists, this is a real bug and stays loud.
+            let doc_gone = !trigger_document_exists(conn, trigger_doc_id)?;
+            if is_fk_violation(&e) && doc_gone {
+                eprintln!(
+                    "[synthesis] source vanished mid-synthesis, skipped proposal writes: {source_path}"
+                );
+                return Ok(());
+            }
+            return Err(e);
         }
     }
 
     write_synth_watermark(conn, trigger_doc_id, watermark_model)?;
 
+    Ok(())
+}
+
+/// True when the trigger document row still exists. The arbiter for the
+/// issue-#299 benign skip: the delete-event pass removes only the
+/// `documents` row (chunks cascade), so a missing row means the note was
+/// deleted mid-synthesis and no write against it can be meaningful.
+fn trigger_document_exists(conn: &Connection, doc_id: i64) -> Result<bool> {
+    let found: Option<i64> = conn
+        .query_row("SELECT 1 FROM documents WHERE id = ?1", [doc_id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// True when the error chain is SQLite refusing a foreign-key reference
+/// (SQLITE_CONSTRAINT, extended code 787). Used only alongside a confirmed
+/// missing trigger row — see the issue-#299 skip in
+/// [`run_synthesis_with_completer`].
+fn is_fk_violation(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause.downcast_ref::<rusqlite::Error>().is_some_and(|re| {
+            matches!(
+                re.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            )
+        })
+    })
+}
+
+/// One validated proposal's full write: insert + auto-approve, or the
+/// pending-proposal event. Extracted verbatim from the former inline loop
+/// body so the caller can arbitrate the issue-#299 race around the whole
+/// write instead of at each `?`.
+fn write_proposal_bundle(
+    conn: &mut Connection,
+    bundle: &ValidatedProposal,
+    auto_approve: bool,
+) -> Result<()> {
+    let proposal_id = bundle.proposal.id.clone();
+    insert_proposal(conn, &bundle.proposal, &bundle.items, &bundle.sources)?;
+
+    if auto_approve {
+        auto_approve_proposal(conn, &proposal_id)?;
+    } else if let Some(entity_id) = bundle.proposal.entity_id.as_deref() {
+        let label = bundle
+            .proposal
+            .proposed_name
+            .as_deref()
+            .unwrap_or(entity_id);
+        write_synthesized_event(
+            conn,
+            entity_id,
+            &format!("Synthesized proposal for *{label}*"),
+        )?;
+    } else if let Some(name) = bundle.proposal.proposed_name.as_deref() {
+        // new_entity — entity_id assigned at commit; event written by resolve_proposal on auto_approve
+        let _ = name;
+    }
     Ok(())
 }
 
@@ -1721,6 +1785,113 @@ mod tests {
             hash, "",
             "persisted evidence content_hash must not be empty"
         );
+    }
+
+    /// Issue #299: the delete-event pass can remove the note's `documents`
+    /// row while synthesis sits in its LLM leg (the nightly heal-trigger
+    /// dotfiles live only ~3s). The write loop then hits the
+    /// `curated_proposal_sources.doc_id` FK — the DB correctly refuses to
+    /// reference the already-deleted note, and the delete+heal pass already
+    /// resolves the state, so synthesis must treat "source vanished" as a
+    /// BENIGN skip: Ok, no proposal, and nothing for the pipeline to mirror
+    /// into errors.log as a `librarian error ... FOREIGN KEY constraint
+    /// failed` line. Reproduced deterministically: the completer deletes
+    /// the trigger document through the REAL delete path (second
+    /// connection, `queries::delete_document`) before returning otherwise
+    /// valid synthesis JSON.
+    #[test]
+    fn source_deleted_mid_synthesis_is_a_benign_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let mut conn = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        let path = "/vault/documents/shortlived.md";
+        let (doc_id, chunk_id) = seed_doc_and_chunk(&conn, path, "Alpha project details here");
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-1");
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "Alpha project details here".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: path.into(),
+        }];
+
+        let json = serde_json::json!({
+            "proposals": [{
+                "target": { "existing_id": "ent-alpha" },
+                "reasoning": "Doc adds a fact.",
+                "summary_update": null,
+                "facts": [{
+                    "op": "add",
+                    "target_id": null,
+                    "body": "Alpha uses Rust.",
+                    "tags": [],
+                    "confidence": "inferred",
+                    "evidence": ["C1"]
+                }],
+                "edges": [],
+                "tasks": []
+            }]
+        })
+        .to_string();
+
+        struct DeleteMidFlight {
+            db_path: std::path::PathBuf,
+            json: String,
+        }
+        impl LlmCompleter for DeleteMidFlight {
+            fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+                // The delete-event pass wins the race during the LLM leg:
+                // remove the trigger document row on a second connection,
+                // exactly as the watcher queue's delete handling would.
+                let mut other = crate::db::connection::open_app_db(&self.db_path, None).unwrap();
+                let tx = other.transaction().unwrap();
+                let deleted =
+                    crate::db::queries::delete_document(&tx, "/vault/documents/shortlived.md")
+                        .unwrap();
+                assert_eq!(deleted, 1, "delete-event pass must remove the trigger row");
+                tx.commit().unwrap();
+                Ok(self.json.clone())
+            }
+        }
+        let completer = DeleteMidFlight {
+            db_path: db_path.clone(),
+            json,
+        };
+
+        let result = run_synthesis_with_completer(
+            &mut conn,
+            path,
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            Some(tmp.path()),
+            &completer,
+            "test-model",
+            false,
+        );
+
+        let err_repr = format!("{:?}", result.as_ref().err());
+        assert!(
+            result.is_ok(),
+            "source-vanished synthesis must skip benignly, got error: {err_repr}"
+        );
+        let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
+        assert!(
+            queue.is_empty(),
+            "no proposal may reference the deleted note: {queue:?}"
+        );
+        let log_path = tmp.path().join(".brain").join("errors.log");
+        if log_path.exists() {
+            let log = std::fs::read_to_string(&log_path).unwrap();
+            assert!(
+                !log.contains("FOREIGN KEY"),
+                "FK residue must not reach errors.log: {log}"
+            );
+        }
     }
 
     #[test]
