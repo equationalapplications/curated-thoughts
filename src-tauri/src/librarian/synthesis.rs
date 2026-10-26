@@ -2475,7 +2475,7 @@ mod tests {
         }
         impl LlmCompleter for DeleteEvidenceMidFlight {
             fn complete(&self, _system: &str, _user: &str) -> Result<String> {
-                let mut other = crate::db::connection::open_app_db(&self.db_path, None).unwrap();
+                let other = crate::db::connection::open_app_db(&self.db_path, None).unwrap();
                 other.execute(
                     "DELETE FROM documents WHERE path = '/vault/documents/doomed-evidence.md'",
                     [],
