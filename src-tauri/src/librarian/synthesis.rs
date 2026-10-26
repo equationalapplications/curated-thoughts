@@ -1966,13 +1966,11 @@ mod tests {
             "no proposal may reference the deleted note: {queue:?}"
         );
         let log_path = tmp.path().join(".brain").join("errors.log");
-        if log_path.exists() {
-            let log = std::fs::read_to_string(&log_path).unwrap();
-            assert!(
-                !log.contains("FOREIGN KEY"),
-                "FK residue must not reach errors.log: {log}"
-            );
-        }
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(
+            !log.contains("FOREIGN KEY"),
+            "FK residue must not reach errors.log: {log}"
+        );
     }
 
     /// Tier-1.5 rung-1 finding: the complement of
