@@ -1354,13 +1354,27 @@ pub(crate) fn run_synthesis_with_completer(
             // diagnosable in the journal.
             let doc_gone = matches!(trigger_document_exists(conn, trigger_doc_id), Ok(false));
             if is_fk_violation(&e) && doc_gone {
+                // The pending-proposal suffix is only truthful when the
+                // proposal row actually survived: a refused insert_proposal
+                // rolls back (no row), so probe before claiming it.
+                let pending = matches!(
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM curated_proposals WHERE id = ?1)",
+                        [&bundle.proposal.id],
+                        |r| r.get::<_, i64>(0),
+                    ),
+                    Ok(1)
+                );
+                let suffix = if pending {
+                    format!(
+                        " (proposal {} left pending with D3 provenance)",
+                        bundle.proposal.id
+                    )
+                } else {
+                    " (no proposal row written)".to_string()
+                };
                 eprintln!(
-                    "[synthesis] source vanished mid-synthesis (fk: {e:#}), skipped proposal writes: {source_path}{}",
-                    if auto_approve {
-                        format!(" (proposal {} left pending with D3 provenance)", bundle.proposal.id)
-                    } else {
-                        String::new()
-                    }
+                    "[synthesis] source vanished mid-synthesis (fk: {e:#}), skipped proposal writes: {source_path}{suffix}"
                 );
                 return Ok(());
             }
