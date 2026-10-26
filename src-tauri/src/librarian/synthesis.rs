@@ -1367,7 +1367,8 @@ pub(crate) fn run_synthesis_with_completer(
                 // rolls back (no row), so probe before claiming it.
                 let pending = matches!(
                     conn.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM curated_proposals WHERE id = ?1)",
+                        "SELECT EXISTS(SELECT 1 FROM curated_proposals
+                          WHERE id = ?1 AND status = 'pending')",
                         [&bundle.proposal.id],
                         |r| r.get::<_, i64>(0),
                     ),
