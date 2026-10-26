@@ -1384,6 +1384,13 @@ pub(crate) fn run_synthesis_with_completer(
                 eprintln!(
                     "[synthesis] source vanished mid-synthesis ({e:#}), skipped proposal writes: {source_path}{suffix}"
                 );
+                // A vanished EVIDENCE source (typed bail, trigger alive)
+                // only kills this bundle: later bundles are independent and
+                // must still write. Only a gone TRIGGER ends the run — its
+                // remaining bundles cannot be written.
+                if source_vanished {
+                    continue;
+                }
                 return Ok(());
             }
             return Err(e);
@@ -1399,6 +1406,12 @@ pub(crate) fn run_synthesis_with_completer(
 /// issue-#299 benign skip: the delete-event pass removes only the
 /// `documents` row (chunks cascade), so a missing row means the note was
 /// deleted mid-synthesis and no write against it can be meaningful.
+///
+/// Scope note (Tier-1.5 rung 5): only the TRIGGER document gates the skip.
+/// A deleted EVIDENCE source at insert time yields an FK refusal with the
+/// trigger alive and propagates as a hard error — pre-existing behavior,
+/// deliberately out of scope for #299 (the watermark is withheld, so the
+/// next sweep re-attempts once the evidence source is restored).
 fn trigger_document_exists(conn: &Connection, doc_id: i64) -> Result<bool> {
     let found: Option<i64> = conn
         .query_row("SELECT 1 FROM documents WHERE id = ?1", [doc_id], |r| {
@@ -1476,6 +1489,18 @@ mod fk_violation_tests {
 static TEST_MID_LOOP_DELETE: std::sync::Mutex<Option<(std::path::PathBuf, String)>> =
     std::sync::Mutex::new(None);
 
+/// Shared seam machinery (Tier-1.5 rung 5 NIT): both delete seams perform
+/// the identical second-connection delete through the REAL
+/// [`crate::db::queries::delete_document`].
+#[cfg(test)]
+fn seam_delete_doc_via_second_conn(db_path: &std::path::Path, source_path: &str) {
+    let mut other = crate::db::connection::open_app_db(db_path, None).unwrap();
+    let tx = other.transaction().unwrap();
+    let deleted = crate::db::queries::delete_document(&tx, source_path).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(deleted, 1, "seam must remove the trigger row");
+}
+
 #[cfg(test)]
 fn test_mid_loop_delete_hook(_conn: &Connection, source_path: &str) -> Result<()> {
     let armed = TEST_MID_LOOP_DELETE.lock().unwrap().clone();
@@ -1487,11 +1512,7 @@ fn test_mid_loop_delete_hook(_conn: &Connection, source_path: &str) -> Result<()
     }
     // Disarm: one delete per armed synthesis run.
     *TEST_MID_LOOP_DELETE.lock().unwrap() = None;
-    let mut other = crate::db::connection::open_app_db(&db_path, None)?;
-    let tx = other.transaction()?;
-    let deleted = crate::db::queries::delete_document(&tx, source_path)?;
-    tx.commit()?;
-    assert_eq!(deleted, 1, "seam must remove the trigger row");
+    seam_delete_doc_via_second_conn(&db_path, source_path);
     Ok(())
 }
 
@@ -1512,11 +1533,7 @@ fn test_delete_before_approve_hook(_conn: &Connection, source_path: &str) -> Res
         return Ok(());
     }
     *TEST_DELETE_BEFORE_APPROVE.lock().unwrap() = None;
-    let mut other = crate::db::connection::open_app_db(&db_path, None)?;
-    let tx = other.transaction()?;
-    let deleted = crate::db::queries::delete_document(&tx, source_path)?;
-    tx.commit()?;
-    assert_eq!(deleted, 1, "seam must remove the trigger row");
+    seam_delete_doc_via_second_conn(&db_path, source_path);
     Ok(())
 }
 

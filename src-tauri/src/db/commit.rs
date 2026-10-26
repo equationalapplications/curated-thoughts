@@ -4594,10 +4594,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(
-            lt >= 1,
-            "agent-tier resolution must stamp librarian_inferred"
-        );
+        assert!(lt >= 1, "agent-tier resolution must stamp librarian_inferred");
         let ut: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM llm_wiki_entries WHERE source_type = 'user_confirmed'",
@@ -5251,10 +5248,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(
-            event_count2, 1,
-            "agent-tier manual resolve writes the event"
-        );
+        assert_eq!(event_count2, 1, "agent-tier manual resolve writes the event");
     }
 
     /// Task 8 anti-arms: MIXED sources (one attested, one not) and ZERO
@@ -5333,10 +5327,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(
-            sources, 0,
-            "fixture: the zero-source proposal has no sources"
-        );
+        assert_eq!(sources, 0, "fixture: the zero-source proposal has no sources");
         let decisions = all_accept_decisions(&conn, "prop-zero");
         let result = resolve_proposal(
             &mut conn,
