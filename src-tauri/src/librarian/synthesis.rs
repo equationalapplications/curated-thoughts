@@ -1338,15 +1338,24 @@ pub(crate) fn run_synthesis_with_completer(
     }
 
     for bundle in validated {
+        // Test-only seam (Tier-1.5 rung-1 finding): arms a mid-loop delete
+        // so the arbiter branch below can be exercised in situ — a
+        // production no-op, compiled out of non-test builds.
+        #[cfg(test)]
+        test_mid_loop_delete_hook(conn, source_path)?;
         if let Err(e) = write_proposal_bundle(conn, &bundle, auto_approve) {
             // Belt-and-braces for the same race one bundle later (the
             // delete can land BETWEEN bundle writes): a constraint refusal
             // is only benign when the trigger row is actually gone — if the
             // document still exists, this is a real bug and stays loud.
-            let doc_gone = !trigger_document_exists(conn, trigger_doc_id)?;
+            // `Ok(false)` (not `?`) keeps a failed existence probe from
+            // masking the original write error; the FK text rides in the
+            // skip line so an entity/edge FK refusal swallowed here stays
+            // diagnosable in the journal.
+            let doc_gone = matches!(trigger_document_exists(conn, trigger_doc_id), Ok(false));
             if is_fk_violation(&e) && doc_gone {
                 eprintln!(
-                    "[synthesis] source vanished mid-synthesis, skipped proposal writes: {source_path}"
+                    "[synthesis] source vanished mid-synthesis (fk: {e:#}), skipped proposal writes: {source_path}"
                 );
                 return Ok(());
             }
@@ -1425,6 +1434,38 @@ mod fk_violation_tests {
             "proposal requires at least one item"
         )));
     }
+}
+
+/// Test-only seam for the issue-#299 arbiter branch (Tier-1.5 rung-1
+/// finding): when armed with a (brain-DB path, source path) pair, the
+/// FIRST bundle-write iteration for THAT source path deletes the trigger
+/// document through the real [`crate::db::queries::delete_document`] on a
+/// second connection — simulating the delete-event pass landing after the
+/// pre-write guard but before the first insert, exactly the window the
+/// in-loop arbiter exists for. Path-keyed so concurrently running
+/// synthesis tests are never intercepted. Never compiled outside
+/// `#[cfg(test)]`.
+#[cfg(test)]
+static TEST_MID_LOOP_DELETE: std::sync::Mutex<Option<(std::path::PathBuf, String)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn test_mid_loop_delete_hook(_conn: &Connection, source_path: &str) -> Result<()> {
+    let armed = TEST_MID_LOOP_DELETE.lock().unwrap().clone();
+    let Some((db_path, armed_path)) = armed else {
+        return Ok(());
+    };
+    if armed_path != source_path {
+        return Ok(());
+    }
+    // Disarm: one delete per armed synthesis run.
+    *TEST_MID_LOOP_DELETE.lock().unwrap() = None;
+    let mut other = crate::db::connection::open_app_db(&db_path, None)?;
+    let tx = other.transaction()?;
+    let deleted = crate::db::queries::delete_document(&tx, source_path)?;
+    tx.commit()?;
+    assert_eq!(deleted, 1, "seam must remove the trigger row");
+    Ok(())
 }
 
 /// One validated proposal's full write: insert + auto-approve, or the
@@ -1932,6 +1973,82 @@ mod tests {
                 "FK residue must not reach errors.log: {log}"
             );
         }
+    }
+
+    /// Tier-1.5 rung-1 finding: the complement of
+    /// `source_deleted_mid_synthesis_is_a_benign_skip`. That test's delete
+    /// lands during the LLM leg, so the PRE-WRITE guard returns before the
+    /// loop and the in-loop arbiter (`is_fk_violation` + confirmed-missing
+    /// trigger row) is never reached — this test is the only witness that
+    /// the arbiter branch itself works. The delete lands via the test seam
+    /// AFTER the guard, before the first bundle insert; the run must still
+    /// resolve to a benign Ok with no proposal written.
+    #[test]
+    fn mid_loop_delete_hits_the_arbiter_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let mut conn = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        let path = "/vault/documents/shortlived-midloop.md";
+        let (doc_id, chunk_id) = seed_doc_and_chunk(&conn, path, "Alpha project details here");
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-1");
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "Alpha project details here".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: path.into(),
+        }];
+
+        let json = serde_json::json!({
+            "proposals": [{
+                "target": { "existing_id": "ent-alpha" },
+                "reasoning": "Doc adds a fact.",
+                "summary_update": null,
+                "facts": [{
+                    "op": "add",
+                    "target_id": null,
+                    "body": "Alpha uses Rust.",
+                    "tags": [],
+                    "confidence": "inferred",
+                    "evidence": ["C1"]
+                }],
+                "edges": [],
+                "tasks": []
+            }]
+        })
+        .to_string();
+        let mock = MockCompleter::new(vec![json]);
+
+        // Arm the seam: the trigger row dies between the pre-write guard
+        // and the first bundle insert.
+        *TEST_MID_LOOP_DELETE.lock().unwrap() = Some((db_path.clone(), path.to_string()));
+
+        let result = run_synthesis_with_completer(
+            &mut conn,
+            path,
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            Some(tmp.path()),
+            &mock,
+            "test-model",
+            false,
+        );
+
+        let err_repr = format!("{:?}", result.as_ref().err());
+        assert!(
+            result.is_ok(),
+            "arbiter must skip benignly, got error: {err_repr}"
+        );
+        let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
+        assert!(
+            queue.is_empty(),
+            "no proposal may reference the deleted note: {queue:?}"
+        );
     }
 
     #[test]
