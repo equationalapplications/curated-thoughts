@@ -1,3 +1,15 @@
+## [3.10.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.0...v3.10.1) (2026-10-26)
+
+### Bug Fixes
+
+* **db:** auto-approve refuses vanished-source proposals per D1 (Tier-1.5 rung 4, Kurt option A) ([859fcf4](https://github.com/equationalapplications/curated-thoughts/commit/859fcf4ec8a230c5ace01fe4c716721cddefec0e))
+* **librarian:** evidence-source vanish continues to next bundle; dedupe test seams (Tier-1.5 rung 5) ([c84dbf2](https://github.com/equationalapplications/curated-thoughts/commit/c84dbf2e99cdb1dd4cc7b550c7584fe2760457cd))
+* **librarian:** is_fk_violation matches the FK extended code (CodeRabbit) ([71a4309](https://github.com/equationalapplications/curated-thoughts/commit/71a43099cd56d2503348e8daa8b2124428ae46e9)), closes [issue-#299](https://github.com/equationalapplications/issue-/issues/299)
+* **librarian:** rung-3 nits — skip line names leftover proposal; drop vacuous log assertion (Tier-1.5) ([4cf253c](https://github.com/equationalapplications/curated-thoughts/commit/4cf253c6133be706355bdf1f7511b157943e5645))
+* **librarian:** skip line probes for a surviving proposal before claiming one (Tier-1.5 rung 4) ([f954fd7](https://github.com/equationalapplications/curated-thoughts/commit/f954fd7e2415a01a60f39f2dd2394ea6bc00be7a))
+* **librarian:** skip-line probe requires status='pending' (CodeRabbit round 4) ([c3d514b](https://github.com/equationalapplications/curated-thoughts/commit/c3d514b080f107297f78efe13a51658ad0a42fbd))
+* **librarian:** treat source-vanished synthesis as a benign skip ([#299](https://github.com/equationalapplications/curated-thoughts/issues/299)) ([ff634a6](https://github.com/equationalapplications/curated-thoughts/commit/ff634a646e9574aeb5d1e0efa9e7bd19c3183147))
+
 ## [3.10.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.9.0...v3.10.0) (2026-10-23)
 
 ### Features
