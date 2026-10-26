@@ -1,3 +1,9 @@
+## [3.10.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.1...v3.10.2) (2026-10-26)
+
+### Bug Fixes
+
+* **deps:** pin [@tauri-apps](https://github.com/tauri-apps) npm minors back to the crate-aligned set that built v3.10.0 ([1d0c6dd](https://github.com/equationalapplications/curated-thoughts/commit/1d0c6dda33fa9e2a1114b425d0acda1325095ed0)), closes [#289](https://github.com/equationalapplications/curated-thoughts/issues/289)
+
 ## [3.10.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.0...v3.10.1) (2026-10-26)
 
 ### Bug Fixes
