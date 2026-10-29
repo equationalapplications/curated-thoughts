@@ -1,3 +1,9 @@
+## [3.10.3](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.2...v3.10.3) (2026-10-29)
+
+### Bug Fixes
+
+* **deps:** zip 8.6.0 -> 9.1.3, clears 2 critical parser-differential advisories ([d3bf13f](https://github.com/equationalapplications/curated-thoughts/commit/d3bf13fc25a567a4eb8144b47a3d8f8dd26c8af2))
+
 ## [3.10.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.1...v3.10.2) (2026-10-26)
 
 ### Bug Fixes
