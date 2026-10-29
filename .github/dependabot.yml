@@ -17,6 +17,12 @@ updates:
       prefix: "chore(bot)"
     schedule:
       interval: "weekly"
+    ignore:
+      # @tauri-apps npm minors must stay aligned with the Rust crate minors:
+      # `pnpm tauri build` refuses a version mismatch (broke the v3.10.3
+      # release build after the 2026-10-29 minor-and-patch group; re-pinned
+      # by the same fix as PR #301). Bump these ONLY alongside a crate bump.
+      - dependency-name: "@tauri-apps/*"
     cooldown:
       # Note: 14-day cooldown applies to direct Dependabot updates only.
       # Transitive dependencies updated via lockfile regeneration may still
