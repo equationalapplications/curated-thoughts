@@ -1,3 +1,10 @@
+## [3.10.4](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.3...v3.10.4) (2026-10-29)
+
+### Bug Fixes
+
+* **ci:** merge duplicate npm ignore keys; scope [@tauri-apps](https://github.com/tauri-apps) ignore to major+minor ([683510b](https://github.com/equationalapplications/curated-thoughts/commit/683510bbb50a55ee1d100087d61a7c5228d3c1c4))
+* **deps:** re-pin [@tauri-apps](https://github.com/tauri-apps) npm minors to the crate-aligned set that builds ([c6d5d94](https://github.com/equationalapplications/curated-thoughts/commit/c6d5d949e7473caa042bcdf081b2ddf399bf1c09)), closes [#303](https://github.com/equationalapplications/curated-thoughts/issues/303) [#301](https://github.com/equationalapplications/curated-thoughts/issues/301)
+
 ## [3.10.3](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.2...v3.10.3) (2026-10-29)
 
 ### Bug Fixes
