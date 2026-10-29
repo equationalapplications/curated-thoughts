@@ -74,6 +74,9 @@ Parsing, chunking, and SQLite storage run entirely on your machine, and so do em
 ### Cross-Partition Wiki Graph
 An agent walking the wiki graph isn't confined to one namespace. `wiki_traverse_graph` with an `entityId` keeps the walk in that namespace; without one, it ranks namespaces by matching-edge count, walks the top eight, and tells you when it cut more.
 
+### One Brain, Every Harness — the Integrations Repo
+The desktop app is only half of Curated Thoughts. The companion repo [curated-thoughts-integrations](https://github.com/equationalapplications/curated-thoughts-integrations) turns CT into a **software factory in a box** for your AI agents: one installable integration per harness — [Hermes Agent](https://github.com/NousResearch/hermes-agent), DeepSeek Harness, OpenCode, Claude Code, OpenClaw, and Docker Agent — each wiring the same MCP sidecar into the agent, with an install doctor, harness-native skills, and **Intuitive Wisdom**: relevant curated facts are recalled into the agent's context at session start, once per user turn, and even mid-task while the agent works autonomously. Facts are delivered at most once, never touch the system prompt or its provider cache, and a brain exported from one machine imports into any of the harnesses ("memory in a box") — with a provenance pre-flight before the agent trusts it.
+
 ---
 
 ## 🚀 Local Development
@@ -306,6 +309,7 @@ Learn more about the Equational Applications memory and wiki packages powering t
 * [`@equationalapplications/react-llm-wiki`](https://www.npmjs.com/package/@equationalapplications/react-llm-wiki) — React web support for local LLM Wiki memory.
 * [`@equationalapplications/expo-llm-wiki`](https://www.npmjs.com/package/@equationalapplications/expo-llm-wiki) — Expo / React Native version with `expo-sqlite` adapter.
 * [`@equationalapplications/core-llm-wiki`](https://www.npmjs.com/package/@equationalapplications/core-llm-wiki) — Framework-agnostic core logic.
+* [`curated-thoughts-integrations`](https://github.com/equationalapplications/curated-thoughts-integrations) — one installable integration per agent harness (Hermes, DeepSeek Harness, OpenCode, Claude Code, OpenClaw, Docker Agent) connecting your CT brain to your agents.
 
 ---
 
