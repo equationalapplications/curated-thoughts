@@ -56,10 +56,10 @@ fn read_bundle_zip(path: &Path) -> Result<Vec<OkfFile>> {
     let mut total: u64 = 0;
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
-        if entry.is_dir() || !entry.name().ends_with(".md") {
+        if entry.is_dir() || !entry.name()?.ends_with(".md") {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name()?.to_string();
         let mut content = String::new();
         let budget = MAX_TOTAL_BYTES.saturating_sub(total) + 1;
         let mut reader = entry.take(budget);
