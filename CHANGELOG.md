@@ -1,3 +1,9 @@
+## [3.10.5](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.4...v3.10.5) (2026-10-30)
+
+### Dependencies
+
+* **deps:** bump handlebars to 4.7.10 (GHSA-8r5x-fm3f-whwj, GHSA-p8wg-vrv2-v86f) ([917e577](https://github.com/equationalapplications/curated-thoughts/commit/917e57798e020cc7adc1a8ee3ef1ebf0c085c278))
+
 ## [3.10.4](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.3...v3.10.4) (2026-10-29)
 
 ### Bug Fixes
