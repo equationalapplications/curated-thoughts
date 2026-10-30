@@ -1208,7 +1208,7 @@ dependencies = [
 
 [[package]]
 name = "curated-thoughts"
-version = "3.10.6"
+version = "3.10.7"
 dependencies = [
  "anyhow",
  "chrono",

@@ -1,3 +1,9 @@
+## [3.10.7](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.6...v3.10.7) (2026-10-30)
+
+### Dependencies
+
+* **deps:** bump undici overrides to 6.29.1/7.30.1/8.12.2 (alerts [#107](https://github.com/equationalapplications/curated-thoughts/issues/107)-[#109](https://github.com/equationalapplications/curated-thoughts/issues/109), [#116](https://github.com/equationalapplications/curated-thoughts/issues/116)-[#126](https://github.com/equationalapplications/curated-thoughts/issues/126)) ([9a90eb5](https://github.com/equationalapplications/curated-thoughts/commit/9a90eb51f0a7231123e194910a25f3a1573d7f19))
+
 ## [3.10.6](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.5...v3.10.6) (2026-10-30)
 
 ### Dependencies
