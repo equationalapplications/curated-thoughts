@@ -1,3 +1,9 @@
+## [3.10.6](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.5...v3.10.6) (2026-10-30)
+
+### Dependencies
+
+* **deps:** bump rustls to 0.23.46 (alerts [#84](https://github.com/equationalapplications/curated-thoughts/issues/84), [#110](https://github.com/equationalapplications/curated-thoughts/issues/110), [#111](https://github.com/equationalapplications/curated-thoughts/issues/111), [#112](https://github.com/equationalapplications/curated-thoughts/issues/112)) ([d42facb](https://github.com/equationalapplications/curated-thoughts/commit/d42facb4599e4bba6ccebf0e3ac157531eb56758))
+
 ## [3.10.5](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.4...v3.10.5) (2026-10-30)
 
 ### Dependencies
