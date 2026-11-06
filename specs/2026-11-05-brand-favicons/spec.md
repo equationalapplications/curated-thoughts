@@ -1,7 +1,8 @@
 # Curated Thoughts brand favicon + desktop icon set (ct-c-v6)
 
 - **Date:** 2026-11-05
-- **Status:** Draft — pending Kurt's spec approval (delivery flow Step 1)
+- **Status:** Implemented (2026-11-05: tauri icon regen OK; vitest
+  96/96 files, 618 passed + 1 skipped)
 - **Branch:** `assets/2026-11-05-brand-favicons`
 - **Priority:** Low — cosmetic, no runtime behavior change
 
@@ -21,6 +22,8 @@ regenerated from the new 512px source.
      `favicon-48x48.png`, `apple-touch-icon.png` (180).
 2. **`index.html`** — replace the `<link rel="icon" ... href="/vite.svg">`
    line with real links: `.ico`, 32px, 16px, and `apple-touch-icon` (180).
+   Delete the orphaned `public/vite.svg` afterwards so no placeholder
+   artifact lingers (Kurt review note, 2026-11-05).
 3. **Desktop icons** — regenerate the full `src-tauri/icons/` set with
    `pnpm tauri icon <source>` (local `@tauri-apps/cli` 2.12.3), source
    `favicon-ct-c-v6-512.png`. The CLI emits the exact filenames
@@ -51,6 +54,10 @@ regenerated from the new 512px source.
 ## Test plan
 
 - `pnpm test` (vitest web suite) — run locally, read real output.
+- Local visual verification runs Vite with `--force`
+  (`npx vite --force`) to bust Vite's aggressive dependency/favicon
+  cache, so the new web favicons render immediately instead of stale
+  placeholders (Kurt review note, 2026-11-05).
 - Grep-verify `tauri.conf.json` icon paths are unchanged after
   regeneration.
 - CI (`ci.yml`) green on the PR. Cargo suites are unaffected (no code
