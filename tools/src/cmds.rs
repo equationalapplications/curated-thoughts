@@ -750,11 +750,13 @@ pub fn librarian_run_on(
         docs.len()
     );
 
-    // Synthesis failures are recorded to <brain>/errors.log by
-    // write_synthesis_error (called from generate_summary, which still
-    // returns Ok). Surface them by watching that file grow across each
-    // call. The log directory must be resolved the same way the writer
-    // resolves its target (vault root), not from db_path's parent.
+    // Synthesis failures surface twice over since #298: generate_summary
+    // returns a typed SynthesisFailure (the Err arm below prints it) AND
+    // write_synthesis_error journaled the same line to <brain>/errors.log.
+    // The Ok-arm log-growth check below stays as defense for any error-log
+    // writer that still returns Ok. The log directory must be resolved the
+    // same way the writer resolves its target (vault root), not from
+    // db_path's parent.
     let error_log = error_log_dir.map(|dir| dir.join("errors.log"));
     let paths: Vec<String> = docs.into_iter().map(|(_, p)| p).collect();
 
@@ -834,9 +836,9 @@ fn errors_log_tail(path: &Path, from: u64) -> Option<String> {
 
 /// Per-doc librarian loop with stderr observability. One `[n/total] <path>
 /// ok|error (<elapsed>s)` line per doc plus a final run-summary line, all
-/// written (flushed) to `err`. Synthesis failures are surfaced whether they
-/// come back as `Err` or were swallowed into `error_log` by
-/// `write_synthesis_error` (detected via log growth during the call).
+/// written (flushed) to `err`. Synthesis failures come back as `Err`
+/// (`SynthesisFailure`, #298) and print from the Err arm; the Ok-arm
+/// log-growth check remains as defense for Ok-returning writers.
 pub(crate) fn run_librarian_docs<F>(
     docs: &[String],
     mut synthesize: F,

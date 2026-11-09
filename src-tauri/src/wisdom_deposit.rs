@@ -2523,6 +2523,69 @@ mod tests {
         });
     }
 
+    /// #298 spec D4 pin: valid, schema-valid output with ZERO proposals is a
+    /// real "nothing to extract" — the kick stays `ingested` with no error
+    /// and the document is watermarked so later librarian passes skip it.
+    /// A future "make every silent path loud" change must not reverse this.
+    #[test]
+    fn kick_zero_proposals_stays_ingested_and_watermarks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            let rel = "immutable-source-files/agents/nothing-to-extract.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Grocery list".into(),
+                    body: "Milk, eggs, coffee filters.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            let completer = WatcherLegCompleter {
+                response: r#"{"proposals": []}"#.to_string(),
+            };
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let profile = kick_ctx.profile.clone();
+            let db_path = kick_ctx.db_path.clone();
+            let vault_dir = kick_ctx.vault_dir.clone().unwrap();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(db_path, vault_dir, kick_rel, profile, Some(&completer));
+            });
+            handle.await.unwrap();
+
+            let conn = ctx.conn.lock().unwrap();
+            let (state, error): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                    [rel],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state, "ingested", "legitimate zero facts reads ingested");
+            assert_eq!(error, None, "zero-facts is not an error");
+            let synth_hash: Option<String> = conn
+                .query_row(
+                    "SELECT synth_hash FROM documents WHERE path LIKE '%nothing-to-extract.md'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                synth_hash.is_some(),
+                "zero-proposals run must watermark the document"
+            );
+        });
+    }
+
     /// RED (B1 regression, deposit-attribution twin): the APP's deposit
     /// regime. The watcher holds the vault lock for its lifetime, so the
     /// deposit kick falls back to `queued_watcher` and the WATCHER stages and
