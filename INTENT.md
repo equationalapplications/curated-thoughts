@@ -6,15 +6,12 @@ made. If this file and another document disagree, this file wins on
 *intent* (what we are trying to do) and the specs win on *detail* (exactly
 how).
 
-Each rule has a **Status** line saying how much of it the code does today:
-
-- **Built** — the code does this.
-- **Partly built** — some of it exists; the line says what is missing.
-- **Planned** — decided, but not in the code yet.
-- **Open decision** — not decided yet.
-
-Statuses were checked against the code on 2026-10-08. Update a status line
-in the same pull request that changes the behavior.
+This file is static. It states what CT is and must be — not what has
+shipped. It carries no status lines and no delivery progress:
+implementation status lives in the spec's status line while in flight
+and in the delivery records after merge. The rules below are written as
+the target system; where the code does not yet match, the gap is tracked
+in issues and specs, never here.
 
 ## Why CT exists
 
@@ -74,8 +71,7 @@ There are two ways in, both over the same pipeline:
   - **Laya** — an open-weight System One model for fast, cheap
     classification. Not in the code yet.
 - **Migration 13** — the wiki-engine database change that added fact
-  history columns (`valid_from`, `valid_to`, `superseded_by`); CT's copy is
-  schema version V24.
+  history columns (`valid_from`, `valid_to`, `superseded_by`).
 
 ## The rules
 
@@ -89,13 +85,6 @@ did this (`curated_add_wisdom`, `curated_update_wisdom`,
 
 *Why:* everything in the brain should trace back to a file, and the
 Librarian should be the single gatekeeper.
-
-**Status: Partly built.** `wisdom_deposit` writes a new file and never the
-facts table, and the four old tools are gone from both the MCP sidecar and
-`ct`. Known gaps: `vault_write_note` can still create and edit files in the
-agents deposit folder, and `ct proposals review` can approve proposals. It
-refuses piped input, but an agent that opens a pseudo-terminal can get
-past that check.
 
 ### 2. A fact is human-trusted only if a person vouched for it
 
@@ -113,19 +102,9 @@ proof instead of guessing. Through the normal tools an agent cannot create
 that proof. If one goes around them, the mismatch between the file and its
 recorded origin can be detected.
 
-When this ships, existing human files will be attested once in bulk, and
-facts that were wrongly stamped as human-stated (`user_stated`) will be
-re-ingested as agent facts and superseded.
-
-**Status: Partly built.** The attestation of record exists for `stated/`
-files (`stated_attestations`, mirrored to `stated/.attestations.jsonl`) and
-for queue confirmations (`.confirmations.jsonl`). The app's direct
-`user_stated` write is retired in this change: statements typed in the app
-are captured as `stated/` files and ingested through the Librarian so they
-gain evidence and become deliverable mid-task. Bulk attestation of existing
-human files and re-ingest of wrongly stamped `user_stated` facts are not
-done; trust for other folders still follows location
-(`deposit_default_tier`).
+Existing human files will be attested once in bulk, and facts that were
+wrongly stamped as human-stated (`user_stated`) will be re-ingested as
+agent facts and superseded.
 
 ### 3. A deposit shows as "pending" until it has been processed
 
@@ -143,11 +122,6 @@ pending. It is live, recallable, and labeled with its provenance;
 *Why:* agents should get an honest answer ("not ready yet") rather than
 half-processed knowledge.
 
-**Status: Partly built.** The deposit kick, the status states, and
-`wisdom_pending` all exist. Gap: a deposit stuck after its text is split
-into chunks (but before facts are made) can still be returned by
-`vault_semantic_search`.
-
 ### 4. Old facts are superseded, not deleted, and only humans overrule humans
 
 An agent retires a fact only by depositing a supersession file
@@ -157,9 +131,6 @@ tier, it becomes a proposal that only a person can accept, in the app.
 
 *Why:* history is kept, and an agent can never overwrite something a
 person stands behind.
-
-**Status: Partly built.** The tool writes the supersession file. The
-Librarian does not apply supersessions yet, so they stay pending.
 
 ### 5. All of a person's machines share one set of facts
 
@@ -174,11 +145,6 @@ they cover.
 *Why:* several machines should agree on one brain without fighting over
 it.
 
-**Status: Partly built.** The outbox exists but only pushes one way, to
-a Postgres replica; machines don't pull from each other. There is no
-"ingested on" machine field, and fact IDs are random. How a machine
-should trust tiers it receives from another is not yet decided.
-
 ### 6. The fast model judges; it never writes
 
 System One models (Jev, Laya) give quick, cheap judgments: should this file be
@@ -188,24 +154,16 @@ questions, or decides trust. It is optional: recall works without it.
 
 *Why:* a small model is useful for sorting, not for deciding what is true.
 
-**Status: Partly built.** Jev exists only as an optional
-classifier that assigns types to untyped facts. It is not used for ingest
-triage or recall relevance, and its judgments are not logged for
-evaluation. Laya is not integrated yet.
-
 ### 7. Recall says "I don't know" rather than guess
 
 If the best match is weak, recall returns nothing rather than presenting a
 poor answer with confidence. The cutoff is a fixed threshold set from
-benchmarks. At ingest, each fact also gets embeddings for the questions it
-answers, and recall uses whichever of a fact's embeddings matches best.
+benchmarks, and recall refuses to answer with a model that has no
+calibrated cutoff. At ingest, each fact also gets embeddings for the
+questions it answers, and recall uses whichever of a fact's embeddings
+matches best.
 
 *Why:* a confident wrong answer is worse than no answer.
-
-**Status: Partly built.** `ct wisdom match` has a benchmark-set cutoff
-(0.70 for qwen3-embedding-4b) and refuses to answer with a model that has
-no calibrated cutoff. The other recall tools (`curated_recall_context`,
-wiki search) have no cutoff. Question embeddings are not built.
 
 ### 8. Facts stay inside the project they came from
 
@@ -222,11 +180,6 @@ restated at the person's direction — never the agent's own paraphrase.
 
 *Why:* one project's knowledge shouldn't leak into another's answers.
 
-**Status: Partly built.** `stated/` capture, the attestation table and the
-attested-source provenance arm are built with the confirmation-queue
-delivery (2026-10). Project scoping (`works/<project>/`) is not in the
-code.
-
 ### 9. Each area of the vault has its own editing rules
 
 Agents may only add files to their deposit folder, never edit or delete
@@ -235,11 +188,6 @@ areas freely, with git as the history. When a source file is gone, its
 facts are retired, but only by the machine that ingested them.
 
 *Why:* agent deposits become an append-only record you can audit.
-
-**Status: Partly built.** `wisdom_deposit` only ever creates new files,
-but `vault_write_note` can edit existing ones in the deposit folder (see
-rule 1). Facts whose source is gone are retired by the database "heal"
-pass, which is not limited to the ingesting machine.
 
 ### 10. Unconfirmed facts are recallable, labeled, and rarely delivered mid-task
 
@@ -254,15 +202,10 @@ offers the person a confirmation prompt.
 *Why:* a wrong fact pushed mid-task is worse than a missed one; a labeled
 fact on request is neither.
 
-**Status: Built (2026-10).** The confirmation queue, the per-hit
-`source_type`/`verified` recall labels, the widened activity aperture, and
-the Active Verification Prompt modal shipped with the
-user-confirmation-queue delivery.
-
 ## Who verifies: users and scope
 
-CT scopes by VAULT, not by user account. One brain per vault (issue #213,
-implemented); there are no user accounts. Identity is a string stamped on
+CT scopes by VAULT, not by user account. One brain per vault (issue
+#213); there are no user accounts. Identity is a string stamped on
 the action: proposal approvals record `reviewed_by` (`desktop-ui` for the
 app; for the CLI review loop, the operator's OS account via `os_account()`
 — historical note: an earlier design also defined an MCP
@@ -292,14 +235,12 @@ rename does not apply to it.
 
 Planned Librarian improvements:
 
-- Fact IDs computed from content, so duplicates can't appear. **Planned.**
+- Fact IDs computed from content, so duplicates can't appear.
 - Question embeddings at ingest, with recall using a fact's best-matching
-  embedding. **Planned.**
-- Recall that skips superseded and expired facts. **Partly built:** only
-  `ct wisdom match` does this today.
+  embedding.
+- Recall that skips superseded and expired facts.
 - Provenance from attested source documents: a proposal whose every source
-  carries an attestation of record lands as `user_stated`. **Built
-  (2026-10).**
+  carries an attestation of record lands as `user_stated`.
 
 Design target: about 10,000 live facts per brain. Approximate
 nearest-neighbor search (ANN) can wait until about 100,000.
@@ -321,7 +262,7 @@ nearest-neighbor search (ANN) can wait until about 100,000.
 
 ## How changes are made
 
-1. **Spec first.** Write a spec under `docs/superpowers/specs/`, based on
+1. **Spec first.** Write a spec under `specs/<name>/`, based on
    an investigation that reads the real code (not memory). Spec, plan and
    implementation go in one pull request.
 2. **Decision history** for the wisdom-deposit design lives in the
