@@ -267,8 +267,9 @@ nearest-neighbor search (ANN) can wait until about 100,000.
 ## How changes are made
 
 1. **Spec first.** Write a spec under `specs/<name>/` (older specs remain
-   in `docs/superpowers/specs/`), based on an investigation that reads the real code (not memory). Spec, plan and
-   implementation go in one pull request.
+   in `docs/superpowers/specs/`), based on an investigation that reads
+   the real code (not memory). Spec, plan and implementation go in one
+   pull request.
 2. **Decision history** for the wisdom-deposit design lives in the
    equational-wiki vault (`wisdom-deposit-file-first-intent-2026-10-01.md`
    and its review, 2026-10-01). That vault is separate from this repo.
