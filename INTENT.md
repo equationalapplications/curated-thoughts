@@ -8,10 +8,10 @@ how).
 
 This file is static. It states what CT is and must be — not what has
 shipped. It carries no status lines and no delivery progress:
-implementation status lives in the spec's status line while in flight
-and in the delivery records after merge. The rules below are written as
-the target system; where the code does not yet match, the gap is tracked
-in issues and specs, never here.
+implementation status lives in the spec's status line and LEDGER while
+in flight, and in the delivery records after merge. Everything below is
+written as the target system; where the code does not yet match, the gap
+is tracked in issues and specs, never here.
 
 ## Why CT exists
 
@@ -39,8 +39,8 @@ There are two ways in, both over the same pipeline:
 - **Deposit** — an agent saving knowledge as a new file in the vault.
 - **Ingest** — the Librarian reading a file and turning it into facts.
 - **Reconcile** — the Librarian's upkeep: removing facts whose source file
-  is gone, flagging inconsistencies, applying supersessions. (The code
-  still calls part of this "heal"; see below.)
+  is gone, flagging inconsistencies, applying supersessions. ("Heal" is
+  the legacy name for part of this; see below.)
 - **Tier** — how much a fact is trusted: *human* (a person stands behind
   it) or *agent*. (Not the database's `tier` column — `fact`/`wisdom`/none
   — used for ranking.)
@@ -71,7 +71,8 @@ There are two ways in, both over the same pipeline:
   - **Laya** — an open-weight System One model for fast, cheap
     classification.
 - **Migration 13** — the wiki-engine database change that added fact
-  history columns (`valid_from`, `valid_to`, `superseded_by`).
+  history columns (`valid_from`, `valid_to`, `superseded_by`); CT's copy is
+  its schema migration V24.
 
 ## The rules
 
@@ -81,7 +82,7 @@ Agents add knowledge only by depositing a file (`wisdom_deposit`). Only the
 Librarian reads those files and turns them into facts. No agent tool may
 add, change, approve, or archive facts in the database. The old tools that
 did this (`curated_add_wisdom`, `curated_update_wisdom`,
-`curated_proposal_decide`, `curated_archive_wisdom`) are removed.
+`curated_proposal_decide`, `curated_archive_wisdom`) must not return.
 
 *Why:* everything in the brain should trace back to a file, and the
 Librarian should be the single gatekeeper.
@@ -93,18 +94,21 @@ for its exact content. Attestations are written only by the app, never by
 agent tools. A fact also earns the human tier when the person confirms it
 in the app's confirmation queue. The confirmation records who confirmed it
 and when on the fact itself and stamps its provenance `user_confirmed`.
-Confirmations, like attestations, are written only by the app. Every file
-without one is treated as agent-written, no matter
-which folder it sits in.
+Confirmations, like attestations, are written only by the app, and each
+has a durable record (`stated/.attestations.jsonl`, `.confirmations.jsonl`).
+The app has no direct `user_stated` write: statements typed in it are
+captured as `stated/` files and ingested through the Librarian, so they
+gain evidence. Every file without an attestation is treated as
+agent-written, no matter which folder it sits in.
 
 *Why:* CT can't tell who wrote a file by looking at it, so it requires
 proof instead of guessing. Through the normal tools an agent cannot create
 that proof. If one goes around them, the mismatch between the file and its
 recorded origin can be detected.
 
-Existing human files will be attested once in bulk, and facts that were
-wrongly stamped as human-stated (`user_stated`) will be re-ingested as
-agent facts and superseded.
+Human files that predate attestation are attested once in bulk. Facts
+wrongly stamped as human-stated (`user_stated`) are re-ingested as agent
+facts and superseded.
 
 ### 3. A deposit shows as "pending" until it has been processed
 
@@ -140,7 +144,8 @@ gone. Fact IDs are computed from the file's path, its content, and the
 fact's position in it, so two machines ingesting the same file produce the
 same facts instead of duplicates. A machine never raises the trust tier of
 a fact it received from another. Attestations sync along with the facts
-they cover.
+they cover. How a machine should trust tiers it receives from another is
+an open decision, deliberately not designed here.
 
 *Why:* several machines should agree on one brain without fighting over
 it.
@@ -157,9 +162,9 @@ questions, or decides trust. It is optional: recall works without it.
 ### 7. Recall says "I don't know" rather than guess
 
 If the best match is weak, recall returns nothing rather than presenting a
-poor answer with confidence. The cutoff is a fixed threshold set from
-benchmarks, and recall refuses to answer with a model that has no
-calibrated cutoff. At ingest, each fact also gets embeddings for the
+poor answer with confidence. The cutoff is set from benchmarks for each
+model, and recall refuses to answer with a model that has no calibrated
+cutoff. At ingest, each fact also gets embeddings for the
 questions it answers, and recall uses whichever of a fact's embeddings
 matches best.
 
@@ -191,7 +196,8 @@ facts are retired, but only by the machine that ingested them.
 
 ### 10. Unconfirmed facts are recallable, labeled, and rarely delivered mid-task
 
-Every live fact is recallable on demand and carries its provenance. Mid-task
+Every live fact is recallable on demand and carries its provenance, as
+per-hit `source_type` and `verified` labels. Mid-task
 delivery admits only human-tier facts: `user_stated` and `user_confirmed` —
 with the standing #265 exception: corrections of any provenance always
 flow. The confirmation queue is the app's list of facts the person has not
@@ -207,14 +213,12 @@ fact on request is neither.
 CT scopes by VAULT, not by user account. One brain per vault (issue
 #213); there are no user accounts. Identity is a string stamped on
 the action: proposal approvals record `reviewed_by` (`desktop-ui` for the
-app; for the CLI review loop, the operator's OS account via `os_account()`
-— historical note: an earlier design also defined an MCP
-`<client>:<os-account>` form for a decide tool that has since been removed,
-rev 4 m10), fact verifications record `last_verified_by` (by convention
+app; for the CLI review loop, the operator's OS account via
+`os_account()`), fact verifications record `last_verified_by` (by convention
 prefixed `human:`) and `last_verified_at`. Authorship of spoken statements
 lives in file paths and frontmatter (`stated/<author>/<year>/`, deposit
 attribution). All of a person's machines share one brain (Rule 5); a team
-today means separate vaults and separate brains per person — shared or
+means separate vaults and separate brains per person — shared or
 cross-person verification is an open decision, deliberately not designed
 here.
 
@@ -226,14 +230,14 @@ The Librarian has two jobs:
 - **Reconcile** — keep the brain healthy: retire facts whose source is
   gone, flag inconsistencies, apply supersessions.
 
-The Librarian's repair job is called "reconcile" from now on. The code
-still uses "heal" for part of it (the database heal pass and the app's
-"Heal Database" button) and should be renamed over time. Separately,
+The Librarian's repair job is called "reconcile". "Heal" is a legacy name
+for part of it (the database heal pass and the app's "Heal Database"
+button) and is to be retired. Separately,
 `ct heal` is also the name of the *ontology* repair command (fixing entity
 and edge types). That command is not part of the Librarian, and this
 rename does not apply to it.
 
-Librarian capabilities:
+The Librarian must provide:
 
 - Fact IDs computed from content, so duplicates can't appear.
 - Question embeddings at ingest, with recall using a fact's best-matching
@@ -262,8 +266,8 @@ nearest-neighbor search (ANN) can wait until about 100,000.
 
 ## How changes are made
 
-1. **Spec first.** Write a spec under `specs/<name>/`, based on
-   an investigation that reads the real code (not memory). Spec, plan and
+1. **Spec first.** Write a spec under `specs/<name>/` (older specs remain
+   in `docs/superpowers/specs/`), based on an investigation that reads the real code (not memory). Spec, plan and
    implementation go in one pull request.
 2. **Decision history** for the wisdom-deposit design lives in the
    equational-wiki vault (`wisdom-deposit-file-first-intent-2026-10-01.md`
