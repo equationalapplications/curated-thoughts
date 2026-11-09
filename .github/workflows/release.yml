@@ -28,6 +28,10 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
+          # A persisted GITHUB_TOKEN header would be sent on semantic-release's
+          # push and override the App token below. Reads need no credential
+          # because this repo is public.
+          persist-credentials: false
 
       - name: Guard release to current main HEAD
         id: release_guard
@@ -77,11 +81,25 @@ jobs:
         run: |
           echo "tags=$(git tag --points-at HEAD --list 'v[0-9]*' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
 
+      # The release commit goes straight to main, and a commit that has only
+      # just been created cannot have passed the required checks. Only an actor
+      # on the `main protection` ruleset's bypass list can push it, which
+      # GITHUB_TOKEN cannot be. Minted after `pnpm install` so dependency
+      # install scripts never run with a credential that can bypass the ruleset.
+      - name: Mint release App token
+        id: release_token
+        if: steps.release_guard.outputs.should_release == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          # curated-thoughts-release. A Client ID is a public identifier.
+          client-id: Iv23li6Pqy1phk48qyEG
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Run semantic-release
         id: release
         if: steps.release_guard.outputs.should_release == 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.release_token.outputs.token }}
         run: pnpm exec semantic-release
 
       # Failure-path fallback for the tag: if a late phase of semantic-release
@@ -127,9 +145,11 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   # Dispatches the Build workflow at the published release tag. The tag push
-  # itself cannot trigger build.yml: tags pushed with GITHUB_TOKEN never fire
-  # downstream workflows (GitHub's anti-recursion guard), but a
-  # workflow_dispatch sent with GITHUB_TOKEN explicitly does.
+  # is not relied on to start build.yml: it now uses the App token, so
+  # GitHub's anti-recursion guard no longer applies, but the tag points at a
+  # `[skip ci]` release commit, which may suppress the push trigger. If both
+  # start, build.yml's concurrency group cancels the older run and one
+  # build completes.
   #
   # Gate: !cancelled() (not success) on purpose — a late failure inside
   # semantic-release after publication (e.g. @semantic-release/github
