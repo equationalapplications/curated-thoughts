@@ -2361,10 +2361,10 @@ mod tests {
     /// to `ingested` — the silent lane that stranded live deposits with
     /// `documents.status='indexed'`, `deposit_kick_state='ingested'`, and
     /// zero facts/proposals/evidence (issue #298, observed on 3.10.0). This
-    /// test drives the JSON arm (non-JSON garbage); see the ledger ruling
-    /// for why no kick-level stimulus reaches the validation arm.
+    /// test drives the JSON arm (non-JSON garbage); spec §8 records why no
+    /// stimulus can reach the validation arm.
     #[test]
-    fn kick_records_failed_when_synthesis_validation_fails() {
+    fn kick_records_failed_when_synthesis_output_is_not_json() {
         let dir = tempfile::TempDir::new().unwrap();
         let real = dir.path().join("vault");
         std::fs::create_dir_all(&real).unwrap();
@@ -2388,8 +2388,7 @@ mod tests {
             // Non-JSON garbage: parse_json_only (which validates the full
             // schema) rejects it after the retry, landing the JSON-failure
             // arm. validate_llm_output has no hard-fail paths, so this arm
-            // is the only reachable synthesis failure stimulus at the kick
-            // level (see ledger ruling).
+            // is the only reachable synthesis failure stimulus (spec §8).
             let completer = WatcherLegCompleter {
                 response: "I could not produce valid JSON for this document.".to_string(),
             };
@@ -2441,13 +2440,18 @@ mod tests {
                 .expect("kick ledger row keyed by the rel handle");
             assert_eq!(
                 state, "failed",
-                "RED (#298): synthesis validation failure must not read `ingested`"
+                "RED (#298): unparseable synthesis output must not read `ingested`"
             );
             let error = error.as_deref().unwrap_or_default();
             assert!(
                 error.starts_with("synthesis JSON failure"),
                 "error must name the JSON-failure arm, got: {error}"
             );
+            // The agent-facing surface #298 is about: what
+            // `wisdom_deposit_status` answers, not just the raw ledger row.
+            let agent_view = deposit_status_row(&conn, rel).unwrap();
+            assert_eq!(agent_view["state"], "failed", "got: {agent_view}");
+            assert_eq!(agent_view["error"], error, "got: {agent_view}");
         });
     }
 
@@ -2525,6 +2529,9 @@ mod tests {
                 error.starts_with("synthesis JSON failure") && error.contains("connection refused"),
                 "error must carry the transport message, got: {error}"
             );
+            let agent_view = deposit_status_row(&conn, rel).unwrap();
+            assert_eq!(agent_view["state"], "failed", "got: {agent_view}");
+            assert_eq!(agent_view["error"], error, "got: {agent_view}");
         });
     }
 
@@ -2587,6 +2594,14 @@ mod tests {
             assert!(
                 synth_hash.is_some(),
                 "zero-proposals run must watermark the document"
+            );
+            let agent_view = deposit_status_row(&conn, rel).unwrap();
+            assert_eq!(agent_view["kick"], "ingested", "got: {agent_view}");
+            assert!(agent_view.get("error").is_none(), "got: {agent_view}");
+            assert_eq!(
+                agent_view["facts"],
+                serde_json::json!([]),
+                "got: {agent_view}"
             );
         });
     }
