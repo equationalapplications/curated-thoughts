@@ -1,3 +1,9 @@
+## [3.11.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.0...v3.11.1) (2026-11-09)
+
+### Bug Fixes
+
+* **deps:** re-pin Cargo.lock against main; dirs-only resolution ([94b78ae](https://github.com/equationalapplications/curated-thoughts/commit/94b78ae4c87730dd6cd98402cfc118ad8b4abce5)), closes [post-#319](https://github.com/equationalapplications/post-/issues/319) [pre-#319](https://github.com/equationalapplications/pre-/issues/319)
+
 ## [3.11.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.7...v3.11.0) (2026-11-09)
 
 ### Features
