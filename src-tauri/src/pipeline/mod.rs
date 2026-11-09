@@ -252,7 +252,14 @@ impl PipelineWorker {
                                 ) {
                                     let msg = format!("librarian error {}: {}", path, e);
                                     eprintln!("[pipeline] {}", msg);
-                                    write_error_log(vault_root.as_deref(), &msg);
+                                    // #298: a SynthesisFailure already
+                                    // attempted its journal write at the
+                                    // failing arm, so the worker adds none.
+                                    // That arm's file is not always this
+                                    // worker's errors.log (#324).
+                                    if librarian_error_needs_journal(&e) {
+                                        write_error_log(vault_root.as_deref(), &msg);
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -547,6 +554,14 @@ fn normalize_workspace_root(path: &str) -> String {
         }
     }
     normalized
+}
+
+/// True when the worker's librarian-error branch still owes errors.log a
+/// line. `SynthesisFailure` attempted its own write at the failing arm
+/// (`write_synthesis_error`, #298); everything else journals here.
+fn librarian_error_needs_journal(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::librarian::SynthesisFailure>()
+        .is_none()
 }
 
 pub fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {
@@ -1420,6 +1435,21 @@ mod tests {
         match PipelineJob::rechunk("/vault/documents/note.md") {
             PipelineJob::Ingest { count_pending, .. } => assert!(!count_pending),
         }
+    }
+
+    /// #298: `SynthesisFailure` already attempted its errors.log write
+    /// inside `run_synthesis_with_completer` (the arm's
+    /// `write_synthesis_error`), so the worker's librarian-error branch must
+    /// not append a second `librarian error …` line for it. Every other
+    /// librarian error still journals.
+    #[test]
+    fn librarian_error_needs_journal_skips_synthesis_failure() {
+        assert!(librarian_error_needs_journal(&anyhow::anyhow!("boom")));
+        assert!(!librarian_error_needs_journal(&anyhow::Error::new(
+            crate::librarian::SynthesisFailure(
+                "synthesis JSON failure for /vault/n.md: bad json".to_string()
+            )
+        )));
     }
 
     #[test]

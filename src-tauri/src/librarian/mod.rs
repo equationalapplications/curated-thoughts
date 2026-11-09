@@ -12,6 +12,7 @@ use rusqlite::Connection;
 
 pub use synthesis::active_generation_model;
 pub(crate) use synthesis::llm_generation_configured;
+pub use synthesis::SynthesisFailure;
 pub(crate) use synthesis::{LlmCompleter, run_synthesis_with_completer};
 
 pub struct ChunkRow {

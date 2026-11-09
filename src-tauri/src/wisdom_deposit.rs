@@ -2354,6 +2354,258 @@ mod tests {
         });
     }
 
+    /// RED (#298): a deposit whose librarian leg FAILS must land `failed` in
+    /// the kick ledger, not `ingested`. `run_synthesis_with_completer`'s
+    /// fail-safe arms (LLM call failure, output validation failure) used to
+    /// return `Ok(())` after journaling to errors.log, which the kick mapped
+    /// to `ingested` — the silent lane that stranded live deposits with
+    /// `documents.status='indexed'`, `deposit_kick_state='ingested'`, and
+    /// zero facts/proposals/evidence (issue #298, observed on 3.10.0). This
+    /// test drives the JSON arm (non-JSON garbage); spec §8 records why no
+    /// stimulus can reach the validation arm.
+    #[test]
+    fn kick_records_failed_when_synthesis_output_is_not_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            let rel = "immutable-source-files/agents/garbled.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Runtime facts".into(),
+                    body: "The exporter ships with retry budgets disabled.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            // Non-JSON garbage: parse_json_only (which validates the full
+            // schema) rejects it after the retry, landing the JSON-failure
+            // arm. validate_llm_output has no hard-fail paths, so this arm
+            // is the only reachable synthesis failure stimulus (spec §8).
+            let completer = WatcherLegCompleter {
+                response: "I could not produce valid JSON for this document.".to_string(),
+            };
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let profile = kick_ctx.profile.clone();
+            let db_path = kick_ctx.db_path.clone();
+            let vault_dir = kick_ctx.vault_dir.clone().unwrap();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(db_path, vault_dir, kick_rel, profile, Some(&completer));
+            });
+            handle.await.unwrap();
+
+            // The ingest leg must have staged before the librarian leg is
+            // judged — a failure here means the harness, not the fix.
+            let canonical_root = std::fs::canonicalize(&real).unwrap();
+            let doc_key = crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
+            {
+                let conn = ctx.conn.lock().unwrap();
+                let status: String = conn
+                    .query_row(
+                        "SELECT status FROM documents WHERE path = ?1",
+                        [&doc_key],
+                        |r| r.get(0),
+                    )
+                    .expect("ingest leg must stage the canonical document row");
+                assert_eq!(
+                    status, "indexed",
+                    "ingest leg must succeed before the librarian leg is judged"
+                );
+                let chunks: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.doc_id \
+                         WHERE d.path = ?1",
+                        [&doc_key],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(chunks, 1, "exactly the deposit prose chunk");
+            }
+
+            let conn = ctx.conn.lock().unwrap();
+            let (state, error): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                    [rel],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .expect("kick ledger row keyed by the rel handle");
+            assert_eq!(
+                state, "failed",
+                "RED (#298): unparseable synthesis output must not read `ingested`"
+            );
+            let error = error.as_deref().unwrap_or_default();
+            assert!(
+                error.starts_with("synthesis JSON failure"),
+                "error must name the JSON-failure arm, got: {error}"
+            );
+            // The agent-facing surface #298 is about: what
+            // `wisdom_deposit_status` answers, not just the raw ledger row.
+            let agent_view = deposit_status_row(&conn, rel).unwrap();
+            assert_eq!(agent_view["state"], "failed", "got: {agent_view}");
+            assert_eq!(agent_view["error"], error, "got: {agent_view}");
+        });
+    }
+
+    /// #298 twin: the completer itself erroring (transport class — network,
+    /// timeout, malformed response body) must record `failed` with the
+    /// transport message, not `ingested`.
+    #[test]
+    fn kick_records_failed_when_synthesis_transport_fails() {
+        struct FailingCompleter;
+        impl crate::librarian::LlmCompleter for FailingCompleter {
+            fn complete(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
+                Err(anyhow::anyhow!("connection refused"))
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            let rel = "immutable-source-files/agents/unreachable.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Runtime facts".into(),
+                    body: "The exporter ships with retry budgets disabled.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let profile = kick_ctx.profile.clone();
+            let db_path = kick_ctx.db_path.clone();
+            let vault_dir = kick_ctx.vault_dir.clone().unwrap();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(
+                    db_path,
+                    vault_dir,
+                    kick_rel,
+                    profile,
+                    Some(&FailingCompleter),
+                );
+            });
+            handle.await.unwrap();
+
+            let canonical_root = std::fs::canonicalize(&real).unwrap();
+            let doc_key = crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
+            let conn = ctx.conn.lock().unwrap();
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM documents WHERE path = ?1",
+                    [&doc_key],
+                    |r| r.get(0),
+                )
+                .expect("ingest leg must stage the canonical document row");
+            assert_eq!(status, "indexed");
+            let (state, error): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                    [rel],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                state, "failed",
+                "transport failure must not read `ingested`"
+            );
+            let error = error.as_deref().unwrap_or_default();
+            assert!(
+                error.starts_with("synthesis JSON failure") && error.contains("connection refused"),
+                "error must carry the transport message, got: {error}"
+            );
+            let agent_view = deposit_status_row(&conn, rel).unwrap();
+            assert_eq!(agent_view["state"], "failed", "got: {agent_view}");
+            assert_eq!(agent_view["error"], error, "got: {agent_view}");
+        });
+    }
+
+    /// #298 spec D4 pin: valid, schema-valid output with ZERO proposals is a
+    /// real "nothing to extract" — the kick stays `ingested` with no error
+    /// and the document is watermarked so later librarian passes skip it.
+    /// A future "make every silent path loud" change must not reverse this.
+    #[test]
+    fn kick_zero_proposals_stays_ingested_and_watermarks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            let rel = "immutable-source-files/agents/nothing-to-extract.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Grocery list".into(),
+                    body: "Milk, eggs, coffee filters.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            let completer = WatcherLegCompleter {
+                response: r#"{"proposals": []}"#.to_string(),
+            };
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let profile = kick_ctx.profile.clone();
+            let db_path = kick_ctx.db_path.clone();
+            let vault_dir = kick_ctx.vault_dir.clone().unwrap();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(db_path, vault_dir, kick_rel, profile, Some(&completer));
+            });
+            handle.await.unwrap();
+
+            let conn = ctx.conn.lock().unwrap();
+            let (state, error): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                    [rel],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state, "ingested", "legitimate zero facts reads ingested");
+            assert_eq!(error, None, "zero-facts is not an error");
+            let synth_hash: Option<String> = conn
+                .query_row(
+                    "SELECT synth_hash FROM documents WHERE path LIKE '%nothing-to-extract.md'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                synth_hash.is_some(),
+                "zero-proposals run must watermark the document"
+            );
+            let agent_view = deposit_status_row(&conn, rel).unwrap();
+            assert_eq!(agent_view["kick"], "ingested", "got: {agent_view}");
+            assert!(agent_view.get("error").is_none(), "got: {agent_view}");
+            assert_eq!(
+                agent_view["facts"],
+                serde_json::json!([]),
+                "got: {agent_view}"
+            );
+        });
+    }
+
     /// RED (B1 regression, deposit-attribution twin): the APP's deposit
     /// regime. The watcher holds the vault lock for its lifetime, so the
     /// deposit kick falls back to `queued_watcher` and the WATCHER stages and
