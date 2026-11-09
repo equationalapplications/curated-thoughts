@@ -1,3 +1,12 @@
+## [3.11.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.1...v3.11.2) (2026-11-09)
+
+### Bug Fixes
+
+* **deps:** adapt to tree-sitter 0.27 and hold cc past the age gate ([95ac496](https://github.com/equationalapplications/curated-thoughts/commit/95ac496231b79f6eda70b14eeb35dd271c3364fb))
+* **librarian:** keep vanished sources benign and name HTTP status ([#298](https://github.com/equationalapplications/curated-thoughts/issues/298)) ([6b69064](https://github.com/equationalapplications/curated-thoughts/commit/6b690642a2f4d9df21e1937e35ad464a43e56988))
+* **librarian:** synthesis failures carry typed SynthesisFailure ([#298](https://github.com/equationalapplications/curated-thoughts/issues/298)) ([66ff273](https://github.com/equationalapplications/curated-thoughts/commit/66ff273d2621b84af4a1478d2b0e4d3c1d53e319)), closes [#299](https://github.com/equationalapplications/curated-thoughts/issues/299)
+* **pipeline:** SynthesisFailure skips errors.log re-journal ([#298](https://github.com/equationalapplications/curated-thoughts/issues/298)) ([4915d0d](https://github.com/equationalapplications/curated-thoughts/commit/4915d0d07600d4e2e46becd025f87d070722dffb))
+
 ## [3.11.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.0...v3.11.1) (2026-11-09)
 
 ### Bug Fixes
