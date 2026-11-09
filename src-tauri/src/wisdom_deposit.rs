@@ -2451,6 +2451,78 @@ mod tests {
         });
     }
 
+    /// #298 twin: the completer itself erroring (transport class — network,
+    /// timeout, malformed response body) must record `failed` with the
+    /// transport message, not `ingested`.
+    #[test]
+    fn kick_records_failed_when_synthesis_transport_fails() {
+        struct FailingCompleter;
+        impl crate::librarian::LlmCompleter for FailingCompleter {
+            fn complete(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
+                Err(anyhow::anyhow!("connection refused"))
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            let rel = "immutable-source-files/agents/unreachable.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Runtime facts".into(),
+                    body: "The exporter ships with retry budgets disabled.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let profile = kick_ctx.profile.clone();
+            let db_path = kick_ctx.db_path.clone();
+            let vault_dir = kick_ctx.vault_dir.clone().unwrap();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(db_path, vault_dir, kick_rel, profile, Some(&FailingCompleter));
+            });
+            handle.await.unwrap();
+
+            let canonical_root = std::fs::canonicalize(&real).unwrap();
+            let doc_key =
+                crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
+            let conn = ctx.conn.lock().unwrap();
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM documents WHERE path = ?1",
+                    [&doc_key],
+                    |r| r.get(0),
+                )
+                .expect("ingest leg must stage the canonical document row");
+            assert_eq!(status, "indexed");
+            let (state, error): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                    [rel],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                state, "failed",
+                "transport failure must not read `ingested`"
+            );
+            let error = error.as_deref().unwrap_or_default();
+            assert!(
+                error.starts_with("synthesis JSON failure") && error.contains("connection refused"),
+                "error must carry the transport message, got: {error}"
+            );
+        });
+    }
+
     /// RED (B1 regression, deposit-attribution twin): the APP's deposit
     /// regime. The watcher holds the vault lock for its lifetime, so the
     /// deposit kick falls back to `queued_watcher` and the WATCHER stages and
