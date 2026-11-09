@@ -51,7 +51,7 @@ Artifacts available on [Releases page](https://github.com/equationalapplications
 
 ## Security
 
-The Release workflow pushes the release commit and tag with a dedicated GitHub App token (`curated-thoughts-release`); its private key is stored as the `RELEASE_APP_PRIVATE_KEY` secret of the branch-limited `release` environment, so only that workflow can read it. The Build workflow uses the default `secrets.GITHUB_TOKEN`. OIDC is reserved for future registry publishing (npm, Crates.io). See [OIDC_SETUP.md](OIDC_SETUP.md) if you're interested in setting up OIDC for external registries.
+The Release workflow pushes the release commit and tag with a dedicated GitHub App token (`curated-thoughts-release`); its private key is stored as the `RELEASE_APP_PRIVATE_KEY` secret of the branch-limited `release` environment — only jobs that reference that environment and run on `main` can read it, and the Release workflow's `release` job is currently the only such job. The Build workflow uses the default `secrets.GITHUB_TOKEN`. OIDC is reserved for future registry publishing (npm, Crates.io). See [OIDC_SETUP.md](OIDC_SETUP.md) if you're interested in setting up OIDC for external registries.
 
 ## Troubleshooting
 

@@ -33,7 +33,9 @@ Your release and build workflows already handle GitHub authentication:
 ```yaml
 - name: Mint release App token
   id: release_token
-  uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+  # The version is SHA-pinned in .github/workflows/release.yml — that file is
+  # the source of truth; do not copy a version number from this document.
+  uses: actions/create-github-app-token@<SHA pin — see .github/workflows/release.yml>
   with:
     client-id: Iv23li6Pqy1phk48qyEG # curated-thoughts-release (public identifier)
     private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

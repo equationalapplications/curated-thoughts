@@ -257,21 +257,25 @@ if (adoptionError === null) {
 }
 
 // Loop guard, checked against the REAL config (see file docstring): the
-// release commit template must keep its skip marker. The plugin default also
-// carries the marker, so an absent `message` option passes — the assertion
-// fails only when someone sets an explicit template without it, or removes
-// the plugin outright.
-const gitEntry = rc.plugins.find(
-  (p) => Array.isArray(p) && p[0] === '@semantic-release/git',
-);
-const releaseTemplate =
-  gitEntry?.[1]?.message ?? 'chore(release): ${nextRelease.version} [skip ci]';
+// release commit template must keep its skip marker. The template must be
+// EXPLICIT in .releaserc.json — this guard does not replicate the plugin's
+// built-in default, so a hardcoded copy of it can never silently pass a
+// future plugin version whose default drops the marker.
+let gitOptions = null;
+try {
+  gitOptions = pluginConfig('@semantic-release/git');
+} catch {
+  gitOptions = null; // plugin absent — no release commit would be created
+}
+const releaseTemplate = gitOptions?.message;
 check(
   'release commit template keeps [skip ci]',
-  gitEntry !== undefined && releaseTemplate.includes('[skip ci]'),
-  gitEntry === undefined
+  typeof releaseTemplate === 'string' && releaseTemplate.includes('[skip ci]'),
+  gitOptions === null
     ? '.releaserc.json has no @semantic-release/git plugin — no release commit would be created'
-    : `effective template: ${JSON.stringify(releaseTemplate)}`,
+    : typeof releaseTemplate !== 'string'
+      ? '.releaserc.json sets no explicit @semantic-release/git message; the guard does not track the plugin default, so the template must stay explicit'
+      : `template lacks the marker: ${JSON.stringify(releaseTemplate)}`,
 );
 
 let failed = 0;
