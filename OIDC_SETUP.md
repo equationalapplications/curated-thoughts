@@ -4,10 +4,10 @@ This guide explains OIDC token authentication for GitHub Actions and how to use 
 
 ## Token Strategy Overview
 
-**Current workflows use `secrets.GITHUB_TOKEN`** (the default, auto-provided token):
-- `release.yml`: Uses `secrets.GITHUB_TOKEN` for semantic-release
-- `build.yml`: Uses `softprops/action-gh-release@v3` (handles authentication internally)
-- Simple, no extra configuration needed, suitable for GitHub releases
+**Current workflows authenticate as follows:**
+- `release.yml`: Mints a `curated-thoughts-release` GitHub App token (the `RELEASE_APP_PRIVATE_KEY` secret of the branch-limited `release` environment) and hands it to semantic-release as `GITHUB_TOKEN`
+- `build.yml`: Uses `softprops/action-gh-release@v3` (handles authentication internally, via the default auto-provided token)
+- No extra configuration is needed for releases; the App key is confined to the `release` environment (deployment branch policy: `main` only)
 
 **OIDC pattern (shown below)**: For future publishing to npm and Crates.io registries where you want short-lived, registry-specific tokens instead of persistent credentials.
 
@@ -31,10 +31,16 @@ Your release and build workflows already handle GitHub authentication:
 
 **release.yml:**
 ```yaml
+- name: Mint release App token
+  id: release_token
+  uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+  with:
+    client-id: Iv23li6Pqy1phk48qyEG # curated-thoughts-release (public identifier)
+    private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 - name: Run semantic-release
   env:
-    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  run: npx semantic-release
+    GITHUB_TOKEN: ${{ steps.release_token.outputs.token }}
+  run: pnpm exec semantic-release
 ```
 
 **build.yml:**
@@ -46,7 +52,7 @@ Your release and build workflows already handle GitHub authentication:
     # Linux: target/release/bundle/appimage/*.AppImage
 ```
 
-Both use the default auto-provided `secrets.GITHUB_TOKEN` — no OIDC setup needed. This token works fine for creating releases and uploading artifacts within the GitHub repository.
+Neither of these needs OIDC: `release.yml` authenticates with the dedicated GitHub App token, and `build.yml` uses the default auto-provided `secrets.GITHUB_TOKEN`. Both work fine for creating releases and uploading artifacts within the GitHub repository.
 
 ## OIDC for External Registries (npm and Crates.io)
 

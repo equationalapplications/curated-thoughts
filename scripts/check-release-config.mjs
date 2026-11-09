@@ -26,6 +26,13 @@
  *
  * Run: node scripts/check-release-config.mjs
  * Exits 0 when every check passes, 1 otherwise.
+ *
+ * The script also asserts that the `@semantic-release/git` release commit
+ * template keeps its skip marker. The release commit is pushed with a GitHub
+ * App token, whose pushes DO start workflows — the default-token
+ * anti-recursion guard no longer applies — so the marker in the commit
+ * message is the only thing stopping the CI run it triggers from completing
+ * and re-entering this release pipeline.
  */
 import { analyzeCommits } from '@semantic-release/commit-analyzer';
 import { generateNotes } from '@semantic-release/release-notes-generator';
@@ -248,6 +255,24 @@ if (adoptionError === null) {
     !adoptionNotes.includes('bump the minor-and-patch group'),
   );
 }
+
+// Loop guard, checked against the REAL config (see file docstring): the
+// release commit template must keep its skip marker. The plugin default also
+// carries the marker, so an absent `message` option passes — the assertion
+// fails only when someone sets an explicit template without it, or removes
+// the plugin outright.
+const gitEntry = rc.plugins.find(
+  (p) => Array.isArray(p) && p[0] === '@semantic-release/git',
+);
+const releaseTemplate =
+  gitEntry?.[1]?.message ?? 'chore(release): ${nextRelease.version} [skip ci]';
+check(
+  'release commit template keeps [skip ci]',
+  gitEntry !== undefined && releaseTemplate.includes('[skip ci]'),
+  gitEntry === undefined
+    ? '.releaserc.json has no @semantic-release/git plugin — no release commit would be created'
+    : `effective template: ${JSON.stringify(releaseTemplate)}`,
+);
 
 let failed = 0;
 for (const result of results) {

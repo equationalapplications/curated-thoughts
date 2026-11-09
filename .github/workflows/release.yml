@@ -6,14 +6,21 @@ on:
     types: [completed]
     branches: [main]
 
+# Workflow-level default is read-only. Every write path in this workflow is
+# deliberate: the release job pushes only through the App token (whose
+# installation permissions govern the API), and `dispatch-build` elevates
+# `actions: write` on its own job. Anything added later inherits read-only.
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    # The App private key lives in this environment, whose deployment branch
+    # policy allows `main` only — a workflow on any other branch cannot read
+    # it. The release job always runs on `main` (workflow_run on the default
+    # branch), so the policy never blocks it.
+    environment: release
     outputs:
       tag: ${{ steps.release.outputs.tag || steps.tag_fallback.outputs.tag }}
     concurrency:
