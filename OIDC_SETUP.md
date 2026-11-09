@@ -4,10 +4,10 @@ This guide explains OIDC token authentication for GitHub Actions and how to use 
 
 ## Token Strategy Overview
 
-**Current workflows use `secrets.GITHUB_TOKEN`** (the default, auto-provided token):
-- `release.yml`: Uses `secrets.GITHUB_TOKEN` for semantic-release
-- `build.yml`: Uses `softprops/action-gh-release@v3` (handles authentication internally)
-- Simple, no extra configuration needed, suitable for GitHub releases
+**Current workflows authenticate as follows:**
+- `release.yml`: Mints a `curated-thoughts-release` GitHub App token (the `RELEASE_APP_PRIVATE_KEY` secret of the branch-limited `release` environment) and hands it to semantic-release as `GITHUB_TOKEN`
+- `build.yml`: Uploads release assets with `tauri-apps/tauri-action` and `gh release upload`, authenticated by the default auto-provided token
+- No extra configuration is needed for releases; the App key is confined to the `release` environment (deployment branch policy: `main` only)
 
 **OIDC pattern (shown below)**: For future publishing to npm and Crates.io registries where you want short-lived, registry-specific tokens instead of persistent credentials.
 
@@ -31,22 +31,49 @@ Your release and build workflows already handle GitHub authentication:
 
 **release.yml:**
 ```yaml
+- name: Mint release App token
+  id: release_token
+  # The version is SHA-pinned in .github/workflows/release.yml — that file is
+  # the source of truth; do not copy a version number from this document.
+  uses: actions/create-github-app-token@<SHA pin — see .github/workflows/release.yml>
+  with:
+    client-id: Iv23li6Pqy1phk48qyEG # curated-thoughts-release (public identifier)
+    private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 - name: Run semantic-release
   env:
-    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  run: npx semantic-release
+    GITHUB_TOKEN: ${{ steps.release_token.outputs.token }}
+  run: pnpm exec semantic-release
 ```
 
-**build.yml:**
+**build.yml:** (tag builds only; abridged — the workflow file is the source of truth)
 ```yaml
-- uses: softprops/action-gh-release@v3
+- uses: tauri-apps/tauri-action@<SHA pin — see .github/workflows/build.yml>
+  if: github.ref_type == 'tag'
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   with:
-    files: ${{ matrix.artifact_path }}
-    # macOS: target/universal-apple-darwin/release/bundle/dmg/*.dmg
-    # Linux: target/release/bundle/appimage/*.AppImage
+    tauriScript: pnpm tauri
+    tagName: v__VERSION__
+    releaseName: "Curated Thoughts v__VERSION__"
+    releaseDraft: false
+    prerelease: false
+    args: ${{ matrix.args }}
+
+- name: Upload ct release asset
+  if: github.ref_type == 'tag'
+  env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # On macOS the ctbuild step is skipped and the asset comes from ctbuildmac;
+  # this fallback mirrors build.yml, which remains the source of truth.
+  run: |
+    if [ -n "${{ steps.ctbuild.outputs.asset }}" ]; then
+      gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuild.outputs.asset }}" --clobber
+    else
+      gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuildmac.outputs.asset }}" --clobber
+    fi
 ```
 
-Both use the default auto-provided `secrets.GITHUB_TOKEN` — no OIDC setup needed. This token works fine for creating releases and uploading artifacts within the GitHub repository.
+Neither of these needs OIDC: `release.yml` authenticates with the dedicated GitHub App token, and `build.yml` uses the default auto-provided `secrets.GITHUB_TOKEN`. Both work fine for creating releases and uploading artifacts within the GitHub repository.
 
 ## OIDC for External Registries (npm and Crates.io)
 

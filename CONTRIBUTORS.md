@@ -34,7 +34,7 @@ Releases happen automatically when version-bumping commits (`feat:`, `fix:`, or 
 2. Version bumps (if applicable)
 3. Git tag created (e.g., `v0.2.0`)
 4. GitHub Release published with changelog
-5. **Note:** Desktop builds (Build workflow) must be manually triggered because `GITHUB_TOKEN` doesn't trigger workflows on tag push. See manual trigger steps below.
+5. **Desktop builds (Build workflow) are dispatched automatically:** the Release workflow's `dispatch-build` job triggers the Build workflow at the published tag. No manual step is required; the manual re-trigger under [Troubleshooting](#troubleshooting) is only a fallback.
 
 Artifacts available on [Releases page](https://github.com/equationalapplications/curated-thoughts/releases).
 
@@ -51,7 +51,7 @@ Artifacts available on [Releases page](https://github.com/equationalapplications
 
 ## Security
 
-Release workflows use the default `secrets.GITHUB_TOKEN` for GitHub authentication. OIDC is reserved for future registry publishing (npm, Crates.io). See [OIDC_SETUP.md](OIDC_SETUP.md) if you're interested in setting up OIDC for external registries.
+The Release workflow pushes the release commit and tag with a dedicated GitHub App token (`curated-thoughts-release`); its private key is stored as the `RELEASE_APP_PRIVATE_KEY` secret of the branch-limited `release` environment — only jobs that reference that environment and run on `main` can read it, and the Release workflow's `release` job is currently the only such job. The Build workflow uses the default `secrets.GITHUB_TOKEN`. OIDC is reserved for future registry publishing (npm, Crates.io). See [OIDC_SETUP.md](OIDC_SETUP.md) if you're interested in setting up OIDC for external registries.
 
 ## Troubleshooting
 
