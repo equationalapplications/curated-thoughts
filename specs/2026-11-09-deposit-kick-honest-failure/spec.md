@@ -10,9 +10,9 @@ synthesis never fires.
 A deposit whose librarian synthesis fails (LLM transport error or synthesis
 output validation error) is recorded in `deposit_kick_state` as **`ingested`**
 with no error, no facts, no proposals, no `librarian_evidence`, and no outbox
-rows. The agent's `wisdom_deposit_status` then reports the honest-state
-vocabulary's success state for a deposit that produced nothing — INTENT rule 3
-("agents should get an honest answer") is violated by the ledger itself.
+rows. The agent's `wisdom_deposit_status` then reports `kick: "ingested"` for
+a deposit that produced nothing — INTENT rule 3 ("agents should get an honest
+answer") is violated by the ledger itself.
 
 Observed live 2026-10-23 on v3.10.0: two deposits reached
 `documents.status=indexed` + `deposit_kick_state='ingested'`; 8+ hours later
@@ -23,13 +23,14 @@ other documents but never for the deposits.
 ## 2. Root cause (code-established 2026-11-09)
 
 `run_synthesis_with_completer` (`src-tauri/src/librarian/synthesis.rs`)
-degrades two failure classes to `Ok(())` after appending one
-`<vault>/.brain/errors.log` line each:
+has two fail-safe arms that return `Ok(())` after appending one `errors.log`
+line (see §8 for where that line lands):
 
-1. **LLM call failure** — `call_llm_with_retry` errors (transport, timeout,
-   missing content in the response body).
-2. **Synthesis output validation failure** — `parse_and_validate` errors
-   (unparseable JSON after retry, or schema/semantic validation rejection).
+1. **`synthesis JSON failure`** — `call_llm_with_retry` errors: transport,
+   timeout, missing content in the response body, or output that is still
+   not schema-valid JSON after the retry.
+2. **`synthesis validation failure`** — `parse_and_validate` errors. This arm
+   is unreachable today (§8).
 
 `run_kick_with` (`src-tauri/src/wisdom_deposit.rs:562-566`) maps any `Ok` from
 the librarian leg to `set_kick_state(..., "ingested", None)`. Because the two
@@ -38,11 +39,10 @@ synthesis watermark, so `ct librarian run` retries the document on its next
 pass and fails the same silent way — consistent with the issue's observation
 that the run minted ~11 general entries while skipping the deposits.
 
-Which of the two failure classes fired on the repro machine is recorded in that
-machine's `<vault>/.brain/errors.log` at 17:14–17:17Z 2026-10-23 (`synthesis
-JSON failure` vs `synthesis validation failure`); confirming the line is a
-verification step (§7), not a blocker — the honesty defect is the same either
-way.
+Which failure fired on the repro machine (transport or unparseable output) is
+recorded in the text after `synthesis JSON failure` in that machine's journal;
+confirming the line is a verification step (§7), not a blocker — the honesty
+defect is the same either way.
 
 ## 3. Non-goals
 
@@ -52,10 +52,13 @@ way.
 - Not changing the legitimate zero-facts path: when the LLM answers with
   valid, schema-valid output that yields zero proposals, that is a real
   "nothing to extract" — it stays `Ok(())`, stamps the watermark, and the
-  deposit reads `ingested` with `facts: []`.
+  status reads `kick: "ingested"` with `facts: []`.
 - Not changing the issue-#299 benign skips (trigger document vanished
   mid-synthesis): they stay `Ok(())` by design — the delete+heal pass owns
   that state.
+- Not changing where synthesis errors are journaled (#324), or the status
+  probe's document-key mismatch that leaves successful deposits reading
+  `state: pending` (#325).
 
 ## 4. Decisions
 
@@ -67,14 +70,15 @@ constraint vocabulary (`pending|chunked|ingested|failed|no_ingest_host|
 queued_watcher`) is unchanged, and `wisdom_deposit_status` already surfaces
 `error`.
 
-**D2 — exactly-once journaling.** The arms keep calling
+**D2 — one journal write per failure.** The arms keep calling
 `write_synthesis_error` (the errors.log journal). Callers must not re-log a
 `SynthesisFailure`:
 
 - The pipeline worker (`pipeline/mod.rs` `run_inner`) currently writes
   `librarian error {path}: {e}` via `write_error_log` on any librarian `Err`;
   it downcasts `SynthesisFailure` and skips its own write (the arm already
-  journaled), keeping one line in `errors.log` instead of two.
+  journaled). The two writers can target different files (§8), so this
+  guarantees one write per failure, not one line in any particular log.
 - `run_kick_with` never wrote errors.log itself; unchanged — the ledger row is
   its record.
 
@@ -92,14 +96,17 @@ reverse them.
 
 1. **RED→GREEN (the #298 repro):** extend the `wisdom_deposit.rs` kick test
    seam — `run_kick_with` with a completer that returns unparseable text
-   (validation-failure class) must leave the ledger at `failed` with the
-   synthesis message in `error`, not `ingested`. Same-shape companion test
-   with a completer that errors outright (transport class).
-2. **Pipeline-lane dedupe:** a librarian leg failing with `SynthesisFailure`
-   writes ONE errors.log line (the arm's), not two.
+   (JSON arm) must leave the ledger at `failed` with the synthesis message in
+   `error`, not `ingested`, and `deposit_status_row` must answer `state:
+   failed` with the same `error`. Same-shape companion test with a completer
+   that errors outright (transport class).
+2. **Pipeline-lane dedupe:** `librarian_error_needs_journal` is false for
+   `SynthesisFailure` and true for every other error. The worker-level
+   line-count test moves to #324, because it only proves something once the
+   two writers share a file.
 3. **D4 pins:** (a) valid-but-zero-proposals output still stamps the watermark
-   and ends the kick `ingested`; (b) the #299 vanished-trigger skip still
-   returns `Ok`.
+   and ends the kick `ingested`, with `kick: "ingested"` and `facts: []` in
+   the status; (b) the #299 vanished-trigger skip still returns `Ok`.
 4. Existing suites must stay green: `librarian_evidence_e2e`,
    `wisdom_deposit` tests, `pipeline.rs`, `folder_rules.rs`.
 
@@ -116,7 +123,27 @@ reverse them.
 
 - `cargo test -p curated-thoughts --lib` + the named integration suites, plus
   `--features test-utils` per the repo's CI gate reality.
-- Human confirmation step (repro machine, Linux box): grep
-  `<vault>/.brain/errors.log` for `synthesis (JSON|validation) failure` at
-  2026-10-23T17:14–17:17Z; post the class ("JSON" = transport/parse,
-  "validation" = schema) onto #298 as the trigger confirmation.
+- Human confirmation step (repro machine, Linux box): run
+  `find <vault> -path '*/.brain/errors.log'` and grep each result for
+  `synthesis JSON failure`. Lines start with `[<epoch seconds>]`; the
+  2026-10-23T17:14–17:17Z window is `1792775640`–`1792775820`. Post the text
+  after the path (transport error or invalid JSON) onto #298 as the trigger
+  confirmation.
+
+## 8. Rulings recorded during review
+
+- **The validation arm is unreachable.** `validate_llm_output` has no error
+  path, and `call_llm_with_retry` has already run the same fence-strip and
+  parse into the same type that `parse_and_validate` repeats. The arm still
+  returns `SynthesisFailure`, so a future hard-fail validator is honest, but
+  no test can reach it today. Only `synthesis JSON failure` can appear in a
+  journal.
+- **Journal location is out of scope (#324).** The arms write to
+  `<source grandparent>/.brain/errors.log`, so a deposit at
+  `immutable-source-files/agents/x.md` logs under
+  `<vault>/immutable-source-files/.brain/`. D2's skip is a true dedupe only
+  when that is also the worker's file.
+- **The agent-visible failure is pinned; the agent-visible success is not
+  (#325).** A failed kick reads `state: failed` with its `error`. A successful
+  kick reads `state: pending` with `facts: []` because the status probes miss
+  the canonical document key.
