@@ -560,7 +560,8 @@ fn normalize_workspace_root(path: &str) -> String {
 /// (`write_synthesis_error`, #298 exactly-once); everything else journals
 /// here.
 fn librarian_error_needs_journal(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<crate::librarian::SynthesisFailure>().is_none()
+    e.downcast_ref::<crate::librarian::SynthesisFailure>()
+        .is_none()
 }
 
 pub fn entity_id_for_path(path: &str, vault_root: Option<&str>) -> String {

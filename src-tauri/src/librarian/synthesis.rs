@@ -1885,7 +1885,18 @@ mod tests {
             "test-model",
             false,
         );
-        assert!(result.is_ok());
+        // #298: a synthesis whose LLM leg never produced valid JSON is a
+        // FAILURE (typed SynthesisFailure), not a quiet Ok — the deposit
+        // kick records `failed` from this and no watermark is stamped.
+        let err = result.expect_err("malformed synthesis JSON must Err");
+        let failure = err
+            .downcast_ref::<SynthesisFailure>()
+            .expect("must be the typed SynthesisFailure");
+        assert!(
+            failure.0.starts_with("synthesis JSON failure"),
+            "must name the JSON-failure arm, got: {}",
+            failure.0
+        );
         let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
         assert!(queue.is_empty());
 
@@ -2794,7 +2805,7 @@ mod tests {
             "test-model",
             false,
         )
-        .unwrap();
+        .expect_err("#298: failed synthesis is a typed Err, not a quiet Ok");
 
         let (synth_hash, _) = watermark_of(&conn, doc_id);
         assert!(

@@ -2405,8 +2405,7 @@ mod tests {
             // The ingest leg must have staged before the librarian leg is
             // judged — a failure here means the harness, not the fix.
             let canonical_root = std::fs::canonicalize(&real).unwrap();
-            let doc_key =
-                crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
+            let doc_key = crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
             {
                 let conn = ctx.conn.lock().unwrap();
                 let status: String = conn
@@ -2488,13 +2487,18 @@ mod tests {
             let db_path = kick_ctx.db_path.clone();
             let vault_dir = kick_ctx.vault_dir.clone().unwrap();
             let handle = tokio::task::spawn_blocking(move || {
-                run_kick_with(db_path, vault_dir, kick_rel, profile, Some(&FailingCompleter));
+                run_kick_with(
+                    db_path,
+                    vault_dir,
+                    kick_rel,
+                    profile,
+                    Some(&FailingCompleter),
+                );
             });
             handle.await.unwrap();
 
             let canonical_root = std::fs::canonicalize(&real).unwrap();
-            let doc_key =
-                crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
+            let doc_key = crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
             let conn = ctx.conn.lock().unwrap();
             let status: String = conn
                 .query_row(
