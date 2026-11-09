@@ -69,7 +69,13 @@ updates:
           - "patch"
 
   - package-ecosystem: "cargo"
-    directory: "/src-tauri"
+    # ONE entry at the workspace root: since 2026-09-03 src-tauri and tools
+    # are members of a single Cargo workspace whose Cargo.lock lives at /,
+    # so the earlier per-crate entries at /src-tauri and /tools — which
+    # predate the unification and saw only member Cargo.tomls, no lockfile —
+    # are folded into this one. Dependabot's cargo ecosystem resolves the
+    # workspace manifest and updates the single root lock for all members.
+    directory: "/"
     commit-message:
       prefix: "chore(bot)"
     schedule:
@@ -88,20 +94,6 @@ updates:
       # deliberate decision to drop those distros. See closed PR #138.
       - dependency-name: "fastembed"
         update-types: ["version-update:semver-major"]
-    groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
-
-  - package-ecosystem: "cargo"
-    directory: "/tools"
-    commit-message:
-      prefix: "chore(bot)"
-    schedule:
-      interval: "weekly"
-    cooldown:
-      default-days: 14
     groups:
       minor-and-patch:
         update-types:
