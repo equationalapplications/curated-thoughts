@@ -63,7 +63,14 @@ Your release and build workflows already handle GitHub authentication:
   if: github.ref_type == 'tag'
   env:
     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  run: gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuild.outputs.asset }}" --clobber
+  # On macOS the ctbuild step is skipped and the asset comes from ctbuildmac;
+  # this fallback mirrors build.yml, which remains the source of truth.
+  run: |
+    if [ -n "${{ steps.ctbuild.outputs.asset }}" ]; then
+      gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuild.outputs.asset }}" --clobber
+    else
+      gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuildmac.outputs.asset }}" --clobber
+    fi
 ```
 
 Neither of these needs OIDC: `release.yml` authenticates with the dedicated GitHub App token, and `build.yml` uses the default auto-provided `secrets.GITHUB_TOKEN`. Both work fine for creating releases and uploading artifacts within the GitHub repository.
