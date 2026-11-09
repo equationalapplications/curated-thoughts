@@ -20,7 +20,7 @@ zero artifacts for either document. The control note through the watcher lane
 minted facts minutes later, and `ct librarian run --yes` minted entries for
 other documents but never for the deposits.
 
-## 2. Root cause (code-established 2026-11-09)
+## 2. Failure mechanism (code-established 2026-11-09)
 
 `run_synthesis_with_completer` (`src-tauri/src/librarian/synthesis.rs`)
 has two fail-safe arms that return `Ok(())` after appending one `errors.log`
@@ -39,20 +39,28 @@ synthesis watermark, so `ct librarian run` retries the document on its next
 pass and fails the same silent way — consistent with the issue's observation
 that the run minted ~11 general entries while skipping the deposits.
 
-Which failure fired on the repro machine (transport or unparseable output) is
-recorded in the text after `synthesis JSON failure` in that machine's journal;
-confirming the line is a verification step (§7), not a blocker — the honesty
-defect is the same either way.
+This is the candidate mechanism for the live incident, not a proven cause. A
+second path gives the same symptom and is unchanged here: schema-valid output
+whose proposals are all dropped by `validate_llm_output` (unknown
+`existing_id`, unknown `op`, empty body) stamps the watermark and returns
+`Ok(())`, so the kick reads `ingested` with zero artifacts and later
+`ct librarian run` passes skip the document. §7 tells the two apart. The
+honesty defect in the fail-safe arms is real either way.
 
 ## 3. Non-goals
 
 - Not changing **which** deposits synthesize (folder rules, tiers, frontmatter
   gates are out of scope; gates 1–4 in `generate_summary_inner` were audited
   and are correct for the deposit lane).
-- Not changing the legitimate zero-facts path: when the LLM answers with
-  valid, schema-valid output that yields zero proposals, that is a real
-  "nothing to extract" — it stays `Ok(())`, stamps the watermark, and the
-  status reads `kick: "ingested"` with `facts: []`.
+- Not changing the zero-result path: when the LLM answers with valid,
+  schema-valid output that yields zero validated proposals, it stays `Ok(())`,
+  stamps the watermark, and the status reads `kick: "ingested"` with
+  `facts: []`. That covers a real "nothing to extract" and also output whose
+  proposals were all dropped during validation; the pin tests only
+  `{"proposals": []}`.
+- Not recording failures in the watcher lane: when a watcher holds the vault
+  lock the kick writes `queued_watcher`, and the pipeline worker never writes
+  the kick ledger, so a synthesis failure there stays `queued_watcher`.
 - Not changing the issue-#299 benign skips (trigger document vanished
   mid-synthesis): they stay `Ok(())` by design — the delete+heal pass owns
   that state.
@@ -70,15 +78,16 @@ constraint vocabulary (`pending|chunked|ingested|failed|no_ingest_host|
 queued_watcher`) is unchanged, and `wisdom_deposit_status` already surfaces
 `error`.
 
-**D2 — one journal write per failure.** The arms keep calling
+**D2 — at most one journal write per failure.** The arms keep calling
 `write_synthesis_error` (the errors.log journal). Callers must not re-log a
 `SynthesisFailure`:
 
 - The pipeline worker (`pipeline/mod.rs` `run_inner`) currently writes
   `librarian error {path}: {e}` via `write_error_log` on any librarian `Err`;
   it downcasts `SynthesisFailure` and skips its own write (the arm already
-  journaled). The two writers can target different files (§8), so this
-  guarantees one write per failure, not one line in any particular log.
+  attempted its write). `write_synthesis_error` is best-effort and the two
+  writers can target different files (§8), so this means at most one write
+  per failure, not one line in any particular log.
 - `run_kick_with` never wrote errors.log itself; unchanged — the ledger row is
   its record.
 
@@ -123,12 +132,16 @@ reverse them.
 
 - `cargo test -p curated-thoughts --lib` + the named integration suites, plus
   `--features test-utils` per the repo's CI gate reality.
-- Human confirmation step (repro machine, Linux box): run
-  `find <vault> -path '*/.brain/errors.log'` and grep each result for
-  `synthesis JSON failure`. Lines start with `[<epoch seconds>]`; the
-  2026-10-23T17:14–17:17Z window is `1792775640`–`1792775820`. Post the text
-  after the path (transport error or invalid JSON) onto #298 as the trigger
-  confirmation.
+- Human confirmation step (repro machine, Linux box), to post onto #298:
+  1. Run `SELECT path, synth_hash FROM documents WHERE path LIKE
+     '%/immutable-source-files/agents/%'` and find the two deposits. A
+     non-NULL `synth_hash` means the zero-result path (§2), so this change did
+     not fix that incident and #298 stays open for it.
+  2. If `synth_hash` is NULL, run `find <vault> -path '*/.brain/errors.log'`
+     and grep each result for `synthesis JSON failure` plus the deposit's
+     filename, with no time bound (17:14Z and 17:17Z are the deposit times;
+     failures are logged later). The text after the path shows the cause
+     (transport error or invalid JSON).
 
 ## 8. Rulings recorded during review
 

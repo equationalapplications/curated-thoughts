@@ -253,8 +253,8 @@ impl PipelineWorker {
                                     let msg = format!("librarian error {}: {}", path, e);
                                     eprintln!("[pipeline] {}", msg);
                                     // #298: a SynthesisFailure already
-                                    // journaled once at the failing arm, so
-                                    // the worker adds no line of its own.
+                                    // attempted its journal write at the
+                                    // failing arm, so the worker adds none.
                                     // That arm's file is not always this
                                     // worker's errors.log (#324).
                                     if librarian_error_needs_journal(&e) {
