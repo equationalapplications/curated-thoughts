@@ -18,7 +18,11 @@ bypass that requirement. No tag was created, and `3.11.0` was not released.
 
 - GitHub App `curated-thoughts-release`, installed on this repository only,
   with Contents, Issues and Pull requests write.
-- Actions secret `RELEASE_APP_PRIVATE_KEY`.
+- Environment `release` with a `main`-only deployment branch policy, holding
+  the environment secret `RELEASE_APP_PRIVATE_KEY`. The repo-level Actions
+  secret of the same name was deleted after the environment secret was
+  confirmed in place, and the superseded App private key was removed — the
+  App keeps exactly one key.
 - Ruleset `main protection` (active, default branch): restrict deletions,
   block force pushes, and the same six required checks, not strict. Bypass
   list: the App and the Repository admin role, the latter preserving the
