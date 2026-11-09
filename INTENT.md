@@ -65,11 +65,11 @@ There are two ways in, both over the same pipeline:
 - **CTI** — curated-thoughts-integrations, a separate repo that delivers
   wisdom into agent sessions using `ct wisdom match`.
 - **System One** — small, fast, cheap models that make typed yes/no or
-  category judgments (classification). CT is building them into its
-  architecture. Two are named:
-  - **Jev** — the one CT uses today.
+  category judgments (classification). They are part of CT's architecture.
+  Two are named:
+  - **Jev** — a System One model.
   - **Laya** — an open-weight System One model for fast, cheap
-    classification. Not in the code yet.
+    classification.
 - **Migration 13** — the wiki-engine database change that added fact
   history columns (`valid_from`, `valid_to`, `superseded_by`).
 
@@ -233,7 +233,7 @@ still uses "heal" for part of it (the database heal pass and the app's
 and edge types). That command is not part of the Librarian, and this
 rename does not apply to it.
 
-Planned Librarian improvements:
+Librarian capabilities:
 
 - Fact IDs computed from content, so duplicates can't appear.
 - Question embeddings at ingest, with recall using a fact's best-matching
@@ -250,7 +250,7 @@ nearest-neighbor search (ANN) can wait until about 100,000.
 - Making the agent tools general-purpose for non-software work. The app
   covers that.
 - Running agent recall through the TypeScript wiki engine. Port what's
-  needed into the Rust recall instead. (Today agent recall is Rust.)
+  needed into the Rust recall instead.
 - Following graph links during session-start injection (v1). Graph
   traversal stays in on-demand tools like `wiki_context`.
 - Reading un-ingested files in injection or recall (see rule 3 for the
