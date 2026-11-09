@@ -1,3 +1,9 @@
+## [3.11.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.7...v3.11.0) (2026-11-09)
+
+### Features
+
+* **brand:** ct-c-v6 web favicons + regenerated Tauri icon set ([720f84a](https://github.com/equationalapplications/curated-thoughts/commit/720f84aea2f19240b69534f1cd3e3c01e97f9ab0))
+
 ## [3.10.7](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.6...v3.10.7) (2026-10-30)
 
 ### Dependencies
