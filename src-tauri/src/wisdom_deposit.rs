@@ -2361,7 +2361,8 @@ mod tests {
     /// to `ingested` — the silent lane that stranded live deposits with
     /// `documents.status='indexed'`, `deposit_kick_state='ingested'`, and
     /// zero facts/proposals/evidence (issue #298, observed on 3.10.0). This
-    /// test drives the validation arm: parseable JSON, wrong schema.
+    /// test drives the JSON arm (non-JSON garbage); see the ledger ruling
+    /// for why no kick-level stimulus reaches the validation arm.
     #[test]
     fn kick_records_failed_when_synthesis_validation_fails() {
         let dir = tempfile::TempDir::new().unwrap();
