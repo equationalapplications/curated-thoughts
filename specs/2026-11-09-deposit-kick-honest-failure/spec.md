@@ -56,14 +56,14 @@ honesty defect in the fail-safe arms is real either way.
   schema-valid output that yields zero validated proposals, it stays `Ok(())`,
   stamps the watermark, and the status reads `kick: "ingested"` with
   `facts: []`. That covers a real "nothing to extract" and also output whose
-  proposals were all dropped during validation; the pin tests only
-  `{"proposals": []}`.
+  proposals were all dropped during validation (#331); the pin tests
+  only `{"proposals": []}`.
 - Not recording failures in the watcher lane: when a watcher holds the vault
   lock the kick writes `queued_watcher`, and the pipeline worker never writes
   the kick ledger, so a synthesis failure there stays `queued_watcher`.
 - Not changing the issue-#299 benign skips (trigger document vanished
   mid-synthesis): they stay `Ok(())` by design — the delete+heal pass owns
-  that state.
+  that state, including when the LLM leg failed as well.
 - Not changing where synthesis errors are journaled (#324), or the status
   probe's document-key mismatch that leaves successful deposits reading
   `state: pending` (#325).
@@ -115,7 +115,8 @@ reverse them.
    two writers share a file.
 3. **D4 pins:** (a) valid-but-zero-proposals output still stamps the watermark
    and ends the kick `ingested`, with `kick: "ingested"` and `facts: []` in
-   the status; (b) the #299 vanished-trigger skip still returns `Ok`.
+   the status; (b) the #299 vanished-trigger skip still returns `Ok`, including
+   when the LLM leg also fails.
 4. Existing suites must stay green: `librarian_evidence_e2e`,
    `wisdom_deposit` tests, `pipeline.rs`, `folder_rules.rs`.
 

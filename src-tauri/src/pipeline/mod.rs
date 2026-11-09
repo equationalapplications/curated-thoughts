@@ -557,9 +557,8 @@ fn normalize_workspace_root(path: &str) -> String {
 }
 
 /// True when the worker's librarian-error branch still owes errors.log a
-/// line. `SynthesisFailure` journaled itself at the failing arm
-/// (`write_synthesis_error`, #298 exactly-once); everything else journals
-/// here.
+/// line. `SynthesisFailure` attempted its own write at the failing arm
+/// (`write_synthesis_error`, #298); everything else journals here.
 fn librarian_error_needs_journal(e: &anyhow::Error) -> bool {
     e.downcast_ref::<crate::librarian::SynthesisFailure>()
         .is_none()
@@ -1438,8 +1437,8 @@ mod tests {
         }
     }
 
-    /// #298 exactly-once journaling: `SynthesisFailure` already wrote its
-    /// errors.log line inside `run_synthesis_with_completer` (the arm's
+    /// #298: `SynthesisFailure` already attempted its errors.log write
+    /// inside `run_synthesis_with_completer` (the arm's
     /// `write_synthesis_error`), so the worker's librarian-error branch must
     /// not append a second `librarian error …` line for it. Every other
     /// librarian error still journals.

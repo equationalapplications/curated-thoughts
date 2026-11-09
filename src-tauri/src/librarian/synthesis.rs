@@ -180,11 +180,18 @@ impl LlmCompleter for HttpLlmCompleter {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
         let resp = req.send()?;
-        let body: serde_json::Value = resp.json()?;
+        // The status rides in both messages so an auth or rate-limit
+        // response is not reported as a mere malformed body.
+        let status = resp.status();
+        let body: serde_json::Value = resp
+            .json()
+            .with_context(|| format!("unreadable /v1/chat/completions response (HTTP {status})"))?;
         body["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string)
-            .context("missing content in /v1/chat/completions response")
+            .with_context(|| {
+                format!("missing content in /v1/chat/completions response (HTTP {status})")
+            })
     }
 }
 
@@ -1319,12 +1326,7 @@ pub(crate) fn run_synthesis_with_completer(
         Ok(r) => r,
         Err(e) => {
             let msg = format!("synthesis JSON failure for {source_path}: {e:#}");
-            write_synthesis_error(vault_root, &msg);
-            // #298 honesty: a synthesis that never produced proposals is a
-            // FAILURE, not a quiet success — the deposit kick records
-            // `failed` with this message (typed so the pipeline worker does
-            // not re-journal it; the line above is the one errors.log copy).
-            return Err(anyhow::Error::new(SynthesisFailure(msg)));
+            return finish_failed_synthesis(conn, trigger_doc_id, source_path, vault_root, msg);
         }
     };
 
@@ -1339,8 +1341,7 @@ pub(crate) fn run_synthesis_with_completer(
         Ok(v) => v,
         Err(e) => {
             let msg = format!("synthesis validation failure for {source_path}: {e:#}");
-            write_synthesis_error(vault_root, &msg);
-            return Err(anyhow::Error::new(SynthesisFailure(msg)));
+            return finish_failed_synthesis(conn, trigger_doc_id, source_path, vault_root, msg);
         }
     };
 
@@ -1442,6 +1443,28 @@ fn trigger_document_exists(conn: &Connection, doc_id: i64) -> Result<bool> {
         })
         .optional()?;
     Ok(found.is_some())
+}
+
+/// Close out a synthesis that produced no proposals because it failed.
+/// #298 honesty: that is a FAILURE, not a quiet success, so the deposit kick
+/// records `failed` with this message (typed so the pipeline worker adds no
+/// journal write of its own). The issue-#299 exception still holds: when the
+/// trigger document is gone the delete+heal pass owns the state, so the run
+/// stays a benign skip. `Ok(false)` (not `?`) keeps a failed existence probe
+/// from masking the synthesis failure.
+fn finish_failed_synthesis(
+    conn: &Connection,
+    trigger_doc_id: i64,
+    source_path: &str,
+    vault_root: Option<&Path>,
+    msg: String,
+) -> Result<()> {
+    write_synthesis_error(vault_root, &msg);
+    if matches!(trigger_document_exists(conn, trigger_doc_id), Ok(false)) {
+        eprintln!("[synthesis] source vanished mid-synthesis, skipping failure: {source_path}");
+        return Ok(());
+    }
+    Err(anyhow::Error::new(SynthesisFailure(msg)))
 }
 
 /// True when the error chain is SQLite refusing a foreign-key reference —
@@ -1987,6 +2010,86 @@ mod tests {
             hash, "",
             "persisted evidence content_hash must not be empty"
         );
+    }
+
+    /// #298 / #299 boundary: a failing LLM leg on a document that was deleted
+    /// meanwhile stays a benign skip, because delete+heal owns that state.
+    #[test]
+    fn source_deleted_while_llm_fails_is_a_benign_skip() {
+        struct DeleteThenFail {
+            db_path: std::path::PathBuf,
+        }
+        impl LlmCompleter for DeleteThenFail {
+            fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+                let mut other = crate::db::connection::open_app_db(&self.db_path, None).unwrap();
+                let tx = other.transaction().unwrap();
+                crate::db::queries::delete_document(&tx, "/vault/documents/gone.md").unwrap();
+                tx.commit().unwrap();
+                Err(anyhow::anyhow!("request timed out"))
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let mut conn = crate::db::connection::open_app_db(&db_path, None).unwrap();
+        let path = "/vault/documents/gone.md";
+        let (doc_id, chunk_id) = seed_doc_and_chunk(&conn, path, "Alpha project details here");
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "Alpha project details here".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: path.into(),
+        }];
+
+        let result = run_synthesis_with_completer(
+            &mut conn,
+            path,
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            Some(tmp.path()),
+            &DeleteThenFail {
+                db_path: db_path.clone(),
+            },
+            "test-model",
+            false,
+        );
+
+        assert!(
+            result.is_ok(),
+            "vanished source must stay benign: {result:?}"
+        );
+    }
+
+    /// An auth, rate-limit, or gateway response must name its HTTP status,
+    /// whether or not the body parses as JSON (#298: this text reaches the
+    /// kick ledger and `wisdom_deposit_status`).
+    #[test]
+    fn http_completer_error_names_the_http_status() {
+        let mut server = mockito::Server::new();
+        for (status, body, expected) in [
+            (401, r#"{"error":{"message":"bad key"}}"#, "401"),
+            (502, "<html>bad gateway</html>", "502"),
+        ] {
+            let mock = server
+                .mock("POST", "/v1/chat/completions")
+                .with_status(status)
+                .with_body(body)
+                .create();
+            let completer = HttpLlmCompleter {
+                endpoint_url: format!("{}/v1/chat/completions", server.url()),
+                api_key: None,
+                model_name: "m".into(),
+                timeout_secs: 5,
+            };
+            let err = completer.complete("s", "u").unwrap_err();
+            assert!(format!("{err:#}").contains(expected), "got: {err:#}");
+            mock.remove();
+        }
     }
 
     /// Issue #299: the delete-event pass can remove the note's `documents`
