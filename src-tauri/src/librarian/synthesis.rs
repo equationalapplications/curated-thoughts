@@ -127,6 +127,24 @@ pub(crate) trait LlmCompleter: Send + Sync {
     fn complete(&self, system: &str, user: &str) -> Result<String>;
 }
 
+/// Synthesis failed before any proposal could be produced: the LLM call
+/// errored (transport/timeout/bad body) or its output never validated.
+/// The carried string is the exact errors.log line body, so the kick
+/// ledger's `error` column, errors.log, and stderr show one message (#298):
+/// the deposit kick maps this to `deposit_kick_state='failed'`, and the
+/// pipeline worker downcasts it to avoid a second errors.log line (the
+/// failing arm already journaled via `write_synthesis_error`).
+#[derive(Debug)]
+pub struct SynthesisFailure(pub String);
+
+impl std::fmt::Display for SynthesisFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for SynthesisFailure {}
+
 struct HttpLlmCompleter {
     endpoint_url: String,
     api_key: Option<String>,
@@ -1302,7 +1320,11 @@ pub(crate) fn run_synthesis_with_completer(
         Err(e) => {
             let msg = format!("synthesis JSON failure for {source_path}: {e:#}");
             write_synthesis_error(vault_root, &msg);
-            return Ok(());
+            // #298 honesty: a synthesis that never produced proposals is a
+            // FAILURE, not a quiet success — the deposit kick records
+            // `failed` with this message (typed so the pipeline worker does
+            // not re-journal it; the line above is the one errors.log copy).
+            return Err(anyhow::Error::new(SynthesisFailure(msg)));
         }
     };
 
@@ -1318,7 +1340,7 @@ pub(crate) fn run_synthesis_with_completer(
         Err(e) => {
             let msg = format!("synthesis validation failure for {source_path}: {e:#}");
             write_synthesis_error(vault_root, &msg);
-            return Ok(());
+            return Err(anyhow::Error::new(SynthesisFailure(msg)));
         }
     };
 

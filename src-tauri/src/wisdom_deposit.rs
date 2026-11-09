@@ -2354,6 +2354,103 @@ mod tests {
         });
     }
 
+    /// RED (#298): a deposit whose librarian leg FAILS must land `failed` in
+    /// the kick ledger, not `ingested`. `run_synthesis_with_completer`'s
+    /// fail-safe arms (LLM call failure, output validation failure) used to
+    /// return `Ok(())` after journaling to errors.log, which the kick mapped
+    /// to `ingested` — the silent lane that stranded live deposits with
+    /// `documents.status='indexed'`, `deposit_kick_state='ingested'`, and
+    /// zero facts/proposals/evidence (issue #298, observed on 3.10.0). This
+    /// test drives the validation arm: parseable JSON, wrong schema.
+    #[test]
+    fn kick_records_failed_when_synthesis_validation_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            let rel = "immutable-source-files/agents/garbled.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Runtime facts".into(),
+                    body: "The exporter ships with retry budgets disabled.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            // Non-JSON garbage: parse_json_only (which validates the full
+            // schema) rejects it after the retry, landing the JSON-failure
+            // arm. validate_llm_output has no hard-fail paths, so this arm
+            // is the only reachable synthesis failure stimulus at the kick
+            // level (see ledger ruling).
+            let completer = WatcherLegCompleter {
+                response: "I could not produce valid JSON for this document.".to_string(),
+            };
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let profile = kick_ctx.profile.clone();
+            let db_path = kick_ctx.db_path.clone();
+            let vault_dir = kick_ctx.vault_dir.clone().unwrap();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(db_path, vault_dir, kick_rel, profile, Some(&completer));
+            });
+            handle.await.unwrap();
+
+            // The ingest leg must have staged before the librarian leg is
+            // judged — a failure here means the harness, not the fix.
+            let canonical_root = std::fs::canonicalize(&real).unwrap();
+            let doc_key =
+                crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
+            {
+                let conn = ctx.conn.lock().unwrap();
+                let status: String = conn
+                    .query_row(
+                        "SELECT status FROM documents WHERE path = ?1",
+                        [&doc_key],
+                        |r| r.get(0),
+                    )
+                    .expect("ingest leg must stage the canonical document row");
+                assert_eq!(
+                    status, "indexed",
+                    "ingest leg must succeed before the librarian leg is judged"
+                );
+                let chunks: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.doc_id \
+                         WHERE d.path = ?1",
+                        [&doc_key],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(chunks, 1, "exactly the deposit prose chunk");
+            }
+
+            let conn = ctx.conn.lock().unwrap();
+            let (state, error): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                    [rel],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .expect("kick ledger row keyed by the rel handle");
+            assert_eq!(
+                state, "failed",
+                "RED (#298): synthesis validation failure must not read `ingested`"
+            );
+            let error = error.as_deref().unwrap_or_default();
+            assert!(
+                error.starts_with("synthesis JSON failure"),
+                "error must name the JSON-failure arm, got: {error}"
+            );
+        });
+    }
+
     /// RED (B1 regression, deposit-attribution twin): the APP's deposit
     /// regime. The watcher holds the vault lock for its lifetime, so the
     /// deposit kick falls back to `queued_watcher` and the WATCHER stages and
