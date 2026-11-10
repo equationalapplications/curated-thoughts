@@ -252,13 +252,90 @@ pub(crate) fn set_kick_state(
     Ok(())
 }
 
+/// Resolve a configured vault root into the two absolute spellings
+/// [`deposit_doc_key_forms`] probes: the CANONICAL form (symlinks resolved;
+/// `None` when the root is not on disk) and the VIRTUAL form
+/// (`std::path::absolute` — a pure string operation, no syscall). Resolve
+/// ONCE per caller and reuse across rows: the canonical leg is a
+/// `canonicalize` syscall, never one per ledger row (#325 review).
+fn deposit_root_forms(
+    vault_root: Option<&std::path::Path>,
+) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+    (
+        vault_root.and_then(|r| r.canonicalize().ok()),
+        vault_root.and_then(|r| std::path::absolute(r).ok()),
+    )
+}
+
+/// #325: every `documents.path` key form one deposit's document row can
+/// carry, deduped, for the vault-relative ledger handle `rel`:
+///
+/// - the vault-relative handle itself (pre-B1 legacy rows; V22 rewrites
+///   only canonical-root-prefixed rows and leaves rows outside both roots
+///   alone, D2b);
+/// - the CANONICAL-root form the kick stages (`virtual_path_key_at_root`,
+///   B1 round 2) — pass the canonicalized root from
+///   [`deposit_root_forms`];
+/// - the VIRTUAL absolute form the watcher/walker stage
+///   (`virtual_path_key(&abs)`, issue #204). It equals the canonical form
+///   unless the CONFIGURED root itself contains a symlink (macOS
+///   `/var` → `/private/var` — the shape `enqueue_vault_event`
+///   canonicalizes its containment root for), in which case the watcher's
+///   row is keyed under the configured spelling and a canonical-only
+///   probe misses it.
+///
+/// Extra forms are harmless: `IN`/set membership dedupes, and each form is
+/// THIS deposit's path under a different root spelling, so it cannot
+/// collide with another document's key.
+fn deposit_doc_key_forms(
+    canonical_root: Option<&std::path::Path>,
+    virtual_root: Option<&std::path::Path>,
+    rel: &str,
+) -> Vec<String> {
+    let mut keys = vec![rel.to_string()];
+    let rel_path = std::path::Path::new(rel);
+    for root in [canonical_root, virtual_root].into_iter().flatten() {
+        // `virtual_path_key` = `std::path::absolute` — string-only for the
+        // absolute roots passed here, so this is not a per-row syscall.
+        if let Ok(k) = crate::db::queue::virtual_path_key(&root.join(rel_path)) {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+    }
+    keys
+}
+
 /// Status probe: librarian evidence linked to THIS document via
 /// proposal sources → documents (the V18 doc link; `librarian_evidence`
 /// carries no path of its own).
 pub(crate) fn deposit_status_row(
     conn: &rusqlite::Connection,
     vault_relative_path: &str,
+    vault_root: Option<&std::path::Path>,
 ) -> Result<Value> {
+    // #325: the kick stages documents under the CANONICAL absolute key
+    // (`virtual_path_key_at_root`, B1 round 2) while this handle stays
+    // vault-relative for the ledger; the watcher/walker stage the VIRTUAL
+    // absolute form of the configured root (`virtual_path_key(&abs)`,
+    // issue #204); pre-B1 brains hold rows keyed by the relative handle
+    // itself (V22 only rewrites canonical-root-prefixed rows and leaves
+    // rows outside both roots alone, D2b). Probe documents/chunks/evidence
+    // with EVERY form the row can carry — a single-form probe reads
+    // `pending` forever in exactly the regime it misses. Duplicate forms
+    // are harmless (`IN` dedupes), and each form is THIS deposit's path
+    // under a different root spelling, so it cannot collide with another
+    // document.
+    let (canonical_root, virtual_root) = deposit_root_forms(vault_root);
+    let probe_keys = deposit_doc_key_forms(
+        canonical_root.as_deref(),
+        virtual_root.as_deref(),
+        vault_relative_path,
+    );
+    let in_list = (1..=probe_keys.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let kick: Option<(String, Option<String>, i64)> = conn
         .query_row(
             "SELECT state, error, updated_ms FROM deposit_kick_state WHERE path = ?1",
@@ -284,24 +361,22 @@ pub(crate) fn deposit_status_row(
     // proposal resolution (same transaction), so evidence implies the
     // proposal was approved.
     let enrich = column_exists(conn, "llm_wiki_entries", "superseded_by")?;
-    let sql = if enrich {
+    let sql_prefix = if enrich {
         "SELECT e.id, e.tier, e.superseded_by FROM librarian_evidence le
            JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id
            JOIN documents d ON d.id = ps.doc_id
-           JOIN llm_wiki_entries e ON e.id = le.entry_id AND e.deleted_at IS NULL
-          WHERE d.path = ?1"
+           JOIN llm_wiki_entries e ON e.id = le.entry_id AND e.deleted_at IS NULL"
     } else {
         "SELECT e.id, e.tier, NULL FROM librarian_evidence le
            JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id
            JOIN documents d ON d.id = ps.doc_id
-           JOIN llm_wiki_entries e ON e.id = le.entry_id AND e.deleted_at IS NULL
-          WHERE d.path = ?1"
+           JOIN llm_wiki_entries e ON e.id = le.entry_id AND e.deleted_at IS NULL"
     };
     let mut stmt = conn
-        .prepare(sql)
+        .prepare(&format!("{sql_prefix} WHERE d.path IN ({in_list})"))
         .map_err(|e| anyhow!("status probe failed: {e}"))?;
     let facts: Vec<(String, Option<String>, Option<String>)> = stmt
-        .query_map([vault_relative_path], |r| {
+        .query_map(rusqlite::params_from_iter(probe_keys.iter()), |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .map_err(|e| anyhow!("status probe failed: {e}"))?
@@ -311,10 +386,12 @@ pub(crate) fn deposit_status_row(
     // Pending check for the D6 query shape: chunks exist for this doc?
     let chunked: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM chunks c
-               JOIN documents d ON d.id = c.doc_id
-              WHERE d.path = ?1",
-            [vault_relative_path],
+            &format!(
+                "SELECT COUNT(*) FROM chunks c
+                   JOIN documents d ON d.id = c.doc_id
+                  WHERE d.path IN ({in_list})"
+            ),
+            rusqlite::params_from_iter(probe_keys.iter()),
             |r| r.get(0),
         )
         .map_err(|e| anyhow!("chunks probe failed: {e}"))?;
@@ -327,8 +404,8 @@ pub(crate) fn deposit_status_row(
     if kick.is_none() && chunked == 0 {
         let known_doc: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM documents WHERE path = ?1",
-                [vault_relative_path],
+                &format!("SELECT COUNT(*) FROM documents WHERE path IN ({in_list})"),
+                rusqlite::params_from_iter(probe_keys.iter()),
                 |r| r.get(0),
             )
             .map_err(|e| anyhow!("documents probe failed: {e}"))?;
@@ -360,11 +437,16 @@ pub(crate) fn deposit_status_row(
         {
             s.clone()
         }
+        // #325: `failed` outranks `chunked` — the chunks the ingest leg
+        // staged before the librarian leg died must not bury the failure
+        // #323 made the ledger record (the `(_, true, true)` arm used to
+        // swallow it once the probes began finding the canonical row).
+        (Some((s, _, _)), _, _) if s == "failed" => "failed".to_string(),
         (_, true, true) => "chunked".to_string(),
         (Some((s, _, _)), _, _)
             if matches!(
                 s.as_str(),
-                "pending" | "queued_watcher" | "no_ingest_host" | "failed"
+                "pending" | "queued_watcher" | "no_ingest_host"
             ) =>
         {
             s.clone()
@@ -387,8 +469,14 @@ pub(crate) fn deposit_status_row(
     let mut out = json!({ "path": vault_relative_path, "state": state, "facts": fact_ids });
     if let Some((s, err, updated)) = kick {
         out["kick"] = json!(s);
-        if let Some(e) = err {
-            out["error"] = json!(e);
+        // #325: the error text is only agent-visible while the RESOLVED
+        // state is `failed` — a stale ledger failure must not shadow the
+        // live evidence that outranks it (the raw ledger state stays
+        // visible in `kick`).
+        if state == "failed" {
+            if let Some(e) = err {
+                out["error"] = json!(e);
+            }
         }
         out["kick_updated_ms"] = json!(updated);
     }
@@ -439,6 +527,57 @@ static KICK_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// spawn/await split to reflect (the capture call runs the kick itself).
 pub(crate) fn register_app_kick(conn: &rusqlite::Connection, rel_path: &str) -> Result<()> {
     set_kick_state(conn, rel_path, "pending", None)
+}
+
+/// Watcher-lane failure honesty (#325): when a watcher holds the vault lock
+/// the kick records `queued_watcher` and the pipeline worker owns the
+/// deposit's outcome. On a typed `SynthesisFailure` the worker calls this to
+/// flip the ledger row to `failed` with the reason — ONLY while the row
+/// still reads `queued_watcher`, so a newer kick's state (a re-deposit's
+/// `pending`, a second kick's own `failed`) is never clobbered.
+/// `doc_path` is the worker's document path (the VIRTUAL absolute form the
+/// watcher/walker stage, issue #204); the ledger row is matched by deriving
+/// each row's key in EVERY form the deposit's document row can carry
+/// ([`deposit_doc_key_forms`]) — under a symlinked CONFIGURED root the
+/// worker's virtual spelling differs from the canonical form
+/// `virtual_path_key_at_root` produces, and a canonical-only match would
+/// silently never fire. The ledger itself keeps the relative handle.
+/// Returns how many rows were updated (0 or 1).
+pub(crate) fn mark_watcher_lane_synthesis_failed(
+    conn: &rusqlite::Connection,
+    vault_root: &std::path::Path,
+    doc_path: &str,
+    reason: &str,
+) -> Result<usize> {
+    let want = crate::db::queue::virtual_path_key(std::path::Path::new(doc_path))
+        .map_err(|e| anyhow!("watcher-lane doc key: {e:#}"))?;
+    // Roots resolved ONCE: the old loop canonicalized the root per ledger
+    // row — a syscall per row.
+    let (canonical_root, virtual_root) = deposit_root_forms(Some(vault_root));
+    let mut stmt = conn
+        .prepare("SELECT path FROM deposit_kick_state")
+        .map_err(|e| anyhow!("kick-state read failed: {e}"))?;
+    let rows: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .map_err(|e| anyhow!("kick-state read failed: {e}"))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("kick-state read failed: {e}"))?;
+    let rel = rows.into_iter().find(|rel| {
+        deposit_doc_key_forms(canonical_root.as_deref(), virtual_root.as_deref(), rel)
+            .iter()
+            .any(|k| k == &want)
+    });
+    match rel {
+        Some(rel) => conn
+            .execute(
+                "UPDATE deposit_kick_state
+                    SET state = 'failed', error = ?2, updated_ms = ?3
+                  WHERE path = ?1 AND state = 'queued_watcher'",
+                rusqlite::params![rel, reason, now_ms()],
+            )
+            .map_err(|e| anyhow!("kick-state write failed: {e}")),
+        None => Ok(0),
+    }
 }
 
 fn run_kick(
@@ -911,6 +1050,11 @@ async fn deposit_inner(
     ))
 }
 
+/// Agent-facing ingest state for one deposited file (`wisdom_deposit_status`
+/// tool + `ct wisdom status`): live-evidence facts for the document, the
+/// kick-ledger state, and the state machine that reconciles them (INTENT
+/// rule 3). The vault-relative path is the caller's handle; document probes
+/// use the canonical key form the kick stages (see [`deposit_status_row`]).
 pub async fn dispatch_wisdom_deposit_status(
     ctx: &ToolDispatchContext,
     p: WisdomDepositStatusParams,
@@ -935,9 +1079,13 @@ pub async fn dispatch_wisdom_deposit_status(
         .conn
         .lock()
         .map_err(|_| anyhow!("conn mutex poisoned"))?;
-    deposit_status_row(&conn, &rel)
+    deposit_status_row(&conn, &rel, ctx.vault_dir.as_deref())
 }
 
+/// Read-only list of deposits without LIVE librarian evidence (D6):
+/// everything on the kick ledger whose document has no un-archived fact —
+/// structurally isolated from recall (INTENT rule 3: an ingested fact is
+/// never listed).
 pub async fn dispatch_wisdom_pending(ctx: &ToolDispatchContext) -> Result<Value> {
     let client = ctx.client.clone();
     ctx.with_rw(move |conn| {
@@ -959,17 +1107,31 @@ pub async fn dispatch_wisdom_pending(ctx: &ToolDispatchContext) -> Result<Value>
     // archived (the same `deleted_at IS NULL` filter as the status probe, so
     // the two views of "in recall" cannot disagree). Structural isolation
     // from recall: separate tool, separate code path.
-    let mut stmt = conn
+    //
+    // #325: `deposit_kick_state.path` is the vault-RELATIVE handle while
+    // the evidence join yields absolute `documents.path` keys (canonical
+    // kick form, B1 round 2; virtual watcher form, issue #204), so a
+    // single-query `NOT IN` never matched and an ingested deposit stayed
+    // listed forever — INTENT rule 3: "`wisdom_pending` never lists it."
+    // Derive each ledger row's key in EVERY form its document row can
+    // carry and exclude against the evidence key set. A row whose root
+    // cannot be resolved stays listed: ingest cannot be proven, so pending
+    // is the honest answer.
+    let mut evidence_stmt = conn
         .prepare(
-            "SELECT path FROM deposit_kick_state
-              WHERE path NOT IN (
-                SELECT d.path FROM librarian_evidence le
-                  JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id
-                  JOIN documents d ON d.id = ps.doc_id
-                  JOIN llm_wiki_entries e ON e.id = le.entry_id AND e.deleted_at IS NULL
-              )
-              ORDER BY path",
+            "SELECT DISTINCT d.path FROM librarian_evidence le
+              JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id
+              JOIN documents d ON d.id = ps.doc_id
+              JOIN llm_wiki_entries e ON e.id = le.entry_id AND e.deleted_at IS NULL",
         )
+        .map_err(|e| anyhow!("pending query failed: {e}"))?;
+    let ingested_keys: std::collections::HashSet<String> = evidence_stmt
+        .query_map([], |r| r.get(0))
+        .map_err(|e| anyhow!("pending query failed: {e}"))?
+        .collect::<std::result::Result<std::collections::HashSet<_>, _>>()
+        .map_err(|e| anyhow!("pending query failed: {e}"))?;
+    let mut stmt = conn
+        .prepare("SELECT path FROM deposit_kick_state ORDER BY path")
         .map_err(|e| anyhow!("pending query failed: {e}"))?;
     let paths: Vec<String> = stmt
         .query_map([], |r| r.get(0))
@@ -977,7 +1139,18 @@ pub async fn dispatch_wisdom_pending(ctx: &ToolDispatchContext) -> Result<Value>
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| anyhow!("pending query failed: {e}"))?;
     let mut items = Vec::new();
+    // #325: roots resolved ONCE (the canonical leg is a `canonicalize`
+    // syscall — never per ledger row); each row is then excluded against
+    // EVERY key form its document row can carry (canonical kick form,
+    // virtual watcher form, legacy relative handle — see
+    // [`deposit_doc_key_forms`]).
+    let (canonical_root, virtual_root) = deposit_root_forms(ctx.vault_dir.as_deref());
     for p in paths {
+        let forms =
+            deposit_doc_key_forms(canonical_root.as_deref(), virtual_root.as_deref(), &p);
+        if forms.iter().any(|k| ingested_keys.contains(k)) {
+            continue;
+        }
         // mtime comes from the vault root only: with no configured
         // vault_dir the fallback must NOT stat vault-relative paths against
         // the process CWD (a sibling file there would answer with a real
@@ -1325,7 +1498,13 @@ mod tests {
                 let conn = ctx.conn.lock().unwrap();
                 set_kick_state(&conn, rel, "failed", Some("synthetic failure")).unwrap();
             }
-            // ...then the Librarian actually landing evidence for the doc.
+            // ...then the Librarian actually landing evidence for the doc
+            // (#325: seeded under the CANONICAL documents key a real kick
+            // stages — B1 round 2 — not the vault-relative handle).
+            let doc_key = crate::db::queue::virtual_path_key(
+                &dir.canonicalize().unwrap().join(rel),
+            )
+            .unwrap();
             {
                 let conn = ctx.conn.lock().unwrap();
                 conn.execute_batch(
@@ -1338,17 +1517,24 @@ mod tests {
                                'librarian_inferred', NULL,
                                'librarian-abc123def456abc123def456abc12345',
                                100, 100, NULL, 0, NULL, NULL, NULL);
-                     INSERT INTO documents (path, hash, tier, status) VALUES
-                         ('immutable-source-files/agents/evidence-note.md', 'h1',
-                          'user_doc', 'indexed');
                      INSERT INTO librarian_evidence
                          (entry_id, proposal_id, evidence_json, created_at)
                          VALUES ('e1', 'p1',
                                  '{\"quote\":\"q\",\"source_kind\":\"document\"}', 0);
                      INSERT INTO curated_proposals (id, kind, model, status, created_at)
-                         VALUES ('p1', 'new_entity', 'test', 'pending', 0);
-                     INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
-                         VALUES ('p1', (SELECT id FROM documents LIMIT 1), 'evidence');",
+                         VALUES ('p1', 'new_entity', 'test', 'pending', 0);",
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO documents (path, hash, tier, status)
+                     VALUES (?1, 'h1', 'user_doc', 'indexed')",
+                    [&doc_key],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+                     VALUES ('p1', (SELECT id FROM documents LIMIT 1), 'evidence')",
+                    [],
                 )
                 .unwrap();
             }
@@ -1783,6 +1969,12 @@ mod tests {
             // the doc is chunked, and the ledger records the completed pass.
             {
                 let conn = ctx.conn.lock().unwrap();
+                // #325: seed under the CANONICAL documents key a real kick
+                // stages (B1 round 2), not the vault-relative handle.
+                let doc_key = crate::db::queue::virtual_path_key(
+                    &dir.canonicalize().unwrap().join(rel),
+                )
+                .unwrap();
                 conn.execute_batch(
                     "INSERT INTO llm_wiki_entries (
                          id, entity_id, title, body, tags, confidence, source_type,
@@ -1793,20 +1985,30 @@ mod tests {
                                'librarian_inferred', NULL,
                                'librarian-abc123def456abc123def456abc12345',
                                100, 100, NULL, 0, NULL, NULL, NULL);
-                     INSERT INTO documents (path, hash, tier, status) VALUES
-                         ('immutable-source-files/agents/arch-note.md', 'h1',
-                          'user_doc', 'indexed');
-                     INSERT INTO chunks (doc_id, chunk_text, position)
-                         SELECT id, 'body text', 0 FROM documents
-                          WHERE path = 'immutable-source-files/agents/arch-note.md';
                      INSERT INTO librarian_evidence
                          (entry_id, proposal_id, evidence_json, created_at)
                          VALUES ('e1', 'p1',
                                  '{\"quote\":\"q\",\"source_kind\":\"document\"}', 0);
                      INSERT INTO curated_proposals (id, kind, model, status, created_at)
-                         VALUES ('p1', 'new_entity', 'test', 'approved', 0);
-                     INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
-                         VALUES ('p1', (SELECT id FROM documents LIMIT 1), 'evidence');",
+                         VALUES ('p1', 'new_entity', 'test', 'approved', 0);",
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO documents (path, hash, tier, status)
+                     VALUES (?1, 'h1', 'user_doc', 'indexed')",
+                    [&doc_key],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO chunks (doc_id, chunk_text, position)
+                     SELECT id, 'body text', 0 FROM documents WHERE path = ?1",
+                    [&doc_key],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+                     VALUES ('p1', (SELECT id FROM documents LIMIT 1), 'evidence')",
+                    [],
                 )
                 .unwrap();
                 set_kick_state(&conn, rel, "ingested", None).unwrap();
@@ -1932,13 +2134,25 @@ mod tests {
         with_brain(&dir_for_env, || async move {
             let ctx = wisdom_ctx(&dir);
             // Seed: one document WITH librarian evidence, one without.
+            // #325: seeded under the CANONICAL documents key a real kick
+            // stages (B1 round 2), not the vault-relative handle.
+            let done_key = crate::db::queue::virtual_path_key(
+                &dir.canonicalize().unwrap().join("immutable-source-files/agents/done.md"),
+            )
+            .unwrap();
+            let waiting_key = crate::db::queue::virtual_path_key(
+                &dir.canonicalize()
+                    .unwrap()
+                    .join("immutable-source-files/agents/waiting.md"),
+            )
+            .unwrap();
             ctx.conn
                 .lock()
                 .unwrap()
                 .execute(
                     "INSERT INTO documents (path, hash, tier, status)
-             VALUES ('immutable-source-files/agents/done.md', 'h1', 'user_doc', 'indexed')",
-                    [],
+             VALUES (?1, 'h1', 'user_doc', 'indexed')",
+                    [&done_key],
                 )
                 .unwrap();
             ctx.conn
@@ -1946,8 +2160,8 @@ mod tests {
                 .unwrap()
                 .execute(
                     "INSERT INTO documents (path, hash, tier, status)
-             VALUES ('immutable-source-files/agents/waiting.md', 'h2', 'user_doc', 'indexed')",
-                    [],
+             VALUES (?1, 'h2', 'user_doc', 'indexed')",
+                    [&waiting_key],
                 )
                 .unwrap();
             ctx.conn
@@ -2449,7 +2663,7 @@ mod tests {
             );
             // The agent-facing surface #298 is about: what
             // `wisdom_deposit_status` answers, not just the raw ledger row.
-            let agent_view = deposit_status_row(&conn, rel).unwrap();
+            let agent_view = deposit_status_row(&conn, rel, None).unwrap();
             assert_eq!(agent_view["state"], "failed", "got: {agent_view}");
             assert_eq!(agent_view["error"], error, "got: {agent_view}");
         });
@@ -2529,9 +2743,760 @@ mod tests {
                 error.starts_with("synthesis JSON failure") && error.contains("connection refused"),
                 "error must carry the transport message, got: {error}"
             );
-            let agent_view = deposit_status_row(&conn, rel).unwrap();
+            let agent_view = deposit_status_row(&conn, rel, None).unwrap();
             assert_eq!(agent_view["state"], "failed", "got: {agent_view}");
             assert_eq!(agent_view["error"], error, "got: {agent_view}");
+        });
+    }
+
+    /// RED (#325): a successful kicked deposit mints a fact, but
+    /// `deposit_status_row` probed `documents.path` (staged under the
+    /// CANONICAL absolute key, B1 round 2) with the vault-RELATIVE handle,
+    /// so both probes missed and the agent read `state: pending,
+    /// facts: []` forever — INTENT rule 3's "pending until processed"
+    /// inverted into "pending forever after processing". Driven through the
+    /// real handler, which owns the vault root the canonical probe needs.
+    #[test]
+    fn status_reports_ingested_and_facts_after_successful_kick() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            let rel = "immutable-source-files/agents/probe.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Runtime facts".into(),
+                    body: "The exporter ships with retry budgets disabled.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            // Seed the entity the canned one-fact proposal targets (the
+            // agents lane's V25 folder rule auto-approves it). The entity
+            // NAME must appear in the deposit body: validation drops
+            // proposals whose target is not a loaded candidate, and
+            // candidates come from embedding/name hits against the text.
+            ctx.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO curated_entities
+                         (id, name, entity_type, summary, created_at, updated_at)
+                     VALUES ('ent-alpha', 'Exporter', 'concept', 'Exporter summary', 100, 100)",
+                    [],
+                )
+                .unwrap();
+
+            let completer = WatcherLegCompleter {
+                response: serde_json::json!({
+                    "proposals": [{
+                        "target": { "existing_id": "ent-alpha" },
+                        "reasoning": "Deposit capture.",
+                        "summary_update": null,
+                        "facts": [{
+                            "op": "add",
+                            "body": "The exporter ships with retry budgets disabled.",
+                            "tags": [],
+                            "confidence": "inferred",
+                            "evidence": ["C1"]
+                        }],
+                        "edges": [],
+                        "tasks": []
+                    }]
+                })
+                .to_string(),
+            };
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let profile = kick_ctx.profile.clone();
+            let db_path = kick_ctx.db_path.clone();
+            let vault_dir = kick_ctx.vault_dir.clone().unwrap();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(db_path, vault_dir, kick_rel, profile, Some(&completer));
+            });
+            handle.await.unwrap();
+
+            // The ledger honestly recorded the success...
+            {
+                let conn = ctx.conn.lock().unwrap();
+                let (state, error): (String, Option<String>) = conn
+                    .query_row(
+                        "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                        [rel],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(state, "ingested", "harness: the kick must succeed");
+                assert_eq!(error, None, "harness: success carries no error");
+            }
+            // ...and the agent-facing surface must agree.
+            let v = dispatch_wisdom_deposit_status(
+                &ctx,
+                WisdomDepositStatusParams { path: rel.into() },
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["state"], serde_json::json!("ingested"), "got: {v}");
+            assert_eq!(v["kick"], serde_json::json!("ingested"), "got: {v}");
+            let facts = v["facts"].as_array().unwrap();
+            assert_eq!(facts.len(), 1, "the minted fact must be visible: {v}");
+            assert!(v.get("error").is_none(), "got: {v}");
+        });
+    }
+
+    /// RED (#325): once the status probes see the canonical document row,
+    /// a FAILED kick whose ingest leg succeeded (chunks exist) would fall
+    /// into the `(_, true, true)` chunked arm and read `chunked` — burying
+    /// the failure #323 made the ledger record. `failed` must outrank
+    /// `chunked` in the state machine.
+    #[test]
+    fn status_failed_kick_with_chunks_still_reads_failed() {
+        struct FailingCompleter;
+        impl crate::librarian::LlmCompleter for FailingCompleter {
+            fn complete(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
+                Err(anyhow::anyhow!("connection refused"))
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            let rel = "immutable-source-files/agents/unreachable-order.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Runtime facts".into(),
+                    body: "The exporter ships with retry budgets disabled.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let profile = kick_ctx.profile.clone();
+            let db_path = kick_ctx.db_path.clone();
+            let vault_dir = kick_ctx.vault_dir.clone().unwrap();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(
+                    db_path,
+                    vault_dir,
+                    kick_rel,
+                    profile,
+                    Some(&FailingCompleter),
+                );
+            });
+            handle.await.unwrap();
+
+            // Harness: the ingest leg really chunked the document under the
+            // canonical key (so the chunked arm is live), and the ledger
+            // really recorded the failure.
+            let canonical_root = std::fs::canonicalize(&real).unwrap();
+            let doc_key = crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
+            {
+                let conn = ctx.conn.lock().unwrap();
+                let chunks: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.doc_id
+                         WHERE d.path = ?1",
+                        [&doc_key],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert!(chunks > 0, "harness: the chunked arm must be live");
+                let (state, _): (String, Option<String>) = conn
+                    .query_row(
+                        "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                        [rel],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(state, "failed", "harness: the kick must fail");
+            }
+            let v = dispatch_wisdom_deposit_status(
+                &ctx,
+                WisdomDepositStatusParams { path: rel.into() },
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["state"], serde_json::json!("failed"), "got: {v}");
+            let error = v["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("connection refused"),
+                "the failure reason must ride along: {v}"
+            );
+        });
+    }
+
+    /// RED (#325): a kick's librarian leg fails transiently (ledger records
+    /// `failed` + reason), then a later `ct librarian run` — NOT a second
+    /// kick, which would rewrite the ledger — lands the facts directly over
+    /// the canonical key. Live evidence must outrank the stale failure, and
+    /// the stale `error` text must NOT ride along beside `state: ingested`
+    /// (it used to be emitted unconditionally).
+    #[test]
+    fn status_suppresses_stale_failed_error_after_later_success() {
+        struct FailingCompleter;
+        impl crate::librarian::LlmCompleter for FailingCompleter {
+            fn complete(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
+                Err(anyhow::anyhow!("connection refused"))
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            let rel = "immutable-source-files/agents/transient.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Runtime facts".into(),
+                    body: "The exporter ships with retry budgets disabled.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            // The transient failure: a real kick whose ingest leg chunks the
+            // document and whose librarian leg fails.
+            {
+                let kick_ctx = ctx.clone();
+                let kick_rel = rel.to_string();
+                let profile = kick_ctx.profile.clone();
+                let db_path = kick_ctx.db_path.clone();
+                let vault_dir = kick_ctx.vault_dir.clone().unwrap();
+                let handle = tokio::task::spawn_blocking(move || {
+                    run_kick_with(db_path, vault_dir, kick_rel, profile, Some(&FailingCompleter));
+                });
+                handle.await.unwrap();
+            }
+            let canonical_root = std::fs::canonicalize(&real).unwrap();
+            let doc_key = crate::db::queue::virtual_path_key(&canonical_root.join(rel)).unwrap();
+            {
+                let conn = ctx.conn.lock().unwrap();
+                let (state, error): (String, Option<String>) = conn
+                    .query_row(
+                        "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                        [rel],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(state, "failed", "harness: the transient failure");
+                assert!(error.is_some(), "harness: the failure carries a reason");
+            }
+            // The later `ct librarian run` succeeds directly over the
+            // canonical key, minting a fact WITHOUT touching the ledger.
+            ctx.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO curated_entities
+                         (id, name, entity_type, summary, created_at, updated_at)
+                     VALUES ('ent-alpha', 'Exporter', 'concept', 'Exporter summary', 100, 100)",
+                    [],
+                )
+                .unwrap();
+            let completer = WatcherLegCompleter {
+                response: serde_json::json!({
+                    "proposals": [{
+                        "target": { "existing_id": "ent-alpha" },
+                        "reasoning": "Deposit capture.",
+                        "summary_update": null,
+                        "facts": [{
+                            "op": "add",
+                            "body": "The exporter ships with retry budgets disabled.",
+                            "tags": [],
+                            "confidence": "inferred",
+                            "evidence": ["C1"]
+                        }],
+                        "edges": [],
+                        "tasks": []
+                    }]
+                })
+                .to_string(),
+            };
+            {
+                let mut guard = ctx.conn.lock().unwrap();
+                let model =
+                    crate::librarian::active_generation_model(crate::setup::recommended_model());
+                crate::librarian::generate_summary_with(
+                    &mut guard, &doc_key, &model, false, &completer,
+                )
+                .unwrap();
+            }
+
+            let v = dispatch_wisdom_deposit_status(
+                &ctx,
+                WisdomDepositStatusParams { path: rel.into() },
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["state"], serde_json::json!("ingested"), "got: {v}");
+            assert_eq!(v["kick"], serde_json::json!("failed"), "got: {v}");
+            assert!(
+                v.get("error").is_none(),
+                "a stale failure must not shadow the success: {v}"
+            );
+            assert_eq!(v["facts"].as_array().unwrap().len(), 1, "got: {v}");
+        });
+    }
+
+    /// RED (#325): `dispatch_wisdom_pending`'s exclusion subquery compared
+    /// the RELATIVE ledger handles against CANONICAL `documents.path` keys,
+    /// so the NOT IN never matched and an ingested deposit stayed listed
+    /// forever — INTENT rule 3: "A fact that has been ingested but not yet
+    /// confirmed by a person is not pending... `wisdom_pending` never lists
+    /// it."
+    #[test]
+    fn wisdom_pending_does_not_list_ingested_deposits() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            let rel = "immutable-source-files/agents/probe.md";
+            dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    path: rel.into(),
+                    title: "Runtime facts".into(),
+                    body: "The exporter ships with retry budgets disabled.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+            // Control: a second deposit left untouched stays listed.
+            dispatch_wisdom_deposit(
+                &ctx,
+                WisdomDepositParams {
+                    path: "immutable-source-files/agents/still-waiting.md".into(),
+                    title: "Untouched".into(),
+                    body: "No kick ran for this one.".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            ctx.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO curated_entities
+                         (id, name, entity_type, summary, created_at, updated_at)
+                     VALUES ('ent-alpha', 'Exporter', 'concept', 'Exporter summary', 100, 100)",
+                    [],
+                )
+                .unwrap();
+            let completer = WatcherLegCompleter {
+                response: serde_json::json!({
+                    "proposals": [{
+                        "target": { "existing_id": "ent-alpha" },
+                        "reasoning": "Deposit capture.",
+                        "summary_update": null,
+                        "facts": [{
+                            "op": "add",
+                            "body": "The exporter ships with retry budgets disabled.",
+                            "tags": [],
+                            "confidence": "inferred",
+                            "evidence": ["C1"]
+                        }],
+                        "edges": [],
+                        "tasks": []
+                    }]
+                })
+                .to_string(),
+            };
+            let kick_ctx = ctx.clone();
+            let kick_rel = rel.to_string();
+            let profile = kick_ctx.profile.clone();
+            let db_path = kick_ctx.db_path.clone();
+            let vault_dir = kick_ctx.vault_dir.clone().unwrap();
+            let handle = tokio::task::spawn_blocking(move || {
+                run_kick_with(db_path, vault_dir, kick_rel, profile, Some(&completer));
+            });
+            handle.await.unwrap();
+
+            // Harness: the kicked deposit really minted live evidence.
+            {
+                let conn = ctx.conn.lock().unwrap();
+                let evidence: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM librarian_evidence", [], |r| r.get(0))
+                    .unwrap();
+                assert!(evidence > 0, "harness: the kick must mint evidence");
+            }
+            let v = dispatch_wisdom_pending(&ctx).await.unwrap();
+            let paths: Vec<&str> = v["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["path"].as_str().unwrap())
+                .collect();
+            assert!(
+                !paths.contains(&rel),
+                "an ingested deposit must not be listed as pending: {paths:?}"
+            );
+            assert!(
+                paths.contains(&"immutable-source-files/agents/still-waiting.md"),
+                "the untouched deposit stays listed: {paths:?}"
+            );
+        });
+    }
+
+    /// #325 watcher lane: when a watcher holds the vault lock the kick
+    /// records `queued_watcher` and the pipeline WORKER owns the deposit's
+    /// outcome. On a typed `SynthesisFailure` the worker must flip the
+    /// ledger row to `failed` with the reason — but ONLY while the row still
+    /// reads `queued_watcher`, so a newer kick's state (a re-deposit's
+    /// `pending`, a second kick's own `failed`) is never clobbered.
+    #[test]
+    fn watcher_lane_synthesis_failure_marks_ledger_failed_only_when_queued() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("vault");
+        std::fs::create_dir_all(&real).unwrap();
+        let real_for_env = real.clone();
+        with_brain(&real_for_env, || async move {
+            let ctx = wisdom_ctx(&real);
+            // Real staging, the way the watcher leg does it: canonical
+            // documents row keyed off the canonical root.
+            let root = real.canonicalize().unwrap();
+            let rel = "immutable-source-files/agents/watcher-held.md";
+            std::fs::create_dir_all(root.join("immutable-source-files/agents")).unwrap();
+            std::fs::write(
+                root.join(rel),
+                "The exporter ships with retry budgets disabled.\n",
+            )
+            .unwrap();
+            let doc_key = crate::db::queue::virtual_path_key(&root.join(rel)).unwrap();
+            {
+                let guard = ctx.conn.lock().unwrap();
+                crate::pipeline::ingest_document_virtual(
+                    &guard,
+                    &ctx.profile,
+                    &doc_key,
+                    &root.join(rel).to_string_lossy(),
+                    false,
+                    Some(root.to_string_lossy().as_ref()),
+                )
+                .unwrap();
+            }
+
+            // queued_watcher row: the flip fires and carries the reason.
+            {
+                let conn = ctx.conn.lock().unwrap();
+                set_kick_state(&conn, rel, "queued_watcher", None).unwrap();
+                let n = mark_watcher_lane_synthesis_failed(
+                    &conn,
+                    &root,
+                    &doc_key,
+                    "synthesis JSON failure: connection refused",
+                )
+                .unwrap();
+                assert_eq!(n, 1, "the queued_watcher row must flip");
+                let (state, error): (String, Option<String>) = conn
+                    .query_row(
+                        "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                        [rel],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(state, "failed", "got: {error:?}");
+                let error = error.unwrap_or_default();
+                assert!(
+                    error.contains("connection refused"),
+                    "the reason must ride along: {error}"
+                );
+            }
+            // A newer kick re-registered the deposit as pending: untouched.
+            {
+                let conn = ctx.conn.lock().unwrap();
+                set_kick_state(&conn, rel, "pending", None).unwrap();
+                let n = mark_watcher_lane_synthesis_failed(
+                    &conn,
+                    &root,
+                    &doc_key,
+                    "synthesis JSON failure: connection refused",
+                )
+                .unwrap();
+                assert_eq!(n, 0, "a newer kick's pending row must not flip");
+                let state: String = conn
+                    .query_row(
+                        "SELECT state FROM deposit_kick_state WHERE path = ?1",
+                        [rel],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(state, "pending");
+            }
+            // Already failed with its own older reason: not overwritten.
+            {
+                let conn = ctx.conn.lock().unwrap();
+                set_kick_state(&conn, rel, "failed", Some("older reason")).unwrap();
+                let n = mark_watcher_lane_synthesis_failed(
+                    &conn,
+                    &root,
+                    &doc_key,
+                    "synthesis JSON failure: connection refused",
+                )
+                .unwrap();
+                assert_eq!(n, 0, "a non-queued_watcher row must not flip");
+                let (state, error): (String, Option<String>) = conn
+                    .query_row(
+                        "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                        [rel],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(state, "failed");
+                assert_eq!(error.as_deref(), Some("older reason"));
+            }
+            // A document with no ledger row (ordinary watcher file): no-op.
+            {
+                let conn = ctx.conn.lock().unwrap();
+                let other = crate::db::queue::virtual_path_key(
+                    &root.join("immutable-source-files/agents/not-a-deposit.md"),
+                )
+                .unwrap();
+                let n = mark_watcher_lane_synthesis_failed(
+                    &conn,
+                    &root,
+                    &other,
+                    "synthesis JSON failure: connection refused",
+                )
+                .unwrap();
+                assert_eq!(n, 0, "no ledger row, no write");
+            }
+        });
+    }
+
+    /// RED (#325 review): pre-B1 brains can hold document rows keyed by the
+    /// vault-RELATIVE handle — V22 only rewrites canonical-root-prefixed
+    /// rows and deliberately leaves rows outside both roots alone (D2b), so
+    /// a legacy deposit's evidence stays joined to the relative key. The
+    /// canonical probe must not regress those deposits back to
+    /// `pending`/unlisted: both key forms are probed.
+    #[test]
+    fn status_and_pending_still_see_legacy_relative_keyed_deposits() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            let rel = "immutable-source-files/agents/legacy-note.md";
+            // Legacy-era staging: everything keyed by the relative handle.
+            {
+                let conn = ctx.conn.lock().unwrap();
+                conn.execute_batch(
+                    "INSERT INTO llm_wiki_entries (
+                         id, entity_id, title, body, tags, confidence, source_type,
+                         source_hash, source_ref, created_at, updated_at,
+                         last_accessed_at, access_count, deleted_at,
+                         embedding_blob, embedding
+                     ) VALUES ('e1', 'ent1', 't', 'b', '[]', 'inferred',
+                               'librarian_inferred', NULL,
+                               'librarian-abc123def456abc123def456abc12345',
+                               100, 100, NULL, 0, NULL, NULL, NULL);
+                     INSERT INTO librarian_evidence
+                         (entry_id, proposal_id, evidence_json, created_at)
+                         VALUES ('e1', 'p1',
+                                 '{\"quote\":\"q\",\"source_kind\":\"document\"}', 0);
+                     INSERT INTO curated_proposals (id, kind, model, status, created_at)
+                         VALUES ('p1', 'new_entity', 'test', 'approved', 0);",
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO documents (path, hash, tier, status)
+                     VALUES (?1, 'h1', 'user_doc', 'indexed')",
+                    [rel],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO chunks (doc_id, chunk_text, position)
+                     SELECT id, 'body text', 0 FROM documents WHERE path = ?1",
+                    [rel],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+                     VALUES ('p1', (SELECT id FROM documents LIMIT 1), 'evidence')",
+                    [],
+                )
+                .unwrap();
+                set_kick_state(&conn, rel, "ingested", None).unwrap();
+            }
+            // The root IS resolvable here (ctx.vault_dir is configured), so
+            // the relative fallback alone must not be what finds the row.
+            let v = dispatch_wisdom_deposit_status(
+                &ctx,
+                WisdomDepositStatusParams { path: rel.into() },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                v["state"],
+                serde_json::json!("ingested"),
+                "legacy relative-keyed evidence must stay visible: {v}"
+            );
+            assert_eq!(v["facts"].as_array().unwrap().len(), 1, "got: {v}");
+
+            let p = dispatch_wisdom_pending(&ctx).await.unwrap();
+            let paths: Vec<&str> = p["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["path"].as_str().unwrap())
+                .collect();
+            assert!(
+                !paths.contains(&rel),
+                "a legacy ingested deposit must not be listed: {paths:?}"
+            );
+        });
+    }
+
+    /// RED (#325 review): the watcher/walker stage `documents.path` in the
+    /// VIRTUAL absolute form of the CONFIGURED root (`virtual_path_key(&abs)`,
+    /// issue #204) — and `enqueue_vault_event` canonicalizes its containment
+    /// root precisely because CONFIGURED roots can be symlinked (macOS
+    /// `/var` → `/private/var`). Under a symlinked configured root the
+    /// virtual spelling differs from the canonical form
+    /// `virtual_path_key_at_root` derives, so a canonical-only probe misses
+    /// the watcher-staged row: status read `pending`/`facts: []` and the
+    /// watcher-lane failure flip never matched its ledger row. Every
+    /// surface must key-match ALL forms the row can carry.
+    #[cfg(unix)]
+    #[test]
+    fn status_and_flip_see_watcher_staged_rows_under_symlinked_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("vault");
+        std::fs::create_dir_all(real.join("immutable-source-files/agents")).unwrap();
+        // The CONFIGURED root is a symlink; its canonical form differs.
+        let link = tmp.path().join("vault-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let link_for_env = link.clone();
+        with_brain(&link_for_env, || async move {
+            let ctx = wisdom_ctx(&link);
+            let rel = "immutable-source-files/agents/watcher-virtual.md";
+            // Watcher-lane staging: the documents row keyed by the VIRTUAL
+            // absolute form of the configured (symlinked) root.
+            let virtual_key = crate::db::queue::virtual_path_key(&link.join(rel)).unwrap();
+            assert_ne!(
+                virtual_key,
+                crate::db::queue::virtual_path_key_at_root(&link, std::path::Path::new(rel))
+                    .unwrap(),
+                "harness: the symlinked configured root must make the key forms diverge"
+            );
+            {
+                let conn = ctx.conn.lock().unwrap();
+                conn.execute_batch(
+                    "INSERT INTO llm_wiki_entries (
+                         id, entity_id, title, body, tags, confidence, source_type,
+                         source_hash, source_ref, created_at, updated_at,
+                         last_accessed_at, access_count, deleted_at,
+                         embedding_blob, embedding
+                     ) VALUES ('e1', 'ent1', 't', 'b', '[]', 'inferred',
+                               'librarian_inferred', NULL,
+                               'librarian-abc123def456abc123def456abc12345',
+                               100, 100, NULL, 0, NULL, NULL, NULL);
+                     INSERT INTO librarian_evidence
+                         (entry_id, proposal_id, evidence_json, created_at)
+                         VALUES ('e1', 'p1',
+                                 '{\"quote\":\"q\",\"source_kind\":\"document\"}', 0);
+                     INSERT INTO curated_proposals (id, kind, model, status, created_at)
+                         VALUES ('p1', 'new_entity', 'test', 'approved', 0);",
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO documents (path, hash, tier, status)
+                     VALUES (?1, 'h1', 'user_doc', 'indexed')",
+                    [&virtual_key],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO chunks (doc_id, chunk_text, position)
+                     SELECT id, 'body text', 0 FROM documents WHERE path = ?1",
+                    [&virtual_key],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+                     VALUES ('p1', (SELECT id FROM documents LIMIT 1), 'evidence')",
+                    [],
+                )
+                .unwrap();
+                set_kick_state(&conn, rel, "queued_watcher", None).unwrap();
+            }
+            // Status must see the watcher-staged evidence under the
+            // symlinked configured root.
+            let v = dispatch_wisdom_deposit_status(
+                &ctx,
+                WisdomDepositStatusParams { path: rel.into() },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                v["state"],
+                serde_json::json!("ingested"),
+                "watcher-staged evidence must stay visible: {v}"
+            );
+            assert_eq!(v["facts"].as_array().unwrap().len(), 1, "got: {v}");
+            // The watcher-lane failure flip must match the row by the
+            // worker's virtual-form doc path.
+            {
+                let conn = ctx.conn.lock().unwrap();
+                let n = mark_watcher_lane_synthesis_failed(
+                    &conn,
+                    &link,
+                    &virtual_key,
+                    "synthesis JSON failure: connection refused",
+                )
+                .unwrap();
+                assert_eq!(n, 1, "the queued_watcher row must flip: {virtual_key}");
+                let (state, error): (String, Option<String>) = conn
+                    .query_row(
+                        "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                        [rel],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(state, "failed", "got: {error:?}");
+                assert!(
+                    error.unwrap_or_default().contains("connection refused"),
+                    "the reason must ride along"
+                );
+            }
+            // And the ingested deposit must not be listed as pending.
+            let p = dispatch_wisdom_pending(&ctx).await.unwrap();
+            let paths: Vec<&str> = p["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["path"].as_str().unwrap())
+                .collect();
+            assert!(
+                !paths.contains(&rel),
+                "an ingested (watcher-staged) deposit must not be listed: {paths:?}"
+            );
         });
     }
 
@@ -2595,7 +3560,7 @@ mod tests {
                 synth_hash.is_some(),
                 "zero-proposals run must watermark the document"
             );
-            let agent_view = deposit_status_row(&conn, rel).unwrap();
+            let agent_view = deposit_status_row(&conn, rel, None).unwrap();
             assert_eq!(agent_view["kick"], "ingested", "got: {agent_view}");
             assert!(agent_view.get("error").is_none(), "got: {agent_view}");
             assert_eq!(
