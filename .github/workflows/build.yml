@@ -107,7 +107,9 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           rm -f "$CERT"
-          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')"
+          # `|| true` so a no-identity keychain reaches the explicit check
+          # below instead of set -e aborting first (xhigh finding).
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')" || true
           if [ -z "$IDENTITY" ]; then
             echo "::error::no 'Developer ID Application' identity in APPLE_CERTIFICATE" >&2
             exit 1
@@ -234,14 +236,10 @@ jobs:
         id: ctbuild
         shell: bash
         env:
-          # Signing credentials are Windows-leg-only (least privilege — the
-          # Linux/macOS legs never sign with Azure).
-          AZURE_CLIENT_ID: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_CLIENT_ID || '' }}
-          AZURE_CLIENT_SECRET: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_CLIENT_SECRET || '' }}
-          AZURE_TENANT_ID: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_TENANT_ID || '' }}
-          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+          # NOTE (xhigh): no signing secrets here — the ct step runs a cargo
+          # build whose build.rs scripts must never see AZURE_CLIENT_SECRET.
+          # Signing lives in the dedicated "Sign Windows ct CLI + MCP sidecar"
+          # step below.
         run: |
           set -euo pipefail
           cargo build --release -p curated-thoughts-tools --bin ct
@@ -255,14 +253,6 @@ jobs:
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
           # Spec :38-41 — every archive carries a short README alongside the binary.
           printf 'ct: the Curated Thoughts headless CLI. See the repo README for usage.\n' > README.txt
-          if [ "${EXT}" = "zip" ] && [ "${WIN_SIGNING}" = "true" ]; then
-            E="$AZURE_SIGNING_ENDPOINT"; A="$AZURE_SIGNING_ACCOUNT"; C="$AZURE_SIGNING_PROFILE"
-            artifact-signing-cli -e "$E" -a "$A" -c "$C" -d "Curated Thoughts CLI" "${TARGET_DIR}/release/ct.exe"
-            # Sign the MCP sidecar explicitly before Tauri bundles it, rather
-            # than relying on the bundler to sign externalBin entries.
-            artifact-signing-cli -e "$E" -a "$A" -c "$C" -d "Curated Thoughts MCP server" \
-              src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe
-          fi
           if [ "${EXT}" = "zip" ]; then
             pwsh -NoProfile -Command "Compress-Archive -Path '${TARGET_DIR}/release/ct.exe','README.txt' -DestinationPath '${ASSET}'"
           else
@@ -272,6 +262,29 @@ jobs:
             cp README.txt "${TARGET_DIR}/release/README.txt"
             tar czf "${ASSET}" -C "${TARGET_DIR}/release" ct README.txt
           fi
+
+      - name: Sign Windows ct CLI + MCP sidecar
+        # Dedicated step so AZURE_CLIENT_SECRET exists only where signing
+        # happens (xhigh finding) — never in the cargo-build env above.
+        # The MCP sidecar is signed here, before Tauri bundles it, rather than
+        # relying on the bundler to sign externalBin entries.
+        if: matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true'
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        run: |
+          set -euo pipefail
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          artifact-signing-cli -e "$AZURE_SIGNING_ENDPOINT" -a "$AZURE_SIGNING_ACCOUNT" -c "$AZURE_SIGNING_PROFILE" \
+            -d "Curated Thoughts CLI" "${TARGET_DIR}/release/ct.exe"
+          artifact-signing-cli -e "$AZURE_SIGNING_ENDPOINT" -a "$AZURE_SIGNING_ACCOUNT" -c "$AZURE_SIGNING_PROFILE" \
+            -d "Curated Thoughts MCP server" \
+            src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe
 
       - name: Build ct CLI (macOS universal)
         if: matrix.platform == 'macos-latest'
@@ -323,9 +336,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Used by signCommand on signed Windows runs only (see setup step);
           # gated to the Windows leg (least privilege).
-          AZURE_CLIENT_ID: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_CLIENT_ID || '' }}
-          AZURE_CLIENT_SECRET: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_CLIENT_SECRET || '' }}
-          AZURE_TENANT_ID: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true' && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true' && secrets.AZURE_CLIENT_SECRET || '' }}
+          AZURE_TENANT_ID: ${{ matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true' && secrets.AZURE_TENANT_ID || '' }}
         with:
           tauriScript: pnpm tauri
           tagName: v__VERSION__
@@ -368,7 +381,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $targetDir = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
-          $files = @(Get-ChildItem "$targetDir/release/bundle/msi/*.msi", "$targetDir/release/bundle/nsis/*.exe", "$targetDir/release/curated-thoughts.exe", "$targetDir/release/ct.exe", "src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe")
+          # Assert each expected artifact class actually exists — a wildcard
+          # with zero matches would otherwise check nothing and pass (xhigh).
+          $msi = Get-ChildItem "$targetDir/release/bundle/msi/*.msi"
+          if (-not $msi) { throw 'no MSI produced' }
+          $nsis = Get-ChildItem "$targetDir/release/bundle/nsis/*.exe"
+          if (-not $nsis) { throw 'no NSIS installer produced' }
+          $files = @($msi) + @($nsis) + @(Get-ChildItem "$targetDir/release/curated-thoughts.exe", "$targetDir/release/ct.exe", "src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe")
           $bad = $files | Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' }
           $files | ForEach-Object { "{0}: {1}" -f $_.Name, (Get-AuthenticodeSignature $_.FullName).Status }
           if ($bad) { throw "Unsigned or invalid: $($bad.Name -join ', ')" }

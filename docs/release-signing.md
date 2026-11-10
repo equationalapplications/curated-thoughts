@@ -7,7 +7,11 @@ verify step fails the release if any artifact comes out unsigned. The release
 is created as a DRAFT — semantic-release (`draftRelease: true`) on the main
 path, `tauri-action` on a human-pushed tag — and the `publish-release` job
 flips it public only after every build leg verified and uploaded, so a failure
-leaves a draft, never a public unsigned release.
+leaves a draft, never a public unsigned release. Residual exposure accepted on
+signed Windows runs: the Azure client secret is present in the Tauri build env
+(reaching `beforeBuildCommand` and build scripts) because `signCommand` runs
+inside the bundler — trusted first-party code only, and the secret is gated to
+Windows legs where `WIN_SIGNING` is true.
 
 | Platform | What gets signed | How |
 |---|---|---|
