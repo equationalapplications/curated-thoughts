@@ -34,9 +34,12 @@ jobs:
     # Code signing (see docs/release-signing.md). Each switch is "true" only
     # when its secrets are configured, so builds stay green (unsigned) until
     # the Apple / Azure accounts exist. Signing runs only on tag builds.
+    # Each gate requires EVERY secret/variable its signing step consumes, so a
+    # partially configured repo degrades to a green unsigned build instead of
+    # failing a tag release mid-run (docs/release-signing.md promise).
     env:
-      MAC_SIGNING: ${{ github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_API_PRIVATE_KEY != '' }}
-      WIN_SIGNING: ${{ github.ref_type == 'tag' && secrets.AZURE_CLIENT_SECRET != '' && vars.AZURE_SIGNING_ACCOUNT != '' }}
+      MAC_SIGNING: ${{ github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_PRIVATE_KEY != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER != '' }}
+      WIN_SIGNING: ${{ github.ref_type == 'tag' && secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_CLIENT_SECRET != '' && secrets.AZURE_TENANT_ID != '' && vars.AZURE_SIGNING_ENDPOINT != '' && vars.AZURE_SIGNING_ACCOUNT != '' && vars.AZURE_SIGNING_PROFILE != '' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -132,7 +135,7 @@ jobs:
           AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
         run: |
           set -euo pipefail
-          cargo install artifact-signing-cli --locked
+          cargo install artifact-signing-cli --locked --version 0.12.0
           jq -n \
             --arg e "$AZURE_SIGNING_ENDPOINT" \
             --arg a "$AZURE_SIGNING_ACCOUNT" \
@@ -234,6 +237,9 @@ jobs:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
         run: |
           set -euo pipefail
           cargo build --release -p curated-thoughts-tools --bin ct
@@ -248,7 +254,7 @@ jobs:
           # Spec :38-41 — every archive carries a short README alongside the binary.
           printf 'ct: the Curated Thoughts headless CLI. See the repo README for usage.\n' > README.txt
           if [ "${EXT}" = "zip" ] && [ "${WIN_SIGNING}" = "true" ]; then
-            E="${{ vars.AZURE_SIGNING_ENDPOINT }}"; A="${{ vars.AZURE_SIGNING_ACCOUNT }}"; C="${{ vars.AZURE_SIGNING_PROFILE }}"
+            E="$AZURE_SIGNING_ENDPOINT"; A="$AZURE_SIGNING_ACCOUNT"; C="$AZURE_SIGNING_PROFILE"
             artifact-signing-cli -e "$E" -a "$A" -c "$C" -d "Curated Thoughts CLI" "${TARGET_DIR}/release/ct.exe"
             # Sign the MCP sidecar explicitly before Tauri bundles it, rather
             # than relying on the bundler to sign externalBin entries.
@@ -333,7 +339,8 @@ jobs:
           TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
           APP="$(find "$TARGET_DIR/universal-apple-darwin/release/bundle/macos" -maxdepth 1 -name '*.app' | head -1)"
           codesign --verify --deep --strict --verbose=2 "$APP"
-          codesign -dv "$APP/Contents/MacOS/curated-thoughts-mcp" 2>&1 | grep -q 'Developer ID Application'
+          sidecar_info="$(codesign -dv "$APP/Contents/MacOS/curated-thoughts-mcp" 2>&1)"
+          grep -q 'Developer ID Application' <<<"$sidecar_info"
           spctl --assess --type execute --verbose=2 "$APP"
           xcrun stapler validate "$APP"
 
