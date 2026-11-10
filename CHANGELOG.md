@@ -1,3 +1,10 @@
+## [3.11.4](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.3...v3.11.4) (2026-11-10)
+
+### Bug Fixes
+
+* **deps:** align @tauri-apps/api with the tauri 2.12 crate ([#333](https://github.com/equationalapplications/curated-thoughts/issues/333)) ([f355c9a](https://github.com/equationalapplications/curated-thoughts/commit/f355c9a7527a8d76ff699c934518b3bd87bbb8a4)), closes [#319](https://github.com/equationalapplications/curated-thoughts/issues/319) [#301](https://github.com/equationalapplications/curated-thoughts/issues/301)
+* **deps:** align tauri plugin npm pins with their crate minors ([#333](https://github.com/equationalapplications/curated-thoughts/issues/333) review) ([40cf841](https://github.com/equationalapplications/curated-thoughts/commit/40cf8418f0cc135a3471b6a8938c83363b5fc440)), closes [#334](https://github.com/equationalapplications/curated-thoughts/issues/334)
+
 ## [3.11.3](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.2...v3.11.3) (2026-11-10)
 
 ### Bug Fixes
