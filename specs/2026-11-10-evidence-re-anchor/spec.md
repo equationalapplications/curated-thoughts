@@ -1,7 +1,7 @@
 # `ct evidence re-anchor`: pre-purge re-anchoring of unanchored librarian evidence
 
 **Date:** 2026-11-10
-**Status:** Draft (design for the `ct evidence re-anchor` implementation task)
+**Status:** Reviewed (Kurt adjudications 2026-11-10: §4 backup KEPT — implement `VACUUM INTO` in the command; §4 breaker language STRIPPED and §5 export-first REMOVED — the command never hands rows to a destructive path; §3 match strategy aligned to the verbatim-substring implementation)
 **Supersedes the ad-hoc repair runs of 2026-10-18** (`brain.db.bak-pre-anchor-heal-20261018`, exports under `~/ct-anchor-heal-exports/`) — those were manual; this makes the recovery a gated, idempotent CLI command.
 
 ## 1. Problem
@@ -23,45 +23,58 @@ The anchorless-evidence incident of 2026-10-18 (verify-scratch lossless blocker;
 
 ## 3. Match strategy
 
-Re-anchoring is content-addressed, never proximity-guessed. For each live `unanchored = 1` evidence blob:
+Re-anchoring is content-addressed, never proximity-guessed. **Adjudicated
+2026-11-10, round 2 (handoff: live dry-run scored `reanchored=0` BY
+CONSTRUCTION)**: the librarian quotes the ENTIRE old chunk (median ~1.2k
+chars), and after a re-split no current chunk contains the full quote — the
+round-1 verbatim-substring search can never match. Implemented strategy:
+normalize both sides (lowercase, whitespace/punctuation runs → single space),
+then:
 
-1. **Exact chunk hash match.** Match `evidence_json[].content_hash` against live `llm_wiki_chunks` chunk hashes. A hit re-anchors: `UPDATE librarian_evidence SET unanchored = 0` with the new `chunk_id` (same hash ⇒ same bytes ⇒ the quote is verbatim — no fabrication risk).
-2. **Doc-level fallback (same document, re-chunked).** Where the doc is re-chunked and no single chunk hash matches (boundaries moved), match on (source document, `content_hash` of the quoted span recomputed from chunk text) — a hit re-anchors to the chunk that now contains the quote. A multi-hit is refused for that row (ambiguous), reported, and left flagged; never best-guess.
-3. **No match.** Row stays `unanchored = 1`. It is NOT deleted here — it re-enters the existing `ct evidence regrade` flow, which owns the gated export-then-purge of genuinely doomed rows.
+1. the quote's ≥60-char normalized **prefix** matches exactly ONE current
+   chunk → re-anchor: rewrite `content_hash` (recomputed via
+   `compute_chunk_hash` from the matched chunk — never trusted from the row),
+   `chunk_id`, `start_line`, `end_line`;
+2. several chunks share the prefix → the quote's last-60-chars normalized
+   **suffix** narrows them (prefix+suffix agreement is the strong case);
+   still tied — or no chunk agrees on both — → **ambiguous** (left flagged;
+   guessing would fabricate provenance);
+3. zero chunks → **unresolved** (left flagged; the heal/regrade flow owns it);
+4. matched chunk's stored hash ≠ recomputed hash → **chunker drift**; skip.
 
-Re-anchor UPDATEs are recovery actions: they commit regardless of the pass's overall verdict (mirrors the issue-271 re-anchor semantics), and re-running the command is a no-op once everything that can match has matched.
+When EVERY item of an entry resolves, `evidence_has_live_chunk` — the same
+grounding contract the commit gate and regrade use — agrees, and `unanchored`
+is cleared. Re-running the command is a no-op once everything that can match
+has matched.
 
 ## 4. Gates
 
-Borrowed wholesale from `evidence_regrade.rs` / the shared breaker:
+(adjudicated 2026-11-10)
 
-- **Breaker-governed.** A re-anchor pass may also *clear* flags (harmless) but any fall-through that hands rows to the destructive path must check the shared bulk-deletion breaker inside the transaction; a refusal deletes nothing and reports loudly.
+- **Backup before first write — KEPT.** Even though the pass is UPDATE-only, it is still a mass brain write: before any apply, `VACUUM INTO` a crash-consistent snapshot (`brain.db.bak-pre-reanchor-<ts>` in the db dir) — cheap, zero-friction insurance, and the documented rollback path.
 - **Dry-run by default.** Like `graph_reanchor`: read-only plan printed unless `--yes`.
-- **Backup before first write.** `VACUUM INTO` crash-consistent snapshot (`brain.db.bak-pre-reanchor-<ts>`), same as the 2026-10-18 run — this backup is the documented rollback path.
-- **Report, don't improvise.** Every skip is a loud WARN naming the idempotent manual recovery (`ct evidence re-anchor`, or `ct evidence regrade` for the doomed remainder).
+- **No breaker interaction — WIP posture adopted.** Rows are only ever UPDATED, never deleted, so the shared bulk-deletion budget is untouched and the breaker is not consulted. Unresolved rows stay flagged `unanchored = 1` for the EXISTING `ct evidence regrade` flow, which owns the gated export-then-purge of genuinely doomed rows — re-anchor never hands rows to a destructive path.
 
-## 5. Export-first
+## 5. Idempotency and the report
 
-Before any fall-through rows reach the regrade purge, the pass exports the full row (`DoomedRow` shape: entry + body + `source_ref` + `evidence_json` + `proposal_id`) to `<db_dir>/repair-export-reanchor/<id>.json` — its own directory so an operator can tell this repair's exports from `repair-export-phase2` and `repair-export-186` at a glance. The token `source_ref` is content-free, so anything less than the full row destroys the only surviving provenance copy (spec C1 posture).
+A `ReAnchorReport` (WIP fields, adjudicated):
 
-## 6. Idempotency and the report
+- `items_reanchored` — dead hashes rewritten to the matched current chunk (flag cleared when the whole entry grounds);
+- `items_ambiguous` — multi-match candidates, left flagged, named by id in stdout;
+- `items_unresolved` — still anchorless, left flagged for the existing regrade flow (NOT exported here; regrade owns export-then-purge);
+- `items_hash_mismatch` — chunker drift, skipped;
+- `entries_already_anchored` — re-run no-ops;
+- `entries_race_skipped` — concurrent mutation detected under the lock; re-run converges.
 
-A `ReAnchorReport`, in the `RegradeReport` mold:
+All UPDATEs are idempotent; re-running converges. Soft-deleted stock is never touched — the 90-day prune owns it (regrade invariant).
 
-- `matched_exact` / `matched_rechunked` — flags cleared with a new anchor;
-- `ambiguous` — multi-match candidates, left flagged, named by id in stdout;
-- `unmatched` — still anchorless, exported, handed to the regrade flow;
-- `already_anchored` — re-run no-ops.
-
-All UPDATEs are idempotent (`SET unanchored = 0` where the predicate still holds); re-running converges. Soft-deleted stock is never touched — the 90-day prune owns it (regrade invariant).
-
-## 7. Testing posture
+## 6. Testing posture
 
 Tests follow the `commit.rs` grounding style — small in-memory `Connection`s, assertions that name the invariant they pin, not just the counts:
 
-- exact-hash hit re-anchors and clears the flag; a re-run of the same DB changes nothing (idempotency);
-- re-chunked doc re-anchors to the chunk containing the quote; multi-match leaves the row flagged and reported, never silently best-guessed;
-- unmatched rows export the FULL row (assert `evidence_json` and `proposal_id` survive into the JSON on disk) before any purge path;
-- breaker refusal deletes nothing and reports `skipped` with the recovery command in the WARN;
-- soft-deleted rows untouched;
+- a dead hash whose quote lives in exactly one current chunk re-anchors (hash recomputed from the matched chunk, never trusted from the row) and clears the flag when the entry grounds; a re-run of the same DB changes nothing (idempotency);
+- a re-chunked doc's shifted boundaries still re-anchor via the verbatim quote; multi-match leaves the row flagged and reported, never silently best-guessed;
+- unresolved rows stay flagged, are never deleted and never exported by this command (the regrade flow owns the purge);
+- a soft-deleted row is untouched by a full pass;
+- the apply path snapshots first: `VACUUM INTO` to `brain.db.bak-pre-reanchor-<ts>` runs before the first UPDATE, and the dry-run path writes no backup file;
 - a direct heal-reset fixture (flags treated as doomed, no match attempt) asserts the ~240-fact loss class cannot recur: rows whose chunk exists in live chunks are never purged.

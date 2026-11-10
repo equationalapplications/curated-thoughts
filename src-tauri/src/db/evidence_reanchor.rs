@@ -7,16 +7,24 @@
 //! soft-delete the entry — the correct last resort, but wasteful when the
 //! quote is recoverable.
 //!
-//! For every dead `content_hash` in a live evidence row, this pass searches
-//! the CURRENT chunks for the item's `quote` as a verbatim substring:
+//! For every dead `content_hash` in a live evidence row, this pass matches
+//! the item's `quote` against the CURRENT chunks (spec §3, adjudicated
+//! 2026-11-10 #2: NORMALIZED PREFIX matching, not verbatim — the librarian
+//! quotes the ENTIRE old chunk, median ~1.2k chars, and after a re-split no
+//! current chunk contains the full quote, so verbatim scores 0 BY
+//! CONSTRUCTION; measured fallback: a normalized 60-char prefix matches 32/40
+//! sampled doomed entries). Both sides are normalized (lowercase, whitespace/
+//! punctuation runs collapsed to single spaces), then:
 //!
-//! - exactly ONE chunk contains the quote → re-anchor: rewrite the item's
-//!   `content_hash` (recomputed via [`compute_chunk_hash`] from the matched
-//!   chunk — never trusted from the row), `chunk_id`, `start_line`,
-//!   `end_line`;
+//! - the quote's ≥60-char normalized PREFIX matches exactly ONE chunk →
+//!   re-anchor: rewrite the item's `content_hash` (recomputed via
+//!   [`compute_chunk_hash`] from the matched chunk — never trusted from the
+//!   row), `chunk_id`, `start_line`, `end_line`;
+//! - several chunks share the prefix → the quote's last-60-chars normalized
+//!   SUFFIX narrows them (prefix+suffix agreement is the strong case); still
+//!   several (or the suffix matches none of them) → ambiguous (left flagged;
+//!   guessing would fabricate provenance);
 //! - zero chunks → unresolved (left flagged; the heal owns it);
-//! - more than one DISTINCT chunk → ambiguous (left flagged; guessing would
-//!   fabricate provenance);
 //! - matched chunk's stored hash ≠ recomputed hash → chunker drift; skip.
 //!
 //! When EVERY item of an entry resolves (its dead ones re-anchored, its live
@@ -95,6 +103,8 @@ pub fn re_anchor(conn: &Connection, apply: bool) -> Result<ReanchorReport> {
     // 2. Match phase (read-only): per dead item, quote-match current chunks.
     //    Each candidate carries its matching-time snapshot json so the apply
     //    transaction can re-verify the row under the lock (swap-race rule).
+    //    The normalized-text chunk index is built once for the whole pass.
+    let chunk_index = load_chunk_index(conn)?;
     let mut candidates: Vec<(String, String, String, bool)> = Vec::new(); // (entry_id, snapshot_json, new_json, would_ground)
     for (entry_id, evidence_json) in flagged {
         let Ok(mut value) = serde_json::from_str::<Value>(&evidence_json) else {
@@ -160,7 +170,7 @@ pub fn re_anchor(conn: &Connection, apply: bool) -> Result<ReanchorReport> {
                 report.items_unresolved += 1;
                 continue;
             }
-            match match_quote(conn, quote)? {
+            match match_quote_prefix(conn, &chunk_index, quote)? {
                 QuoteMatch::None => {
                     report.items_unresolved += 1;
                 }
@@ -237,6 +247,28 @@ pub fn re_anchor(conn: &Connection, apply: bool) -> Result<ReanchorReport> {
     Ok(report)
 }
 
+/// Crash-consistent pre-write snapshot (spec §4, adjudicated 2026-11-10:
+/// backup KEPT even though the pass is UPDATE-only — a mass brain write takes
+/// a `VACUUM INTO` snapshot first). Called on the apply path only, BEFORE the
+/// first UPDATE; a failure here aborts the apply with zero rows touched.
+/// Returns the backup path.
+pub fn backup_before_apply(
+    conn: &Connection,
+    db_path: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    let dir = db_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let stem = db_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("brain.db");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let backup = dir.join(format!("{stem}.bak-pre-reanchor-{ts}"));
+    conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
+    Ok(backup)
+}
+
 /// One current chunk a quote matched.
 #[derive(Debug, Clone)]
 struct MatchedChunk {
@@ -253,60 +285,190 @@ enum QuoteMatch {
     One(MatchedChunk),
 }
 
-/// Find the current chunk(s) containing `quote` verbatim. Requires the
-/// matched chunk's stored hash to equal the recomputed hash (chunker-drift
-/// guard); 2+ DISTINCT chunk ids → [`QuoteMatch::Ambiguous`].
-fn match_quote(conn: &Connection, quote: &str) -> Result<QuoteMatch> {
+/// Normalized text for quote matching: lowercase, every non-alphanumeric run
+/// collapsed to a single space, trimmed. Line wrapping and punctuation
+/// spacing change across re-chunks; the normalized form is the stable surface.
+fn normalize_for_match(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.extend(ch.to_lowercase());
+        } else {
+            pending_space = true;
+        }
+    }
+    out
+}
+
+/// Minimum normalized-prefix length for a quote match (handoff 2026-11-10:
+/// measured 32/40 recovery on sampled doomed entries at this length).
+const MATCH_PREFIX_CHARS: usize = 60;
+/// Suffix length for the prefix+suffix agreement strong case.
+const MATCH_SUFFIX_CHARS: usize = 60;
+
+fn normalized_prefix(qn: &str) -> String {
+    qn.chars().take(MATCH_PREFIX_CHARS).collect()
+}
+
+/// `None` when the normalized quote is too short for a suffix to add signal.
+fn normalized_suffix(qn: &str) -> Option<String> {
+    let count = qn.chars().count();
+    if count > MATCH_PREFIX_CHARS + MATCH_SUFFIX_CHARS {
+        Some(qn.chars().skip(count - MATCH_SUFFIX_CHARS).collect())
+    } else {
+        None
+    }
+}
+
+/// In-memory index of the current chunks, built ONCE per pass (the matcher is
+/// normalized-text search — not expressible as a SQL `instr` against raw
+/// text), so each dead item consults memory, not the DB.
+struct ChunkIndex {
+    rows: Vec<ChunkIndexRow>,
+}
+
+struct ChunkIndexRow {
+    id: i64,
+    stored_hash: String,
+    norm: String,
+}
+
+fn load_chunk_index(conn: &Connection) -> Result<ChunkIndex> {
     let mut stmt = conn.prepare(
-        "SELECT c.id, c.chunk_text, c.position, c.start_line, c.end_line,
-                c.content_hash, d.path
+        "SELECT c.id, c.chunk_text, c.content_hash
            FROM chunks c
-           JOIN documents d ON d.id = c.doc_id
-          WHERE instr(c.chunk_text, ?1) > 0",
+           JOIN documents d ON d.id = c.doc_id",
     )?;
     let rows = stmt
-        .query_map([quote], |r| {
+        .query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
+                r.get::<_, String>(2)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ChunkIndex {
+        rows: rows
+            .into_iter()
+            .map(|(id, text, stored_hash)| ChunkIndexRow {
+                id,
+                stored_hash,
+                norm: normalize_for_match(&text),
+            })
+            .collect(),
+    })
+}
 
-    let mut distinct: Vec<MatchedChunk> = Vec::new();
-    let mut distinct_textual_ids: Vec<i64> = Vec::new();
-    let mut drift: Vec<i64> = Vec::new();
-    for (id, text, position, start_line, end_line, stored_hash, path) in rows {
-        let recomputed = compute_chunk_hash(&text, &path, position as usize);
-        let recomputed_matches = recomputed == stored_hash;
-        if !distinct_textual_ids.contains(&id) {
-            distinct_textual_ids.push(id);
-            if !recomputed_matches {
-                drift.push(id);
-            }
+/// Raw chunk text + path + position for the drift guard — fetched only for
+/// the few textual candidates of one item, not the whole index.
+fn chunk_hash_inputs(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<(String, i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.chunk_text, c.position, d.path
+           FROM chunks c
+           JOIN documents d ON d.id = c.doc_id
+          WHERE c.id = ?1",
+    )?;
+    stmt.query_row([id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+    })
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Match `quote` against the current chunks by NORMALIZED PREFIX (≥60 chars),
+/// narrowed by the normalized SUFFIX when several chunks share the prefix.
+/// Requires the matched chunk's stored hash to equal the recomputed hash
+/// (chunker-drift guard); unresolved ties → [`QuoteMatch::Ambiguous`].
+fn match_quote_prefix(
+    conn: &Connection,
+    index: &ChunkIndex,
+    quote: &str,
+) -> Result<QuoteMatch> {
+    let qn = normalize_for_match(quote);
+    if qn.is_empty() {
+        return Ok(QuoteMatch::None);
+    }
+    let prefix = normalized_prefix(&qn);
+
+    // Textual candidates by normalized prefix (distinct chunk ids).
+    let mut candidates: Vec<&ChunkIndexRow> = Vec::new();
+    for row in &index.rows {
+        if row.norm.contains(&prefix) && !candidates.iter().any(|c| c.id == row.id) {
+            candidates.push(row);
         }
-        if recomputed_matches && !distinct.iter().any(|c| c.chunk_id == id) {
-            distinct.push(MatchedChunk {
-                chunk_id: id,
-                content_hash: stored_hash,
+    }
+    if candidates.is_empty() {
+        return Ok(QuoteMatch::None);
+    }
+
+    // Drift gate on every textual candidate.
+    let mut valid: Vec<MatchedChunk> = Vec::new();
+    let mut drifted = 0usize;
+    for row in candidates {
+        let Some((text, position, path)) = chunk_hash_inputs(conn, row.id)? else {
+            continue;
+        };
+        if compute_chunk_hash(&text, &path, position as usize) == row.stored_hash {
+            let (_, start_line, end_line) = {
+                let mut stmt = conn.prepare(
+                    "SELECT start_line, end_line FROM chunks WHERE id = ?1",
+                )?;
+                let (sl, el) = stmt.query_row([row.id], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                })?;
+                ((), sl, el)
+            };
+            valid.push(MatchedChunk {
+                chunk_id: row.id,
+                content_hash: row.stored_hash.clone(),
                 start_line,
                 end_line,
             });
+        } else {
+            drifted += 1;
         }
     }
     // Chunker drift on EVERY textual match — never trust any as an anchor.
-    if distinct.is_empty() && !drift.is_empty() {
-        return Ok(QuoteMatch::HashMismatch);
+    if valid.is_empty() {
+        return if drifted > 0 {
+            Ok(QuoteMatch::HashMismatch)
+        } else {
+            Ok(QuoteMatch::None)
+        };
     }
-    match distinct.len() {
-        0 => Ok(QuoteMatch::None),
-        1 => Ok(QuoteMatch::One(distinct.pop().unwrap())),
-        _ => Ok(QuoteMatch::Ambiguous),
+    if valid.len() == 1 {
+        return Ok(QuoteMatch::One(valid.pop().unwrap()));
+    }
+
+    // Several prefix matches: the suffix narrows (strong case); an unresolved
+    // tie — or no chunk agreeing on both — stays ambiguous, never a guess.
+    match normalized_suffix(&qn) {
+        Some(suffix) => {
+            let agreeing: Vec<&MatchedChunk> = valid
+                .iter()
+                .filter(|m| {
+                    index
+                        .rows
+                        .iter()
+                        .find(|r| r.id == m.chunk_id)
+                        .is_some_and(|r| r.norm.contains(&suffix))
+                })
+                .collect();
+            match agreeing.len() {
+                1 => Ok(QuoteMatch::One(agreeing[0].clone())),
+                _ => Ok(QuoteMatch::Ambiguous),
+            }
+        }
+        None => Ok(QuoteMatch::Ambiguous),
     }
 }
 
@@ -647,6 +809,153 @@ mod tests {
         assert_eq!(report.items_dead, 0);
         assert_eq!(report.entries_already_anchored, 1);
         assert_eq!(stored_unanchored(&conn, "fact_hashless"), 0);
+    }
+
+    /// Spec §4 (adjudicated: backup KEPT): the apply path snapshots FIRST.
+    /// A file-backed db + mutation-after-snapshot proves the backup carries
+    /// the pre-write state, not just "a file appeared".
+    #[test]
+    fn backup_before_apply_snapshots_pre_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("brain.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute("CREATE TABLE t(x INTEGER)", []).unwrap();
+        conn.execute("INSERT INTO t VALUES (7)", []).unwrap();
+
+        let backup = backup_before_apply(&conn, &db_path).unwrap();
+        assert!(backup.exists(), "backup file must exist");
+        assert!(backup.starts_with(dir.path()), "backup lands beside the db");
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("bak-pre-reanchor"),
+            "backup name follows brain.db.bak-pre-reanchor-<ts>"
+        );
+
+        // Mutate AFTER the snapshot; the backup must hold the pre-state.
+        conn.execute("INSERT INTO t VALUES (8)", []).unwrap();
+        let snap = Connection::open_with_flags(
+            &backup,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let n: i64 = snap
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "backup must carry the pre-mutation state");
+    }
+
+    /// The live failure (handoff 2026-11-10): the librarian quotes the ENTIRE
+    /// OLD chunk (median ~1.2k chars); after a re-split no current chunk
+    /// contains the full quote, so a verbatim matcher scores 0 BY
+    /// CONSTRUCTION. The normalized 60-char prefix still matches.
+    #[test]
+    fn reanchors_long_quote_via_normalized_prefix_after_resplit() {
+        let conn = open_in_memory().unwrap();
+        let mut quote = String::new();
+        for i in 0..40 {
+            quote.push_str(&format!("Word number {} in the long, decisive quote text. ", i));
+        }
+        // Current chunk: same words, different case/punctuation/line
+        // wrapping, truncated well before the quote's end — verbatim cannot
+        // match by construction.
+        let mut chunk_text = String::new();
+        for i in 0..12 {
+            chunk_text.push_str(&format!("WORD  NUMBER {} IN THE long decisive\nquote text,\n", i));
+        }
+        let live_hash = compute_chunk_hash(&chunk_text, DOC_PATH, 3usize);
+        seed_chunk(&conn, &chunk_text, 3, &live_hash);
+        seed_flagged(
+            &conn,
+            "fact_resplit",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_resplit"}}"#,
+                dead_item("dead0000000000000000000000000000000000000000000000000000000000", &quote)
+            ),
+            None,
+        );
+
+        let report = re_anchor(&conn, true).unwrap();
+        assert_eq!(report.items_dead, 1);
+        assert_eq!(
+            report.items_reanchored, 1,
+            "normalized prefix must recover the resplit quote"
+        );
+        assert_eq!(report.entries_regrounded, 1);
+        assert_eq!(report.items_unresolved, 0);
+        // Anchored to the LIVE chunk hash (recomputed), never the dead one.
+        assert!(stored_json(&conn, "fact_resplit").contains(&live_hash));
+    }
+
+    /// Two current chunks share the normalized prefix and the quote carries
+    /// nothing that separates them — refuse and keep the flag (never guess).
+    #[test]
+    fn ambiguous_when_prefix_matches_multiple_chunks() {
+        let conn = open_in_memory().unwrap();
+        let mut shared = String::new();
+        for i in 0..40 {
+            shared.push_str(&format!("word number {} of a shared preamble line. ", i));
+        }
+        let a = format!("{}alpha ending only here", shared);
+        let b = format!("{}beta ending only here", shared);
+        let h1 = compute_chunk_hash(&a, DOC_PATH, 1usize);
+        let h2 = compute_chunk_hash(&b, DOC_PATH, 2usize);
+        seed_chunk(&conn, &a, 1, &h1);
+        seed_chunk(&conn, &b, 2, &h2);
+        seed_flagged(
+            &conn,
+            "fact_ambig",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_ambig"}}"#,
+                dead_item("dead1000000000000000000000000000000000000000000000000000000000", &shared)
+            ),
+            None,
+        );
+
+        let report = re_anchor(&conn, true).unwrap();
+        assert_eq!(
+            report.items_ambiguous, 1,
+            "shared prefix across 2 chunks must refuse, never guess"
+        );
+        assert_eq!(report.items_reanchored, 0);
+        assert_eq!(stored_unanchored(&conn, "fact_ambig"), 1);
+    }
+
+    /// Same shared-prefix setup, but the quote also carries the alpha ending:
+    /// exactly one chunk agrees on prefix AND suffix — the strong case anchors.
+    #[test]
+    fn suffix_agreement_disambiguates_shared_prefix() {
+        let conn = open_in_memory().unwrap();
+        let mut shared = String::new();
+        for i in 0..40 {
+            shared.push_str(&format!("word number {} of a shared preamble line. ", i));
+        }
+        let a = format!("{}alpha ending only here", shared);
+        let b = format!("{}beta ending only here", shared);
+        let h1 = compute_chunk_hash(&a, DOC_PATH, 1usize);
+        let h2 = compute_chunk_hash(&b, DOC_PATH, 2usize);
+        seed_chunk(&conn, &a, 1, &h1);
+        seed_chunk(&conn, &b, 2, &h2);
+        let quote = format!("{}alpha ending only here", shared);
+        seed_flagged(
+            &conn,
+            "fact_suffix",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_suffix"}}"#,
+                dead_item("dead2000000000000000000000000000000000000000000000000000000000", &quote)
+            ),
+            None,
+        );
+
+        let report = re_anchor(&conn, true).unwrap();
+        assert_eq!(
+            report.items_reanchored, 1,
+            "prefix+suffix agreement is the strong case"
+        );
+        assert_eq!(report.items_ambiguous, 0);
+        assert!(stored_json(&conn, "fact_suffix").contains(&h1));
     }
 }
 
