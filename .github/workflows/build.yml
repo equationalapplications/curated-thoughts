@@ -234,9 +234,11 @@ jobs:
         id: ctbuild
         shell: bash
         env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          # Signing credentials are Windows-leg-only (least privilege — the
+          # Linux/macOS legs never sign with Azure).
+          AZURE_CLIENT_ID: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_CLIENT_SECRET || '' }}
+          AZURE_TENANT_ID: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_TENANT_ID || '' }}
           AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
@@ -319,10 +321,11 @@ jobs:
         if: github.ref_type == 'tag'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Used by signCommand on signed Windows runs only (see setup step).
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          # Used by signCommand on signed Windows runs only (see setup step);
+          # gated to the Windows leg (least privilege).
+          AZURE_CLIENT_ID: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_CLIENT_SECRET || '' }}
+          AZURE_TENANT_ID: ${{ matrix.platform == 'windows-latest' && secrets.AZURE_TENANT_ID || '' }}
         with:
           tauriScript: pnpm tauri
           tagName: v__VERSION__
@@ -352,7 +355,12 @@ jobs:
           DMG="$(find "$TARGET_DIR/universal-apple-darwin/release/bundle/dmg" -maxdepth 1 -name '*.dmg' | head -1)"
           test -n "$DMG"
           xcrun stapler validate "$DMG"
-          xcrun stapler validate "${TARGET_DIR}/ct"
+          # Bare Mach-O can never hold a staple — `stapler validate` would
+          # always fail (the ct build step notarizes via `notarytool submit
+          # --wait`, which IS the gate). Verify the signature + authority.
+          ct_info="$(codesign -dv "${TARGET_DIR}/ct" 2>&1)"
+          grep -q 'Developer ID Application' <<<"$ct_info"
+          codesign --verify --strict --verbose=2 "${TARGET_DIR}/ct"
 
       - name: Verify Windows signatures
         if: matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true'
@@ -369,7 +377,7 @@ jobs:
         if: always() && matrix.platform == 'macos-latest'
         run: |
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
-          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/cert.p12"
 
       - name: Upload ct release asset
         if: github.ref_type == 'tag'
@@ -389,11 +397,13 @@ jobs:
           fi
 
   publish-release:
-    # The release is created as a DRAFT by tauri-action above and flips to
-    # public only after EVERY matrix leg built, verified, and uploaded — a
-    # silently unsigned/invalid artifact fails its leg and the release stays
-    # draft (docs/release-signing.md gate promise). GITHUB_REF_NAME is the tag
-    # on this trigger, which is also the release tag tauri-action used.
+    # The release is created as a DRAFT — by semantic-release (`draftRelease:
+    # true` in .releaserc.json) on the main release path, or by tauri-action
+    # (releaseDraft: true above) on a human-pushed tag — and flips to public
+    # only after EVERY matrix leg built, verified, and uploaded. A silently
+    # unsigned/invalid artifact fails its leg and the release stays draft
+    # (docs/release-signing.md gate promise). GITHUB_REF_NAME is the tag on
+    # this trigger, which is also the release tag.
     needs: publish-tauri
     if: github.ref_type == 'tag' && success()
     runs-on: ubuntu-latest

@@ -3,7 +3,11 @@
 `build.yml` signs release builds on tag runs. Each platform's signing switches
 on only when its secrets exist, so the pipeline keeps producing unsigned
 builds until the accounts below are set up. Once a platform is configured, a
-verify step fails the release if any artifact comes out unsigned.
+verify step fails the release if any artifact comes out unsigned. The release
+is created as a DRAFT — semantic-release (`draftRelease: true`) on the main
+path, `tauri-action` on a human-pushed tag — and the `publish-release` job
+flips it public only after every build leg verified and uploaded, so a failure
+leaves a draft, never a public unsigned release.
 
 | Platform | What gets signed | How |
 |---|---|---|
