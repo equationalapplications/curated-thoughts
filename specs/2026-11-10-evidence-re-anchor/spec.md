@@ -65,16 +65,16 @@ per ITEM too — a live sibling must not orphan recoverable provenance.
 
 ## 5. Idempotency and the report
 
-A `ReAnchorReport` (WIP fields, adjudicated):
+A `ReanchorReport` (WIP fields, adjudicated):
 
 - `items_reanchored` — dead hashes rewritten to the matched current chunk (flag cleared when the whole entry grounds);
-- `items_ambiguous` — multi-match candidates, left flagged, named by id in stdout;
-- `items_unresolved` — still anchorless, left flagged for the existing regrade flow (NOT exported here; regrade owns export-then-purge);
+- `items_ambiguous` — multi-match candidates, left flagged, named by id on **stderr** (printed on the apply path);
+- `items_unresolved` — still anchorless, left flagged for the existing regrade flow (NOT exported here; regrade owns export-then-purge), also named by id on **stderr** on the apply path;
 - `items_hash_mismatch` — chunker drift, skipped;
-- `entries_already_anchored` — re-run no-ops;
-- `entries_race_skipped` — concurrent mutation detected under the lock; re-run converges.
+- `entries_already_anchored` — rows already grounding; a stale `unanchored = 1` flag is cleared inside the apply transaction (verified under the lock via the grounding contract);
+- `entries_race_skipped` — concurrent mutation (json drift, lost grounding, or a rewritten chunk vanishing) detected under the lock; re-run converges.
 
-All UPDATEs are idempotent; re-running converges. Soft-deleted stock is never touched — the 90-day prune owns it (regrade invariant).
+All UPDATEs are idempotent; re-running converges — and a converged `--yes` writes nothing and takes no snapshot. Soft-deleted stock is never touched — the 90-day prune owns it (regrade invariant).
 
 ## 6. Testing posture
 

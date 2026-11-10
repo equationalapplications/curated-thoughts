@@ -170,6 +170,7 @@ pub fn re_anchor(
             } else {
                 // No anchor of either kind: unresolvable item.
                 report.items_unresolved += 1;
+                report.items_flagged_detail.push((entry_id.clone(), "unresolved"));
                 continue;
             }
 
@@ -270,7 +271,13 @@ pub fn re_anchor(
                 |r| r.get(0),
             )
             .optional()?;
-        if current.as_deref() == Some(snapshot_json.as_str()) {
+        // Snapshot compare alone is not enough (CodeRabbit/Gemini punch list):
+        // a concurrent re-ingest can delete the grounding chunks WITHOUT
+        // touching evidence_json. The row must still ground under the lock
+        // before its stale flag is cleared.
+        let json_unchanged = current.as_deref() == Some(snapshot_json.as_str());
+        let still_grounded = json_unchanged && evidence_has_live_chunk(&tx, snapshot_json)?;
+        if json_unchanged && still_grounded {
             tx.execute(
                 "UPDATE librarian_evidence SET unanchored = 0 WHERE entry_id = ?1",
                 [entry_id],

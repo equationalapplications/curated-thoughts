@@ -309,12 +309,15 @@ enum EvidenceCmd {
     },
     /// Re-anchor dead evidence hashes to current chunks by quote-text match.
     /// Recovery for boundary-shift orphaning (hash binds text+path+position):
-    /// a quote that survives verbatim in exactly one current chunk gets its
-    /// content_hash/chunk_id rewritten and, if the row grounds, its
-    /// `unanchored` flag cleared — pulling entries back from the nightly
-    /// heal's soft-delete path. Rows are only UPDATED, never deleted, but it
-    /// is still a brain write: without --yes it prints the dry-run summary
-    /// only.
+    /// the quote and chunks are NORMALIZED (case, whitespace, punctuation);
+    /// the full normalized quote living in exactly one current chunk anchors
+    /// there, else a >=60-char normalized prefix match is used with the
+    /// quote's tail breaking ties — unresolved ties stay flagged, never
+    /// guessed. The content_hash/chunk_id are rewritten and, if the row
+    /// grounds, its `unanchored` flag cleared — pulling entries back from
+    /// the nightly heal's soft-delete path. Rows are only UPDATED, never
+    /// deleted, but it is still a brain write: without --yes it prints the
+    /// dry-run summary only.
     ReAnchor {
         /// Confirm the write (hash rewrite + flag clears).
         #[arg(long)]
