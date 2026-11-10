@@ -1,3 +1,10 @@
+## [3.11.3](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.2...v3.11.3) (2026-11-10)
+
+### Bug Fixes
+
+* **wisdom:** probe both key forms so legacy relative-keyed deposits stay visible ([#325](https://github.com/equationalapplications/curated-thoughts/issues/325) review) ([29775e7](https://github.com/equationalapplications/curated-thoughts/commit/29775e7f1fc38a88b96e8df717c8e41daf4ab94a))
+* **wisdom:** status probes use the canonical deposit key; failed outranks chunked ([#325](https://github.com/equationalapplications/curated-thoughts/issues/325)) ([e5601b5](https://github.com/equationalapplications/curated-thoughts/commit/e5601b598c05082a0a72499891f094160053d059))
+
 ## [3.11.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.1...v3.11.2) (2026-11-09)
 
 ### Bug Fixes
