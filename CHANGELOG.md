@@ -1,3 +1,9 @@
+## [3.11.5](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.4...v3.11.5) (2026-11-10)
+
+### Dependencies
+
+* **deps:** adopt [@equationalapplications](https://github.com/equationalapplications) llm-wiki 8.0.2 (behavior-preserving pins) ([4bf9443](https://github.com/equationalapplications/curated-thoughts/commit/4bf94432c739bde2b997266e7902bec458e22021)), closes [#252-era](https://github.com/equationalapplications/curated-thoughts/issues/252-era)
+
 ## [3.11.4](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.3...v3.11.4) (2026-11-10)
 
 ### Bug Fixes
