@@ -15,7 +15,7 @@ Windows legs where `WIN_SIGNING` is true.
 
 | Platform | What gets signed | How |
 |---|---|---|
-| macOS | `.app` (+ bundled MCP sidecar), `.dmg`, `ct` CLI | Developer ID Application cert, hardened runtime, notarized via App Store Connect API key; the app is stapled |
+| macOS | `.app` (+ bundled MCP sidecar), `.dmg`, `ct` CLI | Developer ID Application cert, hardened runtime, notarized via App Store Connect API key; the app is stapled. The `.dmg` is codesigned, not stapled (Tauri bundler behavior) — the stapled ticket rides on the `.app` inside |
 | Windows | app exe, MCP sidecar, `.msi`, NSIS `.exe`, `ct.exe` | Azure Artifact Signing via `artifact-signing-cli` (Tauri `signCommand`) |
 | Linux | — | Nothing to sign for GitHub Releases; Flathub and the Snap Store sign on their side |
 

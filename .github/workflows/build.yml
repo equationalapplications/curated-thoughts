@@ -254,7 +254,11 @@ jobs:
           # Spec :38-41 — every archive carries a short README alongside the binary.
           printf 'ct: the Curated Thoughts headless CLI. See the repo README for usage.\n' > README.txt
           if [ "${EXT}" = "zip" ]; then
-            pwsh -NoProfile -Command "Compress-Archive -Path '${TARGET_DIR}/release/ct.exe','README.txt' -DestinationPath '${ASSET}'"
+            # NO archive here (sonnet-high BLOCKER): ct.exe is signed by the
+            # NEXT step, and the zip must carry the SIGNED binary — packaging
+            # happens in "Package Windows ct CLI" after signing. Stage the
+            # README next to the exe for that step.
+            cp README.txt "${TARGET_DIR}/release/README.txt"
           else
             # Copy next to the binary so tar needs a single -C (OLDPWD is
             # unset under `set -u` when bash never cd'd — unbound-variable
@@ -285,6 +289,20 @@ jobs:
           artifact-signing-cli -e "$AZURE_SIGNING_ENDPOINT" -a "$AZURE_SIGNING_ACCOUNT" -c "$AZURE_SIGNING_PROFILE" \
             -d "Curated Thoughts MCP server" \
             src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe
+
+      - name: Package Windows ct CLI
+        # AFTER signing, so the zip carries the SIGNED ct.exe (sonnet-high
+        # BLOCKER: the old zip was built before the sign step and shipped the
+        # unsigned binary while the on-disk verify checked the signed one).
+        # Runs on unsigned runs too — packaging is not a signing concern.
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          ASSET="ct_${{ steps.ctver.outputs.version }}_windows_amd64.zip"
+          test -f "${TARGET_DIR}/release/README.txt"
+          pwsh -NoProfile -Command "Compress-Archive -Path '${TARGET_DIR}/release/ct.exe','${TARGET_DIR}/release/README.txt' -DestinationPath '${ASSET}'"
 
       - name: Build ct CLI (macOS universal)
         if: matrix.platform == 'macos-latest'
@@ -367,7 +385,13 @@ jobs:
           # (docs/release-signing.md table) — verify them, don't trust.
           DMG="$(find "$TARGET_DIR/universal-apple-darwin/release/bundle/dmg" -maxdepth 1 -name '*.dmg' | head -1)"
           test -n "$DMG"
-          xcrun stapler validate "$DMG"
+          # The bundler CODESIGNS the dmg but never staples it (tauri v2.12.5
+          # dmg/mod.rs) — the stapled ticket rides on the .app inside, which IS
+          # stapled before dmg creation (app.rs notarize()). `stapler validate`
+          # on the dmg would fail every signed release; verify sig+authority.
+          dmg_info="$(codesign -dv "$DMG" 2>&1)"
+          grep -q 'Developer ID Application' <<<"$dmg_info"
+          codesign --verify --strict --verbose=2 "$DMG"
           # Bare Mach-O can never hold a staple — `stapler validate` would
           # always fail (the ct build step notarizes via `notarytool submit
           # --wait`, which IS the gate). Verify the signature + authority.
