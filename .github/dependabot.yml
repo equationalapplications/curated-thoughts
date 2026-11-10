@@ -94,6 +94,30 @@ updates:
       # deliberate decision to drop those distros. See closed PR #138.
       - dependency-name: "fastembed"
         update-types: ["version-update:semver-major"]
+      # Tauri crate minors must stay aligned with the @tauri-apps/* npm
+      # minors: `pnpm tauri build` refuses a version mismatch, and the npm
+      # ecosystem above IGNORES @tauri-apps/* major+minor bumps, so a cargo
+      # group bump of the tauri crate desynchronizes the pair and breaks the
+      # release build with no npm-side counterpart. This happened twice:
+      # the v3.10.3 build broke after the 2026-10-29 minor-and-patch group
+      # (re-pinned via PR #301, npm ignore added), and v3.11.1-v3.11.3 built
+      # no installers after the 2026-11-09 group moved `tauri` to 2.12.5
+      # while @tauri-apps/api stayed on 2.11.1 (re-pinned together with this
+      # ignore). Bump these ONLY alongside the matching @tauri-apps/api
+      # minor. Major+minor are ignored; patch updates keep the major.minor
+      # alignment (and are how security fixes arrive) so they stay available.
+      - dependency-name: "tauri"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      - dependency-name: "tauri-build"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      - dependency-name: "tauri-plugin-*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
     groups:
       minor-and-patch:
         update-types:
