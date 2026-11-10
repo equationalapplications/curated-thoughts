@@ -385,6 +385,18 @@ export function makeWikiOptions(
     config: {
       hybridWeight: 0.7,
       preFilterLimit: 50,
+      // Behavior pin (spec 2026-11-10-llm-wiki-8-bump): 8.0.0 flipped the
+      // engine defaults to `librarian: { strategy: 'ops' }` and
+      // `maintenance: 'deferred'` — under `'deferred'`, write() only
+      // records events and nothing is extracted or healed until the host
+      // calls `runPendingMaintenance()`. CT keeps the 7.13.0 behavior this
+      // app was built against; adopting ops/deferred is a separate spec
+      // (needs runPendingMaintenance wiring + benchmark gates). Never pair
+      // 'deferred' with 'legacy' without that wiring: the legacy strategy
+      // advances the watermark past only the newest ~50 events per pass,
+      // so a bigger deferred backlog is never extracted.
+      librarian: { strategy: "legacy" },
+      maintenance: "auto",
       ontology: classifier.available
         ? { ...ontology, backfillClassifier: "auto", classifyMinConfidence: classifier.min_confidence }
         : ontology,
@@ -416,9 +428,10 @@ let _classifier: ClassifierStatus = CLASSIFIER_OFF;
 let _outboxEnabled = false;
 let _wikiUpdateGeneration = 0;
 
-// --- Keyword-index convergence (core-llm-wiki 7.13.0 host contract) --------
+// --- Keyword-index convergence (core-llm-wiki host contract; introduced
+// 7.13.0, reverified on 8.0.2) ------------------------------------------
 //
-// 7.13.0 bounds FTS (re)build work per setup()/syncSearchIndex() quantum
+// The engine bounds FTS (re)build work per setup()/syncSearchIndex() quantum
 // (config.setupBudgetMs, default 1500 ms). On an existing vault the first open
 // can leave the index "rebuilding"; until it converges, keyword search is
 // unavailable (WikiSearchUnavailableError) — which degrades embed-fallback
@@ -504,7 +517,8 @@ async function rebuildWiki(): Promise<void> {
   await updatedWiki.setup();
   if (gen !== _wikiUpdateGeneration) return;
   wiki = updatedWiki;
-  // core-llm-wiki 7.13.0 host contract: converge a rebuilding FTS index after
+  // core-llm-wiki host contract (introduced 7.13.0, reverified 8.0.2):
+  // converge a rebuilding FTS index after
   // the bounded setup quantum (see scheduleSearchIndexCatchup).
   scheduleSearchIndexCatchup(updatedWiki);
   if (typeof window !== 'undefined') {
@@ -565,7 +579,8 @@ export async function setupWiki() {
   }
   if (_wikiUpdateGeneration === genAtStart) {
     wiki = newWiki;
-    // core-llm-wiki 7.13.0 host contract: converge a rebuilding FTS index
+    // core-llm-wiki host contract (introduced 7.13.0, reverified 8.0.2):
+    // converge a rebuilding FTS index
     // after the bounded setup quantum (see scheduleSearchIndexCatchup). A
     // superseded instance is owned by rebuildWiki, which schedules its own.
     scheduleSearchIndexCatchup(newWiki);

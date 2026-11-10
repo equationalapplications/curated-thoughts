@@ -404,6 +404,18 @@ describe('makeWikiOptions classifier wiring', () => {
   });
 });
 
+describe('makeWikiOptions engine-default pins (llm-wiki 8.0.2 bump)', () => {
+  it('pins librarian and maintenance so the 8.0.0 default flip cannot leak in', () => {
+    // spec 2026-11-10-llm-wiki-8-bump: engine 8.0.0 changed the defaults to
+    // librarian 'ops' and maintenance 'deferred'. An unpinned config would
+    // silently stop write()-time extraction and heal — this assertion is
+    // the tripwire; remove it only when the ops/deferred adoption spec lands.
+    const opts = makeWikiOptions(false, 'schema-org');
+    expect(opts.config?.librarian).toEqual({ strategy: 'legacy' });
+    expect(opts.config?.maintenance).toBe('auto');
+  });
+});
+
 describe('setupWiki boot gate', () => {
   beforeEach(() => vi.clearAllMocks());
 
