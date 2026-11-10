@@ -78,8 +78,13 @@ pub struct ReanchorReport {
     pub entries_race_skipped: usize,
     /// Path of the pre-write `VACUUM INTO` snapshot taken on the apply path
     /// (spec §4: before the FIRST write, flag clears included). `None` on
-    /// dry runs and in-memory tests.
+    /// dry runs, in-memory tests, and converged brains (no write, no
+    /// snapshot).
     pub backup_path: Option<String>,
+    /// Items left flagged, as `(entry_id, kind)` where kind is `"ambiguous"`
+    /// or `"unresolved"` — printed by the CLI so an operator can name the
+    /// adjudication queue (spec §5).
+    pub items_flagged_detail: Vec<(String, &'static str)>,
 }
 
 /// Match (and optionally apply) quote-text re-anchors for the live unanchored
@@ -95,30 +100,33 @@ pub fn re_anchor(
 
     // 1. ALL live evidence rows — the doom condition is a hash that resolves
     //    to no chunk, not the writer-era `unanchored` flag (the live brain's
-    //    flag stock is empty; gating on it would scan nothing). Soft-deleted
-    //    stock is prune's business and is excluded by the join.
+    //    flag stock was empty; gating the SCAN on it would repair nothing).
+    //    The flag value travels along only to decide whether a grounded row
+    //    needs its stale flag cleared (sonnet delta review: pushing every
+    //    grounded row into the write set made `--yes` snapshot and no-op-write
+    //    on every run, and the snapshots were never pruned).
     let mut stmt = conn.prepare(
-        "SELECT le.entry_id, le.evidence_json
+        "SELECT le.entry_id, le.evidence_json, le.unanchored
            FROM librarian_evidence le
            JOIN llm_wiki_entries e ON e.id = le.entry_id
           WHERE e.deleted_at IS NULL",
     )?;
-    let flagged: Vec<(String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let live_rows: Vec<(String, String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    report.entries_examined = flagged.len();
+    report.entries_examined = live_rows.len();
 
     // 2. Match phase (read-only): per dead item, quote-match current chunks.
     //    Each candidate carries its matching-time snapshot json so the apply
     //    transaction can re-verify the row under the lock (swap-race rule).
     //    The normalized-text chunk index is built once for the whole pass.
     let chunk_index = load_chunk_index(conn)?;
-    let mut candidates: Vec<(String, String, String, bool)> = Vec::new(); // (entry_id, snapshot_json, new_json, would_ground)
-    // Grounded rows carrying a stale `unanchored` flag: cleared inside the
-    // apply transaction behind the SAME snapshot compare as hash rewrites
-    // (review: flag writes must not bypass the swap-race rule).
+    let mut candidates: Vec<(String, String, String, bool, bool)> = Vec::new(); // (entry_id, snapshot_json, new_json, would_ground, grounded)
+    // Grounded rows carrying a STALE `unanchored = 1` flag: cleared inside
+    // the apply transaction behind the SAME snapshot compare as hash
+    // rewrites (flag writes must not bypass the swap-race rule).
     let mut flag_clears: Vec<(String, String)> = Vec::new();
-    for (entry_id, evidence_json) in flagged {
+    for (entry_id, evidence_json, unanchored_flag) in live_rows {
         let Ok(mut value) = serde_json::from_str::<Value>(&evidence_json) else {
             continue;
         };
@@ -173,14 +181,17 @@ pub fn re_anchor(
                 .unwrap_or("");
             if quote.is_empty() {
                 report.items_unresolved += 1;
+                report.items_flagged_detail.push((entry_id.clone(), "unresolved"));
                 continue;
             }
             match match_quote_prefix(conn, &chunk_index, quote)? {
                 QuoteMatch::None => {
                     report.items_unresolved += 1;
+                    report.items_flagged_detail.push((entry_id.clone(), "unresolved"));
                 }
                 QuoteMatch::Ambiguous => {
                     report.items_ambiguous += 1;
+                    report.items_flagged_detail.push((entry_id.clone(), "ambiguous"));
                 }
                 QuoteMatch::HashMismatch => {
                     report.items_hash_mismatch += 1;
@@ -207,7 +218,12 @@ pub fn re_anchor(
         if !changed {
             if grounded {
                 report.entries_already_anchored += 1;
-                flag_clears.push((entry_id, evidence_json));
+                // Queue a clear ONLY for a genuinely stale flag — a grounded
+                // row with unanchored = 0 must stay out of the write set, or
+                // every converged `--yes` run would snapshot a no-op pass.
+                if unanchored_flag != 0 {
+                    flag_clears.push((entry_id, evidence_json));
+                }
             } else {
                 report.entries_still_unanchored += 1;
             }
@@ -221,7 +237,7 @@ pub fn re_anchor(
         } else {
             report.entries_still_unanchored += 1;
         }
-        candidates.push((entry_id, evidence_json, new_json, would_ground));
+        candidates.push((entry_id, evidence_json, new_json, would_ground, grounded));
     }
 
     if !apply {
@@ -263,7 +279,7 @@ pub fn re_anchor(
             report.entries_race_skipped += 1;
         }
     }
-    for (entry_id, snapshot_json, new_json, would_ground) in &candidates {
+    for (entry_id, snapshot_json, new_json, would_ground, grounded) in &candidates {
         let current: Option<String> = tx
             .query_row(
                 "SELECT evidence_json FROM librarian_evidence WHERE entry_id = ?1",
@@ -273,6 +289,51 @@ pub fn re_anchor(
             .optional()?;
         match current {
             Some(cur) if &cur == snapshot_json => {
+                // In-transaction chunk re-check (sonnet delta): a re-ingest
+                // between matching and apply must not leave a REWRITTEN
+                // anchor pointed at a chunk that no longer exists. Only
+                // hashes this pass CHANGED are verified — unresolved items
+                // legitimately keep their (dead) hashes.
+                let Ok(old_value) = serde_json::from_str::<Value>(snapshot_json) else {
+                    report.entries_race_skipped += 1;
+                    continue;
+                };
+                let Ok(live_value) = serde_json::from_str::<Value>(new_json) else {
+                    report.entries_race_skipped += 1;
+                    continue;
+                };
+                let mut chunk_gone = false;
+                if let (Some(old_items), Some(new_items)) = (
+                    old_value.get("evidence").and_then(|v| v.as_array()),
+                    live_value.get("evidence").and_then(|v| v.as_array()),
+                ) {
+                    for (old_i, new_i) in old_items.iter().zip(new_items.iter()) {
+                        let old_h = old_i.get("content_hash").and_then(|v| v.as_str());
+                        let new_h = new_i.get("content_hash").and_then(|v| v.as_str());
+                        if old_h == new_h {
+                            continue;
+                        }
+                        if let Some(h) = new_h.filter(|s| !s.is_empty()) {
+                            let live: bool = tx.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM chunks WHERE content_hash = ?1)",
+                                [h],
+                                |r| r.get(0),
+                            )?;
+                            if !live {
+                                chunk_gone = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if chunk_gone {
+                    report.entries_race_skipped += 1;
+                    if !grounded && *would_ground {
+                        report.entries_regrounded = report.entries_regrounded.saturating_sub(1);
+                        report.entries_still_unanchored += 1;
+                    }
+                    continue;
+                }
                 let unanchored = if *would_ground { 0 } else { 1 };
                 tx.execute(
                     "UPDATE librarian_evidence
@@ -283,7 +344,9 @@ pub fn re_anchor(
             }
             _ => {
                 report.entries_race_skipped += 1;
-                if *would_ground {
+                // Grounded rows stay factually grounded on a race-skip — only
+                // the was-ungrounded-now-grounded counters roll back.
+                if !grounded && *would_ground {
                     report.entries_regrounded = report.entries_regrounded.saturating_sub(1);
                     report.entries_still_unanchored += 1;
                 }
@@ -432,12 +495,18 @@ fn chunk_hash_inputs(
 }
 
 /// Match `quote` against the current chunks in two tiers (spec §3, both Kurt
-/// adjudications harmonized): the FULL normalized quote contained in exactly
-/// one chunk anchors at any length (round-1 ruling: verbatim containment of
-/// the whole quote is real provenance, never a guess); otherwise a ≥60-char
-/// normalized PREFIX, narrowed by the normalized SUFFIX when several chunks
-/// share it. Uniqueness counts ALL textual candidates BEFORE the drift gate —
-/// a drifted sibling makes a match ambiguous, never silently anchorable. The
+/// adjudications harmonized):
+///
+/// - **Tier 1 — full-quote containment (any length).** The FULL normalized
+///   quote inside exactly one chunk anchors (round-1 ruling: verbatim
+///   containment of the whole quote is real provenance, never a guess);
+///   contained in several chunks → ambiguous (the suffix adds nothing there).
+/// - **Tier 2 — ≥60-char normalized prefix**, for long quotes that no longer
+///   fit any chunk, narrowed by the normalized SUFFIX when several chunks
+///   share the prefix.
+///
+/// Uniqueness counts ALL textual candidates BEFORE the drift gate — a drifted
+/// sibling makes the match ambiguous, never silently anchorable. The
 /// surviving candidate's stored hash must equal the recomputed hash
 /// (chunker-drift guard); the anchor carries the RECOMPUTED hash, never the
 /// row's stored value.
@@ -450,13 +519,30 @@ fn match_quote_prefix(
     if qn.is_empty() {
         return Ok(QuoteMatch::None);
     }
+
+    // Tier 1: full normalized quote in exactly one chunk — any length.
+    let mut full: Vec<&ChunkIndexRow> = index
+        .rows
+        .iter()
+        .filter(|r| r.norm.contains(qn.as_str()))
+        .collect();
+    if full.len() == 1 {
+        return drift_checked(conn, full.remove(0));
+    }
+    if full.len() > 1 {
+        // Every full-match also contains any prefix/suffix of the quote, so
+        // the prefix tier can never separate them — refuse now.
+        return Ok(QuoteMatch::Ambiguous);
+    }
+
+    // Tier 2: >=60-char normalized prefix, suffix-narrowed.
     let prefix = normalized_prefix(&qn);
     let suffix = normalized_suffix(&qn);
 
     // Textual candidates by normalized prefix (distinct chunk ids).
     let mut candidates: Vec<&ChunkIndexRow> = Vec::new();
     for row in &index.rows {
-        if row.norm.contains(&prefix) && !candidates.iter().any(|c| c.id == row.id) {
+        if row.norm.contains(prefix.as_str()) && !candidates.iter().any(|c| c.id == row.id) {
             candidates.push(row);
         }
     }
@@ -485,19 +571,26 @@ fn match_quote_prefix(
             None => return Ok(QuoteMatch::Ambiguous),
         }
     };
-    let Some((text, position, path)) = chunk_hash_inputs(conn, survivor.id)? else {
+    drift_checked(conn, survivor)
+}
+
+/// The drift gate on a single surviving candidate: the stored hash must
+/// reproduce from the chunk's CURRENT text + path + position; the anchor
+/// carries the recomputed hash.
+fn drift_checked(conn: &Connection, row: &ChunkIndexRow) -> Result<QuoteMatch> {
+    let Some((text, position, path)) = chunk_hash_inputs(conn, row.id)? else {
         return Ok(QuoteMatch::None);
     };
     let recomputed = compute_chunk_hash(&text, &path, position as usize);
-    if recomputed != survivor.stored_hash {
+    if recomputed != row.stored_hash {
         return Ok(QuoteMatch::HashMismatch);
     }
     let mut stmt = conn.prepare("SELECT start_line, end_line FROM chunks WHERE id = ?1")?;
-    let (start_line, end_line) = stmt.query_row([survivor.id], |r| {
+    let (start_line, end_line) = stmt.query_row([row.id], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
     })?;
     Ok(QuoteMatch::One(MatchedChunk {
-        chunk_id: survivor.id,
+        chunk_id: row.id,
         content_hash: recomputed,
         start_line,
         end_line,
@@ -1100,6 +1193,15 @@ mod tests {
         let b = apply.backup_path.expect("apply must snapshot first");
         assert!(dir.path().join(&b).exists(), "snapshot lands beside the db");
         assert_eq!(backups().len(), 1, "exactly one snapshot");
+
+        // Converged re-apply: the row now grounds with unanchored = 0, so it
+        // must stay OUT of the write set — no second snapshot, no backup
+        // growth, no race-skips (sonnet delta review).
+        let again = re_anchor(&conn, true, Some(&db_path)).unwrap();
+        assert_eq!(again.items_reanchored, 0);
+        assert!(again.backup_path.is_none(), "converged apply takes no snapshot");
+        assert!(again.entries_race_skipped == 0);
+        assert_eq!(backups().len(), 1, "no backup growth on a converged apply");
     }
 }
 
