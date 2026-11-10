@@ -1688,6 +1688,56 @@ pub fn evidence_regrade_cmd(yes: bool, allow_bulk: bool) -> Result<i32> {
 }
 
 // ---------------------------------------------------------------------------
+// `ct evidence re-anchor` — quote-text recovery for boundary-shift orphaned
+// evidence hashes. Non-destructive by construction (rows are UPDATED, never
+// deleted; no breaker interaction) but still a brain write, so it follows the
+// regrade gating convention: without --yes, a dry-run summary and exit 1.
+// ---------------------------------------------------------------------------
+
+/// `ct evidence re-anchor` — re-anchor dead evidence hashes to current chunks.
+pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
+    let brain = crate::write::resolve()?;
+    if !yes {
+        let conn = crate::write::open_ro(&brain)?;
+        let report = tauri_app_lib::db::evidence_reanchor::re_anchor(&conn, false)?;
+        eprintln!(
+            "refusing: `ct evidence re-anchor` would rewrite evidence hashes in {} \
+             (a brain write). Dry-run: examined={} already_anchored={} dead_items={} \
+             reanchored={} ambiguous={} unresolved={} hash_mismatch={} \
+             regrounded={} still_unanchored={}. Pass --yes to apply.",
+            brain.paths.db_path.display(),
+            report.entries_examined,
+            report.entries_already_anchored,
+            report.items_dead,
+            report.items_reanchored,
+            report.items_ambiguous,
+            report.items_unresolved,
+            report.items_hash_mismatch,
+            report.entries_regrounded,
+            report.entries_still_unanchored
+        );
+        return Ok(1);
+    }
+    let conn = crate::write::open_rw(&brain)?;
+    let report = tauri_app_lib::db::evidence_reanchor::re_anchor(&conn, true)?;
+    println!(
+        "[ct::reanchor] entries_examined={} already_anchored={} reanchored_items={} \
+         ambiguous={} unresolved={} hash_mismatch={} regrounded={} still_unanchored={} \
+         race_skipped={}",
+        report.entries_examined,
+        report.entries_already_anchored,
+        report.items_reanchored,
+        report.items_ambiguous,
+        report.items_unresolved,
+        report.items_hash_mismatch,
+        report.entries_regrounded,
+        report.entries_still_unanchored,
+        report.entries_race_skipped
+    );
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
 // hvg Task 5: `ct proposals review` — the interactive review loop
 // ---------------------------------------------------------------------------
 

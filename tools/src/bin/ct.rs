@@ -307,6 +307,19 @@ enum EvidenceCmd {
         #[arg(long, requires = "yes")]
         allow_bulk: bool,
     },
+    /// Re-anchor dead evidence hashes to current chunks by quote-text match.
+    /// Recovery for boundary-shift orphaning (hash binds text+path+position):
+    /// a quote that survives verbatim in exactly one current chunk gets its
+    /// content_hash/chunk_id rewritten and, if the row grounds, its
+    /// `unanchored` flag cleared — pulling entries back from the nightly
+    /// heal's soft-delete path. Rows are only UPDATED, never deleted, but it
+    /// is still a brain write: without --yes it prints the dry-run summary
+    /// only.
+    ReAnchor {
+        /// Confirm the write (hash rewrite + flag clears).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -737,6 +750,7 @@ fn run(cmd: Cmd) -> Result<i32> {
             EvidenceCmd::Regrade { yes, allow_bulk } => {
                 cli_common::evidence_regrade_cmd(yes, allow_bulk)
             }
+            EvidenceCmd::ReAnchor { yes } => cli_common::evidence_reanchor_cmd(yes),
         },
         Cmd::Proposals { cmd } => match cmd {
             ProposalsCmd::List { json } => proposals_list(json),
@@ -1427,6 +1441,21 @@ mod tests {
         assert!(
             Ct::try_parse_from(["ct", "evidence", "regrade", "--allow-bulk"]).is_err(),
             "regrade --allow-bulk must require --yes"
+        );
+
+        // re-anchor gains --yes; it is a write so the flag is the only gate.
+        let parsed = Ct::try_parse_from(["ct", "evidence", "re-anchor", "--yes"])
+            .expect("evidence re-anchor --yes must parse");
+        let Cmd::Evidence {
+            cmd: EvidenceCmd::ReAnchor { yes },
+        } = parsed.cmd
+        else {
+            unreachable!("expected EvidenceCmd::ReAnchor");
+        };
+        assert!(yes);
+        assert!(
+            Ct::try_parse_from(["ct", "evidence", "re-anchor"]).is_ok(),
+            "re-anchor without --yes must parse (dry-run default)"
         );
     }
 }
