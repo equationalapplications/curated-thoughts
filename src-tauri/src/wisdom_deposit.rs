@@ -252,6 +252,60 @@ pub(crate) fn set_kick_state(
     Ok(())
 }
 
+/// Resolve a configured vault root into the two absolute spellings
+/// [`deposit_doc_key_forms`] probes: the CANONICAL form (symlinks resolved;
+/// `None` when the root is not on disk) and the VIRTUAL form
+/// (`std::path::absolute` — a pure string operation, no syscall). Resolve
+/// ONCE per caller and reuse across rows: the canonical leg is a
+/// `canonicalize` syscall, never one per ledger row (#325 review).
+fn deposit_root_forms(
+    vault_root: Option<&std::path::Path>,
+) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+    (
+        vault_root.and_then(|r| r.canonicalize().ok()),
+        vault_root.and_then(|r| std::path::absolute(r).ok()),
+    )
+}
+
+/// #325: every `documents.path` key form one deposit's document row can
+/// carry, deduped, for the vault-relative ledger handle `rel`:
+///
+/// - the vault-relative handle itself (pre-B1 legacy rows; V22 rewrites
+///   only canonical-root-prefixed rows and leaves rows outside both roots
+///   alone, D2b);
+/// - the CANONICAL-root form the kick stages (`virtual_path_key_at_root`,
+///   B1 round 2) — pass the canonicalized root from
+///   [`deposit_root_forms`];
+/// - the VIRTUAL absolute form the watcher/walker stage
+///   (`virtual_path_key(&abs)`, issue #204). It equals the canonical form
+///   unless the CONFIGURED root itself contains a symlink (macOS
+///   `/var` → `/private/var` — the shape `enqueue_vault_event`
+///   canonicalizes its containment root for), in which case the watcher's
+///   row is keyed under the configured spelling and a canonical-only
+///   probe misses it.
+///
+/// Extra forms are harmless: `IN`/set membership dedupes, and each form is
+/// THIS deposit's path under a different root spelling, so it cannot
+/// collide with another document's key.
+fn deposit_doc_key_forms(
+    canonical_root: Option<&std::path::Path>,
+    virtual_root: Option<&std::path::Path>,
+    rel: &str,
+) -> Vec<String> {
+    let mut keys = vec![rel.to_string()];
+    let rel_path = std::path::Path::new(rel);
+    for root in [canonical_root, virtual_root].into_iter().flatten() {
+        // `virtual_path_key` = `std::path::absolute` — string-only for the
+        // absolute roots passed here, so this is not a per-row syscall.
+        if let Ok(k) = crate::db::queue::virtual_path_key(&root.join(rel_path)) {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+    }
+    keys
+}
+
 /// Status probe: librarian evidence linked to THIS document via
 /// proposal sources → documents (the V18 doc link; `librarian_evidence`
 /// carries no path of its own).
@@ -262,21 +316,26 @@ pub(crate) fn deposit_status_row(
 ) -> Result<Value> {
     // #325: the kick stages documents under the CANONICAL absolute key
     // (`virtual_path_key_at_root`, B1 round 2) while this handle stays
-    // vault-relative for the ledger. Probe documents/chunks/evidence with
-    // the SAME canonical key the kick wrote — the relative handle misses
-    // both probes and a processed deposit reads `pending` forever. Without
-    // a resolvable root (no vault configured, root vanished) fall back to
-    // the relative handle — the pre-#325 behavior — rather than failing
-    // the whole status read; the ledger fields still surface.
-    let probe_key = vault_root
-        .and_then(|root| {
-            crate::db::queue::virtual_path_key_at_root(
-                root,
-                std::path::Path::new(vault_relative_path),
-            )
-            .ok()
-        })
-        .unwrap_or_else(|| vault_relative_path.to_string());
+    // vault-relative for the ledger; the watcher/walker stage the VIRTUAL
+    // absolute form of the configured root (`virtual_path_key(&abs)`,
+    // issue #204); pre-B1 brains hold rows keyed by the relative handle
+    // itself (V22 only rewrites canonical-root-prefixed rows and leaves
+    // rows outside both roots alone, D2b). Probe documents/chunks/evidence
+    // with EVERY form the row can carry — a single-form probe reads
+    // `pending` forever in exactly the regime it misses. Duplicate forms
+    // are harmless (`IN` dedupes), and each form is THIS deposit's path
+    // under a different root spelling, so it cannot collide with another
+    // document.
+    let (canonical_root, virtual_root) = deposit_root_forms(vault_root);
+    let probe_keys = deposit_doc_key_forms(
+        canonical_root.as_deref(),
+        virtual_root.as_deref(),
+        vault_relative_path,
+    );
+    let in_list = (1..=probe_keys.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let kick: Option<(String, Option<String>, i64)> = conn
         .query_row(
             "SELECT state, error, updated_ms FROM deposit_kick_state WHERE path = ?1",
@@ -302,24 +361,22 @@ pub(crate) fn deposit_status_row(
     // proposal resolution (same transaction), so evidence implies the
     // proposal was approved.
     let enrich = column_exists(conn, "llm_wiki_entries", "superseded_by")?;
-    let sql = if enrich {
+    let sql_prefix = if enrich {
         "SELECT e.id, e.tier, e.superseded_by FROM librarian_evidence le
            JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id
            JOIN documents d ON d.id = ps.doc_id
-           JOIN llm_wiki_entries e ON e.id = le.entry_id AND e.deleted_at IS NULL
-          WHERE d.path = ?1"
+           JOIN llm_wiki_entries e ON e.id = le.entry_id AND e.deleted_at IS NULL"
     } else {
         "SELECT e.id, e.tier, NULL FROM librarian_evidence le
            JOIN curated_proposal_sources ps ON ps.proposal_id = le.proposal_id
            JOIN documents d ON d.id = ps.doc_id
-           JOIN llm_wiki_entries e ON e.id = le.entry_id AND e.deleted_at IS NULL
-          WHERE d.path = ?1"
+           JOIN llm_wiki_entries e ON e.id = le.entry_id AND e.deleted_at IS NULL"
     };
     let mut stmt = conn
-        .prepare(sql)
+        .prepare(&format!("{sql_prefix} WHERE d.path IN ({in_list})"))
         .map_err(|e| anyhow!("status probe failed: {e}"))?;
     let facts: Vec<(String, Option<String>, Option<String>)> = stmt
-        .query_map([&probe_key], |r| {
+        .query_map(rusqlite::params_from_iter(probe_keys.iter()), |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .map_err(|e| anyhow!("status probe failed: {e}"))?
@@ -329,10 +386,12 @@ pub(crate) fn deposit_status_row(
     // Pending check for the D6 query shape: chunks exist for this doc?
     let chunked: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM chunks c
-               JOIN documents d ON d.id = c.doc_id
-              WHERE d.path = ?1",
-            [probe_key.as_str()],
+            &format!(
+                "SELECT COUNT(*) FROM chunks c
+                   JOIN documents d ON d.id = c.doc_id
+                  WHERE d.path IN ({in_list})"
+            ),
+            rusqlite::params_from_iter(probe_keys.iter()),
             |r| r.get(0),
         )
         .map_err(|e| anyhow!("chunks probe failed: {e}"))?;
@@ -345,8 +404,8 @@ pub(crate) fn deposit_status_row(
     if kick.is_none() && chunked == 0 {
         let known_doc: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM documents WHERE path = ?1",
-                [probe_key.as_str()],
+                &format!("SELECT COUNT(*) FROM documents WHERE path IN ({in_list})"),
+                rusqlite::params_from_iter(probe_keys.iter()),
                 |r| r.get(0),
             )
             .map_err(|e| anyhow!("documents probe failed: {e}"))?;
@@ -476,9 +535,13 @@ pub(crate) fn register_app_kick(conn: &rusqlite::Connection, rel_path: &str) -> 
 /// flip the ledger row to `failed` with the reason — ONLY while the row
 /// still reads `queued_watcher`, so a newer kick's state (a re-deposit's
 /// `pending`, a second kick's own `failed`) is never clobbered.
-/// `doc_path` is the worker's document path; the ledger row is matched by
-/// deriving each row's key with the same `virtual_path_key_at_root` family
-/// the kick stages under (the ledger itself keeps the relative handle).
+/// `doc_path` is the worker's document path (the VIRTUAL absolute form the
+/// watcher/walker stage, issue #204); the ledger row is matched by deriving
+/// each row's key in EVERY form the deposit's document row can carry
+/// ([`deposit_doc_key_forms`]) — under a symlinked CONFIGURED root the
+/// worker's virtual spelling differs from the canonical form
+/// `virtual_path_key_at_root` produces, and a canonical-only match would
+/// silently never fire. The ledger itself keeps the relative handle.
 /// Returns how many rows were updated (0 or 1).
 pub(crate) fn mark_watcher_lane_synthesis_failed(
     conn: &rusqlite::Connection,
@@ -488,6 +551,9 @@ pub(crate) fn mark_watcher_lane_synthesis_failed(
 ) -> Result<usize> {
     let want = crate::db::queue::virtual_path_key(std::path::Path::new(doc_path))
         .map_err(|e| anyhow!("watcher-lane doc key: {e:#}"))?;
+    // Roots resolved ONCE: the old loop canonicalized the root per ledger
+    // row — a syscall per row.
+    let (canonical_root, virtual_root) = deposit_root_forms(Some(vault_root));
     let mut stmt = conn
         .prepare("SELECT path FROM deposit_kick_state")
         .map_err(|e| anyhow!("kick-state read failed: {e}"))?;
@@ -497,9 +563,9 @@ pub(crate) fn mark_watcher_lane_synthesis_failed(
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| anyhow!("kick-state read failed: {e}"))?;
     let rel = rows.into_iter().find(|rel| {
-        crate::db::queue::virtual_path_key_at_root(vault_root, std::path::Path::new(rel))
-            .map(|k| k == want)
-            .unwrap_or(false)
+        deposit_doc_key_forms(canonical_root.as_deref(), virtual_root.as_deref(), rel)
+            .iter()
+            .any(|k| k == &want)
     });
     match rel {
         Some(rel) => conn
@@ -984,6 +1050,11 @@ async fn deposit_inner(
     ))
 }
 
+/// Agent-facing ingest state for one deposited file (`wisdom_deposit_status`
+/// tool + `ct wisdom status`): live-evidence facts for the document, the
+/// kick-ledger state, and the state machine that reconciles them (INTENT
+/// rule 3). The vault-relative path is the caller's handle; document probes
+/// use the canonical key form the kick stages (see [`deposit_status_row`]).
 pub async fn dispatch_wisdom_deposit_status(
     ctx: &ToolDispatchContext,
     p: WisdomDepositStatusParams,
@@ -1011,6 +1082,10 @@ pub async fn dispatch_wisdom_deposit_status(
     deposit_status_row(&conn, &rel, ctx.vault_dir.as_deref())
 }
 
+/// Read-only list of deposits without LIVE librarian evidence (D6):
+/// everything on the kick ledger whose document has no un-archived fact —
+/// structurally isolated from recall (INTENT rule 3: an ingested fact is
+/// never listed).
 pub async fn dispatch_wisdom_pending(ctx: &ToolDispatchContext) -> Result<Value> {
     let client = ctx.client.clone();
     ctx.with_rw(move |conn| {
@@ -1034,14 +1109,14 @@ pub async fn dispatch_wisdom_pending(ctx: &ToolDispatchContext) -> Result<Value>
     // from recall: separate tool, separate code path.
     //
     // #325: `deposit_kick_state.path` is the vault-RELATIVE handle while
-    // the evidence join yields CANONICAL `documents.path` keys (B1 round
-    // 2), so a single-query `NOT IN` never matched and an ingested deposit
-    // stayed listed forever — INTENT rule 3: "`wisdom_pending` never lists
-    // it." Derive each ledger row's canonical key (the same
-    // `virtual_path_key_at_root` family the kick stages under) and exclude
-    // against the evidence key set. A row whose root cannot be resolved
-    // stays listed: ingest cannot be proven, so pending is the honest
-    // answer.
+    // the evidence join yields absolute `documents.path` keys (canonical
+    // kick form, B1 round 2; virtual watcher form, issue #204), so a
+    // single-query `NOT IN` never matched and an ingested deposit stayed
+    // listed forever — INTENT rule 3: "`wisdom_pending` never lists it."
+    // Derive each ledger row's key in EVERY form its document row can
+    // carry and exclude against the evidence key set. A row whose root
+    // cannot be resolved stays listed: ingest cannot be proven, so pending
+    // is the honest answer.
     let mut evidence_stmt = conn
         .prepare(
             "SELECT DISTINCT d.path FROM librarian_evidence le
@@ -1064,14 +1139,17 @@ pub async fn dispatch_wisdom_pending(ctx: &ToolDispatchContext) -> Result<Value>
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| anyhow!("pending query failed: {e}"))?;
     let mut items = Vec::new();
+    // #325: roots resolved ONCE (the canonical leg is a `canonicalize`
+    // syscall — never per ledger row); each row is then excluded against
+    // EVERY key form its document row can carry (canonical kick form,
+    // virtual watcher form, legacy relative handle — see
+    // [`deposit_doc_key_forms`]).
+    let (canonical_root, virtual_root) = deposit_root_forms(ctx.vault_dir.as_deref());
     for p in paths {
-        let key = ctx.vault_dir.as_deref().and_then(|root| {
-            crate::db::queue::virtual_path_key_at_root(root, std::path::Path::new(&p)).ok()
-        });
-        if let Some(k) = key {
-            if ingested_keys.contains(&k) {
-                continue;
-            }
+        let forms =
+            deposit_doc_key_forms(canonical_root.as_deref(), virtual_root.as_deref(), &p);
+        if forms.iter().any(|k| ingested_keys.contains(k)) {
+            continue;
         }
         // mtime comes from the vault root only: with no configured
         // vault_dir the fallback must NOT stat vault-relative paths against
@@ -3209,6 +3287,216 @@ mod tests {
                 .unwrap();
                 assert_eq!(n, 0, "no ledger row, no write");
             }
+        });
+    }
+
+    /// RED (#325 review): pre-B1 brains can hold document rows keyed by the
+    /// vault-RELATIVE handle — V22 only rewrites canonical-root-prefixed
+    /// rows and deliberately leaves rows outside both roots alone (D2b), so
+    /// a legacy deposit's evidence stays joined to the relative key. The
+    /// canonical probe must not regress those deposits back to
+    /// `pending`/unlisted: both key forms are probed.
+    #[test]
+    fn status_and_pending_still_see_legacy_relative_keyed_deposits() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            let rel = "immutable-source-files/agents/legacy-note.md";
+            // Legacy-era staging: everything keyed by the relative handle.
+            {
+                let conn = ctx.conn.lock().unwrap();
+                conn.execute_batch(
+                    "INSERT INTO llm_wiki_entries (
+                         id, entity_id, title, body, tags, confidence, source_type,
+                         source_hash, source_ref, created_at, updated_at,
+                         last_accessed_at, access_count, deleted_at,
+                         embedding_blob, embedding
+                     ) VALUES ('e1', 'ent1', 't', 'b', '[]', 'inferred',
+                               'librarian_inferred', NULL,
+                               'librarian-abc123def456abc123def456abc12345',
+                               100, 100, NULL, 0, NULL, NULL, NULL);
+                     INSERT INTO librarian_evidence
+                         (entry_id, proposal_id, evidence_json, created_at)
+                         VALUES ('e1', 'p1',
+                                 '{\"quote\":\"q\",\"source_kind\":\"document\"}', 0);
+                     INSERT INTO curated_proposals (id, kind, model, status, created_at)
+                         VALUES ('p1', 'new_entity', 'test', 'approved', 0);",
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO documents (path, hash, tier, status)
+                     VALUES (?1, 'h1', 'user_doc', 'indexed')",
+                    [rel],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO chunks (doc_id, chunk_text, position)
+                     SELECT id, 'body text', 0 FROM documents WHERE path = ?1",
+                    [rel],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+                     VALUES ('p1', (SELECT id FROM documents LIMIT 1), 'evidence')",
+                    [],
+                )
+                .unwrap();
+                set_kick_state(&conn, rel, "ingested", None).unwrap();
+            }
+            // The root IS resolvable here (ctx.vault_dir is configured), so
+            // the relative fallback alone must not be what finds the row.
+            let v = dispatch_wisdom_deposit_status(
+                &ctx,
+                WisdomDepositStatusParams { path: rel.into() },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                v["state"],
+                serde_json::json!("ingested"),
+                "legacy relative-keyed evidence must stay visible: {v}"
+            );
+            assert_eq!(v["facts"].as_array().unwrap().len(), 1, "got: {v}");
+
+            let p = dispatch_wisdom_pending(&ctx).await.unwrap();
+            let paths: Vec<&str> = p["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["path"].as_str().unwrap())
+                .collect();
+            assert!(
+                !paths.contains(&rel),
+                "a legacy ingested deposit must not be listed: {paths:?}"
+            );
+        });
+    }
+
+    /// RED (#325 review): the watcher/walker stage `documents.path` in the
+    /// VIRTUAL absolute form of the CONFIGURED root (`virtual_path_key(&abs)`,
+    /// issue #204) — and `enqueue_vault_event` canonicalizes its containment
+    /// root precisely because CONFIGURED roots can be symlinked (macOS
+    /// `/var` → `/private/var`). Under a symlinked configured root the
+    /// virtual spelling differs from the canonical form
+    /// `virtual_path_key_at_root` derives, so a canonical-only probe misses
+    /// the watcher-staged row: status read `pending`/`facts: []` and the
+    /// watcher-lane failure flip never matched its ledger row. Every
+    /// surface must key-match ALL forms the row can carry.
+    #[cfg(unix)]
+    #[test]
+    fn status_and_flip_see_watcher_staged_rows_under_symlinked_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("vault");
+        std::fs::create_dir_all(real.join("immutable-source-files/agents")).unwrap();
+        // The CONFIGURED root is a symlink; its canonical form differs.
+        let link = tmp.path().join("vault-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let link_for_env = link.clone();
+        with_brain(&link_for_env, || async move {
+            let ctx = wisdom_ctx(&link);
+            let rel = "immutable-source-files/agents/watcher-virtual.md";
+            // Watcher-lane staging: the documents row keyed by the VIRTUAL
+            // absolute form of the configured (symlinked) root.
+            let virtual_key = crate::db::queue::virtual_path_key(&link.join(rel)).unwrap();
+            assert_ne!(
+                virtual_key,
+                crate::db::queue::virtual_path_key_at_root(&link, std::path::Path::new(rel))
+                    .unwrap(),
+                "harness: the symlinked configured root must make the key forms diverge"
+            );
+            {
+                let conn = ctx.conn.lock().unwrap();
+                conn.execute_batch(
+                    "INSERT INTO llm_wiki_entries (
+                         id, entity_id, title, body, tags, confidence, source_type,
+                         source_hash, source_ref, created_at, updated_at,
+                         last_accessed_at, access_count, deleted_at,
+                         embedding_blob, embedding
+                     ) VALUES ('e1', 'ent1', 't', 'b', '[]', 'inferred',
+                               'librarian_inferred', NULL,
+                               'librarian-abc123def456abc123def456abc12345',
+                               100, 100, NULL, 0, NULL, NULL, NULL);
+                     INSERT INTO librarian_evidence
+                         (entry_id, proposal_id, evidence_json, created_at)
+                         VALUES ('e1', 'p1',
+                                 '{\"quote\":\"q\",\"source_kind\":\"document\"}', 0);
+                     INSERT INTO curated_proposals (id, kind, model, status, created_at)
+                         VALUES ('p1', 'new_entity', 'test', 'approved', 0);",
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO documents (path, hash, tier, status)
+                     VALUES (?1, 'h1', 'user_doc', 'indexed')",
+                    [&virtual_key],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO chunks (doc_id, chunk_text, position)
+                     SELECT id, 'body text', 0 FROM documents WHERE path = ?1",
+                    [&virtual_key],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO curated_proposal_sources (proposal_id, doc_id, role)
+                     VALUES ('p1', (SELECT id FROM documents LIMIT 1), 'evidence')",
+                    [],
+                )
+                .unwrap();
+                set_kick_state(&conn, rel, "queued_watcher", None).unwrap();
+            }
+            // Status must see the watcher-staged evidence under the
+            // symlinked configured root.
+            let v = dispatch_wisdom_deposit_status(
+                &ctx,
+                WisdomDepositStatusParams { path: rel.into() },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                v["state"],
+                serde_json::json!("ingested"),
+                "watcher-staged evidence must stay visible: {v}"
+            );
+            assert_eq!(v["facts"].as_array().unwrap().len(), 1, "got: {v}");
+            // The watcher-lane failure flip must match the row by the
+            // worker's virtual-form doc path.
+            {
+                let conn = ctx.conn.lock().unwrap();
+                let n = mark_watcher_lane_synthesis_failed(
+                    &conn,
+                    &link,
+                    &virtual_key,
+                    "synthesis JSON failure: connection refused",
+                )
+                .unwrap();
+                assert_eq!(n, 1, "the queued_watcher row must flip: {virtual_key}");
+                let (state, error): (String, Option<String>) = conn
+                    .query_row(
+                        "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                        [rel],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(state, "failed", "got: {error:?}");
+                assert!(
+                    error.unwrap_or_default().contains("connection refused"),
+                    "the reason must ride along"
+                );
+            }
+            // And the ingested deposit must not be listed as pending.
+            let p = dispatch_wisdom_pending(&ctx).await.unwrap();
+            let paths: Vec<&str> = p["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["path"].as_str().unwrap())
+                .collect();
+            assert!(
+                !paths.contains(&rel),
+                "an ingested (watcher-staged) deposit must not be listed: {paths:?}"
+            );
         });
     }
 
