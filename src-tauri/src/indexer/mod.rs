@@ -69,7 +69,7 @@ fn extract_by_pattern(lang: RefLang, text: &str, base_line: u32, kind: PatternKi
     loop {
         mq.advance();
         let Some(mat) = mq.get() else { break };
-        for cap in mat.captures {
+        for cap in mat.captures() {
             if cap.index != ref_idx {
                 continue;
             }

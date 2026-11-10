@@ -2,11 +2,10 @@ name: Build
 
 on:
   push:
-    # Tags pushed with GITHUB_TOKEN (i.e. by semantic-release in release.yml)
-    # deliberately do NOT fire this trigger (GitHub's anti-recursion guard):
-    # those releases are built automatically via the workflow_dispatch that
-    # release.yml's dispatch-build job sends. This trigger exists for tags
-    # pushed by a human credential.
+    # Release builds are started by the workflow_dispatch that release.yml's
+    # dispatch-build job sends. semantic-release's tag push uses an App token
+    # and may also fire this trigger; the concurrency group below keeps one
+    # build. This trigger exists for tags pushed by a human credential.
     tags:
       - "v*"
   workflow_dispatch:

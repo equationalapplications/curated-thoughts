@@ -131,7 +131,7 @@ fn run_query<'a>(
         let mut sym_n: Option<Node<'a>> = None;
         let mut name_n: Option<Node<'a>> = None;
         let mut class_n: Option<Node<'a>> = None;
-        for cap in mat.captures {
+        for cap in mat.captures() {
             let QueryCapture { node, index, .. } = *cap;
             if index == symbol_idx {
                 sym_n = Some(node);

@@ -129,7 +129,7 @@ pnpm test
 * `src/` — React frontend and app UI (Settings, Review desk, Drafts panels)
 * `src-tauri/` — Rust backend: file watcher, SQLite, librarian engine, MCP server
 * `tools/` — the `ct` headless CLI and dev/ingest helper binaries
-* `docs/superpowers/specs/` — design specs
+* `specs/` — design specs (older ones are in `docs/superpowers/specs/`)
 
 ### Recommended IDE Setup
 

@@ -702,9 +702,9 @@ pub fn librarian_run(model: &str, force: bool) -> Result<()> {
     // root from the resolved config path, not from db_path's parent.
     let mut db = AppDb::open_with_config(&paths.db_path, &paths.config_path)
         .with_context(|| format!("open brain database {}", paths.db_path.display()))?;
-    // Resolve errors.log's parent directory the same way write_synthesis_error does
-    // (vault root derived from the config path), not from db_path's parent, so
-    // surface-detection stays correct under non-default brain-dir layouts.
+    // The errors.log watched for growth lives beside the config file. Writers
+    // use `<root>/.brain/errors.log`, so it is the same file only when the
+    // brain dir is `<vault>/.brain` (#324).
     let error_log_dir = paths.config_path.parent();
     // CLI callers pass a bin-default fallback (e.g. "llama3.2:3b"); the
     // watermark/provenance model must be what the brain config actually
@@ -750,11 +750,10 @@ pub fn librarian_run_on(
         docs.len()
     );
 
-    // Synthesis failures are recorded to <brain>/errors.log by
-    // write_synthesis_error (called from generate_summary, which still
-    // returns Ok). Surface them by watching that file grow across each
-    // call. The log directory must be resolved the same way the writer
-    // resolves its target (vault root), not from db_path's parent.
+    // Since #298 generate_summary returns a typed SynthesisFailure, which the
+    // Err arm below prints and counts. No synthesis writer still logs and
+    // returns Ok, so the Ok-arm log-growth check guards nothing and is slated
+    // for removal (#324).
     let error_log = error_log_dir.map(|dir| dir.join("errors.log"));
     let paths: Vec<String> = docs.into_iter().map(|(_, p)| p).collect();
 
@@ -834,9 +833,9 @@ fn errors_log_tail(path: &Path, from: u64) -> Option<String> {
 
 /// Per-doc librarian loop with stderr observability. One `[n/total] <path>
 /// ok|error (<elapsed>s)` line per doc plus a final run-summary line, all
-/// written (flushed) to `err`. Synthesis failures are surfaced whether they
-/// come back as `Err` or were swallowed into `error_log` by
-/// `write_synthesis_error` (detected via log growth during the call).
+/// written (flushed) to `err`. Synthesis failures come back as `Err`
+/// (`SynthesisFailure`, #298) and print from the Err arm; the Ok-arm
+/// log-growth check no longer guards any synthesis writer (#324).
 pub(crate) fn run_librarian_docs<F>(
     docs: &[String],
     mut synthesize: F,

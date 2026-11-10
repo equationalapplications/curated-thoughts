@@ -1,3 +1,31 @@
+## [3.11.3](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.2...v3.11.3) (2026-11-10)
+
+### Bug Fixes
+
+* **wisdom:** probe both key forms so legacy relative-keyed deposits stay visible ([#325](https://github.com/equationalapplications/curated-thoughts/issues/325) review) ([29775e7](https://github.com/equationalapplications/curated-thoughts/commit/29775e7f1fc38a88b96e8df717c8e41daf4ab94a))
+* **wisdom:** status probes use the canonical deposit key; failed outranks chunked ([#325](https://github.com/equationalapplications/curated-thoughts/issues/325)) ([e5601b5](https://github.com/equationalapplications/curated-thoughts/commit/e5601b598c05082a0a72499891f094160053d059))
+
+## [3.11.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.1...v3.11.2) (2026-11-09)
+
+### Bug Fixes
+
+* **deps:** adapt to tree-sitter 0.27 and hold cc past the age gate ([95ac496](https://github.com/equationalapplications/curated-thoughts/commit/95ac496231b79f6eda70b14eeb35dd271c3364fb))
+* **librarian:** keep vanished sources benign and name HTTP status ([#298](https://github.com/equationalapplications/curated-thoughts/issues/298)) ([6b69064](https://github.com/equationalapplications/curated-thoughts/commit/6b690642a2f4d9df21e1937e35ad464a43e56988))
+* **librarian:** synthesis failures carry typed SynthesisFailure ([#298](https://github.com/equationalapplications/curated-thoughts/issues/298)) ([66ff273](https://github.com/equationalapplications/curated-thoughts/commit/66ff273d2621b84af4a1478d2b0e4d3c1d53e319)), closes [#299](https://github.com/equationalapplications/curated-thoughts/issues/299)
+* **pipeline:** SynthesisFailure skips errors.log re-journal ([#298](https://github.com/equationalapplications/curated-thoughts/issues/298)) ([4915d0d](https://github.com/equationalapplications/curated-thoughts/commit/4915d0d07600d4e2e46becd025f87d070722dffb))
+
+## [3.11.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.0...v3.11.1) (2026-11-09)
+
+### Bug Fixes
+
+* **deps:** re-pin Cargo.lock against main; dirs-only resolution ([94b78ae](https://github.com/equationalapplications/curated-thoughts/commit/94b78ae4c87730dd6cd98402cfc118ad8b4abce5)), closes [post-#319](https://github.com/equationalapplications/post-/issues/319) [pre-#319](https://github.com/equationalapplications/pre-/issues/319)
+
+## [3.11.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.7...v3.11.0) (2026-11-09)
+
+### Features
+
+* **brand:** ct-c-v6 web favicons + regenerated Tauri icon set ([720f84a](https://github.com/equationalapplications/curated-thoughts/commit/720f84aea2f19240b69534f1cd3e3c01e97f9ab0))
+
 ## [3.10.7](https://github.com/equationalapplications/curated-thoughts/compare/v3.10.6...v3.10.7) (2026-10-30)
 
 ### Dependencies
