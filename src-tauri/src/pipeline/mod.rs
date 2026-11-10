@@ -252,6 +252,36 @@ impl PipelineWorker {
                                 ) {
                                     let msg = format!("librarian error {}: {}", path, e);
                                     eprintln!("[pipeline] {}", msg);
+                                    // #325: in the watcher lane the kick
+                                    // recorded `queued_watcher` and THIS
+                                    // worker owns the deposit's outcome —
+                                    // surface a typed synthesis failure in
+                                    // the ledger, only while the row still
+                                    // reads queued_watcher. The CONFIGURED
+                                    // root is required for the key match;
+                                    // the heuristic parent-of-parent root
+                                    // above is wrong for the deposit lane's
+                                    // deeper nesting.
+                                    if let Some(root) = worker_vault_root.as_deref() {
+                                        if e
+                                            .downcast_ref::<crate::librarian::SynthesisFailure>()
+                                            .is_some()
+                                        {
+                                            let reason = format!("{e:#}");
+                                            if let Err(ledger_err) =
+                                                crate::wisdom_deposit::mark_watcher_lane_synthesis_failed(
+                                                    &conn,
+                                                    root,
+                                                    &path,
+                                                    &reason,
+                                                )
+                                            {
+                                                eprintln!(
+                                                    "[pipeline] kick ledger write failed: {ledger_err:#}"
+                                                );
+                                            }
+                                        }
+                                    }
                                     // #298: a SynthesisFailure already
                                     // attempted its journal write at the
                                     // failing arm, so the worker adds none.
