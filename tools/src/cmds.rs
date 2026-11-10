@@ -1738,9 +1738,9 @@ pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
         report.entries_race_skipped
     );
     if !report.items_flagged_detail.is_empty() {
-        eprintln!("[ct::reanchor] items left flagged (entry_id kind) — adjudication queue:");
-        for (entry_id, kind) in &report.items_flagged_detail {
-            eprintln!("  {} {}", entry_id, kind);
+        eprintln!("[ct::reanchor] items left flagged (entry_id kind #item) — adjudication queue:");
+        for (entry_id, kind, item_idx) in &report.items_flagged_detail {
+            eprintln!("  {} {} #{}", entry_id, kind, item_idx);
         }
     }
     Ok(0)

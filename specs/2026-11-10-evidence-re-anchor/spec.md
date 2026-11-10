@@ -70,11 +70,14 @@ A `ReanchorReport` (WIP fields, adjudicated):
 - `items_reanchored` — dead hashes rewritten to the matched current chunk (flag cleared when the whole entry grounds);
 - `items_ambiguous` — multi-match candidates, left flagged, named by id on **stderr** (printed on the apply path);
 - `items_unresolved` — still anchorless, left flagged for the existing regrade flow (NOT exported here; regrade owns export-then-purge), also named by id on **stderr** on the apply path;
-- `items_hash_mismatch` — chunker drift, skipped;
+- `items_hash_mismatch` — chunker drift, skipped — also named by id on stderr (drift is the case a person most needs to inspect);
+- `items_flagged_detail` — the adjudication queue itself: `(entry_id, kind, item_index)` tuples;
+- `entries_examined` — ALL live rows scanned (flag-agnostic);
 - `entries_already_anchored` — rows already grounding; a stale `unanchored = 1` flag is cleared inside the apply transaction (verified under the lock via the grounding contract);
+- `entries_regrounded` / `entries_still_unanchored` — was-ungrounded-now-grounded / still ungrounded after the pass;
 - `entries_race_skipped` — concurrent mutation (json drift, lost grounding, or a rewritten chunk vanishing) detected under the lock; re-run converges.
 
-All UPDATEs are idempotent; re-running converges — and a converged `--yes` writes nothing and takes no snapshot. Soft-deleted stock is never touched — the 90-day prune owns it (regrade invariant).
+All UPDATEs are idempotent; re-running converges — and a converged `--yes` writes nothing and takes no snapshot. Soft-deleted stock is never touched — the 90-day prune owns it (regrade invariant). Ungrounded unchanged rows are FLAGGED `unanchored = 1` inside the transaction: `ct evidence regrade` scans `unanchored = 1`, so this is the concrete hand-off of the adjudication queue to the regrade/adjudication flow (Fable tier review — without it the queue is invisible to regrade on a brain whose flag stock is empty).
 
 ## 6. Testing posture
 

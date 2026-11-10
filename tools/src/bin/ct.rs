@@ -315,9 +315,10 @@ enum EvidenceCmd {
     /// quote's tail breaking ties — unresolved ties stay flagged, never
     /// guessed. The content_hash/chunk_id are rewritten and, if the row
     /// grounds, its `unanchored` flag cleared — pulling entries back from
-    /// the nightly heal's soft-delete path. Rows are only UPDATED, never
-    /// deleted, but it is still a brain write: without --yes it prints the
-    /// dry-run summary only.
+    /// the nightly heal's soft-delete path; rows left ungrounded are FLAGGED
+    /// `unanchored = 1` so the regrade flow (and adjudication) sees them.
+    /// Rows are only UPDATED, never deleted, but it is still a brain write:
+    /// without --yes it prints the dry-run summary only.
     ReAnchor {
         /// Confirm the write (hash rewrite + flag clears).
         #[arg(long)]

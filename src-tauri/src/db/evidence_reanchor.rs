@@ -41,7 +41,11 @@
 //!   the matching ran against — any concurrent mutation skips that entry
 //!   (swap-race rule; re-run to converge);
 //! - no breaker interaction: nothing is deleted, so the shared bulk-deletion
-//!   budget is untouched.
+//!   budget is untouched;
+//! - ungrounded unchanged rows are FLAGGED `unanchored = 1` inside the
+//!   transaction — the concrete hand-off to `ct evidence regrade`, which
+//!   scans `unanchored = 1` (without it, a brain whose flag stock is empty
+//!   would hide its adjudication queue from regrade).
 //!
 //! Idempotent: a second pass on a converged brain re-examines every live
 //! row, reports them as already anchored, and rewrites nothing.
@@ -56,7 +60,9 @@ use crate::db::commit::evidence_has_live_chunk;
 /// Outcome of one `re_anchor` pass.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ReanchorReport {
-    /// Live flagged evidence rows examined.
+    /// ALL live evidence rows inspected (the scan is flag-agnostic — the
+    /// doom condition is a hash that resolves to no chunk, whatever the
+    /// writer-era `unanchored` flag says).
     pub entries_examined: usize,
     /// Already-grounded flagged rows (all hashes live) — flag cleared.
     pub entries_already_anchored: usize,
@@ -81,10 +87,26 @@ pub struct ReanchorReport {
     /// dry runs, in-memory tests, and converged brains (no write, no
     /// snapshot).
     pub backup_path: Option<String>,
-    /// Items left flagged, as `(entry_id, kind)` where kind is `"ambiguous"`
-    /// or `"unresolved"` — printed by the CLI so an operator can name the
-    /// adjudication queue (spec §5).
-    pub items_flagged_detail: Vec<(String, &'static str)>,
+    /// Items left flagged, as `(entry_id, kind, item_index)` where kind is
+    /// `"ambiguous"`, `"unresolved"`, or `"hash_mismatch"` — printed by the
+    /// CLI so an operator can name the adjudication queue (spec §5).
+    pub items_flagged_detail: Vec<(String, &'static str, usize)>,
+}
+
+/// One entry queued from the match phase for the apply transaction.
+struct Candidate {
+    entry_id: String,
+    /// Matching-time evidence_json; the apply re-reads the row under the lock
+    /// and requires equality (swap-race rule).
+    snapshot_json: String,
+    new_json: String,
+    would_ground: bool,
+    /// The row already grounded BEFORE this pass (its counters roll back
+    /// differently on a race-skip).
+    grounded: bool,
+    /// Items this pass rewrote — rolled back if the row is race-skipped, so
+    /// `items_reanchored` counts only WRITTEN re-anchors.
+    items_reanchored: usize,
 }
 
 /// Match (and optionally apply) quote-text re-anchors for the live unanchored
@@ -121,11 +143,17 @@ pub fn re_anchor(
     //    transaction can re-verify the row under the lock (swap-race rule).
     //    The normalized-text chunk index is built once for the whole pass.
     let chunk_index = load_chunk_index(conn)?;
-    let mut candidates: Vec<(String, String, String, bool, bool)> = Vec::new(); // (entry_id, snapshot_json, new_json, would_ground, grounded)
+    let mut candidates: Vec<Candidate> = Vec::new();
     // Grounded rows carrying a STALE `unanchored = 1` flag: cleared inside
     // the apply transaction behind the SAME snapshot compare as hash
     // rewrites (flag writes must not bypass the swap-race rule).
     let mut flag_clears: Vec<(String, String)> = Vec::new();
+    // Ungrounded unchanged rows carrying `unanchored = 0`: FLAGGED inside the
+    // apply transaction — this is the documented hand-off to `ct evidence
+    // regrade`, which scans `unanchored = 1` (Fable tier review: without it,
+    // the residual adjudication queue is invisible to regrade on a brain
+    // whose flag stock is empty).
+    let mut flag_sets: Vec<(String, String)> = Vec::new();
     for (entry_id, evidence_json, unanchored_flag) in live_rows {
         let Ok(mut value) = serde_json::from_str::<Value>(&evidence_json) else {
             continue;
@@ -141,7 +169,8 @@ pub fn re_anchor(
         let grounded = evidence_has_live_chunk(conn, &evidence_json)?;
 
         let mut changed = false;
-        for item in evidence.iter_mut() {
+        let mut items_reanchored = 0usize;
+        for (item_idx, item) in evidence.iter_mut().enumerate() {
             let hash = item
                 .get("content_hash")
                 .and_then(|v| v.as_str())
@@ -170,7 +199,9 @@ pub fn re_anchor(
             } else {
                 // No anchor of either kind: unresolvable item.
                 report.items_unresolved += 1;
-                report.items_flagged_detail.push((entry_id.clone(), "unresolved"));
+                report
+                    .items_flagged_detail
+                    .push((entry_id.clone(), "unresolved", item_idx));
                 continue;
             }
 
@@ -182,20 +213,31 @@ pub fn re_anchor(
                 .unwrap_or("");
             if quote.is_empty() {
                 report.items_unresolved += 1;
-                report.items_flagged_detail.push((entry_id.clone(), "unresolved"));
+                report
+                    .items_flagged_detail
+                    .push((entry_id.clone(), "unresolved", item_idx));
                 continue;
             }
             match match_quote_prefix(conn, &chunk_index, quote)? {
                 QuoteMatch::None => {
                     report.items_unresolved += 1;
-                    report.items_flagged_detail.push((entry_id.clone(), "unresolved"));
+                    report
+                        .items_flagged_detail
+                        .push((entry_id.clone(), "unresolved", item_idx));
                 }
                 QuoteMatch::Ambiguous => {
                     report.items_ambiguous += 1;
-                    report.items_flagged_detail.push((entry_id.clone(), "ambiguous"));
+                    report
+                        .items_flagged_detail
+                        .push((entry_id.clone(), "ambiguous", item_idx));
                 }
                 QuoteMatch::HashMismatch => {
                     report.items_hash_mismatch += 1;
+                    // Drift is the case a person most needs to look at — name
+                    // it in the adjudication queue too (Opus tier review).
+                    report
+                        .items_flagged_detail
+                        .push((entry_id.clone(), "hash_mismatch", item_idx));
                 }
                 QuoteMatch::One(chunk) => {
                     item["chunk_id"] = Value::from(chunk.chunk_id);
@@ -203,6 +245,7 @@ pub fn re_anchor(
                     item["start_line"] = Value::from(chunk.start_line);
                     item["end_line"] = Value::from(chunk.end_line);
                     report.items_reanchored += 1;
+                    items_reanchored += 1;
                     changed = true;
                 }
             }
@@ -227,6 +270,12 @@ pub fn re_anchor(
                 }
             } else {
                 report.entries_still_unanchored += 1;
+                // FLAG the row: `ct evidence regrade` scans `unanchored = 1`,
+                // so an unflagged ungrounded row would be invisible to the
+                // documented hand-off (Fable tier review).
+                if unanchored_flag == 0 {
+                    flag_sets.push((entry_id, evidence_json));
+                }
             }
             continue;
         }
@@ -238,21 +287,29 @@ pub fn re_anchor(
         } else {
             report.entries_still_unanchored += 1;
         }
-        candidates.push((entry_id, evidence_json, new_json, would_ground, grounded));
+        candidates.push(Candidate {
+            entry_id,
+            snapshot_json: evidence_json,
+            new_json,
+            would_ground,
+            grounded,
+            items_reanchored,
+        });
     }
 
     if !apply {
         return Ok(report);
     }
-    let has_writes = !candidates.is_empty() || !flag_clears.is_empty();
+    let has_writes =
+        !candidates.is_empty() || !flag_clears.is_empty() || !flag_sets.is_empty();
     if !has_writes {
         // Converged brain: nothing to write, nothing to snapshot.
         return Ok(report);
     }
 
     // 3. Apply phase: §4 hard gate FIRST — the crash-consistent snapshot
-    //    lands before the FIRST write, flag clears included; a backup failure
-    //    aborts with zero rows touched.
+    //    lands before the FIRST write, flag clears/sets included; a backup
+    //    failure aborts with zero rows touched.
     if let Some(p) = db_path {
         report.backup_path = Some(
             backup_before_apply(conn, p)?
@@ -286,7 +343,34 @@ pub fn re_anchor(
             report.entries_race_skipped += 1;
         }
     }
-    for (entry_id, snapshot_json, new_json, would_ground, grounded) in &candidates {
+    // Ungrounded unchanged rows get their flag SET (regrade scans
+    // `unanchored = 1`); grounding is recomputed under the lock — a row that
+    // became grounded since the match clears instead.
+    for (entry_id, snapshot_json) in &flag_sets {
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT evidence_json FROM librarian_evidence WHERE entry_id = ?1",
+                [entry_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if current.as_deref() == Some(snapshot_json.as_str()) {
+            let grounds = evidence_has_live_chunk(&tx, snapshot_json)?;
+            let flag: i64 = if grounds { 0 } else { 1 };
+            tx.execute(
+                "UPDATE librarian_evidence SET unanchored = ?2 WHERE entry_id = ?1",
+                rusqlite::params![entry_id, flag],
+            )?;
+        } else {
+            report.entries_race_skipped += 1;
+        }
+    }
+    for cand in &candidates {
+        let entry_id = &cand.entry_id;
+        let snapshot_json = &cand.snapshot_json;
+        let new_json = &cand.new_json;
+        let would_ground = &cand.would_ground;
+        let grounded = &cand.grounded;
         let current: Option<String> = tx
             .query_row(
                 "SELECT evidence_json FROM librarian_evidence WHERE entry_id = ?1",
@@ -335,6 +419,10 @@ pub fn re_anchor(
                 }
                 if chunk_gone {
                     report.entries_race_skipped += 1;
+                    // items_reanchored counted at match time — roll back this
+                    // row's rewrites so the counter says WRITTEN (Fable tier).
+                    report.items_reanchored =
+                        report.items_reanchored.saturating_sub(cand.items_reanchored);
                     if !grounded && *would_ground {
                         report.entries_regrounded = report.entries_regrounded.saturating_sub(1);
                         report.entries_still_unanchored += 1;
@@ -351,6 +439,10 @@ pub fn re_anchor(
             }
             _ => {
                 report.entries_race_skipped += 1;
+                // items_reanchored counted at match time — roll back this
+                // row's rewrites so the counter says WRITTEN (Fable tier).
+                report.items_reanchored =
+                    report.items_reanchored.saturating_sub(cand.items_reanchored);
                 // Grounded rows stay factually grounded on a race-skip — only
                 // the was-ungrounded-now-grounded counters roll back.
                 if !grounded && *would_ground {
@@ -380,7 +472,7 @@ pub fn backup_before_apply(
         .unwrap_or("brain.db");
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
+        .as_millis();
     let backup = dir.join(format!("{stem}.bak-pre-reanchor-{ts}"));
     conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
     Ok(backup)
@@ -452,6 +544,9 @@ struct ChunkIndex {
 struct ChunkIndexRow {
     id: i64,
     stored_hash: String,
+    /// Normalized chunk text, PADDED with a space on each side — searches use
+    /// the same padding so a needle can never match mid-word ("art" cannot
+    /// match "start"; Opus tier review).
     norm: String,
 }
 
@@ -476,7 +571,7 @@ fn load_chunk_index(conn: &Connection) -> Result<ChunkIndex> {
             .map(|(id, text, stored_hash)| ChunkIndexRow {
                 id,
                 stored_hash,
-                norm: normalize_for_match(&text),
+                norm: format!(" {} ", normalize_for_match(&text)),
             })
             .collect(),
     })
@@ -527,11 +622,15 @@ fn match_quote_prefix(
         return Ok(QuoteMatch::None);
     }
 
+    // Word-boundary padding (Opus tier review): search `" {qn} "` inside the
+    // padded chunk norms so a quote can never match mid-word.
+    let padded_qn = format!(" {} ", qn);
+
     // Tier 1: full normalized quote in exactly one chunk — any length.
     let mut full: Vec<&ChunkIndexRow> = index
         .rows
         .iter()
-        .filter(|r| r.norm.contains(qn.as_str()))
+        .filter(|r| r.norm.contains(padded_qn.as_str()))
         .collect();
     if full.len() == 1 {
         return drift_checked(conn, full.remove(0));
@@ -542,7 +641,13 @@ fn match_quote_prefix(
         return Ok(QuoteMatch::Ambiguous);
     }
 
-    // Tier 2: >=60-char normalized prefix, suffix-narrowed.
+    // Tier 2: >=60-char normalized prefix, suffix-narrowed. REQUIRES the
+    // normalized quote to reach 60 chars (spec §3): a shorter quote is
+    // tier-1 territory only — a short UNPADDED substring match is exactly
+    // the fabricated-provenance case (Opus M2: "art" inside "starts").
+    if qn.chars().count() < MATCH_PREFIX_CHARS {
+        return Ok(QuoteMatch::None);
+    }
     let prefix = normalized_prefix(&qn);
     let suffix = normalized_suffix(&qn);
 
@@ -1021,97 +1126,39 @@ mod tests {
         assert!(stored_json(&conn, "fact_resplit").contains(&live_hash));
     }
 
-    /// Two current chunks share the normalized prefix and the quote carries
-    /// nothing that separates them — refuse and keep the flag (never guess).
-    #[test]
-    fn ambiguous_when_prefix_matches_multiple_chunks() {
-        let conn = open_in_memory().unwrap();
-        let mut shared = String::new();
-        for i in 0..40 {
-            shared.push_str(&format!("word number {} of a shared preamble line. ", i));
-        }
-        let a = format!("{}alpha ending only here", shared);
-        let b = format!("{}beta ending only here", shared);
-        let h1 = compute_chunk_hash(&a, DOC_PATH, 1usize);
-        let h2 = compute_chunk_hash(&b, DOC_PATH, 2usize);
-        seed_chunk(&conn, &a, 1, &h1);
-        seed_chunk(&conn, &b, 2, &h2);
-        seed_flagged(
-            &conn,
-            "fact_ambig",
-            &format!(
-                r#"{{"evidence":[{}],"proposal_id":"prop_ambig"}}"#,
-                dead_item("dead1000000000000000000000000000000000000000000000000000000000", &shared)
-            ),
-            None,
-        );
-
-        let report = re_anchor(&conn, true, None).unwrap();
-        assert_eq!(
-            report.items_ambiguous, 1,
-            "shared prefix across 2 chunks must refuse, never guess"
-        );
-        assert_eq!(report.items_reanchored, 0);
-        assert_eq!(stored_unanchored(&conn, "fact_ambig"), 1);
+    /// Tier-2 fixture (Opus M1: the original fixtures were short enough for
+    /// tier 1 to answer first, so the prefix tier was never exercised).
+    /// Returns the normalized base, its first/last 60 chars, and a quote
+    /// `head60 + NOVEL MIDDLE + rest-of-base` — the full quote fits NO chunk
+    /// (tier 1 answers nothing), the prefix lives in the shared head, and the
+    /// quote's tail is the base's own tail.
+    fn tier2_parts() -> (String, String, String) {
+        let base = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima \
+                    mike november oscar papa quebec romeo sierra tango uniform victor whiskey";
+        let base_n = normalize_for_match(base);
+        let head: String = base_n.chars().take(60).collect();
+        let rest: String = base_n.chars().skip(60).collect();
+        let quote = format!("{} novel middle words never chunked anywhere {}", head, rest);
+        (base_n, head, quote)
     }
 
-    /// Same shared-prefix setup, but the quote also carries the alpha ending:
-    /// exactly one chunk agrees on prefix AND suffix — the strong case anchors.
+    /// Tier 2, narrowing works: the shared-head prefix matches two chunks
+    /// (a = full base; b = head + divergent tail); the quote's base tail
+    /// suffix matches chunk a only → anchor a.
     #[test]
-    fn suffix_agreement_disambiguates_shared_prefix() {
+    fn prefix_tier_suffix_narrows_to_one_chunk() {
         let conn = open_in_memory().unwrap();
-        let mut shared = String::new();
-        for i in 0..40 {
-            shared.push_str(&format!("word number {} of a shared preamble line. ", i));
-        }
-        let a = format!("{}alpha ending only here", shared);
-        let b = format!("{}beta ending only here", shared);
-        let h1 = compute_chunk_hash(&a, DOC_PATH, 1usize);
-        let h2 = compute_chunk_hash(&b, DOC_PATH, 2usize);
-        seed_chunk(&conn, &a, 1, &h1);
-        seed_chunk(&conn, &b, 2, &h2);
-        let quote = format!("{}alpha ending only here", shared);
+        let (base_n, head, quote) = tier2_parts();
+        let h_a = compute_chunk_hash(&base_n, DOC_PATH, 1usize);
+        seed_chunk(&conn, &base_n, 1, &h_a);
+        let b = format!("{} beta gamma delta epsilon zeta eta theta", head);
+        let h_b = compute_chunk_hash(&b, DOC_PATH, 2usize);
+        seed_chunk(&conn, &b, 2, &h_b);
         seed_flagged(
             &conn,
-            "fact_suffix",
+            "fact_tier2_narrow",
             &format!(
-                r#"{{"evidence":[{}],"proposal_id":"prop_suffix"}}"#,
-                dead_item("dead2000000000000000000000000000000000000000000000000000000000", &quote)
-            ),
-            None,
-        );
-
-        let report = re_anchor(&conn, true, None).unwrap();
-        assert_eq!(
-            report.items_reanchored, 1,
-            "prefix+suffix agreement is the strong case"
-        );
-        assert_eq!(report.items_ambiguous, 0);
-        assert!(stored_json(&conn, "fact_suffix").contains(&h1));
-    }
-
-    /// Uniqueness counts drifted siblings: two chunks share the prefix (and
-    /// the suffix matches both), one with a stale stored hash — the tie is
-    /// ambiguous, NEVER anchored to the one valid chunk (review haiku/high).
-    #[test]
-    fn drifted_sibling_makes_shared_prefix_ambiguous() {
-        let conn = open_in_memory().unwrap();
-        let mut shared = String::new();
-        for i in 0..40 {
-            shared.push_str(&format!("word number {} of a shared preamble line. ", i));
-        }
-        let a = format!("{}alpha ending only here", shared);
-        let b = format!("{}alpha ending only here", shared); // same ending!
-        let h_good = compute_chunk_hash(&a, DOC_PATH, 1usize);
-        seed_chunk(&conn, &a, 1, &h_good);
-        // Chunk b stores a hash that does NOT match its text — drifted.
-        seed_chunk(&conn, &b, 2, "beef0000000000000000000000000000000000000000000000000000000000");
-        let quote = format!("{}alpha ending only here", shared);
-        seed_flagged(
-            &conn,
-            "fact_drift_sibling",
-            &format!(
-                r#"{{"evidence":[{}],"proposal_id":"prop_ds"}}"#,
+                r#"{{"evidence":[{}],"proposal_id":"prop_t2a"}}"#,
                 dead_item("dead3000000000000000000000000000000000000000000000000000000000", &quote)
             ),
             None,
@@ -1119,11 +1166,131 @@ mod tests {
 
         let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(
+            report.items_reanchored, 1,
+            "prefix tier + suffix narrowing must reach the anchor"
+        );
+        assert!(stored_json(&conn, "fact_tier2_narrow").contains(&h_a));
+    }
+
+    /// Tier 2, tie: BOTH chunks match the prefix AND the quote's suffix —
+    /// nothing separates them → refuse, never guess.
+    #[test]
+    fn prefix_tie_with_matching_suffix_stays_ambiguous() {
+        let conn = open_in_memory().unwrap();
+        let (base_n, _, quote) = tier2_parts();
+        let h1 = compute_chunk_hash(&base_n, DOC_PATH, 1usize);
+        let h2 = compute_chunk_hash(&base_n, DOC_PATH, 2usize);
+        seed_chunk(&conn, &base_n, 1, &h1);
+        seed_chunk(&conn, &base_n, 2, &h2);
+        seed_flagged(
+            &conn,
+            "fact_tier2_tie",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_t2b"}}"#,
+                dead_item("dead3100000000000000000000000000000000000000000000000000000000", &quote)
+            ),
+            None,
+        );
+
+        let report = re_anchor(&conn, true, None).unwrap();
+        assert_eq!(
             report.items_ambiguous, 1,
-            "a drifted sibling must turn the tie ambiguous, not pick the valid one"
+            "prefix+suffix tie across 2 chunks must refuse"
         );
         assert_eq!(report.items_reanchored, 0);
-        assert_eq!(stored_unanchored(&conn, "fact_drift_sibling"), 1);
+        assert_eq!(stored_unanchored(&conn, "fact_tier2_tie"), 1);
+    }
+
+    /// Tier 2, suffix matches NEITHER candidate (novel tail) → narrowed to
+    /// zero → ambiguous, never a prefix-only guess.
+    #[test]
+    fn prefix_tie_with_unmatched_suffix_stays_ambiguous() {
+        let conn = open_in_memory().unwrap();
+        let (base_n, head, _) = tier2_parts();
+        let quote = format!(
+            "{} novel middle words zzz tail text no chunk contains at all",
+            head
+        );
+        let h1 = compute_chunk_hash(&base_n, DOC_PATH, 1usize);
+        seed_chunk(&conn, &base_n, 1, &h1);
+        let b = format!("{} beta gamma delta epsilon zeta eta theta", head);
+        let h_b = compute_chunk_hash(&b, DOC_PATH, 2usize);
+        seed_chunk(&conn, &b, 2, &h_b);
+        seed_flagged(
+            &conn,
+            "fact_tier2_zero",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_t2c"}}"#,
+                dead_item("dead3200000000000000000000000000000000000000000000000000000000", &quote)
+            ),
+            None,
+        );
+
+        let report = re_anchor(&conn, true, None).unwrap();
+        assert_eq!(report.items_ambiguous, 1);
+        assert_eq!(report.items_reanchored, 0);
+        assert_eq!(stored_unanchored(&conn, "fact_tier2_zero"), 1);
+    }
+
+    /// Tier 2 survivor drift: the suffix narrows the tie to ONE chunk whose
+    /// stored hash is stale — the drift gate must reject it (HashMismatch),
+    /// proving the gate runs on the tier-2 survivor (Opus M1).
+    #[test]
+    fn drifted_survivor_in_prefix_tier_reports_mismatch() {
+        let conn = open_in_memory().unwrap();
+        let (base_n, head, quote) = tier2_parts();
+        // Chunk a: the suffix's only home — but its stored hash is drifted.
+        seed_chunk(
+            &conn,
+            &base_n,
+            1,
+            "beef0000000000000000000000000000000000000000000000000000000000",
+        );
+        let b = format!("{} beta gamma delta epsilon zeta eta theta", head);
+        let h_b = compute_chunk_hash(&b, DOC_PATH, 2usize);
+        seed_chunk(&conn, &b, 2, &h_b);
+        seed_flagged(
+            &conn,
+            "fact_tier2_drift",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_t2d"}}"#,
+                dead_item("dead3300000000000000000000000000000000000000000000000000000000", &quote)
+            ),
+            None,
+        );
+
+        let report = re_anchor(&conn, true, None).unwrap();
+        assert_eq!(
+            report.items_hash_mismatch, 1,
+            "the narrowed survivor must still pass the drift gate"
+        );
+        assert_eq!(report.items_reanchored, 0);
+        assert_eq!(stored_unanchored(&conn, "fact_tier2_drift"), 1);
+    }
+
+    /// Word-boundary guard (Opus M2): a short quote that occurs only
+    /// mid-word ("art" inside "starts") matches no chunk — substring
+    /// matching is padded on both sides.
+    #[test]
+    fn mid_word_quote_match_is_refused() {
+        let conn = open_in_memory().unwrap();
+        let live_text = "the story starts abruptly here";
+        let live_hash = compute_chunk_hash(live_text, DOC_PATH, 1usize);
+        seed_chunk(&conn, live_text, 1, &live_hash);
+        seed_flagged(
+            &conn,
+            "fact_midword",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_mw"}}"#,
+                dead_item("dead3400000000000000000000000000000000000000000000000000000000", "art")
+            ),
+            None,
+        );
+
+        let report = re_anchor(&conn, true, None).unwrap();
+        assert_eq!(report.items_unresolved, 1);
+        assert_eq!(report.items_reanchored, 0);
+        assert_eq!(stored_unanchored(&conn, "fact_midword"), 1);
     }
 
     /// A grounded entry can still carry a dead sibling item (the grounding
