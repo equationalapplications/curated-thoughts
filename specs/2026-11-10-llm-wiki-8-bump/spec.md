@@ -1,7 +1,13 @@
 # Adopt @equationalapplications llm-wiki 8.0.2 — behavior-preserving bump
 
 - **Date:** 2026-11-10
-- **Status:** Draft
+- **Status:** Implemented. All CI-mirroring gates green locally 2026-11-10
+  (clippy `src-tauri` + `tools` with `-D warnings`; `cargo test` both
+  crates single-threaded incl.
+  `rust_llm_wiki_ddl_matches_core_llm_wiki_package`; `engine_source_ref_gate`
+  `--ignored` proving installed == pinned == 8.0.2; pnpm typecheck clean;
+  vitest 609 passed with a failure set byte-identical to clean `main` at
+  7.13.0). CI on this branch is the authoritative run.
 - **Branch:** `deps/llm-wiki-8-0-2`
 - **Priority:** High. 8.0.0 flips two engine defaults CT relies on; every new
   CT feature built on 7.13.0 assumptions drifts further from upstream.
