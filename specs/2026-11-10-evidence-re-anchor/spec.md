@@ -45,7 +45,15 @@ then:
 When EVERY item of an entry resolves, `evidence_has_live_chunk` — the same
 grounding contract the commit gate and regrade use — agrees, and `unanchored`
 is cleared. Re-running the command is a no-op once everything that can match
-has matched.
+has matched. **Tier harmonization (review ladder, 2026-11-10):** a quote whose
+FULL normalized text lives in exactly one chunk anchors at any length (the
+round-1 adjudication: "if exactly one chunk contains the quote, anchor to
+it" — verbatim containment is real provenance); the ≥60-char prefix tier
+applies only when the full quote no longer fits any chunk. Uniqueness counts
+ALL textual candidates BEFORE the drift gate: a drifted sibling makes the
+match ambiguous, never silently anchorable, and the anchor carries the
+RECOMPUTED hash, never the row's stored value. Grounded entries are repaired
+per ITEM too — a live sibling must not orphan recoverable provenance.
 
 ## 4. Gates
 
@@ -72,9 +80,21 @@ All UPDATEs are idempotent; re-running converges. Soft-deleted stock is never to
 
 Tests follow the `commit.rs` grounding style — small in-memory `Connection`s, assertions that name the invariant they pin, not just the counts:
 
-- a dead hash whose quote lives in exactly one current chunk re-anchors (hash recomputed from the matched chunk, never trusted from the row) and clears the flag when the entry grounds; a re-run of the same DB changes nothing (idempotency);
-- a re-chunked doc's shifted boundaries still re-anchor via the verbatim quote; multi-match leaves the row flagged and reported, never silently best-guessed;
-- unresolved rows stay flagged, are never deleted and never exported by this command (the regrade flow owns the purge);
+- a dead hash whose quote lives in exactly one current chunk re-anchors (hash
+  recomputed from the matched chunk, never trusted from the row) and clears
+  the flag when the entry grounds; a re-run of the same DB changes nothing
+  (idempotency);
+- a re-chunked doc's shifted boundaries still re-anchor via the ≥60-char
+  normalized prefix; multi-match (or a drifted sibling in the tie) leaves the
+  row flagged and reported, never silently best-guessed;
+- unresolved rows stay flagged, are never deleted and never exported by this
+  command (the regrade flow owns the purge; the command's UPDATE-only posture
+  is pinned by `unresolved_quote_and_soft_deleted_stock_are_untouched`, which
+  doubles as the heal-reset loss-class fixture — no code path can delete);
 - a soft-deleted row is untouched by a full pass;
-- the apply path snapshots first: `VACUUM INTO` to `brain.db.bak-pre-reanchor-<ts>` runs before the first UPDATE, and the dry-run path writes no backup file;
-- a direct heal-reset fixture (flags treated as doomed, no match attempt) asserts the ~240-fact loss class cannot recur: rows whose chunk exists in live chunks are never purged.
+- the apply path snapshots before the first write — `VACUUM INTO` to
+  `brain.db.bak-pre-reanchor-<ts>` — and the dry-run path writes no backup
+  (pinned by `apply_snapshots_but_dry_run_writes_no_backup` on a file-backed
+  db); the swap-race branch's counter bookkeeping is exercised indirectly by
+  the snapshot re-read in every tx loop; direct race simulation is not
+  unit-testable in-process (documented limitation).

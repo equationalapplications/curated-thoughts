@@ -43,8 +43,8 @@
 //! - no breaker interaction: nothing is deleted, so the shared bulk-deletion
 //!   budget is untouched.
 //!
-//! Idempotent: a second pass on a converged brain finds no dead hashes and
-//! returns a default report.
+//! Idempotent: a second pass on a converged brain re-examines every live
+//! row, reports them as already anchored, and rewrites nothing.
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
@@ -76,13 +76,21 @@ pub struct ReanchorReport {
     pub entries_still_unanchored: usize,
     /// Entries skipped because the row mutated between matching and apply.
     pub entries_race_skipped: usize,
+    /// Path of the pre-write `VACUUM INTO` snapshot taken on the apply path
+    /// (spec §4: before the FIRST write, flag clears included). `None` on
+    /// dry runs and in-memory tests.
+    pub backup_path: Option<String>,
 }
 
 /// Match (and optionally apply) quote-text re-anchors for the live unanchored
 /// stock. `apply = false` is the dry-run: identical matching, zero writes.
 ///
 /// See the module docs for the full contract. Idempotent.
-pub fn re_anchor(conn: &Connection, apply: bool) -> Result<ReanchorReport> {
+pub fn re_anchor(
+    conn: &Connection,
+    apply: bool,
+    db_path: Option<&std::path::Path>,
+) -> Result<ReanchorReport> {
     let mut report = ReanchorReport::default();
 
     // 1. ALL live evidence rows — the doom condition is a hash that resolves
@@ -106,6 +114,10 @@ pub fn re_anchor(conn: &Connection, apply: bool) -> Result<ReanchorReport> {
     //    The normalized-text chunk index is built once for the whole pass.
     let chunk_index = load_chunk_index(conn)?;
     let mut candidates: Vec<(String, String, String, bool)> = Vec::new(); // (entry_id, snapshot_json, new_json, would_ground)
+    // Grounded rows carrying a stale `unanchored` flag: cleared inside the
+    // apply transaction behind the SAME snapshot compare as hash rewrites
+    // (review: flag writes must not bypass the swap-race rule).
+    let mut flag_clears: Vec<(String, String)> = Vec::new();
     for (entry_id, evidence_json) in flagged {
         let Ok(mut value) = serde_json::from_str::<Value>(&evidence_json) else {
             continue;
@@ -113,19 +125,12 @@ pub fn re_anchor(conn: &Connection, apply: bool) -> Result<ReanchorReport> {
         let Some(evidence) = value.get_mut("evidence").and_then(|v| v.as_array_mut()) else {
             continue;
         };
-        // Stale flag: the shared grounding contract already finds a live
-        // anchor for this row — clear the flag and move on.
-        if evidence_has_live_chunk(conn, &evidence_json)? {
-            report.entries_already_anchored += 1;
-            if apply {
-                conn.execute(
-                    "UPDATE librarian_evidence SET unanchored = 0 WHERE entry_id = ?1",
-                    [&entry_id],
-                )?;
-            }
-            continue;
-        }
-        // Dead entry (the shared contract finds NO live anchor).
+        // The shared grounding contract only needs ONE live item — so a
+        // grounded entry can still carry dead items whose quote survives.
+        // Those are repaired TOO (spec §3: recovery is per ITEM; a live
+        // sibling must not orphan recoverable provenance), and only a fully
+        // resolved entry has its `unanchored` flag semantics touched.
+        let grounded = evidence_has_live_chunk(conn, &evidence_json)?;
 
         let mut changed = false;
         for item in evidence.iter_mut() {
@@ -191,15 +196,27 @@ pub fn re_anchor(conn: &Connection, apply: bool) -> Result<ReanchorReport> {
             }
         }
 
-        if !changed {
-            report.entries_still_unanchored += 1;
-            continue;
-        }
         // Preserve the other top-level keys (proposal_id etc.). Grounding is
         // re-evaluated against the REWRITTEN json via the shared contract.
         let new_json = serde_json::to_string(&value)?;
-        let would_ground = evidence_has_live_chunk(conn, &new_json)?;
-        if would_ground {
+        let would_ground = if changed {
+            evidence_has_live_chunk(conn, &new_json)?
+        } else {
+            grounded
+        };
+        if !changed {
+            if grounded {
+                report.entries_already_anchored += 1;
+                flag_clears.push((entry_id, evidence_json));
+            } else {
+                report.entries_still_unanchored += 1;
+            }
+            continue;
+        }
+        if grounded {
+            // Already grounded; this pass only improved item provenance.
+            report.entries_already_anchored += 1;
+        } else if would_ground {
             report.entries_regrounded += 1;
         } else {
             report.entries_still_unanchored += 1;
@@ -207,15 +224,45 @@ pub fn re_anchor(conn: &Connection, apply: bool) -> Result<ReanchorReport> {
         candidates.push((entry_id, evidence_json, new_json, would_ground));
     }
 
-    if !apply || candidates.is_empty() {
+    if !apply {
+        return Ok(report);
+    }
+    let has_writes = !candidates.is_empty() || !flag_clears.is_empty();
+    if !has_writes {
+        // Converged brain: nothing to write, nothing to snapshot.
         return Ok(report);
     }
 
-    // 3. Apply phase: ONE IMMEDIATE transaction; each row is re-read under
-    //    the lock and must equal the matching-time snapshot (swap-race rule).
-    //    Rows that ground are cleared in the SAME write; ungrounded rows get
-    //    the re-anchored hashes only (they stay flagged for the heal).
+    // 3. Apply phase: §4 hard gate FIRST — the crash-consistent snapshot
+    //    lands before the FIRST write, flag clears included; a backup failure
+    //    aborts with zero rows touched.
+    if let Some(p) = db_path {
+        report.backup_path = Some(
+            backup_before_apply(conn, p)?
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    //    ONE IMMEDIATE transaction; each target row is re-read under the lock
+    //    and must equal the matching-time snapshot (swap-race rule).
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    for (entry_id, snapshot_json) in &flag_clears {
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT evidence_json FROM librarian_evidence WHERE entry_id = ?1",
+                [entry_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if current.as_deref() == Some(snapshot_json.as_str()) {
+            tx.execute(
+                "UPDATE librarian_evidence SET unanchored = 0 WHERE entry_id = ?1",
+                [entry_id],
+            )?;
+        } else {
+            report.entries_race_skipped += 1;
+        }
+    }
     for (entry_id, snapshot_json, new_json, would_ground) in &candidates {
         let current: Option<String> = tx
             .query_row(
@@ -384,10 +431,16 @@ fn chunk_hash_inputs(
     .map_err(Into::into)
 }
 
-/// Match `quote` against the current chunks by NORMALIZED PREFIX (≥60 chars),
-/// narrowed by the normalized SUFFIX when several chunks share the prefix.
-/// Requires the matched chunk's stored hash to equal the recomputed hash
-/// (chunker-drift guard); unresolved ties → [`QuoteMatch::Ambiguous`].
+/// Match `quote` against the current chunks in two tiers (spec §3, both Kurt
+/// adjudications harmonized): the FULL normalized quote contained in exactly
+/// one chunk anchors at any length (round-1 ruling: verbatim containment of
+/// the whole quote is real provenance, never a guess); otherwise a ≥60-char
+/// normalized PREFIX, narrowed by the normalized SUFFIX when several chunks
+/// share it. Uniqueness counts ALL textual candidates BEFORE the drift gate —
+/// a drifted sibling makes a match ambiguous, never silently anchorable. The
+/// surviving candidate's stored hash must equal the recomputed hash
+/// (chunker-drift guard); the anchor carries the RECOMPUTED hash, never the
+/// row's stored value.
 fn match_quote_prefix(
     conn: &Connection,
     index: &ChunkIndex,
@@ -398,6 +451,7 @@ fn match_quote_prefix(
         return Ok(QuoteMatch::None);
     }
     let prefix = normalized_prefix(&qn);
+    let suffix = normalized_suffix(&qn);
 
     // Textual candidates by normalized prefix (distinct chunk ids).
     let mut candidates: Vec<&ChunkIndexRow> = Vec::new();
@@ -410,66 +464,44 @@ fn match_quote_prefix(
         return Ok(QuoteMatch::None);
     }
 
-    // Drift gate on every textual candidate.
-    let mut valid: Vec<MatchedChunk> = Vec::new();
-    let mut drifted = 0usize;
-    for row in candidates {
-        let Some((text, position, path)) = chunk_hash_inputs(conn, row.id)? else {
-            continue;
-        };
-        if compute_chunk_hash(&text, &path, position as usize) == row.stored_hash {
-            let (_, start_line, end_line) = {
-                let mut stmt = conn.prepare(
-                    "SELECT start_line, end_line FROM chunks WHERE id = ?1",
-                )?;
-                let (sl, el) = stmt.query_row([row.id], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-                })?;
-                ((), sl, el)
-            };
-            valid.push(MatchedChunk {
-                chunk_id: row.id,
-                content_hash: row.stored_hash.clone(),
-                start_line,
-                end_line,
-            });
-        } else {
-            drifted += 1;
-        }
-    }
-    // Chunker drift on EVERY textual match — never trust any as an anchor.
-    if valid.is_empty() {
-        return if drifted > 0 {
-            Ok(QuoteMatch::HashMismatch)
-        } else {
-            Ok(QuoteMatch::None)
-        };
-    }
-    if valid.len() == 1 {
-        return Ok(QuoteMatch::One(valid.pop().unwrap()));
-    }
-
-    // Several prefix matches: the suffix narrows (strong case); an unresolved
-    // tie — or no chunk agreeing on both — stays ambiguous, never a guess.
-    match normalized_suffix(&qn) {
-        Some(suffix) => {
-            let agreeing: Vec<&MatchedChunk> = valid
-                .iter()
-                .filter(|m| {
-                    index
-                        .rows
-                        .iter()
-                        .find(|r| r.id == m.chunk_id)
-                        .is_some_and(|r| r.norm.contains(&suffix))
-                })
-                .collect();
-            match agreeing.len() {
-                1 => Ok(QuoteMatch::One(agreeing[0].clone())),
-                _ => Ok(QuoteMatch::Ambiguous),
+    // Uniqueness FIRST (drifted siblings count), then the drift gate on the
+    // single survivor only.
+    let survivor: &ChunkIndexRow = if candidates.len() == 1 {
+        candidates[0]
+    } else {
+        match &suffix {
+            Some(suffix) => {
+                let narrowed: Vec<&ChunkIndexRow> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|r| r.norm.contains(suffix))
+                    .collect();
+                if narrowed.len() == 1 {
+                    narrowed[0]
+                } else {
+                    return Ok(QuoteMatch::Ambiguous);
+                }
             }
+            None => return Ok(QuoteMatch::Ambiguous),
         }
-        None => Ok(QuoteMatch::Ambiguous),
+    };
+    let Some((text, position, path)) = chunk_hash_inputs(conn, survivor.id)? else {
+        return Ok(QuoteMatch::None);
+    };
+    let recomputed = compute_chunk_hash(&text, &path, position as usize);
+    if recomputed != survivor.stored_hash {
+        return Ok(QuoteMatch::HashMismatch);
     }
+    let mut stmt = conn.prepare("SELECT start_line, end_line FROM chunks WHERE id = ?1")?;
+    let (start_line, end_line) = stmt.query_row([survivor.id], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    Ok(QuoteMatch::One(MatchedChunk {
+        chunk_id: survivor.id,
+        content_hash: recomputed,
+        start_line,
+        end_line,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -581,7 +613,7 @@ mod tests {
             None,
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.entries_examined, 1);
         assert_eq!(report.items_dead, 1);
         assert_eq!(report.items_reanchored, 1);
@@ -605,7 +637,7 @@ mod tests {
 
         // Idempotent: a converged brain is a no-op (the row is re-examined —
         // the scan covers ALL live rows — but grounds, so nothing is rewritten).
-        let second = re_anchor(&conn, true).unwrap();
+        let second = re_anchor(&conn, true, None).unwrap();
         assert_eq!(second.entries_examined, 1);
         assert_eq!(second.entries_already_anchored, 1);
         assert_eq!(second.items_reanchored, 0);
@@ -630,7 +662,7 @@ mod tests {
             0, // NOT flagged — the live-brain condition
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.entries_examined, 1);
         assert_eq!(report.items_dead, 1);
         assert_eq!(report.items_reanchored, 1);
@@ -656,7 +688,7 @@ mod tests {
             None,
         );
 
-        let report = re_anchor(&conn, false).unwrap();
+        let report = re_anchor(&conn, false, None).unwrap();
         assert_eq!(report.items_reanchored, 1);
         assert_eq!(report.entries_regrounded, 1);
 
@@ -684,7 +716,7 @@ mod tests {
             None,
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.items_ambiguous, 1);
         assert_eq!(report.items_reanchored, 0);
         assert_eq!(report.entries_still_unanchored, 1);
@@ -707,7 +739,7 @@ mod tests {
             None,
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.items_hash_mismatch, 1);
         assert_eq!(report.items_reanchored, 0);
         assert_eq!(stored_unanchored(&conn, "fact_drift"), 1);
@@ -736,7 +768,7 @@ mod tests {
             Some(90), // soft-deleted: prune's business, never re-anchored
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.entries_examined, 1); // soft-deleted row skipped
         assert_eq!(report.items_unresolved, 1);
         assert_eq!(report.items_reanchored, 0);
@@ -763,7 +795,7 @@ mod tests {
             None,
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.items_reanchored, 1);
         assert_eq!(report.items_unresolved, 1);
         // Contract satisfied via the re-anchored item → flag cleared.
@@ -786,7 +818,7 @@ mod tests {
             None,
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.entries_already_anchored, 1);
         assert_eq!(report.items_dead, 0);
         assert_eq!(stored_unanchored(&conn, "fact_stale"), 0);
@@ -805,7 +837,7 @@ mod tests {
             None,
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.items_dead, 0);
         assert_eq!(report.entries_already_anchored, 1);
         assert_eq!(stored_unanchored(&conn, "fact_hashless"), 0);
@@ -877,7 +909,7 @@ mod tests {
             None,
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.items_dead, 1);
         assert_eq!(
             report.items_reanchored, 1,
@@ -914,7 +946,7 @@ mod tests {
             None,
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(
             report.items_ambiguous, 1,
             "shared prefix across 2 chunks must refuse, never guess"
@@ -949,13 +981,125 @@ mod tests {
             None,
         );
 
-        let report = re_anchor(&conn, true).unwrap();
+        let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(
             report.items_reanchored, 1,
             "prefix+suffix agreement is the strong case"
         );
         assert_eq!(report.items_ambiguous, 0);
         assert!(stored_json(&conn, "fact_suffix").contains(&h1));
+    }
+
+    /// Uniqueness counts drifted siblings: two chunks share the prefix (and
+    /// the suffix matches both), one with a stale stored hash — the tie is
+    /// ambiguous, NEVER anchored to the one valid chunk (review haiku/high).
+    #[test]
+    fn drifted_sibling_makes_shared_prefix_ambiguous() {
+        let conn = open_in_memory().unwrap();
+        let mut shared = String::new();
+        for i in 0..40 {
+            shared.push_str(&format!("word number {} of a shared preamble line. ", i));
+        }
+        let a = format!("{}alpha ending only here", shared);
+        let b = format!("{}alpha ending only here", shared); // same ending!
+        let h_good = compute_chunk_hash(&a, DOC_PATH, 1usize);
+        seed_chunk(&conn, &a, 1, &h_good);
+        // Chunk b stores a hash that does NOT match its text — drifted.
+        seed_chunk(&conn, &b, 2, "beef0000000000000000000000000000000000000000000000000000000000");
+        let quote = format!("{}alpha ending only here", shared);
+        seed_flagged(
+            &conn,
+            "fact_drift_sibling",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_ds"}}"#,
+                dead_item("dead3000000000000000000000000000000000000000000000000000000000", &quote)
+            ),
+            None,
+        );
+
+        let report = re_anchor(&conn, true, None).unwrap();
+        assert_eq!(
+            report.items_ambiguous, 1,
+            "a drifted sibling must turn the tie ambiguous, not pick the valid one"
+        );
+        assert_eq!(report.items_reanchored, 0);
+        assert_eq!(stored_unanchored(&conn, "fact_drift_sibling"), 1);
+    }
+
+    /// A grounded entry can still carry a dead sibling item (the grounding
+    /// contract needs ONE live item). The dead item is repaired too — a live
+    /// sibling must not orphan recoverable provenance (review haiku/medium).
+    #[test]
+    fn grounded_entry_dead_sibling_item_is_still_repaired() {
+        let conn = open_in_memory().unwrap();
+        let live_text = "intro line\nthe live sibling quote\ntrailing";
+        let live_hash = compute_chunk_hash(live_text, DOC_PATH, 1usize);
+        seed_chunk(&conn, live_text, 1, &live_hash);
+        let rec_text = "recovery line\nthe recoverable sibling quote\nmore";
+        let rec_hash = compute_chunk_hash(rec_text, DOC_PATH, 2usize);
+        seed_chunk(&conn, rec_text, 2, &rec_hash);
+        // item0: LIVE hash (grounds the entry); item1: dead but recoverable.
+        seed_row(
+            &conn,
+            "fact_grounded_sibling",
+            &format!(
+                r#"{{"evidence":[{},{}],"proposal_id":"prop_gs"}}"#,
+                dead_item(&live_hash, "the live sibling quote"),
+                dead_item("dead4000000000000000000000000000000000000000000000000000000000", "the recoverable sibling quote")
+            ),
+            None,
+            0,
+        );
+
+        let report = re_anchor(&conn, true, None).unwrap();
+        assert_eq!(report.items_dead, 1);
+        assert_eq!(report.items_reanchored, 1, "dead sibling of a live item is repaired");
+        assert_eq!(report.entries_already_anchored, 1);
+        assert!(stored_json(&conn, "fact_grounded_sibling").contains(&rec_hash));
+    }
+
+    /// §4/§6: the APPLY path snapshots before the first write (file-backed db
+    /// proves the file lands next to the db); the dry-run path writes none.
+    #[test]
+    fn apply_snapshots_but_dry_run_writes_no_backup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("brain.db");
+        let conn = Connection::open(&db_path).unwrap();
+        crate::db::connection::migrate_open_db(&conn, Some(dir.path())).unwrap();
+
+        let live_text = "intro line\nthe recoverable quote here\ntrailing";
+        let live_hash = compute_chunk_hash(live_text, DOC_PATH, 1usize);
+        seed_chunk(&conn, live_text, 1, &live_hash);
+        seed_flagged(
+            &conn,
+            "fact_backup",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_bk"}}"#,
+                dead_item("dead5000000000000000000000000000000000000000000000000000000000", "the recoverable quote here")
+            ),
+            None,
+        );
+
+        let backups = || -> Vec<_> {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().contains("bak-pre-reanchor"))
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>()
+        };
+        assert!(backups().is_empty(), "no backup before any pass");
+
+        let dry = re_anchor(&conn, false, Some(&db_path)).unwrap();
+        assert_eq!(dry.items_reanchored, 1);
+        assert!(dry.backup_path.is_none(), "dry-run takes no backup");
+        assert!(backups().is_empty(), "dry-run must not write a backup");
+
+        let apply = re_anchor(&conn, true, Some(&db_path)).unwrap();
+        assert_eq!(apply.items_reanchored, 1);
+        let b = apply.backup_path.expect("apply must snapshot first");
+        assert!(dir.path().join(&b).exists(), "snapshot lands beside the db");
+        assert_eq!(backups().len(), 1, "exactly one snapshot");
     }
 }
 

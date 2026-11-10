@@ -1698,7 +1698,7 @@ pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
     let brain = crate::write::resolve()?;
     if !yes {
         let conn = crate::write::open_ro(&brain)?;
-        let report = tauri_app_lib::db::evidence_reanchor::re_anchor(&conn, false)?;
+        let report = tauri_app_lib::db::evidence_reanchor::re_anchor(&conn, false, None)?;
         eprintln!(
             "refusing: `ct evidence re-anchor` would rewrite evidence hashes in {} \
              (a brain write). Dry-run: examined={} already_anchored={} dead_items={} \
@@ -1718,7 +1718,11 @@ pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
         return Ok(1);
     }
     let conn = crate::write::open_rw(&brain)?;
-    let report = tauri_app_lib::db::evidence_reanchor::re_anchor(&conn, true)?;
+    let report =
+        tauri_app_lib::db::evidence_reanchor::re_anchor(&conn, true, Some(&brain.paths.db_path))?;
+    if let Some(b) = &report.backup_path {
+        eprintln!("[ct::reanchor] backup={}", b);
+    }
     println!(
         "[ct::reanchor] entries_examined={} already_anchored={} reanchored_items={} \
          ambiguous={} unresolved={} hash_mismatch={} regrounded={} still_unanchored={} \
