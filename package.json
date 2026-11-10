@@ -51,7 +51,7 @@
     "@equationalapplications/schema-software-org": "7.13.0",
     "@mantine/core": "9.7.4",
     "@mantine/hooks": "9.7.4",
-    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/api": "2.12.4",
     "@tauri-apps/plugin-dialog": "2.7.3",
     "@tauri-apps/plugin-notification": "2.4.0",
     "@tauri-apps/plugin-opener": "2.7.2",
