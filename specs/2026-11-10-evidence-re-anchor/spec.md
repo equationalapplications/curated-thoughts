@@ -1,7 +1,7 @@
 # `ct evidence re-anchor`: pre-purge re-anchoring of unanchored librarian evidence
 
 **Date:** 2026-11-10
-**Status:** Reviewed (Kurt adjudications 2026-11-10: §4 backup KEPT — implement `VACUUM INTO` in the command; §4 breaker language STRIPPED and §5 export-first REMOVED — the command never hands rows to a destructive path; §3 match strategy aligned to the verbatim-substring implementation)
+**Status:** Implemented (2026-11-10: applied to the live brain after dry-run gates — backup `brain.db.bak-pre-reanchor-1794342813`; 173 entries re-anchored/regrounded, 0 race-skips, idempotent re-run clean; residual 129 entries adjudication pending with Kurt; spec §3 round 2 normalized-prefix strategy per the reanchored=0-by-construction handoff)
 **Supersedes the ad-hoc repair runs of 2026-10-18** (`brain.db.bak-pre-anchor-heal-20261018`, exports under `~/ct-anchor-heal-exports/`) — those were manual; this makes the recovery a gated, idempotent CLI command.
 
 ## 1. Problem
