@@ -103,7 +103,7 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security import "$CERT" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security import "$CERT" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security -t cert -f pkcs12 -k "$KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           rm -f "$CERT"
@@ -328,7 +328,11 @@ jobs:
           tagName: v__VERSION__
           releaseName: "Curated Thoughts v__VERSION__"
           releaseBody: "See the assets below to download and install this version."
-          releaseDraft: false
+          # Draft first: the release goes public only via the publish-release
+          # job AFTER every matrix leg built, verified, and uploaded — so a
+          # silently unsigned/invalid artifact fails the build and the release
+          # never goes public (docs/release-signing.md gate promise).
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
 
@@ -343,6 +347,12 @@ jobs:
           grep -q 'Developer ID Application' <<<"$sidecar_info"
           spctl --assess --type execute --verbose=2 "$APP"
           xcrun stapler validate "$APP"
+          # The .dmg and the ct CLI are signed+notarized artifacts too
+          # (docs/release-signing.md table) — verify them, don't trust.
+          DMG="$(find "$TARGET_DIR/universal-apple-darwin/release/bundle/dmg" -maxdepth 1 -name '*.dmg' | head -1)"
+          test -n "$DMG"
+          xcrun stapler validate "$DMG"
+          xcrun stapler validate "${TARGET_DIR}/ct"
 
       - name: Verify Windows signatures
         if: matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true'
@@ -354,6 +364,12 @@ jobs:
           $bad = $files | Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' }
           $files | ForEach-Object { "{0}: {1}" -f $_.Name, (Get-AuthenticodeSignature $_.FullName).Status }
           if ($bad) { throw "Unsigned or invalid: $($bad.Name -join ', ')" }
+
+      - name: Cleanup signing material (macOS)
+        if: always() && matrix.platform == 'macos-latest'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
 
       - name: Upload ct release asset
         if: github.ref_type == 'tag'
@@ -371,3 +387,20 @@ jobs:
           else
             gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuildmac.outputs.asset }}" --clobber
           fi
+
+  publish-release:
+    # The release is created as a DRAFT by tauri-action above and flips to
+    # public only after EVERY matrix leg built, verified, and uploaded — a
+    # silently unsigned/invalid artifact fails its leg and the release stays
+    # draft (docs/release-signing.md gate promise). GITHUB_REF_NAME is the tag
+    # on this trigger, which is also the release tag tauri-action used.
+    needs: publish-tauri
+    if: github.ref_type == 'tag' && success()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
