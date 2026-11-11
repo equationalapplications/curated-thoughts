@@ -1653,6 +1653,10 @@ pub fn evidence_regrade_cmd(yes: bool, allow_bulk: bool) -> Result<i32> {
     }
     let brain = crate::write::resolve()?;
     let conn = crate::write::open_rw(&brain)?;
+    // Migrate-first (PR #336 T4 M3): the regrade purge scan names
+    // `adjudication_hold` (V29); a pre-V29 brain must be brought current
+    // before the scan prepares (same pattern as the graph reanchor cmd).
+    tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
     let now_ms = tauri_app_lib::db::commit::ms_now();
     let report = tauri_app_lib::db::evidence_regrade::regrade_unanchored_opts(
         &conn,
@@ -1682,6 +1686,111 @@ pub fn evidence_regrade_cmd(yes: bool, allow_bulk: bool) -> Result<i32> {
              rows survive un-exported; fix the cause and re-run"
         );
         return Ok(1);
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// `ct evidence re-anchor` — quote-text recovery for boundary-shift orphaned
+// evidence hashes. Non-destructive by construction (rows are UPDATED, never
+// deleted; no breaker interaction) but still a brain write, so it follows the
+// regrade gating convention: without --yes, a dry-run summary and exit 1.
+// ---------------------------------------------------------------------------
+
+/// `ct evidence re-anchor` — re-anchor dead evidence hashes to current chunks.
+pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
+    let brain = crate::write::resolve()?;
+    // Migrate-first, DELIBERATELY split by arm (PR #336 T4 delta M2, refined
+    // delta-2 M1): both evidence scans name `adjudication_hold` (V29), and
+    // `COALESCE` does not rescue a missing column — so every arm ensures the
+    // V29 column. But NEITHER arm may run the full ladder up front: the V20
+    // block export-then-purges `unanchored = 1 AND hold = 0` stock, and this
+    // command is the pre-purge RESCUE — spec §2 orders re-anchor BEFORE any
+    // purge. The `--yes` arm therefore runs the full ladder only AFTER the
+    // re-anchor apply returns, so the V20 purge sees the post-rescue stock.
+    //
+    // T4 delta-3 m5: the dry run is a read-only command, so the ensure takes
+    // the write lock ONLY when the column is actually missing (read-only
+    // probe first — the same unlocked-pre-check → lock-only-when-pending
+    // house pattern V29 itself uses). A steady-state dry run is now fully
+    // read-only; a pre-V29 brain still gets its one-time idempotent DDL, and
+    // a pre-V18 brain gets ensure's clear "nothing to rescue yet" error.
+    let probe_conn = crate::write::open_ro(&brain)?;
+    let column_present = tauri_app_lib::db::connection::v29_hold_column_present(&probe_conn)?;
+    drop(probe_conn);
+    if !column_present {
+        let mw = crate::write::open_rw(&brain)?;
+        tauri_app_lib::db::connection::ensure_v29_adjudication_hold(&mw)?;
+    }
+    if !yes {
+        let conn = crate::write::open_ro(&brain)?;
+        let report = tauri_app_lib::db::evidence_reanchor::re_anchor(&conn, false, None)?;
+        eprintln!(
+            "refusing: `ct evidence re-anchor` would rewrite evidence hashes in {} \
+             (a brain write). Dry-run: examined={} already_anchored={} dead_items={} \
+             reanchored={} ambiguous={} unresolved={} hash_mismatch={} \
+             regrounded={} still_unanchored={} \
+             flag_writes: {} handoff(s), {} clear(s); hold_writes: {} set(s), {} clear(s). \
+             Pass --yes to apply.",
+            brain.paths.db_path.display(),
+            report.entries_examined,
+            report.entries_already_anchored,
+            report.items_dead,
+            report.items_reanchored,
+            report.items_ambiguous,
+            report.items_unresolved,
+            report.items_hash_mismatch,
+            report.entries_regrounded,
+            report.entries_still_unanchored,
+            report.flag_handoffs_planned,
+            report.flag_clears_planned,
+            report.hold_sets_planned,
+            report.hold_clears_planned
+        );
+        if !report.items_flagged_detail.is_empty() {
+            eprintln!(
+                "[ct::reanchor] dry-run adjudication queue (entry_id kind #item):"
+            );
+            for (entry_id, kind, item_idx) in &report.items_flagged_detail {
+                eprintln!("  {} {} #{}", entry_id, kind, item_idx);
+            }
+        }
+        return Ok(1);
+    }
+    let conn = crate::write::open_rw(&brain)?;
+    let report =
+        tauri_app_lib::db::evidence_reanchor::re_anchor(&conn, true, Some(&brain.paths.db_path))?;
+    // Post-rescue ladder (PR #336 T4 delta-2 M1): NOW that re-anchor has
+    // rescued everything recoverable, bring the schema fully current — the
+    // V20 block's purge (if this brain was still below 20) sees only the
+    // post-rescue stock, preserving the spec §2 ordering.
+    tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
+    if let Some(b) = &report.backup_path {
+        eprintln!("[ct::reanchor] backup={}", b);
+    }
+    println!(
+        "[ct::reanchor] entries_examined={} already_anchored={} reanchored_items={} \
+         ambiguous={} unresolved={} hash_mismatch={} regrounded={} still_unanchored={} \
+         race_skipped={} flag_handoffs={} flag_clears={} hold_sets={} hold_clears={}",
+        report.entries_examined,
+        report.entries_already_anchored,
+        report.items_reanchored,
+        report.items_ambiguous,
+        report.items_unresolved,
+        report.items_hash_mismatch,
+        report.entries_regrounded,
+        report.entries_still_unanchored,
+        report.entries_race_skipped,
+        report.flag_handoffs_planned,
+        report.flag_clears_planned,
+        report.hold_sets_planned,
+        report.hold_clears_planned
+    );
+    if !report.items_flagged_detail.is_empty() {
+        eprintln!("[ct::reanchor] items left flagged (entry_id kind #item) — adjudication queue:");
+        for (entry_id, kind, item_idx) in &report.items_flagged_detail {
+            eprintln!("  {} {} #{}", entry_id, kind, item_idx);
+        }
     }
     Ok(0)
 }

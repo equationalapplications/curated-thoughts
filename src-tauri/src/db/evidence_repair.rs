@@ -302,6 +302,14 @@ pub fn run_evidence_repair(conn: &Connection, now_ms: i64) -> Result<RepairRepor
                 // Compute the real Phase-1 flag — a repaired blob with no live
                 // chunk anchor must carry unanchored=1, not a hardcoded 0, or
                 // it re-arms the heal-purge bait. Spec §2.4.
+                // Adjudication hold (PR #336 T4 delta m5 — ACCEPTED SEMANTICS,
+                // stated plainly): the INSERT OR REPLACE below rebuilds the
+                // row wholesale, so any prior `adjudication_hold` resets to 0
+                // by construction. A previously held ambiguous row rebuilt by
+                // this repair lands hold 0 and IS purge-eligible (heal's
+                // soft-delete still keys on grounding) until the next
+                // re-anchor pass re-derives the class. That exposure is
+                // accepted: the repair payload's class is unknowable here.
                 let unanchored = !crate::db::commit::evidence_has_live_chunk(conn, &json)?;
                 crate::db::commit::insert_librarian_evidence(
                     conn, &entry_id, &pid, &json, unanchored, now_ms,

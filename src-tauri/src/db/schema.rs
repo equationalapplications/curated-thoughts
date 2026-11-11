@@ -395,7 +395,8 @@ CREATE TABLE IF NOT EXISTS librarian_evidence (
   proposal_id   TEXT NOT NULL,
   evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
   unanchored    INTEGER NOT NULL DEFAULT 0,
-  created_at    INTEGER NOT NULL
+  created_at    INTEGER NOT NULL,
+  adjudication_hold INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS librarian_evidence_proposal_idx

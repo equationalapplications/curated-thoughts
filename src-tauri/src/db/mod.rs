@@ -11,6 +11,7 @@ pub mod edge_purge;
 pub mod entities;
 pub mod entity_gate;
 pub mod events;
+pub mod evidence_reanchor;
 pub mod evidence_regrade;
 pub mod evidence_repair;
 pub mod heal;

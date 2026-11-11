@@ -307,6 +307,25 @@ enum EvidenceCmd {
         #[arg(long, requires = "yes")]
         allow_bulk: bool,
     },
+    /// Re-anchor dead evidence hashes to current chunks by quote-text match.
+    /// Recovery for boundary-shift orphaning (hash binds text+path+position):
+    /// the quote and chunks are NORMALIZED (case, whitespace, punctuation);
+    /// the full normalized quote living in exactly one current chunk anchors
+    /// there, else a >=60-char normalized prefix match is used with the
+    /// quote's tail breaking ties — unresolved ties stay flagged, never
+    /// guessed. The content_hash/chunk_id are rewritten and, if the row
+    /// grounds, its `unanchored` flag cleared — pulling entries back from
+    /// the nightly heal's soft-delete path. Flag dispositions follow the
+    /// adjudication class: unresolved-only rows are flagged `unanchored = 1`
+    /// for the regrade flow; ambiguous/drift rows are kept CLEAR of regrade's
+    /// purge scan. Rows are only UPDATED, never deleted, but it is still a
+    /// brain write: without --yes it prints the dry-run summary only.
+    ReAnchor {
+        /// Confirm the write (hash rewrites + flag hand-offs 0→1, flag
+        /// clears 1→0, and adjudication-hold set/clear writes).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -737,6 +756,7 @@ fn run(cmd: Cmd) -> Result<i32> {
             EvidenceCmd::Regrade { yes, allow_bulk } => {
                 cli_common::evidence_regrade_cmd(yes, allow_bulk)
             }
+            EvidenceCmd::ReAnchor { yes } => cli_common::evidence_reanchor_cmd(yes),
         },
         Cmd::Proposals { cmd } => match cmd {
             ProposalsCmd::List { json } => proposals_list(json),
@@ -1427,6 +1447,21 @@ mod tests {
         assert!(
             Ct::try_parse_from(["ct", "evidence", "regrade", "--allow-bulk"]).is_err(),
             "regrade --allow-bulk must require --yes"
+        );
+
+        // re-anchor gains --yes; it is a write so the flag is the only gate.
+        let parsed = Ct::try_parse_from(["ct", "evidence", "re-anchor", "--yes"])
+            .expect("evidence re-anchor --yes must parse");
+        let Cmd::Evidence {
+            cmd: EvidenceCmd::ReAnchor { yes },
+        } = parsed.cmd
+        else {
+            unreachable!("expected EvidenceCmd::ReAnchor");
+        };
+        assert!(yes);
+        assert!(
+            Ct::try_parse_from(["ct", "evidence", "re-anchor"]).is_ok(),
+            "re-anchor without --yes must parse (dry-run default)"
         );
     }
 }

@@ -224,7 +224,8 @@ pub fn purge_doomed_rows_opts(
             "SELECT le.entry_id, le.evidence_json
                FROM librarian_evidence le
                JOIN llm_wiki_entries e ON e.id = le.entry_id
-              WHERE le.unanchored = 1 AND e.deleted_at IS NULL",
+              WHERE le.unanchored = 1 AND e.deleted_at IS NULL
+                AND COALESCE(le.adjudication_hold, 0) = 0",
         )?;
         let flagged: Vec<(String, String)> = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -312,11 +313,15 @@ pub fn regrade_unanchored_opts(
     let mut report = RegradeReport::default();
 
     // 1. Live flagged rows only — soft-deleted stock is prune's business.
+    //    Held rows (adjudication pending, PR #336 T3 M1) are invisible to the
+    //    purge: the in-transaction recount below applies the identical guard,
+    //    so the swap-race set comparison stays meaningful.
     let mut stmt = conn.prepare(
         "SELECT le.entry_id, le.evidence_json
            FROM librarian_evidence le
            JOIN llm_wiki_entries e ON e.id = le.entry_id
-          WHERE le.unanchored = 1 AND e.deleted_at IS NULL",
+          WHERE le.unanchored = 1 AND e.deleted_at IS NULL
+            AND COALESCE(le.adjudication_hold, 0) = 0",
     )?;
     let flagged: Vec<(String, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
