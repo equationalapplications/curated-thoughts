@@ -814,7 +814,13 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
             // destructive path (regrade's purge OR this heal's soft-delete)
             // until a person adjudicates them.
             Some((json, unanchored, hold)) => {
-                if unanchored == 1 && (v20_regrade_pending(conn) || hold == 1) {
+                // CodeRabbit #336 thread 4539690136: the hold blocks the heal
+                // INDEPENDENTLY of the flag — regrade's hold-blind re-grounding
+                // clear plus the scan/re-anchor race can leave hold = 1 with
+                // unanchored = 0 (D7 pins it). The V20 exception stays
+                // conditional on the flag: an unheld unflagged row grounds
+                // strictly, per §2.3.
+                if hold == 1 || (unanchored == 1 && v20_regrade_pending(conn)) {
                     return true;
                 }
                 match evidence_has_live_chunk(conn, &json) {
@@ -8833,6 +8839,68 @@ mod source_ref_grounded_tests {
         assert!(
             !source_ref_is_still_grounded(&conn, &token),
             "the same row without the hold must fall to the heal (grounding decides)"
+        );
+    }
+
+    /// D7 — CodeRabbit #336 thread 4539690136: hold blocks the heal
+    /// INDEPENDENTLY of the flag. Regrade's re-grounding clear is hold-blind
+    /// (`SET unanchored = 0`), and the scan/re-anchor swap race can leave a
+    /// row at `hold = 1, unanchored = 0`. Grounding may then lapse (chunk
+    /// resplit) before the next re-anchor pass clears the stale hold — the
+    /// heal must still not soft-delete it. The V20 exception stays
+    /// conditional on the flag (an UNheld unflagged row grounds strictly).
+    #[test]
+    fn hold_keeps_unflagged_row_from_heal_independently_of_flag() {
+        let conn = open_in_memory().unwrap();
+        // Settle the brain so `v20_regrade_pending` is false — the hold must
+        // carry the keep-rule ON ITS OWN, flag or no flag.
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (20)",
+            [],
+        )
+        .unwrap();
+        let token = librarian_source_ref_token("fact_hold_unflagged");
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_hold_unflagged','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+            [&token],
+        )
+        .unwrap();
+        // Held but UNFLAGGED (hold = 1, unanchored = 0 — the regrade race
+        // shape), fully ungrounded: demonstrably dead by evidence alone.
+        insert_librarian_evidence(
+            &conn,
+            "fact_hold_unflagged",
+            "prop_hu",
+            r#"{"evidence":[{"chunk_id":999,"content_hash":"h_gone","quote":"q","start_line":1,"end_line":3}],"proposal_id":"prop_hu"}"#,
+            false,
+            1,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE librarian_evidence SET adjudication_hold = 1
+              WHERE entry_id = 'fact_hold_unflagged'",
+            [],
+        )
+        .unwrap();
+
+        // Held + unflagged + fully ungrounded → the heal must NOT soft-delete.
+        assert!(
+            source_ref_is_still_grounded(&conn, &token),
+            "held-but-unflagged row must be kept from the heal's soft-delete"
+        );
+
+        // Control: same row WITHOUT the hold falls (grounding decides).
+        conn.execute(
+            "UPDATE librarian_evidence SET adjudication_hold = 0
+              WHERE entry_id = 'fact_hold_unflagged'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            !source_ref_is_still_grounded(&conn, &token),
+            "the same unheld unflagged row must fall to the heal (grounding decides)"
         );
     }
 
