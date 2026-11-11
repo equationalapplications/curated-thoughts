@@ -66,7 +66,7 @@ per ITEM too — a live sibling must not orphan recoverable provenance.
 (adjudicated 2026-11-10)
 
 - **Backup before first write — KEPT.** Even though the pass is UPDATE-only, it is still a mass brain write: before any apply, `VACUUM INTO` a crash-consistent snapshot (`brain.db.bak-pre-reanchor-<ts>` in the db dir) — cheap, zero-friction insurance, and the documented rollback path.
-- **Dry-run by default.** Like `graph_reanchor`: read-only plan printed unless `--yes`.
+- **Dry-run by default.** Like `graph_reanchor`: read-only plan printed unless `--yes`. Read-only covers all EVIDENCE data — zero row writes, no backup. One exception (CodeRabbit thread 4539690158 residual, adjudicated 2026-11-11): on a brain where the V29 `adjudication_hold` column is still missing, the dry run first ensures it — one idempotent schema-only DDL under the write lock, taken ONLY when the probe shows the column absent. Unavoidable: both evidence scans name the column and `COALESCE` does not rescue a missing one, so a pre-V29 brain cannot be dry-run-scanned at all without it. Steady-state dry runs are fully read-only.
 - **No breaker interaction — WIP posture adopted.** Rows are only ever UPDATED, never deleted, so the shared bulk-deletion budget is untouched and the breaker is not consulted. The two destructive consumers — regrade's gated export-then-purge and the heal's soft-delete — each consult the row's `adjudication_hold`: held rows take NO destructive path; unresolved rows (hold 0) are EXPLICITLY handed to regrade's purge by carrying `unanchored = 1` — re-anchor writes flags, regrade decides deletions, under its own gates.
 
 ## 5. Idempotency and the report
