@@ -1251,10 +1251,6 @@ fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()> {
 /// carries the adjudication state instead, and both destructive consumers
 /// (regrade's purge scans, heal's keep-rule) consult it.
 ///
-/// Runs EARLY — called right after the V18 block (which guarantees the table
-/// exists on fresh brains; their DDL carries the column natively) and BEFORE
-/// the V20 block, whose in-migration re-grade scan names `adjudication_hold`
-/// and would fail `no such column` on a pre-V29 brain otherwise.
 /// V29 column-add phase (called EARLY, right after the V18 block and before
 /// the V20 block whose re-grade scan names `adjudication_hold`). Steady state
 /// is a LOCK-FREE no-op (T4 delta M1): the unlocked pragma pre-check returns
@@ -1334,10 +1330,22 @@ pub(crate) fn stamp_v29(conn: &Connection) -> Result<()> {
 
 /// One-shot V29 ensure for direct callers that hold a raw connection to a
 /// brain the app has not opened yet (the `ct` evidence commands' migrate-first
-/// path, T4 M3): column-add + stamp in one call.
+/// path, T4 M3): column-add + stamp in one call. The stamp only lands when
+/// the versioned ladder has settled (MAX >= 28, T4 delta-2 m4): on a brain
+/// parked mid-ladder (e.g. V25, waiting for a rooted open) the column is
+/// added — the evidence scans need it — but `ct status` keeps reporting the
+/// unsettled ladder truthfully until the next full migrate stamps the rest.
 pub fn ensure_v29_adjudication_hold(conn: &Connection) -> Result<()> {
     ensure_v29_column(conn)?;
-    stamp_v29(conn)
+    let stamped_now: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped_now >= 28 {
+        stamp_v29(conn)?;
+    }
+    Ok(())
 }
 
 /// True when a trigger of the given name exists (any table). Used to decide

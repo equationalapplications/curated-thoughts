@@ -133,6 +133,9 @@ struct Candidate {
     /// True when the pass saw any ambiguous/hash_mismatch dead item — the
     /// hold disposition the apply writes if the row stays ungrounded.
     has_hold: bool,
+    /// The row's `adjudication_hold` column at queue time (hold-counter
+    /// rollback on a race-skip keys on it).
+    held: i64,
     /// Items this pass rewrote — rolled back if the row is race-skipped, so
     /// `items_reanchored` counts only WRITTEN re-anchors.
     items_reanchored: usize,
@@ -376,6 +379,20 @@ pub fn re_anchor(
         } else {
             report.entries_still_unanchored += 1;
         }
+        // T4 delta-2 m2: candidates write the hold column too — count the
+        // PREDICTED hold disposition now, on the same grounds prediction the
+        // apply reconciles against (see the grounds_now block below).
+        if would_ground {
+            if held != 0 {
+                report.hold_clears_planned += 1;
+            }
+        } else if has_hold {
+            if held == 0 {
+                report.hold_sets_planned += 1;
+            }
+        } else if held != 0 {
+            report.hold_clears_planned += 1;
+        }
         candidates.push(Candidate {
             entry_id,
             snapshot_json: evidence_json,
@@ -383,6 +400,7 @@ pub fn re_anchor(
             would_ground,
             grounded,
             has_hold,
+            held,
             items_reanchored,
         });
     }
@@ -519,6 +537,22 @@ pub fn re_anchor(
                     report.items_reanchored = report
                         .items_reanchored
                         .saturating_sub(cand.items_reanchored);
+                    // Undo the PREDICTED hold counting queued for this row
+                    // (T4 delta-2 m2): a race-skip writes nothing.
+                    if *would_ground {
+                        if cand.held != 0 {
+                            report.hold_clears_planned =
+                                report.hold_clears_planned.saturating_sub(1);
+                        }
+                    } else if cand.has_hold {
+                        if cand.held == 0 {
+                            report.hold_sets_planned =
+                                report.hold_sets_planned.saturating_sub(1);
+                        }
+                    } else if cand.held != 0 {
+                        report.hold_clears_planned =
+                            report.hold_clears_planned.saturating_sub(1);
+                    }
                     if !grounded && *would_ground {
                         report.entries_regrounded = report.entries_regrounded.saturating_sub(1);
                         report.entries_still_unanchored += 1;
@@ -559,6 +593,34 @@ pub fn re_anchor(
                         report.entries_regrounded = report.entries_regrounded.saturating_sub(1);
                         report.entries_still_unanchored += 1;
                     }
+                    // Hold-counter reconciliation (T4 delta-2 m2): undo the
+                    // would_ground-based counting and recount by the ACTUAL
+                    // under-lock grounding.
+                    if *would_ground {
+                        if cand.held != 0 {
+                            report.hold_clears_planned =
+                                report.hold_clears_planned.saturating_sub(1);
+                        }
+                    } else if cand.has_hold {
+                        if cand.held == 0 {
+                            report.hold_sets_planned =
+                                report.hold_sets_planned.saturating_sub(1);
+                        }
+                    } else if cand.held != 0 {
+                        report.hold_clears_planned =
+                            report.hold_clears_planned.saturating_sub(1);
+                    }
+                    if grounds_now {
+                        if cand.held != 0 {
+                            report.hold_clears_planned += 1;
+                        }
+                    } else if cand.has_hold {
+                        if cand.held == 0 {
+                            report.hold_sets_planned += 1;
+                        }
+                    } else if cand.held != 0 {
+                        report.hold_clears_planned += 1;
+                    }
                 }
                 tx.execute(
                     "UPDATE librarian_evidence
@@ -574,6 +636,20 @@ pub fn re_anchor(
                 report.items_reanchored = report
                     .items_reanchored
                     .saturating_sub(cand.items_reanchored);
+                // Undo the PREDICTED hold counting (T4 delta-2 m2) — a
+                // race-skip writes nothing.
+                if *would_ground {
+                    if cand.held != 0 {
+                        report.hold_clears_planned =
+                            report.hold_clears_planned.saturating_sub(1);
+                    }
+                } else if cand.has_hold {
+                    if cand.held == 0 {
+                        report.hold_sets_planned = report.hold_sets_planned.saturating_sub(1);
+                    }
+                } else if cand.held != 0 {
+                    report.hold_clears_planned = report.hold_clears_planned.saturating_sub(1);
+                }
                 // Grounded rows stay factually grounded on a race-skip — only
                 // the was-ungrounded-now-grounded counters roll back.
                 if !grounded && *would_ground {

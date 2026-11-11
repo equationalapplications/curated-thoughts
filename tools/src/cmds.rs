@@ -1700,21 +1700,17 @@ pub fn evidence_regrade_cmd(yes: bool, allow_bulk: bool) -> Result<i32> {
 /// `ct evidence re-anchor` — re-anchor dead evidence hashes to current chunks.
 pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
     let brain = crate::write::resolve()?;
-    // Migrate-first, DELIBERATELY split by arm (PR #336 T4 delta M2): both
-    // evidence scans name `adjudication_hold` (V29), and `COALESCE` does not
-    // rescue a missing column. But `migrate_open_db` runs the WHOLE ladder —
-    // including the V20 block's export-then-purge — and this command is the
-    // pre-purge RESCUE: a sub-V20 brain must not be purged as a side effect
-    // of a dry run. So the dry run ensures ONLY the V29 column; the `--yes`
-    // arm (explicit brain write) brings the full schema current like every
-    // other writer command.
+    // Migrate-first, DELIBERATELY split by arm (PR #336 T4 delta M2, refined
+    // delta-2 M1): both evidence scans name `adjudication_hold` (V29), and
+    // `COALESCE` does not rescue a missing column — so every arm ensures the
+    // V29 column. But NEITHER arm may run the full ladder up front: the V20
+    // block export-then-purges `unanchored = 1 AND hold = 0` stock, and this
+    // command is the pre-purge RESCUE — spec §2 orders re-anchor BEFORE any
+    // purge. The `--yes` arm therefore runs the full ladder only AFTER the
+    // re-anchor apply returns, so the V20 purge sees the post-rescue stock.
     {
         let mw = crate::write::open_rw(&brain)?;
-        if yes {
-            tauri_app_lib::db::connection::migrate_open_db(&mw, brain.paths.db_path.parent())?;
-        } else {
-            tauri_app_lib::db::connection::ensure_v29_adjudication_hold(&mw)?;
-        }
+        tauri_app_lib::db::connection::ensure_v29_adjudication_hold(&mw)?;
     }
     if !yes {
         let conn = crate::write::open_ro(&brain)?;
@@ -1754,6 +1750,11 @@ pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
     let conn = crate::write::open_rw(&brain)?;
     let report =
         tauri_app_lib::db::evidence_reanchor::re_anchor(&conn, true, Some(&brain.paths.db_path))?;
+    // Post-rescue ladder (PR #336 T4 delta-2 M1): NOW that re-anchor has
+    // rescued everything recoverable, bring the schema fully current — the
+    // V20 block's purge (if this brain was still below 20) sees only the
+    // post-rescue stock, preserving the spec §2 ordering.
+    tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
     if let Some(b) = &report.backup_path {
         eprintln!("[ct::reanchor] backup={}", b);
     }
