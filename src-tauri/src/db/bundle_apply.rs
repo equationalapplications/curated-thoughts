@@ -549,12 +549,14 @@ pub fn apply_import(
                         // Compute the real Phase-1 flag: a bundle-applied row whose
                         // blob has no live chunk anchor must be unanchored=1, or it
                         // re-arms the heal-purge bait. Spec §2.4.
-                        // Adjudication hold (PR #336 T4 m7): the INSERT OR REPLACE
-                        // below rebuilds the row wholesale, so any prior
-                        // `adjudication_hold` resets to 0 by construction — the
-                        // bundle payload's class is unknown to this writer and the
-                        // next re-anchor pass re-derives it (same accepted
-                        // semantics as the evidence_repair writer).
+                        // Adjudication hold (PR #336 T4 delta m5 — ACCEPTED
+                        // SEMANTICS, same as the evidence_repair writer): the
+                        // INSERT OR REPLACE below rebuilds the row wholesale,
+                        // so any prior `adjudication_hold` resets to 0 by
+                        // construction. A previously held row rebuilt by a
+                        // bundle import lands hold 0 and IS purge-eligible
+                        // until the next re-anchor pass re-derives the class;
+                        // the bundle payload's class is unknowable here.
                         let unanchored =
                             !crate::db::commit::evidence_has_live_chunk(&tx, evidence_json)?;
                         crate::db::commit::insert_librarian_evidence(

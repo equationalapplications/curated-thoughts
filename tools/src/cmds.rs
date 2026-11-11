@@ -1700,15 +1700,21 @@ pub fn evidence_regrade_cmd(yes: bool, allow_bulk: bool) -> Result<i32> {
 /// `ct evidence re-anchor` — re-anchor dead evidence hashes to current chunks.
 pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
     let brain = crate::write::resolve()?;
-    // Migrate-first (PR #336 T4 M3): both evidence scans name
-    // `adjudication_hold` (V29), and `COALESCE` does not rescue a missing
-    // column — a brain the upgraded app has not opened yet would fail
-    // statement prepare with `no such column`. Same pattern as the graph
-    // reanchor cmd: bring the schema current on a short-lived rw connection,
-    // then open per-arm.
+    // Migrate-first, DELIBERATELY split by arm (PR #336 T4 delta M2): both
+    // evidence scans name `adjudication_hold` (V29), and `COALESCE` does not
+    // rescue a missing column. But `migrate_open_db` runs the WHOLE ladder —
+    // including the V20 block's export-then-purge — and this command is the
+    // pre-purge RESCUE: a sub-V20 brain must not be purged as a side effect
+    // of a dry run. So the dry run ensures ONLY the V29 column; the `--yes`
+    // arm (explicit brain write) brings the full schema current like every
+    // other writer command.
     {
         let mw = crate::write::open_rw(&brain)?;
-        tauri_app_lib::db::connection::migrate_open_db(&mw, brain.paths.db_path.parent())?;
+        if yes {
+            tauri_app_lib::db::connection::migrate_open_db(&mw, brain.paths.db_path.parent())?;
+        } else {
+            tauri_app_lib::db::connection::ensure_v29_adjudication_hold(&mw)?;
+        }
     }
     if !yes {
         let conn = crate::write::open_ro(&brain)?;

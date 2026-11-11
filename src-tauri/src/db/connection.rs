@@ -495,12 +495,11 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         )?;
     }
 
-    // V29 (PR #336 T3 M1) runs HERE — after V18 has guaranteed the
+    // V29 (PR #336 T3 M1) column-add runs HERE — after V18 has guaranteed the
     // librarian_evidence table exists, and BEFORE the V20 block, whose
-    // in-migration re-grade scans `adjudication_hold`. Ungated and
-    // idempotent (existing-columns pre-check): on a steady-state brain the
-    // column is already there and this is a read-only no-op.
-    apply_v29_adjudication_hold(conn)?;
+    // in-migration re-grade scan names `adjudication_hold`. Lock-free in
+    // steady state (T4 delta M1); the version stamp runs later, after V28.
+    ensure_v29_column(conn)?;
 
     if version < 20 {
         // The Phase-2 flip itself (issue #186 §2.4): re-grade every live
@@ -851,6 +850,11 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // V25's re-read.
     apply_v27_embed_scheme(conn)?;
     apply_v28_two_stage_columns(conn)?;
+    // V29's version stamp (T4 delta m3): the early column-add site cannot
+    // stamp — a fresh brain reads MAX(version) = 19 there, under the V22
+    // gate. Here the ladder has settled, so a fresh brain leaves its FIRST
+    // open at 29.
+    stamp_v29(conn)?;
 
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
     // rev 4.1 §1/D4): the deposit file's frontmatter is authoritative; this
@@ -1251,19 +1255,27 @@ fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()> {
 /// exists on fresh brains; their DDL carries the column natively) and BEFORE
 /// the V20 block, whose in-migration re-grade scan names `adjudication_hold`
 /// and would fail `no such column` on a pre-V29 brain otherwise.
-fn apply_v29_adjudication_hold(conn: &Connection) -> Result<()> {
-    // Concurrent-open guard (PR #336 T4 M1 — same race V24/V28 document):
-    // the desktop app and a simultaneously launching `--mcp` server can both
-    // snapshot "column missing" from the unlocked pre-check; the second bare
-    // ALTER would fail its open with `duplicate column name`. BEGIN IMMEDIATE
-    // takes the write lock up front (the loser blocks on it, via the busy
-    // timeout set at open) and the column is re-checked UNDER that lock, so
-    // exactly one process runs the ALTER and the other no-ops into the
-    // idempotent stamp.
-    //
-    // `librarian_evidence` absent (pre-V18 replica): skip WITHOUT error —
-    // SQLite rejects ALTER TABLE on a missing table; the column lands on a
-    // later open after V18's DDL (same machinery note as V28's trigger).
+/// V29 column-add phase (called EARLY, right after the V18 block and before
+/// the V20 block whose re-grade scan names `adjudication_hold`). Steady state
+/// is a LOCK-FREE no-op (T4 delta M1): the unlocked pragma pre-check returns
+/// before any lock is taken, exactly like V24/V28 — the BEGIN IMMEDIATE is
+/// entered only when the column is actually missing, and the column is
+/// re-checked UNDER the lock (the concurrent desktop + `--mcp` open race:
+/// two opens can both snapshot "missing"; the loser of the write lock must
+/// find the column present and no-op). The version STAMP lives in
+/// [`stamp_v29`] and runs late (after V28) — at this early point a fresh
+/// brain reads MAX(version) = 19 and could never clear the >= 22 gate.
+pub(crate) fn ensure_v29_column(conn: &Connection) -> Result<()> {
+    // Lock-free steady state (T4 delta M1): column present → read-only return.
+    let has_column: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('librarian_evidence')
+          WHERE name = 'adjudication_hold'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_column > 0 {
+        return Ok(());
+    }
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let applied = (|| -> Result<()> {
         let table_exists: i64 = conn.query_row(
@@ -1272,6 +1284,9 @@ fn apply_v29_adjudication_hold(conn: &Connection) -> Result<()> {
             |r| r.get(0),
         )?;
         if table_exists == 0 {
+            // Pre-V18 replica: skip WITHOUT error — SQLite rejects ALTER TABLE
+            // on a missing table; the column lands on a later open after V18's
+            // DDL (same machinery note as V28's trigger).
             return Ok(());
         }
         let has_column: i64 = conn.query_row(
@@ -1286,22 +1301,6 @@ fn apply_v29_adjudication_hold(conn: &Connection) -> Result<()> {
                      ADD COLUMN adjudication_hold INTEGER NOT NULL DEFAULT 0;",
             )?;
         }
-        // Stamp on EVERY path where the table exists — fresh brains carry the
-        // column natively via V18's DDL and would otherwise never stamp 29
-        // (T4 m5: MAX(version) reading 28 on new brains is needless drift).
-        // Gated on V22 like every stamp since V23 (a rootless open must not
-        // mask a deferred V22).
-        let stamped_now: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            [],
-            |r| r.get(0),
-        )?;
-        if stamped_now >= 22 {
-            conn.execute(
-                "INSERT OR IGNORE INTO schema_version (version) VALUES (29)",
-                [],
-            )?;
-        }
         Ok(())
     })();
     match applied {
@@ -1312,6 +1311,33 @@ fn apply_v29_adjudication_hold(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// V29 stamp phase (called LATE, after V28 — see [`ensure_v29_column`]: at
+/// the early call site a fresh brain reads MAX(version) = 19, below the V22
+/// gate every stamp since V23 carries, so the stamp must wait until the
+/// versioned ladder has settled). Idempotent (`INSERT OR IGNORE`).
+pub(crate) fn stamp_v29(conn: &Connection) -> Result<()> {
+    let stamped_now: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped_now >= 22 {
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (29)",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// One-shot V29 ensure for direct callers that hold a raw connection to a
+/// brain the app has not opened yet (the `ct` evidence commands' migrate-first
+/// path, T4 M3): column-add + stamp in one call.
+pub fn ensure_v29_adjudication_hold(conn: &Connection) -> Result<()> {
+    ensure_v29_column(conn)?;
+    stamp_v29(conn)
 }
 
 /// True when a trigger of the given name exists (any table). Used to decide
@@ -1875,6 +1901,62 @@ mod tests {
             .expect("guard must still accept the re-opened database");
     }
 
+    /// V29 restore guard (PR #336 T4 delta m6): a brain rolled back to
+    /// pre-V29 state (column dropped, stamp forgotten) must come back with
+    /// the column present on the next migrate — and a second migrate must be
+    /// a no-op (the bare-ALTER regression guard every column migration
+    /// carries since V21).
+    #[test]
+    fn v29_column_is_restored_on_a_pre_v29_brain() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch(
+            "ALTER TABLE librarian_evidence DROP COLUMN adjudication_hold;
+             DELETE FROM schema_version WHERE version = 29;",
+        )
+        .unwrap();
+
+        migrate(&conn, None, None).expect("migrate must restore the V29 column");
+        let has: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('librarian_evidence')
+                  WHERE name = 'adjudication_hold'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has, 1, "migrate must restore the adjudication_hold column");
+
+        migrate(&conn, None, None).expect("second migrate must be a no-op");
+    }
+
+    /// V29 stamp placement (PR #336 T4 delta m3): the early column-add site
+    /// cannot stamp (a fresh brain reads MAX(version) = 19 there, below the
+    /// V22 gate), so the stamp runs after V28 — a settled brain must leave
+    /// migrate() stamped at 29.
+    #[test]
+    fn v29_stamp_lands_after_the_ladder_settles() {
+        let conn = open_in_memory().unwrap();
+        // Simulate a rooted brain that has settled V22 (the in-memory test
+        // env is rootless, so V22 defers and sits at 21 otherwise).
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (22)",
+            [],
+        )
+        .unwrap();
+        migrate(&conn, None, None).unwrap();
+        let v: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            v >= 29,
+            "a brain settled at V22+ must stamp 29 on migrate, got MAX={v}"
+        );
+    }
+
     /// Concurrent-open guard for V24 (review finding on PR #252): the desktop
     /// app and an `--mcp` server opening the same pre-7.9 brain at once must
     /// both succeed. Without BEGIN IMMEDIATE plus the under-lock re-inspection,
@@ -2045,7 +2127,7 @@ mod tests {
         let v: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 28);
+        assert_eq!(v, 29);
 
         // One-shot backfill semantics: an indexed row was backfilled from `hash`;
         // embed_key got NO migration backfill (NULL until a writer stamps it).
@@ -4082,9 +4164,9 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 28,
-            "V22 then V23 then V24 then V25 then V26 then V27 then V28 must be stamped \
-             when the migration runs"
+            version, 29,
+            "V22 then V23 then V24 then V25 then V26 then V27 then V28 then V29 \
+             must be stamped when the migration runs"
         );
 
         let rewritten_path: String = conn
@@ -4128,9 +4210,9 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 28,
-            "rooted open stamps 26 (ontology gate wave), 27 (embed scheme) \
-             and 28 (two-stage columns); MAX must be 28"
+            version, 29,
+            "rooted open stamps 26 (ontology gate wave), 27 (embed scheme), \
+             28 (two-stage columns) and 29 (adjudication hold); MAX must be 29",
         );
 
         let agents: String = conn
@@ -4401,8 +4483,8 @@ mod tests {
         );
         assert_eq!(
             max_version(&conn),
-            28,
-            "rooted open stamps 22, then 23/24/25/26/27/28 (the latter gated on V22)"
+            29,
+            "rooted open stamps 22..28 then V29 (the latter gated on V22)"
         );
     }
 

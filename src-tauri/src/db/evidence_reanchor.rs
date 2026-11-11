@@ -347,6 +347,13 @@ pub fn re_anchor(
                 if desired_hold == 1 && held == 0 {
                     report.hold_sets_planned += 1;
                 }
+                // T4 delta m4: a HELD row that came back unresolved-only
+                // (hold clears, flag hand-off) was counted into NEITHER hold
+                // counter at the old queue site — the dry run undercounted
+                // the clear. Count it explicitly.
+                if desired_hold == 0 && held != 0 {
+                    report.hold_clears_planned += 1;
+                }
                 if unanchored_flag != 1 || held != desired_hold {
                     adjudication_writes.push((
                         entry_id,
@@ -446,6 +453,9 @@ pub fn re_anchor(
                 }
                 if *desired_hold == 1 && *held == 0 {
                     report.hold_sets_planned = report.hold_sets_planned.saturating_sub(1);
+                }
+                if *desired_hold == 0 && *held != 0 {
+                    report.hold_clears_planned = report.hold_clears_planned.saturating_sub(1);
                 }
             }
         }
