@@ -1,3 +1,20 @@
+## [3.11.7](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.6...v3.11.7) (2026-11-11)
+
+### Bug Fixes
+
+* **evidence:** adjudication hold column — truthful unanchored flag, no destructive path for held rows ([5b1460e](https://github.com/equationalapplications/curated-thoughts/commit/5b1460e12f464d689f02ff78d7775d1619739c2f)), closes [#336](https://github.com/equationalapplications/curated-thoughts/issues/336)
+* **evidence:** CodeRabbit threads 4539690136/4539690125 — hold blocks the heal independently of the flag; spec prune window corrected ([92b47ac](https://github.com/equationalapplications/curated-thoughts/commit/92b47acfefba6584f97d2717c438d96280487427))
+* **evidence:** CodeRabbit/Gemini punch list — grounding check under the lock, queue completeness, help-text truth ([3de22c4](https://github.com/equationalapplications/curated-thoughts/commit/3de22c476723a6abf9209788507743920ed28ade))
+* **evidence:** flag dispositions follow the adjudication class — ambiguous/drift rows stay out of regrade's purge ([130ef59](https://github.com/equationalapplications/curated-thoughts/commit/130ef5917c2f018ce8f5942f9cf057c842fc7c4d))
+* **evidence:** normalized-prefix quote matching — repairs the reanchored=0-by-construction dry-run ([871d4ee](https://github.com/equationalapplications/curated-thoughts/commit/871d4ee792625929993959c17b0bd65aae43a482))
+* **evidence:** PR [#336](https://github.com/equationalapplications/curated-thoughts/issues/336) ladder fixes — two-tier matching, uniqueness before drift, backup inside the tested unit ([520a3b7](https://github.com/equationalapplications/curated-thoughts/commit/520a3b7df1d6f035fc8d55ce7e4797bb100b7c1b))
+* **evidence:** sonnet delta review — converged apply writes nothing, named adjudication queue ([9f6db7d](https://github.com/equationalapplications/curated-thoughts/commit/9f6db7da1bdac0248011eb12b19def9be1410e89))
+* **evidence:** T4 delta review — lock-free steady-state V29, arm-split migrate-first, stamp placement ([16a6ef8](https://github.com/equationalapplications/curated-thoughts/commit/16a6ef8b1f605297be193050d734083760be2c9b))
+* **evidence:** T4 delta-2 — arm-split migrate ordering, candidate hold accounting, V29 tests ([a3a1804](https://github.com/equationalapplications/curated-thoughts/commit/a3a1804a42222c8ae04a6dcafdf46a4b25c13a50))
+* **evidence:** T4 delta-3 — counter coverage MAJOR, flag-counter candidate gap, helper extraction ([65ddfe2](https://github.com/equationalapplications/curated-thoughts/commit/65ddfe25295c7f0a058b684dab7cf6c2de6dcc03))
+* **evidence:** T4 review — lock-guarded V29, exact race-skip rollback, migrate-first evidence CLIs ([5178211](https://github.com/equationalapplications/curated-thoughts/commit/5178211094697187c064141fc521ec0e2eb49ec8))
+* **evidence:** Tier-3/4 review (Opus + Fable) — word-boundary tiers, regrade hand-off made concrete ([27c416e](https://github.com/equationalapplications/curated-thoughts/commit/27c416ee0871e2e8bc1075da92c218ce84af6a03))
+
 ## [3.11.6](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.5...v3.11.6) (2026-11-11)
 
 ### Dependencies
