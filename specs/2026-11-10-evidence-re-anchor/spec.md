@@ -77,7 +77,7 @@ A `ReanchorReport` (WIP fields, adjudicated):
 - `entries_regrounded` / `entries_still_unanchored` — was-ungrounded-now-grounded / still ungrounded after the pass;
 - `entries_race_skipped` — concurrent mutation (json drift, lost grounding, or a rewritten chunk vanishing) detected under the lock; re-run converges.
 
-All UPDATEs are idempotent; re-running converges — and a converged `--yes` writes nothing and takes no snapshot. Soft-deleted stock is never touched — the 90-day prune owns it (regrade invariant). Ungrounded unchanged rows are FLAGGED `unanchored = 1` inside the transaction: `ct evidence regrade` scans `unanchored = 1`, so this is the concrete hand-off of the adjudication queue to the regrade/adjudication flow (Fable tier review — without it the queue is invisible to regrade on a brain whose flag stock is empty).
+All UPDATEs are idempotent; re-running converges — and a converged `--yes` writes nothing and takes no snapshot. Soft-deleted stock is never touched — the 90-day prune owns it (regrade invariant). Flag dispositions inside the transaction follow the adjudication class (CodeRabbit tier review): ungrounded rows with unresolved items are FLAGGED `unanchored = 1` — the concrete hand-off, since `ct evidence regrade` scans `unanchored = 1` — while ambiguous/hash_mismatch rows have any stale flag CLEARED, keeping them out of regrade's purge scan until a better matcher or Kurt's adjudication disposes of them.
 
 ## 6. Testing posture
 

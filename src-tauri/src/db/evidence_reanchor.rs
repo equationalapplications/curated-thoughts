@@ -42,10 +42,12 @@
 //!   (swap-race rule; re-run to converge);
 //! - no breaker interaction: nothing is deleted, so the shared bulk-deletion
 //!   budget is untouched;
-//! - ungrounded unchanged rows are FLAGGED `unanchored = 1` inside the
-//!   transaction — the concrete hand-off to `ct evidence regrade`, which
-//!   scans `unanchored = 1` (without it, a brain whose flag stock is empty
-//!   would hide its adjudication queue from regrade).
+//! - flag dispositions inside the transaction are the adjudication classes
+//!   (CodeRabbit tier review): ungrounded rows with unresolved items are
+//!   FLAGGED `unanchored = 1` — the concrete hand-off to `ct evidence
+//!   regrade`, which scans `unanchored = 1` — while ambiguous/hash_mismatch
+//!   rows have any stale flag CLEARED, keeping them OUT of regrade's purge
+//!   scan until a better matcher or Kurt's adjudication disposes of them.
 //!
 //! Idempotent: a second pass on a converged brain re-examines every live
 //! row, reports them as already anchored, and rewrites nothing.
@@ -144,16 +146,20 @@ pub fn re_anchor(
     //    The normalized-text chunk index is built once for the whole pass.
     let chunk_index = load_chunk_index(conn)?;
     let mut candidates: Vec<Candidate> = Vec::new();
-    // Grounded rows carrying a STALE `unanchored = 1` flag: cleared inside
-    // the apply transaction behind the SAME snapshot compare as hash
-    // rewrites (flag writes must not bypass the swap-race rule).
-    let mut flag_clears: Vec<(String, String)> = Vec::new();
-    // Ungrounded unchanged rows carrying `unanchored = 0`: FLAGGED inside the
-    // apply transaction — this is the documented hand-off to `ct evidence
-    // regrade`, which scans `unanchored = 1` (Fable tier review: without it,
-    // the residual adjudication queue is invisible to regrade on a brain
-    // whose flag stock is empty).
-    let mut flag_sets: Vec<(String, String)> = Vec::new();
+    // Flag writes inside the apply transaction, as `(entry_id, snapshot_json,
+    // desired_flag)` — the desired value is the ADJUDICATION disposition, and
+    // the transaction recomputes grounding under the lock before writing:
+    //
+    // - grounded rows: desired 0 (a stale `unanchored = 1` would otherwise
+    //   haunt regrade's scan);
+    // - ungrounded rows WITH unresolved items: desired 1 — the concrete
+    //   hand-off to `ct evidence regrade`, which scans `unanchored = 1`
+    //   (Fable tier review);
+    // - ungrounded rows whose dead items are ambiguous/hash_mismatch ONLY:
+    //   desired 0 — PROTECT them. Regrade's gated purge would hard-delete
+    //   flagged rows, and these are the recoverable-later / adjudication
+    //   classes (CodeRabbit tier review). They stay in the stderr queue.
+    let mut flag_writes: Vec<(String, String, i64)> = Vec::new();
     for (entry_id, evidence_json, unanchored_flag) in live_rows {
         let Ok(mut value) = serde_json::from_str::<Value>(&evidence_json) else {
             continue;
@@ -170,6 +176,11 @@ pub fn re_anchor(
 
         let mut changed = false;
         let mut items_reanchored = 0usize;
+        // True when at least one DEAD item had no quote match at all — the
+        // genuinely-gone class whose disposition is the regrade hand-off.
+        // Ambiguous/hash_mismatch items are recoverable-later/adjudication
+        // classes and must stay OUT of regrade's purge scan.
+        let mut has_unresolved = false;
         for (item_idx, item) in evidence.iter_mut().enumerate() {
             let hash = item
                 .get("content_hash")
@@ -199,6 +210,7 @@ pub fn re_anchor(
             } else {
                 // No anchor of either kind: unresolvable item.
                 report.items_unresolved += 1;
+                has_unresolved = true;
                 report
                     .items_flagged_detail
                     .push((entry_id.clone(), "unresolved", item_idx));
@@ -213,6 +225,7 @@ pub fn re_anchor(
                 .unwrap_or("");
             if quote.is_empty() {
                 report.items_unresolved += 1;
+                has_unresolved = true;
                 report
                     .items_flagged_detail
                     .push((entry_id.clone(), "unresolved", item_idx));
@@ -221,6 +234,7 @@ pub fn re_anchor(
             match match_quote_prefix(conn, &chunk_index, quote)? {
                 QuoteMatch::None => {
                     report.items_unresolved += 1;
+                    has_unresolved = true;
                     report
                         .items_flagged_detail
                         .push((entry_id.clone(), "unresolved", item_idx));
@@ -266,15 +280,22 @@ pub fn re_anchor(
                 // row with unanchored = 0 must stay out of the write set, or
                 // every converged `--yes` run would snapshot a no-op pass.
                 if unanchored_flag != 0 {
-                    flag_clears.push((entry_id, evidence_json));
+                    flag_writes.push((entry_id, evidence_json, 0));
+                }
+            } else if has_unresolved {
+                // Genuine no-match stock: FLAG for the regrade hand-off
+                // (regrade scans `unanchored = 1`).
+                report.entries_still_unanchored += 1;
+                if unanchored_flag == 0 {
+                    flag_writes.push((entry_id, evidence_json, 1));
                 }
             } else {
+                // Ambiguous/hash_mismatch-only: PROTECT from regrade's purge
+                // scan until adjudication — clear a stale flag so regrade
+                // cannot see these rows (CodeRabbit tier review).
                 report.entries_still_unanchored += 1;
-                // FLAG the row: `ct evidence regrade` scans `unanchored = 1`,
-                // so an unflagged ungrounded row would be invisible to the
-                // documented hand-off (Fable tier review).
-                if unanchored_flag == 0 {
-                    flag_sets.push((entry_id, evidence_json));
+                if unanchored_flag != 0 {
+                    flag_writes.push((entry_id, evidence_json, 0));
                 }
             }
             continue;
@@ -301,14 +322,14 @@ pub fn re_anchor(
         return Ok(report);
     }
     let has_writes =
-        !candidates.is_empty() || !flag_clears.is_empty() || !flag_sets.is_empty();
+        !candidates.is_empty() || !flag_writes.is_empty();
     if !has_writes {
         // Converged brain: nothing to write, nothing to snapshot.
         return Ok(report);
     }
 
     // 3. Apply phase: §4 hard gate FIRST — the crash-consistent snapshot
-    //    lands before the FIRST write, flag clears/sets included; a backup
+    //    lands before the FIRST write, flag writes included; a backup
     //    failure aborts with zero rows touched.
     if let Some(p) = db_path {
         report.backup_path = Some(
@@ -320,33 +341,10 @@ pub fn re_anchor(
     //    ONE IMMEDIATE transaction; each target row is re-read under the lock
     //    and must equal the matching-time snapshot (swap-race rule).
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-    for (entry_id, snapshot_json) in &flag_clears {
-        let current: Option<String> = tx
-            .query_row(
-                "SELECT evidence_json FROM librarian_evidence WHERE entry_id = ?1",
-                [entry_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        // Snapshot compare alone is not enough (CodeRabbit/Gemini punch list):
-        // a concurrent re-ingest can delete the grounding chunks WITHOUT
-        // touching evidence_json. The row must still ground under the lock
-        // before its stale flag is cleared.
-        let json_unchanged = current.as_deref() == Some(snapshot_json.as_str());
-        let still_grounded = json_unchanged && evidence_has_live_chunk(&tx, snapshot_json)?;
-        if json_unchanged && still_grounded {
-            tx.execute(
-                "UPDATE librarian_evidence SET unanchored = 0 WHERE entry_id = ?1",
-                [entry_id],
-            )?;
-        } else {
-            report.entries_race_skipped += 1;
-        }
-    }
-    // Ungrounded unchanged rows get their flag SET (regrade scans
-    // `unanchored = 1`); grounding is recomputed under the lock — a row that
-    // became grounded since the match clears instead.
-    for (entry_id, snapshot_json) in &flag_sets {
+    // Flag dispositions: the desired value is the adjudication class, and
+    // grounding is recomputed under the lock — a row that became grounded
+    // since the match always lands at 0.
+    for (entry_id, snapshot_json, desired) in &flag_writes {
         let current: Option<String> = tx
             .query_row(
                 "SELECT evidence_json FROM librarian_evidence WHERE entry_id = ?1",
@@ -356,7 +354,7 @@ pub fn re_anchor(
             .optional()?;
         if current.as_deref() == Some(snapshot_json.as_str()) {
             let grounds = evidence_has_live_chunk(&tx, snapshot_json)?;
-            let flag: i64 = if grounds { 0 } else { 1 };
+            let flag: i64 = if grounds { 0 } else { *desired };
             tx.execute(
                 "UPDATE librarian_evidence SET unanchored = ?2 WHERE entry_id = ?1",
                 rusqlite::params![entry_id, flag],
@@ -925,7 +923,8 @@ mod tests {
         assert_eq!(report.items_ambiguous, 1);
         assert_eq!(report.items_reanchored, 0);
         assert_eq!(report.entries_still_unanchored, 1);
-        assert_eq!(stored_unanchored(&conn, "fact_amb"), 1);
+        // Protected: ambiguous-only rows are kept out of regrade's purge scan.
+        assert_eq!(stored_unanchored(&conn, "fact_amb"), 0);
         assert!(stored_json(&conn, "fact_amb").contains("dead2222222222222222222222222222222222222222222222222222222222"));
     }
 
@@ -947,7 +946,8 @@ mod tests {
         let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.items_hash_mismatch, 1);
         assert_eq!(report.items_reanchored, 0);
-        assert_eq!(stored_unanchored(&conn, "fact_drift"), 1);
+        // Protected: drift-only rows are kept out of regrade's purge scan.
+        assert_eq!(stored_unanchored(&conn, "fact_drift"), 0);
     }
 
     #[test]
@@ -1198,7 +1198,9 @@ mod tests {
             "prefix+suffix tie across 2 chunks must refuse"
         );
         assert_eq!(report.items_reanchored, 0);
-        assert_eq!(stored_unanchored(&conn, "fact_tier2_tie"), 1);
+        // Ambiguous-only rows are PROTECTED: the flag clears so regrade's
+        // purge scan cannot ever see them (CodeRabbit tier review).
+        assert_eq!(stored_unanchored(&conn, "fact_tier2_tie"), 0);
     }
 
     /// Tier 2, suffix matches NEITHER candidate (novel tail) → narrowed to
@@ -1229,7 +1231,8 @@ mod tests {
         let report = re_anchor(&conn, true, None).unwrap();
         assert_eq!(report.items_ambiguous, 1);
         assert_eq!(report.items_reanchored, 0);
-        assert_eq!(stored_unanchored(&conn, "fact_tier2_zero"), 1);
+        // Protected: ambiguous-only rows must stay out of regrade's purge scan.
+        assert_eq!(stored_unanchored(&conn, "fact_tier2_zero"), 0);
     }
 
     /// Tier 2 survivor drift: the suffix narrows the tie to ONE chunk whose
@@ -1265,7 +1268,8 @@ mod tests {
             "the narrowed survivor must still pass the drift gate"
         );
         assert_eq!(report.items_reanchored, 0);
-        assert_eq!(stored_unanchored(&conn, "fact_tier2_drift"), 1);
+        // Protected: drift-only rows must stay out of regrade's purge scan.
+        assert_eq!(stored_unanchored(&conn, "fact_tier2_drift"), 0);
     }
 
     /// Word-boundary guard (Opus M2): a short quote that occurs only
@@ -1291,6 +1295,35 @@ mod tests {
         assert_eq!(report.items_unresolved, 1);
         assert_eq!(report.items_reanchored, 0);
         assert_eq!(stored_unanchored(&conn, "fact_midword"), 1);
+    }
+
+    /// The regrade hand-off is CONCRETE (CodeRabbit tier review): an
+    /// unflagged row whose only dead items are unresolved gets FLAGGED
+    /// `unanchored = 1` inside the transaction, so `ct evidence regrade`
+    /// (which scans `unanchored = 1`) actually sees the adjudication queue.
+    #[test]
+    fn unresolved_only_unflagged_row_is_flagged_for_regrade() {
+        let conn = open_in_memory().unwrap();
+        let live_text = "unrelated live chunk text";
+        let live_hash = compute_chunk_hash(live_text, DOC_PATH, 1usize);
+        seed_chunk(&conn, live_text, 1, &live_hash);
+        seed_row(
+            &conn,
+            "fact_handoff",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_ho"}}"#,
+                dead_item("dead3500000000000000000000000000000000000000000000000000000000", "words that exist nowhere in any chunk")
+            ),
+            None,
+            0, // NOT flagged — exactly the live-brain condition
+        );
+
+        let report = re_anchor(&conn, true, None).unwrap();
+        assert_eq!(report.items_unresolved, 1);
+        assert_eq!(report.items_reanchored, 0);
+        assert_eq!(report.entries_still_unanchored, 1);
+        // The concrete hand-off: regrade's scan now finds this row.
+        assert_eq!(stored_unanchored(&conn, "fact_handoff"), 1);
     }
 
     /// A grounded entry can still carry a dead sibling item (the grounding
