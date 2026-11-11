@@ -1208,7 +1208,7 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let (base_n, head, _) = tier2_parts();
         let quote = format!(
-            "{} novel middle words zzz tail text no chunk contains at all",
+            "{} novel middle words zzz tail text no chunk contains at all anywhere in the corpus today",
             head
         );
         let h1 = compute_chunk_hash(&base_n, DOC_PATH, 1usize);
