@@ -1653,6 +1653,10 @@ pub fn evidence_regrade_cmd(yes: bool, allow_bulk: bool) -> Result<i32> {
     }
     let brain = crate::write::resolve()?;
     let conn = crate::write::open_rw(&brain)?;
+    // Migrate-first (PR #336 T4 M3): the regrade purge scan names
+    // `adjudication_hold` (V29); a pre-V29 brain must be brought current
+    // before the scan prepares (same pattern as the graph reanchor cmd).
+    tauri_app_lib::db::connection::migrate_open_db(&conn, brain.paths.db_path.parent())?;
     let now_ms = tauri_app_lib::db::commit::ms_now();
     let report = tauri_app_lib::db::evidence_regrade::regrade_unanchored_opts(
         &conn,
@@ -1696,6 +1700,16 @@ pub fn evidence_regrade_cmd(yes: bool, allow_bulk: bool) -> Result<i32> {
 /// `ct evidence re-anchor` — re-anchor dead evidence hashes to current chunks.
 pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
     let brain = crate::write::resolve()?;
+    // Migrate-first (PR #336 T4 M3): both evidence scans name
+    // `adjudication_hold` (V29), and `COALESCE` does not rescue a missing
+    // column — a brain the upgraded app has not opened yet would fail
+    // statement prepare with `no such column`. Same pattern as the graph
+    // reanchor cmd: bring the schema current on a short-lived rw connection,
+    // then open per-arm.
+    {
+        let mw = crate::write::open_rw(&brain)?;
+        tauri_app_lib::db::connection::migrate_open_db(&mw, brain.paths.db_path.parent())?;
+    }
     if !yes {
         let conn = crate::write::open_ro(&brain)?;
         let report = tauri_app_lib::db::evidence_reanchor::re_anchor(&conn, false, None)?;

@@ -321,7 +321,8 @@ enum EvidenceCmd {
     /// purge scan. Rows are only UPDATED, never deleted, but it is still a
     /// brain write: without --yes it prints the dry-run summary only.
     ReAnchor {
-        /// Confirm the write (hash rewrite + flag clears).
+        /// Confirm the write (hash rewrites + flag hand-offs 0→1, flag
+        /// clears 1→0, and adjudication-hold set/clear writes).
         #[arg(long)]
         yes: bool,
     },

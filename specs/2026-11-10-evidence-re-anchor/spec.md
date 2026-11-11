@@ -1,7 +1,7 @@
 # `ct evidence re-anchor`: pre-purge re-anchoring of unanchored librarian evidence
 
 **Date:** 2026-11-10
-**Status:** Implemented (2026-11-10: applied to the live brain after dry-run gates — backup `brain.db.bak-pre-reanchor-1794342813`; 173 entries re-anchored/regrounded, 0 race-skips, idempotent re-run clean; residual 129 entries adjudication pending with Kurt; spec §3 round 2 normalized-prefix strategy per the reanchored=0-by-construction handoff). **Rev 2 (2026-11-11, PR #336 Tier-3 Opus M1/M2):** the adjudication disposition moved OFF the `unanchored` flag onto a new `adjudication_hold` column (V29) — the Nov 10 live apply ran the flag-era build, so its "idempotent re-run clean" receipt predates rev 2 and is re-verified by a fresh dry-run + apply pass on the new build.
+**Status:** Implemented (2026-11-10: applied to the live brain after dry-run gates — backup `brain.db.bak-pre-reanchor-1794342813`; 173 entries re-anchored/regrounded, 0 race-skips, idempotent re-run clean; residual 129 entries adjudication pending with Kurt; spec §3 round 2 normalized-prefix strategy per the reanchored=0-by-construction handoff). **Rev 2 (2026-11-11, PR #336 Tier-3 Opus M1/M2):** the adjudication disposition moved OFF the `unanchored` flag onto a new `adjudication_hold` column (V29) — the Nov 10 live apply ran the flag-era build, so its receipt predates rev 2. **Rev 2 verification receipt (2026-11-11):** full dry-run + apply + convergence pass executed against a COPY of the live brain (`/mnt/kv-work/scratch/ct-rev2/brain.db`, V29 DDL applied manually to simulate the app's first-open migration): examined=1112, dead_items=139 (48 ambiguous / 91 unresolved / 0 hash_mismatch), apply wrote 129 flag hand-offs + 42 hold sets with 0 race-skips behind backup `brain.db.bak-pre-reanchor-1794407413873` (copy-side), second dry-run converged to ZERO planned writes; end state 983 grounded / 87 unresolved-only hand-off / 42 held = 1112. The LIVE brain picks up V29 + the hold conversion on its first open by a V29-capable build (the installed 3.10.7 ct and app predate it); until then `ct evidence re-anchor`/`regrade` from the new build migrate-first on open (T4 M3).
 **Supersedes the ad-hoc repair runs of 2026-10-18** (`brain.db.bak-pre-anchor-heal-20261018`, exports under `~/ct-anchor-heal-exports/`) — those were manual; this makes the recovery a gated, idempotent CLI command.
 
 ## 1. Problem
@@ -38,7 +38,13 @@ then:
 2. several chunks share the prefix → the quote's last-60-chars normalized
    **suffix** narrows them (prefix+suffix agreement is the strong case);
    still tied — or no chunk agrees on both — → **ambiguous** (left flagged;
-   guessing would fabricate provenance);
+   guessing would fabricate provenance). **Suffix gate (T4 m9):** the suffix
+   is the remainder after the 60-char prefix, capped at the last 60
+   normalized chars — a prefix-tied quote longer than 120 normalized chars
+   has its tail truncated before narrowing, so ultra-long quotes can stay
+   ambiguous where a (fictitiously exact) longer tail would have separated
+   them; this is deliberate conservatism and the fixture in commit e23fb022
+   was lengthened past it;
 3. zero chunks → **unresolved** (left flagged; the heal/regrade flow owns it);
 4. matched chunk's stored hash ≠ recomputed hash → **chunker drift**; skip.
 

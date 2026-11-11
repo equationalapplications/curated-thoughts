@@ -175,11 +175,12 @@ pub fn re_anchor(
     let chunk_index = load_chunk_index(conn)?;
     let mut candidates: Vec<Candidate> = Vec::new();
     // Adjudication writes inside the apply transaction, as `(entry_id,
-    // snapshot_json, desired_flag, desired_hold, held, counted_already_anchored)`
-    // where `held` is the row's CURRENT hold at queue time. Only rows whose
-    // CURRENT state differs from the desired state are queued (sonnet delta
-    // review: no-op writes make every converged `--yes` run snapshot). The
-    // transaction recomputes grounding under the lock before writing:
+    // snapshot_json, desired_flag, desired_hold, held, flag_at_queue,
+    // counted_already_anchored)` where `held` and `flag_at_queue` snapshot
+    // the row's CURRENT columns at queue time. Only rows whose CURRENT state
+    // differs from the desired state are queued (sonnet delta review: no-op
+    // writes make every converged `--yes` run snapshot). The transaction
+    // recomputes grounding under the lock before writing:
     //
     // - the FLAG stays TRUTHFUL: `unanchored == !grounded` — the invariant
     //   every other writer upholds (evidence_repair.rs, bundle_apply.rs;
@@ -193,7 +194,7 @@ pub fn re_anchor(
     //   only → hold 0, the concrete regrade hand-off. regrade's purge scans
     //   and the heal's keep-rule both consult the hold, so a held row takes
     //   NO destructive path until adjudicated.
-    let mut adjudication_writes: Vec<(String, String, i64, i64, i64, bool)> = Vec::new();
+    let mut adjudication_writes: Vec<(String, String, i64, i64, i64, i64, bool)> = Vec::new();
     for (entry_id, evidence_json, unanchored_flag, held) in live_rows {
         let Ok(mut value) = serde_json::from_str::<Value>(&evidence_json) else {
             continue;
@@ -321,7 +322,15 @@ pub fn re_anchor(
                     report.hold_clears_planned += 1;
                 }
                 if unanchored_flag != 0 || held != 0 {
-                    adjudication_writes.push((entry_id, evidence_json, 0, 0, held, true));
+                    adjudication_writes.push((
+                        entry_id,
+                        evidence_json,
+                        0,
+                        0,
+                        held,
+                        unanchored_flag,
+                        true,
+                    ));
                 }
             } else {
                 // Ungrounded: flag 1 (truthful — the invariant writers), and
@@ -345,6 +354,7 @@ pub fn re_anchor(
                         1,
                         desired_hold,
                         held,
+                        unanchored_flag,
                         false,
                     ));
                 }
@@ -394,8 +404,8 @@ pub fn re_anchor(
     // stays held (nothing left to adjudicate). A race-skip rolls the row out
     // of the match-time counter it was counted into (T3 m3 — the flag-writes
     // loop previously left it counted).
-    for (entry_id, snapshot_json, desired_flag, desired_hold, held, counted_already) in
-        &adjudication_writes
+    for (entry_id, snapshot_json, desired_flag, desired_hold, held, flag_at_queue, counted_already)
+        in &adjudication_writes
     {
         let current: Option<String> = tx
             .query_row(
@@ -416,26 +426,27 @@ pub fn re_anchor(
             )?;
         } else {
             report.entries_race_skipped += 1;
-            // Roll this row out of the counters it was counted into at queue
-            // time, so counters say WRITTEN, not QUEUED (T3 m3). The held
-            // snapshot makes each decrement match its queue-time increment
-            // exactly.
+            // Roll this row out of EXACTLY the counters it was counted into
+            // at queue time (T4 M2: the queue-time increments key on the
+            // row's flag column for the flag counters and on `held` for the
+            // hold counters — mirror both, or saturating_sub silently hides
+            // a wrong-key decrement and corrupts the aggregate).
             if *counted_already {
                 report.entries_already_anchored = report.entries_already_anchored.saturating_sub(1);
+                if *flag_at_queue != 0 {
+                    report.flag_clears_planned = report.flag_clears_planned.saturating_sub(1);
+                }
+                if *held != 0 {
+                    report.hold_clears_planned = report.hold_clears_planned.saturating_sub(1);
+                }
             } else {
                 report.entries_still_unanchored = report.entries_still_unanchored.saturating_sub(1);
-            }
-            if *desired_flag == 0 && *held != 0 {
-                report.flag_clears_planned = report.flag_clears_planned.saturating_sub(1);
-            }
-            if *desired_flag == 1 && *held == 0 {
-                report.flag_handoffs_planned = report.flag_handoffs_planned.saturating_sub(1);
-            }
-            if *desired_hold == 1 && *held == 0 {
-                report.hold_sets_planned = report.hold_sets_planned.saturating_sub(1);
-            }
-            if *desired_hold == 0 && *held != 0 {
-                report.hold_clears_planned = report.hold_clears_planned.saturating_sub(1);
+                if *flag_at_queue == 0 {
+                    report.flag_handoffs_planned = report.flag_handoffs_planned.saturating_sub(1);
+                }
+                if *desired_hold == 1 && *held == 0 {
+                    report.hold_sets_planned = report.hold_sets_planned.saturating_sub(1);
+                }
             }
         }
     }

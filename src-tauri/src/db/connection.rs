@@ -852,13 +852,6 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     apply_v27_embed_scheme(conn)?;
     apply_v28_two_stage_columns(conn)?;
 
-    // V29 (PR #336 T3 M1) runs EARLY — before the versioned V20 block, whose
-    // in-migration re-grade scans `adjudication_hold` — and after V18's DDL
-    // has ensured the table exists on fresh brains (which now carry the
-    // column natively). Idempotent either way: the existing-columns pre-check
-    // makes repeats no-ops.
-    apply_v29_adjudication_hold(conn)?;
-
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
     // rev 4.1 §1/D4): the deposit file's frontmatter is authoritative; this
     // derived table is written inside the audit_and_seed_kick transaction.
@@ -1239,9 +1232,9 @@ fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// V29 body (CT PR #336 Tier-3 Opus review M1): add the nullable-behavior
-/// `librarian_evidence.adjudication_hold` column (`INTEGER NOT NULL DEFAULT
-/// 0`, written only by `ct evidence re-anchor`'s apply transaction).
+/// V29 body (CT PR #336 Tier-3 Opus review M1): add the `librarian_evidence.adjudication_hold`
+/// column (`INTEGER NOT NULL DEFAULT 0`, written only by `ct evidence
+/// re-anchor`'s apply transaction).
 ///
 /// WHY A SECOND COLUMN: the `unanchored` flag's contract across every writer
 /// is `unanchored == !evidence_has_live_chunk(..)` (evidence_repair.rs,
@@ -1252,43 +1245,71 @@ fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()> {
 /// still-ungrounded rows therefore broke the invariant, exposed ambiguous rows
 /// on pre-V20 brains, and protected nothing from the heal. The hold column
 /// carries the adjudication state instead, and both destructive consumers
-/// (regrade's purge scans, heal's keep-rule) consult it. Runs AFTER every
-/// versioned migration, stamp gated on V22 like V23–V28 (a rootless open must
-/// not mask a deferred V22).
+/// (regrade's purge scans, heal's keep-rule) consult it.
+///
+/// Runs EARLY — called right after the V18 block (which guarantees the table
+/// exists on fresh brains; their DDL carries the column natively) and BEFORE
+/// the V20 block, whose in-migration re-grade scan names `adjudication_hold`
+/// and would fail `no such column` on a pre-V29 brain otherwise.
 fn apply_v29_adjudication_hold(conn: &Connection) -> Result<()> {
-    // Unlocked pre-check keeps the steady state (column present) from taking
-    // the write lock on every open — the V24/V27/V28 pattern.
-    let existing = crate::db::ddl_compat::existing_columns(conn, "librarian_evidence")?;
-    let missing = !existing.iter().any(|c| c == "adjudication_hold");
-    if !missing {
-        return Ok(());
-    }
+    // Concurrent-open guard (PR #336 T4 M1 — same race V24/V28 document):
+    // the desktop app and a simultaneously launching `--mcp` server can both
+    // snapshot "column missing" from the unlocked pre-check; the second bare
+    // ALTER would fail its open with `duplicate column name`. BEGIN IMMEDIATE
+    // takes the write lock up front (the loser blocks on it, via the busy
+    // timeout set at open) and the column is re-checked UNDER that lock, so
+    // exactly one process runs the ALTER and the other no-ops into the
+    // idempotent stamp.
+    //
     // `librarian_evidence` absent (pre-V18 replica): skip WITHOUT error —
     // SQLite rejects ALTER TABLE on a missing table; the column lands on a
     // later open after V18's DDL (same machinery note as V28's trigger).
-    let table_exists: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='librarian_evidence'",
-        [],
-        |r| r.get(0),
-    )?;
-    if table_exists == 0 {
-        return Ok(());
-    }
-    conn.execute_batch(
-        "ALTER TABLE librarian_evidence
-             ADD COLUMN adjudication_hold INTEGER NOT NULL DEFAULT 0;",
-    )?;
-    // Stamp last, gated on V22 (same rationale as V28's stamp).
-    let stamped_now: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-        [],
-        |r| r.get(0),
-    )?;
-    if stamped_now >= 22 {
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_version (version) VALUES (29)",
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let applied = (|| -> Result<()> {
+        let table_exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='librarian_evidence'",
             [],
+            |r| r.get(0),
         )?;
+        if table_exists == 0 {
+            return Ok(());
+        }
+        let has_column: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('librarian_evidence')
+              WHERE name = 'adjudication_hold'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_column == 0 {
+            conn.execute_batch(
+                "ALTER TABLE librarian_evidence
+                     ADD COLUMN adjudication_hold INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        // Stamp on EVERY path where the table exists — fresh brains carry the
+        // column natively via V18's DDL and would otherwise never stamp 29
+        // (T4 m5: MAX(version) reading 28 on new brains is needless drift).
+        // Gated on V22 like every stamp since V23 (a rootless open must not
+        // mask a deferred V22).
+        let stamped_now: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )?;
+        if stamped_now >= 22 {
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (29)",
+                [],
+            )?;
+        }
+        Ok(())
+    })();
+    match applied {
+        Ok(()) => conn.execute_batch("COMMIT;")?,
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
     }
     Ok(())
 }
