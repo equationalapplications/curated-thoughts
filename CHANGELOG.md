@@ -1,3 +1,9 @@
+## [3.11.6](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.5...v3.11.6) (2026-11-11)
+
+### Dependencies
+
+* **deps:** pin minimatch vulnerable range to 11.0.2 (dependabot alert [#129](https://github.com/equationalapplications/curated-thoughts/issues/129)) ([ba44a32](https://github.com/equationalapplications/curated-thoughts/commit/ba44a32febcc9c48817fa2931d42ce5324400ae5))
+
 ## [3.11.5](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.4...v3.11.5) (2026-11-10)
 
 ### Dependencies
