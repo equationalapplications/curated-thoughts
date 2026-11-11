@@ -780,11 +780,13 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
             warn_source_ref_missing_evidence(trimmed, "no entry for token");
             return true;
         };
-        let row: Option<(String, i64)> = conn
+        let row: Option<(String, i64, i64)> = conn
             .query_row(
-                "SELECT evidence_json, unanchored FROM librarian_evidence WHERE entry_id = ?1",
+                "SELECT evidence_json, unanchored,
+                        COALESCE(adjudication_hold, 0)
+                   FROM librarian_evidence WHERE entry_id = ?1",
                 [&entry_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .unwrap_or(None);
@@ -806,9 +808,13 @@ pub fn source_ref_is_still_grounded(conn: &Connection, source_ref: &str) -> bool
             // leaves version 20 unstamped on a skipped destructive phase, so
             // `MAX(version) < 20` is the durable pending marker. Once the
             // regrade settles (or on a brain already at 20+), flagged rows
-            // ground strictly again, exactly as §2.3 specifies.
-            Some((json, unanchored)) => {
-                if unanchored == 1 && v20_regrade_pending(conn) {
+            // ground strictly again, exactly as §2.3 specifies — EXCEPT rows
+            // under adjudication hold (PR #336 T3 M1): `ct evidence re-anchor`
+            // marks ambiguous/hash_mismatch-class rows that must not take ANY
+            // destructive path (regrade's purge OR this heal's soft-delete)
+            // until a person adjudicates them.
+            Some((json, unanchored, hold)) => {
+                if unanchored == 1 && (v20_regrade_pending(conn) || hold == 1) {
                     return true;
                 }
                 match evidence_has_live_chunk(conn, &json) {
@@ -8771,6 +8777,63 @@ mod source_ref_grounded_tests {
             &conn,
             r#"{"proposal_id":null,"evidence":[]}"#
         ));
+    }
+
+    /// D6 — Adjudication hold keep-rule (PR #336 T3 M1): a flagged, fully
+    /// ungrounded row under `adjudication_hold = 1` is KEPT from the heal's
+    /// soft-delete even on a settled (V20-stamped) brain — the hold is the
+    /// durable "no destructive path until adjudicated" marker, unlike the
+    /// V20 pending gate which expires once regrade settles.
+    #[test]
+    fn adjudication_hold_keeps_ungrounded_row_from_heal() {
+        let conn = open_in_memory().unwrap();
+        // Settle the brain so `v20_regrade_pending` is false — the hold must
+        // carry the keep-rule ON ITS OWN.
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (20)",
+            [],
+        )
+        .unwrap();
+        let token = librarian_source_ref_token("fact_hold");
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence,
+                 source_type, source_ref, created_at, updated_at, access_count)
+             VALUES ('fact_hold','ent','t','b','[]','inferred','librarian_inferred',?1,1,1,0)",
+            [&token],
+        )
+        .unwrap();
+        // Dangling chunk ref: demonstrably ungrounded, flagged.
+        insert_librarian_evidence(
+            &conn,
+            "fact_hold",
+            "prop_hold",
+            r#"{"evidence":[{"chunk_id":999,"content_hash":"h_gone","quote":"q","start_line":1,"end_line":3}],"proposal_id":"prop_hold"}"#,
+            true,
+            1,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE librarian_evidence SET adjudication_hold = 1 WHERE entry_id = 'fact_hold'",
+            [],
+        )
+        .unwrap();
+
+        // Held + flagged + fully ungrounded → the heal must NOT soft-delete.
+        assert!(
+            source_ref_is_still_grounded(&conn, &token),
+            "held row must be kept from the heal's soft-delete on a settled brain"
+        );
+
+        // Control: the same row WITHOUT the hold falls (heal owns it).
+        conn.execute(
+            "UPDATE librarian_evidence SET adjudication_hold = 0 WHERE entry_id = 'fact_hold'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            !source_ref_is_still_grounded(&conn, &token),
+            "the same row without the hold must fall to the heal (grounding decides)"
+        );
     }
 
     /// D5 — Parse-error defensive branch. JSON-looking-but-malformed input

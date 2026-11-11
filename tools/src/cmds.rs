@@ -1703,7 +1703,9 @@ pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
             "refusing: `ct evidence re-anchor` would rewrite evidence hashes in {} \
              (a brain write). Dry-run: examined={} already_anchored={} dead_items={} \
              reanchored={} ambiguous={} unresolved={} hash_mismatch={} \
-             regrounded={} still_unanchored={}. Pass --yes to apply.",
+             regrounded={} still_unanchored={} \
+             flag_writes: {} handoff(s), {} clear(s); hold_writes: {} set(s), {} clear(s). \
+             Pass --yes to apply.",
             brain.paths.db_path.display(),
             report.entries_examined,
             report.entries_already_anchored,
@@ -1713,8 +1715,20 @@ pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
             report.items_unresolved,
             report.items_hash_mismatch,
             report.entries_regrounded,
-            report.entries_still_unanchored
+            report.entries_still_unanchored,
+            report.flag_handoffs_planned,
+            report.flag_clears_planned,
+            report.hold_sets_planned,
+            report.hold_clears_planned
         );
+        if !report.items_flagged_detail.is_empty() {
+            eprintln!(
+                "[ct::reanchor] dry-run adjudication queue (entry_id kind #item):"
+            );
+            for (entry_id, kind, item_idx) in &report.items_flagged_detail {
+                eprintln!("  {} {} #{}", entry_id, kind, item_idx);
+            }
+        }
         return Ok(1);
     }
     let conn = crate::write::open_rw(&brain)?;
@@ -1726,7 +1740,7 @@ pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
     println!(
         "[ct::reanchor] entries_examined={} already_anchored={} reanchored_items={} \
          ambiguous={} unresolved={} hash_mismatch={} regrounded={} still_unanchored={} \
-         race_skipped={}",
+         race_skipped={} flag_handoffs={} flag_clears={} hold_sets={} hold_clears={}",
         report.entries_examined,
         report.entries_already_anchored,
         report.items_reanchored,
@@ -1735,7 +1749,11 @@ pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
         report.items_hash_mismatch,
         report.entries_regrounded,
         report.entries_still_unanchored,
-        report.entries_race_skipped
+        report.entries_race_skipped,
+        report.flag_handoffs_planned,
+        report.flag_clears_planned,
+        report.hold_sets_planned,
+        report.hold_clears_planned
     );
     if !report.items_flagged_detail.is_empty() {
         eprintln!("[ct::reanchor] items left flagged (entry_id kind #item) — adjudication queue:");

@@ -495,6 +495,13 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         )?;
     }
 
+    // V29 (PR #336 T3 M1) runs HERE — after V18 has guaranteed the
+    // librarian_evidence table exists, and BEFORE the V20 block, whose
+    // in-migration re-grade scans `adjudication_hold`. Ungated and
+    // idempotent (existing-columns pre-check): on a steady-state brain the
+    // column is already there and this is a read-only no-op.
+    apply_v29_adjudication_hold(conn)?;
+
     if version < 20 {
         // The Phase-2 flip itself (issue #186 §2.4): re-grade every live
         // unanchored librarian_evidence row against current chunk state.
@@ -844,6 +851,13 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // V25's re-read.
     apply_v27_embed_scheme(conn)?;
     apply_v28_two_stage_columns(conn)?;
+
+    // V29 (PR #336 T3 M1) runs EARLY — before the versioned V20 block, whose
+    // in-migration re-grade scans `adjudication_hold` — and after V18's DDL
+    // has ensured the table exists on fresh brains (which now carry the
+    // column natively). Idempotent either way: the existing-columns pre-check
+    // makes repeats no-ops.
+    apply_v29_adjudication_hold(conn)?;
 
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
     // rev 4.1 §1/D4): the deposit file's frontmatter is authoritative; this
@@ -1219,6 +1233,60 @@ fn apply_v28_two_stage_columns(conn: &Connection) -> Result<()> {
     if stamped_now >= 22 {
         conn.execute(
             "INSERT OR IGNORE INTO schema_version (version) VALUES (28)",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// V29 body (CT PR #336 Tier-3 Opus review M1): add the nullable-behavior
+/// `librarian_evidence.adjudication_hold` column (`INTEGER NOT NULL DEFAULT
+/// 0`, written only by `ct evidence re-anchor`'s apply transaction).
+///
+/// WHY A SECOND COLUMN: the `unanchored` flag's contract across every writer
+/// is `unanchored == !evidence_has_live_chunk(..)` (evidence_repair.rs,
+/// bundle_apply.rs — "or it re-arms the heal-purge bait"). The heal reads the
+/// flag in exactly one place (source_ref_is_still_grounded: a flagged row is
+/// kept ONLY while the V20 re-grade is pending); regrade's purge scan reads it
+/// unconditionally. Encoding "adjudication pending" by clearing the flag on
+/// still-ungrounded rows therefore broke the invariant, exposed ambiguous rows
+/// on pre-V20 brains, and protected nothing from the heal. The hold column
+/// carries the adjudication state instead, and both destructive consumers
+/// (regrade's purge scans, heal's keep-rule) consult it. Runs AFTER every
+/// versioned migration, stamp gated on V22 like V23–V28 (a rootless open must
+/// not mask a deferred V22).
+fn apply_v29_adjudication_hold(conn: &Connection) -> Result<()> {
+    // Unlocked pre-check keeps the steady state (column present) from taking
+    // the write lock on every open — the V24/V27/V28 pattern.
+    let existing = crate::db::ddl_compat::existing_columns(conn, "librarian_evidence")?;
+    let missing = !existing.iter().any(|c| c == "adjudication_hold");
+    if !missing {
+        return Ok(());
+    }
+    // `librarian_evidence` absent (pre-V18 replica): skip WITHOUT error —
+    // SQLite rejects ALTER TABLE on a missing table; the column lands on a
+    // later open after V18's DDL (same machinery note as V28's trigger).
+    let table_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='librarian_evidence'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table_exists == 0 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "ALTER TABLE librarian_evidence
+             ADD COLUMN adjudication_hold INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    // Stamp last, gated on V22 (same rationale as V28's stamp).
+    let stamped_now: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped_now >= 22 {
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (29)",
             [],
         )?;
     }
@@ -2771,7 +2839,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(stamped, "user_confirmed", "§8: rebuild re-derives the stamp");
+        assert_eq!(
+            stamped, "user_confirmed",
+            "§8: rebuild re-derives the stamp"
+        );
         let marker: String = conn
             .query_row(
                 "SELECT value FROM llm_wiki_meta WHERE key = 'stated_ledger_rederived'",
@@ -4104,8 +4175,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let (mode, auto) =
-            get_folder_mode(&conn, "stated/kurt/2026/some-statement.md");
+        let (mode, auto) = get_folder_mode(&conn, "stated/kurt/2026/some-statement.md");
         assert_eq!(
             (mode.as_str(), auto),
             ("synthesize", true),

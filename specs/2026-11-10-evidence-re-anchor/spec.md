@@ -1,7 +1,7 @@
 # `ct evidence re-anchor`: pre-purge re-anchoring of unanchored librarian evidence
 
 **Date:** 2026-11-10
-**Status:** Implemented (2026-11-10: applied to the live brain after dry-run gates — backup `brain.db.bak-pre-reanchor-1794342813`; 173 entries re-anchored/regrounded, 0 race-skips, idempotent re-run clean; residual 129 entries adjudication pending with Kurt; spec §3 round 2 normalized-prefix strategy per the reanchored=0-by-construction handoff)
+**Status:** Implemented (2026-11-10: applied to the live brain after dry-run gates — backup `brain.db.bak-pre-reanchor-1794342813`; 173 entries re-anchored/regrounded, 0 race-skips, idempotent re-run clean; residual 129 entries adjudication pending with Kurt; spec §3 round 2 normalized-prefix strategy per the reanchored=0-by-construction handoff). **Rev 2 (2026-11-11, PR #336 Tier-3 Opus M1/M2):** the adjudication disposition moved OFF the `unanchored` flag onto a new `adjudication_hold` column (V29) — the Nov 10 live apply ran the flag-era build, so its "idempotent re-run clean" receipt predates rev 2 and is re-verified by a fresh dry-run + apply pass on the new build.
 **Supersedes the ad-hoc repair runs of 2026-10-18** (`brain.db.bak-pre-anchor-heal-20261018`, exports under `~/ct-anchor-heal-exports/`) — those were manual; this makes the recovery a gated, idempotent CLI command.
 
 ## 1. Problem
@@ -61,7 +61,7 @@ per ITEM too — a live sibling must not orphan recoverable provenance.
 
 - **Backup before first write — KEPT.** Even though the pass is UPDATE-only, it is still a mass brain write: before any apply, `VACUUM INTO` a crash-consistent snapshot (`brain.db.bak-pre-reanchor-<ts>` in the db dir) — cheap, zero-friction insurance, and the documented rollback path.
 - **Dry-run by default.** Like `graph_reanchor`: read-only plan printed unless `--yes`.
-- **No breaker interaction — WIP posture adopted.** Rows are only ever UPDATED, never deleted, so the shared bulk-deletion budget is untouched and the breaker is not consulted. Unresolved rows stay flagged `unanchored = 1` for the EXISTING `ct evidence regrade` flow, which owns the gated export-then-purge of genuinely doomed rows — re-anchor never hands rows to a destructive path.
+- **No breaker interaction — WIP posture adopted.** Rows are only ever UPDATED, never deleted, so the shared bulk-deletion budget is untouched and the breaker is not consulted. The two destructive consumers — regrade's gated export-then-purge and the heal's soft-delete — each consult the row's `adjudication_hold`: held rows take NO destructive path; unresolved rows (hold 0) are EXPLICITLY handed to regrade's purge by carrying `unanchored = 1` — re-anchor writes flags, regrade decides deletions, under its own gates.
 
 ## 5. Idempotency and the report
 
@@ -77,7 +77,7 @@ A `ReanchorReport` (WIP fields, adjudicated):
 - `entries_regrounded` / `entries_still_unanchored` — was-ungrounded-now-grounded / still ungrounded after the pass;
 - `entries_race_skipped` — concurrent mutation (json drift, lost grounding, or a rewritten chunk vanishing) detected under the lock; re-run converges.
 
-All UPDATEs are idempotent; re-running converges — and a converged `--yes` writes nothing and takes no snapshot. Soft-deleted stock is never touched — the 90-day prune owns it (regrade invariant). Flag dispositions inside the transaction follow the adjudication class (CodeRabbit tier review): ungrounded rows with unresolved items are FLAGGED `unanchored = 1` — the concrete hand-off, since `ct evidence regrade` scans `unanchored = 1` — while ambiguous/hash_mismatch rows have any stale flag CLEARED, keeping them out of regrade's purge scan until a better matcher or Kurt's adjudication disposes of them.
+All UPDATEs are idempotent; re-running converges — and a converged `--yes` writes nothing and takes no snapshot. Soft-deleted stock is never touched — the 90-day prune owns it (regrade invariant). Flag + hold dispositions inside the transaction (rev 2, PR #336 Tier-3 Opus M1/M2): the `unanchored` flag stays TRUTHFUL — `unanchored == !grounded`, the invariant every other writer upholds (evidence_repair.rs, bundle_apply.rs) — while the NEW `adjudication_hold` column carries the adjudication class: ungrounded rows with unresolved items ONLY get hold 0 (the concrete hand-off — regrade's purge scans `unanchored = 1 AND hold = 0`); ungrounded rows with ANY ambiguous/hash_mismatch dead item get hold 1 (mixed classes included), and both destructive consumers — regrade's purge scans and the heal's keep-rule (`source_ref_is_still_grounded`) — consult the hold, so a held row takes NO destructive path until a better matcher or Kurt's adjudication disposes of it.
 
 ## 6. Testing posture
 
