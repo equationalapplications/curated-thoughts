@@ -1708,7 +1708,17 @@ pub fn evidence_reanchor_cmd(yes: bool) -> Result<i32> {
     // command is the pre-purge RESCUE — spec §2 orders re-anchor BEFORE any
     // purge. The `--yes` arm therefore runs the full ladder only AFTER the
     // re-anchor apply returns, so the V20 purge sees the post-rescue stock.
-    {
+    //
+    // T4 delta-3 m5: the dry run is a read-only command, so the ensure takes
+    // the write lock ONLY when the column is actually missing (read-only
+    // probe first — the same unlocked-pre-check → lock-only-when-pending
+    // house pattern V29 itself uses). A steady-state dry run is now fully
+    // read-only; a pre-V29 brain still gets its one-time idempotent DDL, and
+    // a pre-V18 brain gets ensure's clear "nothing to rescue yet" error.
+    let probe_conn = crate::write::open_ro(&brain)?;
+    let column_present = tauri_app_lib::db::connection::v29_hold_column_present(&probe_conn)?;
+    drop(probe_conn);
+    if !column_present {
         let mw = crate::write::open_rw(&brain)?;
         tauri_app_lib::db::connection::ensure_v29_adjudication_hold(&mw)?;
     }

@@ -136,9 +136,78 @@ struct Candidate {
     /// The row's `adjudication_hold` column at queue time (hold-counter
     /// rollback on a race-skip keys on it).
     held: i64,
+    /// The row's `unanchored` flag column at queue time (flag-counter
+    /// rollback on a race-skip keys on it — T4 delta-3 m1, same fix shape
+    /// as the hold column above: the preview counters must be undoable by
+    /// the EXACT key they were counted into).
+    unanchored_flag: i64,
     /// Items this pass rewrote — rolled back if the row is race-skipped, so
     /// `items_reanchored` counts only WRITTEN re-anchors.
     items_reanchored: usize,
+}
+
+/// Count one row's predicted FLAG write (T4 delta-3 m1), keyed on the row's
+/// `unanchored` column at queue time — `grounds == true` previews a 1→0
+/// clear when the row was flagged; `grounds == false` previews a 0→1
+/// regrade hand-off when the row was NOT yet flagged. The race-skip undo
+/// (see [`undo_flag_prediction`]) decrements against the same key, so the
+/// counter always reads like the WRITTEN flag flips.
+fn count_flag_prediction(report: &mut ReanchorReport, grounds: bool, flag: i64) {
+    if grounds {
+        if flag != 0 {
+            report.flag_clears_planned += 1;
+        }
+    } else if flag == 0 {
+        report.flag_handoffs_planned += 1;
+    }
+}
+
+/// Undo one row's predicted FLAG counting on a race-skip — a skipped row
+/// writes nothing, so its previewed flag flips roll back out.
+fn undo_flag_prediction(report: &mut ReanchorReport, grounds: bool, flag: i64) {
+    if grounds {
+        if flag != 0 {
+            report.flag_clears_planned = report.flag_clears_planned.saturating_sub(1);
+        }
+    } else if flag == 0 {
+        report.flag_handoffs_planned = report.flag_handoffs_planned.saturating_sub(1);
+    }
+}
+
+/// Count one row's hold disposition by the governing grounding verdict
+/// (T4 delta-2 m2): grounded rows leave any hold (`1→0`); ungrounded rows
+/// with an ambiguous/hash_mismatch item enter the hold (`0→1`); ungrounded
+/// rows without one leave it (`1→0`). Shared by the queue-time prediction
+/// and the under-lock reconciliation.
+fn count_hold_disposition(report: &mut ReanchorReport, grounds: bool, has_hold: bool, held: i64) {
+    if grounds {
+        if held != 0 {
+            report.hold_clears_planned += 1;
+        }
+    } else if has_hold {
+        if held == 0 {
+            report.hold_sets_planned += 1;
+        }
+    } else if held != 0 {
+        report.hold_clears_planned += 1;
+    }
+}
+
+/// Undo one row's PREDICTED hold counting on a race-skip — a skipped row
+/// writes nothing (T4 delta-2 m2). Byte-for-byte the inverse of
+/// [`count_hold_disposition`], saturating so a double-undo can never wrap.
+fn undo_hold_prediction(report: &mut ReanchorReport, grounds: bool, has_hold: bool, held: i64) {
+    if grounds {
+        if held != 0 {
+            report.hold_clears_planned = report.hold_clears_planned.saturating_sub(1);
+        }
+    } else if has_hold {
+        if held == 0 {
+            report.hold_sets_planned = report.hold_sets_planned.saturating_sub(1);
+        }
+    } else if held != 0 {
+        report.hold_clears_planned = report.hold_clears_planned.saturating_sub(1);
+    }
 }
 
 /// Match (and optionally apply) quote-text re-anchors for the live unanchored
@@ -382,17 +451,11 @@ pub fn re_anchor(
         // T4 delta-2 m2: candidates write the hold column too — count the
         // PREDICTED hold disposition now, on the same grounds prediction the
         // apply reconciles against (see the grounds_now block below).
-        if would_ground {
-            if held != 0 {
-                report.hold_clears_planned += 1;
-            }
-        } else if has_hold {
-            if held == 0 {
-                report.hold_sets_planned += 1;
-            }
-        } else if held != 0 {
-            report.hold_clears_planned += 1;
-        }
+        // T4 delta-3 m1: the FLAG counters get the same treatment — the
+        // candidate carries its flag column, so queue-time counting and every
+        // race-skip/reconciliation undo key on the identical column values.
+        count_hold_disposition(&mut report, would_ground, has_hold, held);
+        count_flag_prediction(&mut report, would_ground, unanchored_flag);
         candidates.push(Candidate {
             entry_id,
             snapshot_json: evidence_json,
@@ -401,6 +464,7 @@ pub fn re_anchor(
             grounded,
             has_hold,
             held,
+            unanchored_flag,
             items_reanchored,
         });
     }
@@ -537,22 +601,11 @@ pub fn re_anchor(
                     report.items_reanchored = report
                         .items_reanchored
                         .saturating_sub(cand.items_reanchored);
-                    // Undo the PREDICTED hold counting queued for this row
-                    // (T4 delta-2 m2): a race-skip writes nothing.
-                    if *would_ground {
-                        if cand.held != 0 {
-                            report.hold_clears_planned =
-                                report.hold_clears_planned.saturating_sub(1);
-                        }
-                    } else if cand.has_hold {
-                        if cand.held == 0 {
-                            report.hold_sets_planned =
-                                report.hold_sets_planned.saturating_sub(1);
-                        }
-                    } else if cand.held != 0 {
-                        report.hold_clears_planned =
-                            report.hold_clears_planned.saturating_sub(1);
-                    }
+                    // Undo the PREDICTED hold + flag counting queued for
+                    // this row (T4 delta-2 m2 / delta-3 m1): a race-skip
+                    // writes nothing.
+                    undo_hold_prediction(&mut report, *would_ground, cand.has_hold, cand.held);
+                    undo_flag_prediction(&mut report, *would_ground, cand.unanchored_flag);
                     if !grounded && *would_ground {
                         report.entries_regrounded = report.entries_regrounded.saturating_sub(1);
                         report.entries_still_unanchored += 1;
@@ -593,34 +646,15 @@ pub fn re_anchor(
                         report.entries_regrounded = report.entries_regrounded.saturating_sub(1);
                         report.entries_still_unanchored += 1;
                     }
-                    // Hold-counter reconciliation (T4 delta-2 m2): undo the
-                    // would_ground-based counting and recount by the ACTUAL
-                    // under-lock grounding.
-                    if *would_ground {
-                        if cand.held != 0 {
-                            report.hold_clears_planned =
-                                report.hold_clears_planned.saturating_sub(1);
-                        }
-                    } else if cand.has_hold {
-                        if cand.held == 0 {
-                            report.hold_sets_planned =
-                                report.hold_sets_planned.saturating_sub(1);
-                        }
-                    } else if cand.held != 0 {
-                        report.hold_clears_planned =
-                            report.hold_clears_planned.saturating_sub(1);
-                    }
-                    if grounds_now {
-                        if cand.held != 0 {
-                            report.hold_clears_planned += 1;
-                        }
-                    } else if cand.has_hold {
-                        if cand.held == 0 {
-                            report.hold_sets_planned += 1;
-                        }
-                    } else if cand.held != 0 {
-                        report.hold_clears_planned += 1;
-                    }
+                    // Hold + flag counter reconciliation (T4 delta-2 m2 /
+                    // delta-3 m1): undo the would_ground-based counting and
+                    // recount by the ACTUAL under-lock grounding — the pass
+                    // is re-counted by its WRITTEN outcome, not its
+                    // predicted one.
+                    undo_hold_prediction(&mut report, *would_ground, cand.has_hold, cand.held);
+                    undo_flag_prediction(&mut report, *would_ground, cand.unanchored_flag);
+                    count_hold_disposition(&mut report, grounds_now, cand.has_hold, cand.held);
+                    count_flag_prediction(&mut report, grounds_now, cand.unanchored_flag);
                 }
                 tx.execute(
                     "UPDATE librarian_evidence
@@ -636,20 +670,10 @@ pub fn re_anchor(
                 report.items_reanchored = report
                     .items_reanchored
                     .saturating_sub(cand.items_reanchored);
-                // Undo the PREDICTED hold counting (T4 delta-2 m2) — a
-                // race-skip writes nothing.
-                if *would_ground {
-                    if cand.held != 0 {
-                        report.hold_clears_planned =
-                            report.hold_clears_planned.saturating_sub(1);
-                    }
-                } else if cand.has_hold {
-                    if cand.held == 0 {
-                        report.hold_sets_planned = report.hold_sets_planned.saturating_sub(1);
-                    }
-                } else if cand.held != 0 {
-                    report.hold_clears_planned = report.hold_clears_planned.saturating_sub(1);
-                }
+                // Undo the PREDICTED hold + flag counting (T4 delta-2 m2 /
+                // delta-3 m1) — a race-skip writes nothing.
+                undo_hold_prediction(&mut report, *would_ground, cand.has_hold, cand.held);
+                undo_flag_prediction(&mut report, *would_ground, cand.unanchored_flag);
                 // Grounded rows stay factually grounded on a race-skip — only
                 // the was-ungrounded-now-grounded counters roll back.
                 if !grounded && *would_ground {
@@ -1724,6 +1748,90 @@ mod tests {
         // The row survives, still flagged, still held.
         assert_eq!(stored_unanchored(&conn, "fact_held"), 1);
         assert_eq!(stored_hold(&conn, "fact_held"), 1);
+    }
+
+    /// T4 delta-3 MAJOR: the four planned-write counters had ZERO test
+    /// assertions (all mentions were implementation lines). A dry run over
+    /// two rows — a HELD row whose dead item is regroundable (candidate
+    /// path: hold clears, flag clears) and an UNHELD UNFLAGGED row whose
+    /// dead item is ambiguous (adjudication path: hold sets, flag
+    /// hand-off) — must preview exactly the writes the apply would make,
+    /// and write NOTHING.
+    #[test]
+    fn dry_run_counters_preview_held_regroundable_and_ambiguous_rows() {
+        let conn = open_in_memory().unwrap();
+        // Row A — held but regroundable: unique quote match.
+        let new_text = "intro line\nthe decisive quote here\ntrailing text";
+        let pos = 2usize;
+        let live_hash = compute_chunk_hash(new_text, DOC_PATH, pos);
+        seed_chunk(&conn, new_text, pos, &live_hash);
+        seed_flagged(
+            &conn,
+            "fact_held_regroundable",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_hr"}}"#,
+                dead_item(
+                    "dead5000000000000000000000000000000000000000000000000000000000",
+                    "the decisive quote here"
+                )
+            ),
+            None,
+        );
+        conn.execute(
+            "UPDATE librarian_evidence SET adjudication_hold = 1
+              WHERE entry_id = 'fact_held_regroundable'",
+            [],
+        )
+        .unwrap();
+
+        // Row B — unheld, unflagged, ambiguous: tier-2 prefix tie across
+        // two identical-text chunks.
+        let (base_n, _, quote) = tier2_parts();
+        let h1 = compute_chunk_hash(&base_n, DOC_PATH, 1usize);
+        let h2 = compute_chunk_hash(&base_n, DOC_PATH, 2usize);
+        seed_chunk(&conn, &base_n, 1, &h1);
+        seed_chunk(&conn, &base_n, 2, &h2);
+        seed_row(
+            &conn,
+            "fact_unheld_ambiguous",
+            &format!(
+                r#"{{"evidence":[{}],"proposal_id":"prop_ua"}}"#,
+                dead_item(
+                    "dead5100000000000000000000000000000000000000000000000000000000",
+                    &quote
+                )
+            ),
+            None,
+            0, // NOT flagged — its 0→1 hand-off is previewable
+        );
+
+        // DRY RUN: identical matching, zero writes, exact counters.
+        let report = re_anchor(&conn, false, None).unwrap();
+        // Row A (candidate path, T4 delta-3 m1): grounds → hold 1→0 AND
+        // flag 1→0 clear previewed.
+        assert_eq!(report.hold_clears_planned, 1);
+        assert_eq!(report.flag_clears_planned, 1);
+        // Row B (adjudication path): hold 0→1 AND flag 0→1 hand-off.
+        assert_eq!(report.hold_sets_planned, 1);
+        assert_eq!(report.flag_handoffs_planned, 1);
+        assert_eq!(report.entries_race_skipped, 0);
+        // Preview semantics: nothing was written.
+        assert_eq!(stored_hold(&conn, "fact_held_regroundable"), 1);
+        assert_eq!(stored_hold(&conn, "fact_unheld_ambiguous"), 0);
+        assert_eq!(stored_unanchored(&conn, "fact_unheld_ambiguous"), 0);
+
+        // The apply then lands EXACTLY the previewed writes — the counters
+        // are a contract, not decoration.
+        let applied = re_anchor(&conn, true, None).unwrap();
+        assert_eq!(applied.hold_clears_planned, 1);
+        assert_eq!(applied.flag_clears_planned, 1);
+        assert_eq!(applied.hold_sets_planned, 1);
+        assert_eq!(applied.flag_handoffs_planned, 1);
+        assert_eq!(applied.entries_race_skipped, 0);
+        assert_eq!(stored_hold(&conn, "fact_held_regroundable"), 0);
+        assert_eq!(stored_unanchored(&conn, "fact_held_regroundable"), 0);
+        assert_eq!(stored_hold(&conn, "fact_unheld_ambiguous"), 1);
+        assert_eq!(stored_unanchored(&conn, "fact_unheld_ambiguous"), 1);
     }
 
     /// A grounded entry can still carry a dead sibling item (the grounding

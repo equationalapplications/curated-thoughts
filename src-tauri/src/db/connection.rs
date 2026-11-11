@@ -1313,6 +1313,11 @@ pub(crate) fn ensure_v29_column(conn: &Connection) -> Result<()> {
 /// the early call site a fresh brain reads MAX(version) = 19, below the V22
 /// gate every stamp since V23 carries, so the stamp must wait until the
 /// versioned ladder has settled). Idempotent (`INSERT OR IGNORE`).
+///
+/// The inner `>= 22` gate is SUBSUMED at both current call sites (T4 delta-3
+/// doc nit): [`migrate`] reaches here only after the full ladder (MAX far
+/// above 22), and [`ensure_v29_adjudication_hold`] already gates on
+/// `MAX >= 28`. It stays as cheap standalone-call safety, not behavior.
 pub(crate) fn stamp_v29(conn: &Connection) -> Result<()> {
     let stamped_now: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_version",
@@ -1336,6 +1341,22 @@ pub(crate) fn stamp_v29(conn: &Connection) -> Result<()> {
 /// added — the evidence scans need it — but `ct status` keeps reporting the
 /// unsettled ladder truthfully until the next full migrate stamps the rest.
 pub fn ensure_v29_adjudication_hold(conn: &Connection) -> Result<()> {
+    // T4 delta-3 m3: on a pre-V18 brain neither `schema_version` nor
+    // `librarian_evidence` exists yet — there is NOTHING to rescue, and the
+    // raw rusqlite error ("no such table: schema_version") gave the operator
+    // no path forward. Name the situation and the remedy instead.
+    let sv_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    if sv_table == 0 {
+        anyhow::bail!(
+            "brain schema is pre-V18 (no schema_version table): nothing to \
+             re-anchor yet. Open the brain once in the app (or run a full \
+             migrate) to build the V18 evidence schema, then retry."
+        );
+    }
     ensure_v29_column(conn)?;
     let stamped_now: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_version",
@@ -1346,6 +1367,24 @@ pub fn ensure_v29_adjudication_hold(conn: &Connection) -> Result<()> {
         stamp_v29(conn)?;
     }
     Ok(())
+}
+
+/// Read-only probe for CLI callers (T4 delta-3 m5): true when
+/// `librarian_evidence.adjudication_hold` exists. Lets a read-only command
+/// take the write lock ONLY when the V29 column is actually missing, instead
+/// of ensuring unconditionally (steady-state dry runs stay fully read-only —
+/// the same unlocked-pre-check → lock-only-when-pending house pattern V29
+/// itself uses). A missing `librarian_evidence` table reports `false`, so the
+/// caller's ensure path surfaces the pre-V18 remedy via
+/// [`ensure_v29_adjudication_hold`]'s clear error.
+pub fn v29_hold_column_present(conn: &Connection) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('librarian_evidence')
+          WHERE name = 'adjudication_hold'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// True when a trigger of the given name exists (any table). Used to decide
@@ -1962,6 +2001,77 @@ mod tests {
         assert!(
             v >= 29,
             "a brain settled at V22+ must stamp 29 on migrate, got MAX={v}"
+        );
+    }
+
+    /// T4 delta-3 MAJOR: the CLI one-shot on a brain parked MID-LADDER (the
+    /// `ct status`-truthful contract, see [`ensure_v29_adjudication_hold`]).
+    /// The column must be ADDED — both evidence scans name it — while the
+    /// version stamp stays EXACTLY where the ladder left it (below 29) until
+    /// a full migrate settles the rest.
+    #[test]
+    fn ensure_v29_one_shot_adds_column_but_leaves_mid_ladder_stamp() {
+        let conn = open_in_memory().unwrap();
+        // Park the brain mid-ladder: simulate a rooted brain that settled
+        // V22 (the in-memory env is rootless, so V22 defers otherwise) and
+        // rewind past V25 — the exact mid-ladder state the doc names — then
+        // drop the V29 column to complete the pre-V29 replica.
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (22)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("DELETE FROM schema_version WHERE version > 25;")
+            .unwrap();
+        conn.execute_batch("ALTER TABLE librarian_evidence DROP COLUMN adjudication_hold;")
+            .unwrap();
+        let stamp_before: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            stamp_before < 28,
+            "test setup must park the brain below the stamp gate, got MAX={stamp_before}"
+        );
+
+        ensure_v29_adjudication_hold(&conn).expect("one-shot ensure must succeed");
+
+        let has: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('librarian_evidence')
+                  WHERE name = 'adjudication_hold'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has, 1, "one-shot must add the adjudication_hold column");
+        let stamp_after: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stamp_after, stamp_before,
+            "mid-ladder stamp must stay truthful (no V29 stamp below the gate)"
+        );
+
+        // The full ladder then settles the stamp on the next migrate.
+        migrate(&conn, None, None).unwrap();
+        let settled: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            settled >= 29,
+            "full migrate must stamp 29, got MAX={settled}"
         );
     }
 
