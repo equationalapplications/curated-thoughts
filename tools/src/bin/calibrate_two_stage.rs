@@ -1195,7 +1195,6 @@ pub fn score_entries(
     shape: &TemporalShape,
     scheme: Scheme,
     now_ms: i64,
-    provenance_filter: Option<&str>,
 ) -> Result<Vec<(f32, WisdomItem)>> {
     if ids.is_empty() || query_vec.is_empty() {
         return Ok(Vec::new());
@@ -1239,14 +1238,6 @@ pub fn score_entries(
         if let Some(f) = floor {
             if raw < f {
                 continue; // the core's `raw < floor` drop
-            }
-        }
-        // The delivery aperture (rev-6 M3): BEFORE the arm-internal
-        // truncate — a top-N of filtered-out facts must never shadow a
-        // `user_stated` fact ranked below it.
-        if let Some(want) = provenance_filter {
-            if provenance_for(source_type.as_deref()).as_deref() != Some(want) {
-                continue;
             }
         }
         let weighted = raw * tier_weight(entity_id.as_deref().unwrap_or(""));
@@ -1314,7 +1305,6 @@ fn chunk_hop_arm(
     cands: &CandidateSet,
     shape: &TemporalShape,
     top_k_opening: bool,
-    provenance_filter: Option<&str>,
     corrections_absent: &HashSet<String>,
 ) -> Result<ChunkHopRun> {
     // Stage 1 with the RAW vector, breadth = the calibrated k.
@@ -1363,7 +1353,6 @@ fn chunk_hop_arm(
         shape,
         scheme,
         now_ms,
-        provenance_filter,
     )?;
     // §3 v1-merge over the STRUCTURAL complement, v1 floor, then ONE
     // weighted re-rank + truncate (r28-m2: schemed vector; r27-M1/r29-M1:
@@ -1386,7 +1375,6 @@ fn chunk_hop_arm(
             shape,
             scheme,
             now_ms,
-            provenance_filter,
         )?;
         v1merged = merge_scored.len();
         merged = merge_scored;
@@ -1720,7 +1708,6 @@ fn main() -> Result<()> {
                     &cands,
                     &shape,
                     false, // the arm opens TOP-1 (pinned r30-m1)
-                    None, // issue #344: the aperture no longer filters by provenance
                     &corrections_absent,
                 )?;
                 merge_ms.push(run.merge_ms);
@@ -1761,7 +1748,6 @@ fn main() -> Result<()> {
                 &cands,
                 &shape,
                 true, // top-k member-chunk opening
-                None, // issue #344: the aperture no longer filters by provenance
                 &corrections_absent,
             )?;
             ablation_verdicts.push(verdict_of(&run.entries, !run.entries.is_empty(), probe));
