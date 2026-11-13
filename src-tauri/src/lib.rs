@@ -1,9 +1,15 @@
 pub mod chunker;
 pub mod cloud_bridge;
 pub mod commands;
+pub mod ct_sql_functions;
 pub mod config;
 pub mod db;
 pub mod doctor;
+
+/// Re-export: every filtered consumer calls this before preparing its
+/// chunk query (working-memory-age plan Task 2; registration-at-consumer
+/// sites land in Task 4).
+pub use ct_sql_functions::register_ct_functions;
 mod drafts_api;
 pub mod embed_scheme;
 pub mod embed_sweep;
