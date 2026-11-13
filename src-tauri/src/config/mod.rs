@@ -368,6 +368,14 @@ fn scan_ingest_ties(ingest: &IngestConfig) -> (bool, Vec<String>) {
             "ingest.folder_tiers tie on prefix {k:?}: most conservative wins ({v:?}; ranking none < chunks-only < full)"
         ));
     }
+    // Same-normalized-key `folder_ages` conflicts: the LARGER age wins
+    // (larger hides less, the conservative outcome for memory decay), but
+    // the conflict is still reported loudly. Not degraded (mirror of tiers).
+    for (k, v) in normalized_key_ties(&ingest.folder_ages) {
+        msgs.push(format!(
+            "ingest.folder_ages tie on prefix {k:?}: larger age wins ({v} days)"
+        ));
+    }
     (degraded, msgs)
 }
 
@@ -417,6 +425,13 @@ pub struct IngestConfig {
     /// `null` parses as `None` = absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ontology_default: Option<OntologyMode>,
+    /// Map of vault-relative folder prefix → age in days (spec
+    /// 2026-11-13-working-memory-age). Same longest-prefix resolution core
+    /// as `folder_tiers` (`resolve_prefix`); absent = the folder never
+    /// ages out. Same-normalized-key conflicts resolve to the LARGER age
+    /// (larger hides less) with a load-time diagnostic.
+    #[serde(default)]
+    pub folder_ages: std::collections::HashMap<String, u64>,
 }
 
 impl IngestConfig {
@@ -440,6 +455,35 @@ impl IngestConfig {
             // absolute branch, so the vault root is never consulted.
             PrefixOutcome::NoMatch | PrefixOutcome::Unplaceable => IngestTier::Full,
         }
+    }
+
+    /// Resolve the age-in-days for an ALREADY-VAULT-RELATIVE path
+    /// (spec 2026-11-13-working-memory-age). Same longest-prefix,
+    /// component-aware core as [`IngestConfig::tier_for`] over
+    /// `folder_ages`; no match → `None` (the folder never ages). A
+    /// same-normalized-key tie resolves to the LARGER age (larger hides
+    /// less); the loud diagnostic fires once at load time
+    /// ([`scan_ingest_ties`]), never here.
+    pub fn age_days_for(&self, rel_path: &str) -> Option<u64> {
+        let under = match resolve_prefix(&self.folder_ages, rel_path, None) {
+            PrefixOutcome::Tie(vals) => Some(vals.into_iter().max()),
+            PrefixOutcome::Match(days) => Some(Some(days)),
+            // Unplaceable cannot arise: a relative path never enters the
+            // absolute branch, so the vault root is never consulted.
+            PrefixOutcome::NoMatch | PrefixOutcome::Unplaceable => None,
+        };
+        if under.is_some() {
+            return under.unwrap();
+        }
+        // The folder ITSELF (query is the bare folder name, no file
+        // component): exact normalized-key match, larger wins on a tie.
+        let normalized = rel_path.replace('\\', "/");
+        let normalized = normalized.trim_start_matches("./");
+        self.folder_ages
+            .iter()
+            .filter(|(k, _)| key_is_matchable(k) && normalize_key(k) == normalized)
+            .map(|(_, v)| *v)
+            .max()
     }
 
     /// Resolve the tier for a vault-relative OR absolute path. An absolute
@@ -726,6 +770,18 @@ impl IngestPolicy {
             .tier_for_path(path, vault_root.or(self.vault_root.as_deref()))
     }
 
+    /// Age-in-days for an ALREADY-VAULT-RELATIVE path
+    /// (spec 2026-11-13-working-memory-age); `None` = never ages.
+    pub fn age_days_for(&self, rel_path: &str) -> Option<u64> {
+        self.tiers.age_days_for(rel_path)
+    }
+
+    /// Alias kept for readability at the SQLite scalar-function call site
+    /// (Task 2): the closure passes an already-relative path.
+    pub fn folder_ages_lookup(&self, rel: &str) -> Option<u64> {
+        self.age_days_for(rel)
+    }
+
     /// The degraded state consumed by [`IngestConfig::ontology_lookup`].
     pub fn ontology_degraded_state(&self) -> OntologyDegradedState {
         OntologyDegradedState {
@@ -919,6 +975,16 @@ pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
         guard.insert(paths.config_path, (contents, policy.clone()));
     }
     policy
+}
+
+/// The ingest-policy snapshot for one brain (spec 2026-11-13-working-memory-age,
+/// Task 2). Thin wrapper over [`ingest_policy_for_db`]: the refresh-on-change
+/// cache means a config edit takes effect on the NEXT call — which is exactly
+/// the registration cadence the SQLite scalar function uses. A pathless
+/// connection (in-memory) gets the default policy: everything NULL, nothing
+/// ages.
+pub fn ingest_policy_snapshot(db_path: Option<&str>) -> IngestPolicy {
+    ingest_policy_for_db(db_path)
 }
 
 /// Parse the ingest policy from the EXACT bytes read for the cache key —
@@ -1317,7 +1383,8 @@ impl BrainConfig {
                 // re-serialization would drop them unless the strict arm
                 // captures them too — mirroring `preserved_wiki`).
                 if let Some(ing_val) = obj.get("ingest").and_then(|v| v.as_object()) {
-                    let known_ingest_keys = ["folder_tiers", "folder_ontology", "ontology_default"];
+                    let known_ingest_keys =
+                        ["folder_tiers", "folder_ontology", "ontology_default", "folder_ages"];
                     let unknown: serde_json::Map<String, serde_json::Value> = ing_val
                         .iter()
                         .filter(|(k, _)| !known_ingest_keys.contains(&k.as_str()))
@@ -1761,7 +1828,8 @@ impl BrainConfig {
                 return Ok(report);
             };
             // Unknown sub-keys → preserved_ingest (always kept).
-            let known_ingest_keys = ["folder_tiers", "folder_ontology", "ontology_default"];
+            let known_ingest_keys =
+                ["folder_tiers", "folder_ontology", "ontology_default", "folder_ages"];
             let unknown: serde_json::Map<String, serde_json::Value> = ing_obj
                 .iter()
                 .filter(|(k, _)| !known_ingest_keys.contains(&k.as_str()))
@@ -1794,6 +1862,34 @@ impl BrainConfig {
                         } else {
                             report.diagnostics.push(
                                 "ingest.folder_tiers unparseable (not an object); tiers full"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            if let Some(fa) = ing_obj.get("folder_ages") {
+                match serde_json::from_value::<std::collections::HashMap<String, u64>>(fa.clone())
+                {
+                    Ok(m) => report.config.ingest.folder_ages = m,
+                    Err(_) => {
+                        // Entry-by-entry salvage; drop only bad entries
+                        // (mirrors the folder_tiers salvage above).
+                        if let Some(map) = fa.as_object() {
+                            for (k, v) in map {
+                                match serde_json::from_value::<u64>(v.clone()) {
+                                    Ok(days) => {
+                                        report.config.ingest.folder_ages.insert(k.clone(), days);
+                                    }
+                                    Err(e) => report.diagnostics.push(format!(
+                                        "ingest.folder_ages entry {k:?} dropped: {e}"
+                                    )),
+                                }
+                            }
+                        } else {
+                            report.diagnostics.push(
+                                "ingest.folder_ages unparseable (not an object); no folders age"
                                     .to_string(),
                             );
                         }
@@ -2280,6 +2376,91 @@ mod tests {
             ..Default::default()
         }
     }
+
+    // ---- working-memory-age: ingest.folder_ages (spec 2026-11-13) ----
+
+    fn brain_config_json(ingest_block: &str) -> String {
+        format!(
+            r#"{{"vault_path":"/v","migrated_to_v2":false,"generation":{{"provider":"unconfigured","model_name":null,"model_path":null,"external_url":null,"api_key":null,"timeout_secs":null}},"embedding":{{"provider":"fastembed","external_url":null}},"privacy":{{"mode":"strict","chosen":true,"ephemeral_disclosure_acknowledged":true,"migration_disclosure_acknowledged":true}},"ingest":{ingest_block}}}"#
+        )
+    }
+
+    /// Absent `folder_ages` key: every path resolves to `None` (never ages).
+    #[test]
+    fn absent_folder_ages_means_never_ages() {
+        let cfg: BrainConfig =
+            serde_json::from_str(&brain_config_json(r#"{"folder_tiers":{"records":"chunks-only"}}"#))
+                .unwrap();
+        assert!(cfg.ingest.folder_ages.is_empty());
+        assert_eq!(cfg.ingest.age_days_for("records/a.md"), None);
+        assert_eq!(cfg.ingest.age_days_for("records"), None);
+        assert_eq!(cfg.ingest.age_days_for("anything/at/all.md"), None);
+    }
+
+    /// A configured folder age resolves on FOLDER components (deepest
+    /// prefix wins): the folder name itself and everything under it get
+    /// the age; a sibling that merely shares a string prefix does not.
+    #[test]
+    fn folder_ages_resolve_deepest_component_aware_prefix() {
+        let cfg: BrainConfig = serde_json::from_str(&brain_config_json(
+            r#"{"folder_ages":{"records":90,"people/tessera/sessions":7}}"#,
+        ))
+        .unwrap();
+        assert_eq!(cfg.ingest.age_days_for("records/foo.md"), Some(90));
+        assert_eq!(cfg.ingest.age_days_for("records"), Some(90));
+        assert_eq!(cfg.ingest.age_days_for("records-archive/x.md"), None);
+        assert_eq!(
+            cfg.ingest.age_days_for("people/tessera/sessions/s1.md"),
+            Some(7)
+        );
+        assert_eq!(cfg.ingest.age_days_for("people/tessera/notes.md"), None);
+        assert_eq!(cfg.ingest.age_days_for("wiki/note.md"), None);
+    }
+
+    /// DECIDED tie rule (spec §3.4): two same-normalized-key `folder_ages`
+    /// entries conflict → the LARGER age wins (larger hides less, the
+    /// conservative outcome), and a load-time diagnostic mirrors the
+    /// `folder_tiers` tie scan and names the rule.
+    #[test]
+    fn folder_ages_tie_larger_wins_with_load_diagnostic() {
+        let text = brain_config_json(r#"{"folder_ages":{"records/":30,"records":90}}"#);
+        let report = BrainConfig::load_lenient_from_str(&text).unwrap();
+        assert_eq!(report.config.ingest.age_days_for("records/a.md"), Some(90));
+        assert_eq!(report.config.ingest.age_days_for("records"), Some(90));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|m| m.contains("folder_ages tie") && m.contains("larger age wins")),
+            "expected a folder_ages tie diagnostic naming the larger-wins rule; got {:?}",
+            report.diagnostics
+        );
+    }
+
+    /// A degraded (salvaged) load preserves `folder_ages` like
+    /// `folder_tiers` does — the age setting must survive a salvage.
+    #[test]
+    fn salvage_preserves_folder_ages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = BrainPaths {
+            brain_dir: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.json"),
+            db_path: tmp.path().join("brain.db"),
+        };
+        std::fs::write(
+            &paths.config_path,
+            r#"{"ingest":{"folder_tiers":{"operations":"bogus-tier","notes":"chunks-only"},"folder_ages":{"records":90}}}"#,
+        )
+        .unwrap();
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        assert_eq!(
+            report.config.ingest.folder_ages.get("records"),
+            Some(&90),
+            "a degraded load must preserve folder_ages"
+        );
+        assert_eq!(report.config.ingest.age_days_for("records/a.md"), Some(90));
+    }
+
 
     /// A hand-edited key spelled with `\` separators matches like its `/`
     /// spelling — normalization is symmetric, not path-only.
