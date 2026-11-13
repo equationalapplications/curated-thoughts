@@ -1568,29 +1568,29 @@ fn main() -> Result<()> {
     } else {
         Some(message_v1_floor)
     };
-    // rev-6 M3: activity positives are drawn from `user_stated` facts ONLY —
-    // a non-`user_stated` positive reachable by baseline v1 but never by the
-    // activity aperture would read as "the floor bet failed" (rev-7 M3/M2).
+    // issue #344: after the rule-10 amendment the activity aperture no longer
+    // filters by provenance, so the floor must be derived from a MIXED pool.
+    // We still walk the positives to (a) fail on missing facts and (b) record
+    // the provenance mix; any provenance is accepted (spec §5, rev-4).
     if activity {
         let mut stmt = conn
             .prepare("SELECT source_type FROM llm_wiki_entries WHERE id = ?1")
             .context("preparing the provenance gate")?;
+        let mut mix: std::collections::BTreeMap<String, usize> = Default::default();
         for probe in &probes {
             for id in &probe.expect {
                 let source: Option<String> = stmt
                     .query_row([id], |r| r.get(0))
                     .with_context(|| format!("positive fact {id} not found in llm_wiki_entries"))?;
-                if provenance_for(source.as_deref()).as_deref() != Some("user_stated") {
-                    bail!(
-                        "probe {:?} expects fact {id} with provenance {:?} — activity runs \
-                         calibrate the `user_stated` aperture (rev-6 M3): regenerate the \
-                         probe set from `user_stated` facts only",
-                        probe.text,
-                        source
-                    );
-                }
+                *mix.entry(provenance_for(source.as_deref())
+                    .unwrap_or_else(|| "null".to_string()))
+                .or_insert(0) += 1;
             }
         }
+        println!(
+            "activity positives provenance mix (issue #344, mixed pool): {:?}",
+            mix
+        );
     }
 
     // §9 step 3a / §6: coverage BEFORE any embed; < 100% ⇒ abort (Task 13
@@ -1720,7 +1720,7 @@ fn main() -> Result<()> {
                     &cands,
                     &shape,
                     false, // the arm opens TOP-1 (pinned r30-m1)
-                    if activity { Some("user_stated") } else { None },
+                    None, // issue #344: the aperture no longer filters by provenance
                     &corrections_absent,
                 )?;
                 merge_ms.push(run.merge_ms);
@@ -1761,7 +1761,7 @@ fn main() -> Result<()> {
                 &cands,
                 &shape,
                 true, // top-k member-chunk opening
-                if activity { Some("user_stated") } else { None },
+                None, // issue #344: the aperture no longer filters by provenance
                 &corrections_absent,
             )?;
             ablation_verdicts.push(verdict_of(&run.entries, !run.entries.is_empty(), probe));
