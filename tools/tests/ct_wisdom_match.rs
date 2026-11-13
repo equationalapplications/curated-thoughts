@@ -436,3 +436,92 @@ fn fallback_gate_label_has_no_activity_suffix() {
         );
     });
 }
+
+// ── Active Verification Prompting from the CLI (issue #344 OQ1, plan Task 6)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A vault-shaped brain: `<vault>/.brain` as CURATED_BRAIN_DIR with a real
+/// `vault_path` in config.json, real AppDb schema, stub embeddings — the
+/// minimum for the drop file to land at `<vault>/.brain/unverified-match.jsonl`.
+fn with_vault_brain<F: FnOnce(&std::path::Path)>(enabled: Option<bool>, f: F) {
+    use tempfile::tempdir;
+    use temp_env::with_vars;
+
+    let vault = tempdir().unwrap();
+    let brain = vault.path().join(".brain");
+    std::fs::create_dir_all(&brain).unwrap();
+    let confirmations = match enabled {
+        Some(true) => r#","confirmations":{"enabled":true}"#,
+        Some(false) => r#","confirmations":{"enabled":false}"#,
+        None => "",
+    };
+    let config = format!(
+        r#"{{"vault_path":"{}"{}}}"#,
+        vault.path().display(),
+        confirmations
+    );
+    std::fs::write(brain.join("config.json"), config).unwrap();
+    let brain_str = brain.to_str().unwrap().to_string();
+    with_vars(
+        [
+            ("CURATED_BRAIN_DIR", Some(brain_str.as_str())),
+            ("CURATED_EMBED_STUB", Some("constant8")),
+            ("CURATED_BRAIN_CONFIG", None::<&str>),
+            ("CURATED_BRAIN_DB", None::<&str>),
+        ],
+        move || {
+            // Real DDL via the production migration path (common.rs pattern).
+            let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+            let _db = tauri_app_lib::retrieval::AppDb::open_with_config(
+                &paths.db_path,
+                &paths.config_path,
+            )
+            .expect("writable brain db open");
+            f(vault.path());
+        },
+    );
+}
+
+fn drop_file(vault: &std::path::Path) -> std::path::PathBuf {
+    vault.join(".brain").join("unverified-match.jsonl")
+}
+
+/// An activity run that DELIVERS an agent-tier fact gains an entry in
+/// `unverified-match.jsonl` when the confirmation surface is on (plan Task 6
+/// Step 3). The fixture brain is uncalibrated, so the run takes the
+/// never-worse fallback — the OQ1 ruling wires the prompt there too.
+#[test]
+fn activity_delivery_emits_unverified_match_when_enabled() {
+    with_vault_brain(Some(true), |vault| {
+        seed_fact("fact_a");
+        let out = run_ct(&["wisdom", "match", "--json", "--path=how do I deploy"]);
+        let v = json_of(&out);
+        assert_eq!(
+            v["entries"].as_array().unwrap().len(),
+            1,
+            "the fixture fact must deliver: {v}"
+        );
+        let text = std::fs::read_to_string(drop_file(vault))
+            .expect("the drop file must be created");
+        assert!(
+            text.contains("fact_a"),
+            "delivered agent-tier fact must be offered for confirmation: {text}"
+        );
+    });
+}
+
+/// The confirmations.enabled switch (Task 5) gates the CLI surface too:
+/// flag off → the delivery still happens, but NOTHING is written to disk.
+#[test]
+fn activity_delivery_emits_nothing_when_disabled() {
+    with_vault_brain(Some(false), |vault| {
+        seed_fact("fact_a");
+        let out = run_ct(&["wisdom", "match", "--json", "--path=how do I deploy"]);
+        let v = json_of(&out);
+        assert_eq!(v["entries"].as_array().unwrap().len(), 1);
+        assert!(
+            !drop_file(vault).exists(),
+            "flag off must leave no drop file"
+        );
+    });
+}
