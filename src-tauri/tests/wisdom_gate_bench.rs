@@ -296,7 +296,11 @@ fn activity_fp0_on_user_confirmed_kernel_brain() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(seeded, 14, "the 14 kernel facts seeded as user_confirmed");
+    let frozen_fact_count = frozen["facts"].as_array().unwrap().len();
+    assert_eq!(
+        seeded, frozen_fact_count as i64,
+        "every frozen kernel fact seeded as user_confirmed"
+    );
 
     // Replay: every frozen probe through the REAL activity orchestrator.
     let (mut rel, mut opens, mut fps, mut irr, mut hit1) = (0usize, 0usize, 0usize, 0usize, 0usize);

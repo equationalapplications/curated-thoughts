@@ -1,0 +1,215 @@
+{"text": "immutable-source-files/agents/procedures/curated-thoughts-improvement-backlog.md", "expect": ["fact_7c2218667797a0b159b4f272"]}
+{"text": "cat immutable-source-files/agents/procedures/curated-thoughts-improvement-backlog.md", "expect": ["fact_7c2218667797a0b159b4f272"]}
+{"text": "curated thoughts improvement backlog", "expect": ["fact_7c2218667797a0b159b4f272"]}
+{"text": "home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/software/event-hand/event-hand-decision-log.md", "expect": ["fact_8b02fde7de6e2e7487264a20"]}
+{"text": "cat home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/software/event-hand/event-hand-decision-log.md", "expect": ["fact_8b02fde7de6e2e7487264a20"]}
+{"text": "event hand decision log", "expect": ["fact_8b02fde7de6e2e7487264a20"]}
+{"text": "procedures/ct-maintenance-heal-and-release-install.md", "expect": ["fact_4eecd143052b2dd39a5885a5"]}
+{"text": "cat procedures/ct-maintenance-heal-and-release-install.md", "expect": ["fact_4eecd143052b2dd39a5885a5"]}
+{"text": "ct maintenance heal and release install", "expect": ["fact_4eecd143052b2dd39a5885a5"]}
+{"text": "home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/memories/sharper-memory-design-rulings-2026-11-13.md", "expect": ["fact_412127b4db00e4d9eaec0f0f"]}
+{"text": "cat home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/memories/sharper-memory-design-rulings-2026-11-13.md", "expect": ["fact_412127b4db00e4d9eaec0f0f"]}
+{"text": "sharper memory design rulings 2026 11 13", "expect": ["fact_412127b4db00e4d9eaec0f0f"]}
+{"text": "immutable-source-files/agents/people/adrian-maule/profile.md", "expect": ["fact_ae07e3eed63191e6b77a0685"]}
+{"text": "cat immutable-source-files/agents/people/adrian-maule/profile.md", "expect": ["fact_ae07e3eed63191e6b77a0685"]}
+{"text": "profile", "expect": ["fact_ae07e3eed63191e6b77a0685"]}
+{"text": "immutable-source-files/agents/projects/hearthlore.md", "expect": ["fact_0fde7ab3a3d02fcb5a298b3d"]}
+{"text": "cat immutable-source-files/agents/projects/hearthlore.md", "expect": ["fact_0fde7ab3a3d02fcb5a298b3d"]}
+{"text": "hearthlore", "expect": ["fact_0fde7ab3a3d02fcb5a298b3d"]}
+{"text": "immutable-source-files/agents/projects/synapsetree-owner-rulings-2026-11-05.md", "expect": ["fact_e1045c0c5ca25d77d0c2e0a1"]}
+{"text": "cat immutable-source-files/agents/projects/synapsetree-owner-rulings-2026-11-05.md", "expect": ["fact_e1045c0c5ca25d77d0c2e0a1"]}
+{"text": "synapsetree owner rulings 2026 11 05", "expect": ["fact_e1045c0c5ca25d77d0c2e0a1"]}
+{"text": "tmp/gb_harness.py", "expect": ["fact_7b6d4fc7d0053dc3f30c92cd"]}
+{"text": "cat tmp/gb_harness.py", "expect": ["fact_7b6d4fc7d0053dc3f30c92cd"]}
+{"text": "gb_harness", "expect": ["fact_7b6d4fc7d0053dc3f30c92cd"]}
+{"text": "~/.brain/config.json", "expect": ["fact_ec357540b4dcfcacce38aa55"]}
+{"text": "cargo test", "expect": ["fact_ec357540b4dcfcacce38aa55"]}
+{"text": "config", "expect": ["fact_ec357540b4dcfcacce38aa55"]}
+{"text": "immutable-source-files/agents/organizations/equational-applications-public-contact-rules.md", "expect": ["fact_fda2babef79b87156ae318d5"]}
+{"text": "cat immutable-source-files/agents/organizations/equational-applications-public-contact-rules.md", "expect": ["fact_fda2babef79b87156ae318d5"]}
+{"text": "equational applications public contact rules", "expect": ["fact_fda2babef79b87156ae318d5"]}
+{"text": "home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/memories/lessons-learned-ct-v240-deployment-2026-09-04.md", "expect": ["fact_2fbdc6eb439eed7748a9b050"]}
+{"text": "cat home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/memories/lessons-learned-ct-v240-deployment-2026-09-04.md", "expect": ["fact_2fbdc6eb439eed7748a9b050"]}
+{"text": "lessons learned ct v240 deployment 2026 09 04", "expect": ["fact_2fbdc6eb439eed7748a9b050"]}
+{"text": "people/tessera/SOUL.md", "expect": ["fact_499b31af6de4544a5e02f296"]}
+{"text": "cat people/tessera/SOUL.md", "expect": ["fact_499b31af6de4544a5e02f296"]}
+{"text": "SOUL", "expect": ["fact_499b31af6de4544a5e02f296"]}
+{"text": "immutable-source-files/agents/services/cloud/github.md", "expect": ["fact_44899d73867d0329fcb21acf"]}
+{"text": "cat immutable-source-files/agents/services/cloud/github.md", "expect": ["fact_44899d73867d0329fcb21acf"]}
+{"text": "github", "expect": ["fact_44899d73867d0329fcb21acf"]}
+{"text": "immutable-source-files/agents/memories/sor-band-ruling-2026-10-02.md", "expect": ["fact_7ebd15079cad816160101c22"]}
+{"text": "cat immutable-source-files/agents/memories/sor-band-ruling-2026-10-02.md", "expect": ["fact_7ebd15079cad816160101c22"]}
+{"text": "sor band ruling 2026 10 02", "expect": ["fact_7ebd15079cad816160101c22"]}
+{"text": "~/Documents/equational-wiki/immutable-source-files/agents/projects/app-of-apps-decision-log.md", "expect": ["fact_d142a1fd2345df16dbdba063"]}
+{"text": "cat ~/Documents/equational-wiki/immutable-source-files/agents/projects/app-of-apps-decision-log.md", "expect": ["fact_d142a1fd2345df16dbdba063"]}
+{"text": "app of apps decision log", "expect": ["fact_d142a1fd2345df16dbdba063"]}
+{"text": "agents/software/sqlite-s3-agent-tutorial.md", "expect": ["fact_e776586dcac850bf2a28a06c"]}
+{"text": "cat agents/software/sqlite-s3-agent-tutorial.md", "expect": ["fact_e776586dcac850bf2a28a06c"]}
+{"text": "sqlite s3 agent tutorial", "expect": ["fact_e776586dcac850bf2a28a06c"]}
+{"text": "immutable-source-files/agents/procedures/nested-ts-app-ci-lint.md", "expect": ["fact_ec98b55a4a310a7775aad477"]}
+{"text": "cat immutable-source-files/agents/procedures/nested-ts-app-ci-lint.md", "expect": ["fact_ec98b55a4a310a7775aad477"]}
+{"text": "nested ts app ci lint", "expect": ["fact_ec98b55a4a310a7775aad477"]}
+{"text": "~/Documents/equational-wiki/immutable-source-files/agents/procedures/software-development/pr-spec-driven/README.md", "expect": ["fact_db816ce169d65108295d4f5a"]}
+{"text": "cat ~/Documents/equational-wiki/immutable-source-files/agents/procedures/software-development/pr-spec-driven/README.md", "expect": ["fact_db816ce169d65108295d4f5a"]}
+{"text": "README", "expect": ["fact_db816ce169d65108295d4f5a"]}
+{"text": "immutable-source-files/agents/people/tessera/tessera.md", "expect": ["fact_83e52621bb4a92a10e5f360e"]}
+{"text": "cat immutable-source-files/agents/people/tessera/tessera.md", "expect": ["fact_83e52621bb4a92a10e5f360e"]}
+{"text": "tessera", "expect": ["fact_83e52621bb4a92a10e5f360e"]}
+{"text": "records/operations/2026-09-29-backup-external-drive-stage0.md", "expect": ["fact_ae740d2d7cb30d74a3b90426"]}
+{"text": "cat records/operations/2026-09-29-backup-external-drive-stage0.md", "expect": ["fact_ae740d2d7cb30d74a3b90426"]}
+{"text": "2026 09 29 backup external drive stage0", "expect": ["fact_ae740d2d7cb30d74a3b90426"]}
+{"text": "immutable-source-files/agents/organizations/equational-sound-catalog.md", "expect": ["fact_0b89269ee15c67c3d9c56d52"]}
+{"text": "cat immutable-source-files/agents/organizations/equational-sound-catalog.md", "expect": ["fact_0b89269ee15c67c3d9c56d52"]}
+{"text": "equational sound catalog", "expect": ["fact_0b89269ee15c67c3d9c56d52"]}
+{"text": "src-tauri/src/db/queue.rs", "expect": ["fact_b1352c12e6e26e0cb1fbb43b"]}
+{"text": "tauri_app_lib = { path = \"../src-tauri\" }", "expect": ["fact_b1352c12e6e26e0cb1fbb43b"]}
+{"text": "queue", "expect": ["fact_b1352c12e6e26e0cb1fbb43b"]}
+{"text": "releaserc/release.yml", "expect": ["fact_b11d482fe389cfa2d60048b3"]}
+{"text": "cat releaserc/release.yml", "expect": ["fact_b11d482fe389cfa2d60048b3"]}
+{"text": "release", "expect": ["fact_b11d482fe389cfa2d60048b3"]}
+{"text": "agents/memories/plan-authoring-pinned-assertions-2026-09-17.md", "expect": ["fact_ced61416987f703277a042e8"]}
+{"text": "grep -n \"assert\" sites/main/scripts/checks/*.test.mjs", "expect": ["fact_ced61416987f703277a042e8"]}
+{"text": "plan authoring pinned assertions 2026 09 17", "expect": ["fact_ced61416987f703277a042e8"]}
+{"text": "home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/software/hermes-background-completion-wakes.md", "expect": ["fact_6240f121fae2c4aaa60bd9f5"]}
+{"text": "cat home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/software/hermes-background-completion-wakes.md", "expect": ["fact_6240f121fae2c4aaa60bd9f5"]}
+{"text": "hermes background completion wakes", "expect": ["fact_6240f121fae2c4aaa60bd9f5"]}
+{"text": "home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/projects/synapsetree-bedrock-decision-log.md", "expect": ["fact_e612d156fc650be64e02f2be"]}
+{"text": "cat home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/projects/synapsetree-bedrock-decision-log.md", "expect": ["fact_e612d156fc650be64e02f2be"]}
+{"text": "synapsetree bedrock decision log", "expect": ["fact_e612d156fc650be64e02f2be"]}
+{"text": "home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/procedures/curated-thoughts-installation.md", "expect": ["fact_1897aea4e3a2a978385920b9"]}
+{"text": "cat home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/procedures/curated-thoughts-installation.md", "expect": ["fact_1897aea4e3a2a978385920b9"]}
+{"text": "curated thoughts installation", "expect": ["fact_1897aea4e3a2a978385920b9"]}
+{"text": "home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/projects/udemy-sdd-course/course-outline-draft.md", "expect": ["fact_fe4f22f965119bfcdd79a971"]}
+{"text": "cat home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/projects/udemy-sdd-course/course-outline-draft.md", "expect": ["fact_fe4f22f965119bfcdd79a971"]}
+{"text": "course outline draft", "expect": ["fact_fe4f22f965119bfcdd79a971"]}
+{"text": "immutable-source-files/agents/services/typesafe-jev-email-triage.md", "expect": ["fact_090cafc0b20995068e1a31b5"]}
+{"text": "cat immutable-source-files/agents/services/typesafe-jev-email-triage.md", "expect": ["fact_090cafc0b20995068e1a31b5"]}
+{"text": "typesafe jev email triage", "expect": ["fact_090cafc0b20995068e1a31b5"]}
+{"text": "home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/projects/synapsetree-byok-open-questions-decision-log.md", "expect": ["fact_ad277819bf29e30ce02bbb1f"]}
+{"text": "cat home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/projects/synapsetree-byok-open-questions-decision-log.md", "expect": ["fact_ad277819bf29e30ce02bbb1f"]}
+{"text": "synapsetree byok open questions decision log", "expect": ["fact_ad277819bf29e30ce02bbb1f"]}
+{"text": "src/__tests__/errorFeed.test.ts", "expect": []}
+{"text": "src/__tests__/a11y-contrast.test.ts", "expect": []}
+{"text": "src-tauri/src/recall_bench_fixture.rs", "expect": []}
+{"text": "src/hooks/useRelatedChunks.ts", "expect": []}
+{"text": "src/__tests__/BrainMode.test.tsx", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-08-wiki-edge-integrity-wave-design.md", "expect": []}
+{"text": "src-tauri/src/wiki_graph.rs", "expect": []}
+{"text": "src/components/modes/BrainMode.tsx", "expect": []}
+{"text": "src/a11y/inertGuard.ts", "expect": []}
+{"text": "docs/mcp-write-tools-okf-frontmatter.md", "expect": []}
+{"text": "src-tauri/tests/ontology_selection.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-10-01-issue253-deps-release-rule-design.md", "expect": []}
+{"text": "src/components/settings/PrivacyPanel.tsx", "expect": []}
+{"text": "src-tauri/src/db/wisdom.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-01-wiki-reader-contract-and-forget-outbox-design.md", "expect": []}
+{"text": "src/__tests__/applyOntologyChange.test.ts", "expect": []}
+{"text": "src/hooks/useChunkOverlay.ts", "expect": []}
+{"text": "calibration-run/grid-20261018-activity/sweep-path-chunk-hop-f0.55.json", "expect": []}
+{"text": "src-tauri/tests/vault_config_regression.rs", "expect": []}
+{"text": "tools/tests/ct_watch_e2e.rs", "expect": []}
+{"text": "src-tauri/tests/config_leniency.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-30-llm-wiki-7-9-adoption-design.md", "expect": []}
+{"text": "src-tauri/src/librarian/synthesis.rs", "expect": []}
+{"text": "src-tauri/tests/fixtures/yaml-bench-k8s-curated/qrels.json", "expect": []}
+{"text": "tools/src/bin/ingest_vault_once.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-05-07-core-llm-wiki-vector-ranker-design.md", "expect": []}
+{"text": "src-tauri/fixtures/okf/golden-v2/index.md", "expect": []}
+{"text": "src-tauri/tests/ast_symbol.rs", "expect": []}
+{"text": "src-tauri/src/okf/related_section.rs", "expect": []}
+{"text": "src-tauri/src/pipeline/watchdog/diagnostics.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-07-05-clanker-desktop-bridge-alignment-design.md", "expect": []}
+{"text": "src-tauri/src/db/breaker.rs", "expect": []}
+{"text": "src/components/review/ReviewProposalEditor.tsx", "expect": []}
+{"text": "docs/superpowers/specs/2026-10-01-issue245-frontmatter-key-drop-guard-design.md", "expect": []}
+{"text": "src-tauri/src/db/migration.rs", "expect": []}
+{"text": "src-tauri/tests/config_load.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-03-build-artifact-hygiene-design.md", "expect": []}
+{"text": "calibration-run/grid-20261018-activity/sweep-pattern-restricted-cosine-f0.55.json", "expect": []}
+{"text": "specs/2026-11-13-rule10-mid-task-delivery/spec.md", "expect": []}
+{"text": "src-tauri/src/pipeline/mod.rs", "expect": []}
+{"text": "tools/tests/ct_merge_duplicates.rs", "expect": []}
+{"text": "calibration-run/grid-20261018-activity/sweep-pattern-chunk-hop-f0.55.json", "expect": []}
+{"text": "docs/superpowers/specs/2026-08-25-ct-headless-cli-phase2-watch.md", "expect": []}
+{"text": "src/__tests__/StepIndicator.test.tsx", "expect": []}
+{"text": "src/components/modes/LibraryMode.tsx", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-09-issue186-phase2-flip-design.md", "expect": []}
+{"text": "src-tauri/src/okf/concept.rs", "expect": []}
+{"text": "src/__tests__/StepFastembed.test.tsx", "expect": []}
+{"text": "docs/superpowers/specs/2026-08-24-librarian-completer-timeout-reasoning-design.md", "expect": []}
+{"text": "src/__tests__/useChunkOverlay.test.ts", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-22-llm-wiki-7-7-adoption-design.md", "expect": []}
+{"text": "src/lib/searchProfiling.ts", "expect": []}
+{"text": "src-tauri/src/okf/types.rs", "expect": []}
+{"text": "src/__tests__/EditorPane.test.tsx", "expect": []}
+{"text": "src-tauri/fixtures/okf/golden-v1/entities/demo/facts/fact_beta.md", "expect": []}
+{"text": "src/__tests__/ProposalDiff.component.test.tsx", "expect": []}
+{"text": ".hermes/reviews/2026-09-24_pr228-round1-dispositions.md", "expect": []}
+{"text": "src-tauri/tests/entities_api.rs", "expect": []}
+{"text": "docs/a11y/conformance-ledger.md", "expect": []}
+{"text": "src/__tests__/SetupWizard.test.tsx", "expect": []}
+{"text": "src-tauri/tests/resolution_precedence.rs", "expect": []}
+{"text": "src-tauri/src/scifact_fixture.rs", "expect": []}
+{"text": "src/components/privacy/PrivacyShieldIcon.tsx", "expect": []}
+{"text": "src/components/privacy/EphemeralDisclosureModal.tsx", "expect": []}
+{"text": "docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/freezeD-expected.json", "expect": []}
+{"text": "src-tauri/src/setup/ollama.rs", "expect": []}
+{"text": "tools/src/walk_list.rs", "expect": []}
+{"text": "src-tauri/tests/wisdom_gate_bench.rs", "expect": []}
+{"text": "src/hooks/useIndexingStatus.ts", "expect": []}
+{"text": "src-tauri/src/db/okf_ddl.rs", "expect": []}
+{"text": "src/__tests__/AppShell.queueBadge.test.tsx", "expect": []}
+{"text": "src-tauri/fixtures/okf/golden-v1/entities/demo/tasks/task_follow.md", "expect": []}
+{"text": "src/a11y/__tests__/useRovingTabindex.test.tsx", "expect": []}
+{"text": "src-tauri/fixtures/okf/golden-v2/entities/demo/facts/fact_stale.md", "expect": []}
+{"text": "src/components/shell/SearchResults.tsx", "expect": []}
+{"text": "src-tauri/src/db/wiki_forget.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-23-readme-refresh-design.md", "expect": []}
+{"text": "calibration-run/grid-20261113-activity/cells/cell-f0.55.json", "expect": []}
+{"text": "src/components/review/ReviewQueueList.tsx", "expect": []}
+{"text": "src-tauri/tests/librarian_evidence_e2e.rs", "expect": []}
+{"text": "src-tauri/src/db/evidence_reanchor.rs", "expect": []}
+{"text": "src/lib/wiki.ts", "expect": []}
+{"text": "docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/step0-curves-ADE.json", "expect": []}
+{"text": "src/__tests__/TimelineMode.test.tsx", "expect": []}
+{"text": ".hermes/reviews/2026-09-24_pr228-round3-dispositions.md", "expect": []}
+{"text": "calibration-run/grid-20261018-activity/sweep-command-restricted-cosine-f0.70.json", "expect": []}
+{"text": "docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/step0-bootstrap.json", "expect": []}
+{"text": "src-tauri/src/chunker/prose.rs", "expect": []}
+{"text": "src-tauri/src/watcher/fs_watcher.rs", "expect": []}
+{"text": "tools/tests/ct_graph_wiki.rs", "expect": []}
+{"text": "tools/src/bin/export_okf_bundle.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-08-31-ingest-drain-stall-watchdog-design.md", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-03-trusted-link-load-boundary-validation-design.md", "expect": []}
+{"text": "docs/superpowers/plans/2026-10-07-issue265-wisdom-instruction-prefix.md", "expect": []}
+{"text": "docs/superpowers/specs/2026-05-11-default-vault-and-vault-switching-design.md", "expect": []}
+{"text": "src/jest-dom-vitest.d.ts", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-15-clippy-enforcement-design.md", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-15-deletion-side-effects-design.md", "expect": []}
+{"text": "tools/src/graph_reanchor.rs", "expect": []}
+{"text": "src-tauri/tests/wiki_maintenance.rs", "expect": []}
+{"text": "git log -p src-tauri/tests/vault_config_regression.rs", "expect": []}
+{"text": "rg TODO docs/superpowers/specs/2026-08-25-ct-headless-cli-phase2-watch.md", "expect": []}
+{"text": "rg TODO calibration-run/grid-20261018-activity/sweep-command-restricted-cosine-f0.70.json", "expect": []}
+{"text": "git log -p src-tauri/src/okf/related_section.rs", "expect": []}
+{"text": "less docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/freezeD-expected.json", "expect": []}
+{"text": "less docs/superpowers/specs/2026-09-23-readme-refresh-design.md", "expect": []}
+{"text": "cat src-tauri/src/okf/related_section.rs", "expect": []}
+{"text": "less docs/superpowers/specs/2026-09-15-deletion-side-effects-design.md", "expect": []}
+{"text": "git log -p specs/2026-11-13-rule10-mid-task-delivery/spec.md", "expect": []}
+{"text": "less docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/step0-bootstrap.json", "expect": []}
+{"text": "nvim docs/superpowers/specs/2026-07-05-clanker-desktop-bridge-alignment-design.md", "expect": []}
+{"text": "git log -p src/components/review/ReviewQueueList.tsx", "expect": []}
+{"text": "less src/components/shell/SearchResults.tsx", "expect": []}
+{"text": "rg TODO src-tauri/src/db/wisdom.rs", "expect": []}
+{"text": "cat docs/superpowers/plans/2026-10-07-issue265-wisdom-instruction-prefix.md", "expect": []}
+{"text": "less src-tauri/tests/ast_symbol.rs", "expect": []}
+{"text": "cat src/components/modes/BrainMode.tsx", "expect": []}
+{"text": "less src-tauri/tests/ontology_selection.rs", "expect": []}
+{"text": "less docs/superpowers/specs/2026-08-31-ingest-drain-stall-watchdog-design.md", "expect": []}
+{"text": "git log -p calibration-run/grid-20261018-activity/sweep-command-restricted-cosine-f0.70.json", "expect": []}
+{"text": "less docs/superpowers/specs/2026-08-24-librarian-completer-timeout-reasoning-design.md", "expect": []}
+{"text": "cat src-tauri/src/pipeline/mod.rs", "expect": []}
+{"text": "nvim src/components/review/ReviewProposalEditor.tsx", "expect": []}
+{"text": "git log -p .hermes/reviews/2026-09-24_pr228-round3-dispositions.md", "expect": []}
+{"text": "less docs/superpowers/specs/2026-10-01-issue245-frontmatter-key-drop-guard-design.md", "expect": []}
