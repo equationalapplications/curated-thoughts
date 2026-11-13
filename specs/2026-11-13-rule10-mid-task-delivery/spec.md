@@ -1,7 +1,7 @@
 # `rule10-mid-task-delivery`: delete INTENT rule 10's limit on mid-task delivery
 
 **Date:** 2026-11-13
-**Status:** Draft — awaits the owner's approval (Step-3 review). Rev 2: addresses the Opus spec review (3 MAJOR / 4 MINOR, all adjudicated REAL and fixed: probe-set regeneration, configuration-safe rule-10 heading, test disposition corrected — `:3030` deleted, all seven parameter sites named, drain-file gates named, reversibility sentence, *Why* wording). Backed by the converged investigation of 2026-11-13 (Opus Tier-3 rounds 1-2 + Fable Tier-4; every finding verified against the tree at `d26654a3` and addressed).
+**Status:** Draft — awaits the owner's approval (Step-3 review). Rev 3: Opus spec verdict APPROVE WITH NITS; nits fixed (degraded-config resolves ON, golden-file rule sharpened, probe sampling read-only with mix recorded). Rev 2: addresses the Opus spec review (3 MAJOR / 4 MINOR, all adjudicated REAL and fixed: probe-set regeneration, configuration-safe rule-10 heading, test disposition corrected — `:3030` deleted, all seven parameter sites named, drain-file gates named, reversibility sentence, *Why* wording). Backed by the converged investigation of 2026-11-13 (Opus Tier-3 rounds 1-2 + Fable Tier-4; every finding verified against the tree at `d26654a3` and addressed).
 **Issue:** #344. **Owner ruling:** 2026-11-12.
 
 ## 1. Problem
@@ -45,7 +45,7 @@ The `:activity` floor value was calibrated on positives drawn from `user_stated`
 
 1. Remove or relax the positive-provenance hard error at `calibrate_two_stage.rs:1583-1591`. Update the warning comment at `:1573`.
 2. Set the two activity-arm arguments (`:1723`, `:1764`) to `None`.
-3. **Regenerate the activity probe set with positives from every provenance** before re-running. Relaxing the gate alone changes nothing: today's probe file holds only `user_stated` positives, so a plain re-run re-derives the same human-only floors.
+3. **Regenerate the activity probe set with positives from every provenance** before re-running. Relaxing the gate alone changes nothing: today's probe file holds only `user_stated` positives, so a plain re-run re-derives the same human-only floors. The positives are sampled READ-ONLY from stored facts — §2's no-reprocessing rule is not touched. The provenance mix of the sample is recorded with the benchmark (§5.5); the plan fixes the minimum share per tier.
 4. Re-run the calibration on the regenerated probe set.
 5. Re-derive the per-model `:activity` floors. Record the new benchmark under `docs/benchmarks/`. The benchmark record must list the provenance mix of its positives, so a future reader can tell the pool was mixed.
 6. Rewrite or remove the now-dead predicate block at `:1244-1251` with its stale comment, in the follow-up commit.
@@ -69,6 +69,7 @@ No setting exists today. The only opt-out is a 7-day localStorage snooze (`Unver
 1. Add one config setting that turns off the whole confirmation surface: the queue UI and the recall prompt. One switch, not two.
 2. Default: on. Absent key: on. The empty config keeps today's behavior.
 3. When off, the backend must not write the unverified-match drain file. The gates sit at the three writer call sites — `tool_dispatch.rs:682`, `:1285`, `:1326` — plus any `ct wisdom match` site OQ1 option 1 adds. The sidecar and CLI processes read the same config.json the app reads: both crates resolve it from the brain directory (`ingest_policy_for_db`, `config/mod.rs:878`, via `brain_paths_for`), so one setting governs all processes.
+4. A malformed or unreadable config.json resolves to ON (today's behavior) in every process — the same degraded-load discipline the ingest keys follow (`config/mod.rs:872-877`: missing file is default; any other read error is degraded, never silently off). The setting gets its own small reader next to the ingest-policy loader; it does not ride on `IngestPolicy`, which is an ontology-and-tier type.
 4. The setting is reversible. Turning it off leaves `.confirmations.jsonl` and every existing confirmation stamp untouched; rule 2's path to `user_confirmed` still exists when it is on, and turning it back on restores the queue with prior stamps intact.
 5. Document the setting in INTENT rule 10's amended body, one sentence.
 6. The exact name follows the existing config key style; the plan fixes it.
@@ -89,7 +90,7 @@ The amendment is a recall and injection change, so all gates apply:
 3. Abstention precision.
 4. Paraphrase tests, at least 200, across models.
 5. Exactly-once delivery.
-6. Cached output stays byte-identical to fresh output for the same inputs. The cached-equals-fresh property tests pass unchanged. The activity-path fixtures and golden outputs change; they describe the old human-only delivery.
+6. Cached output stays byte-identical to fresh output for the same inputs. The cached-equals-fresh property-test CODE stays unchanged; only the activity-path golden fixtures described in §6 are regenerated (they describe the old human-only delivery). Regenerating a golden file used by a cached-equals-fresh test is forbidden — that would hide a real cache bug.
 
 ## 10. Out of scope
 
