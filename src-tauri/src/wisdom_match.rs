@@ -55,9 +55,7 @@ pub const PROVENANCE_VOCAB: &[&str] = &[
 /// (prose) or an activity target (`--path=`/`--command=`/`--pattern=` — a
 /// bare path, command or search pattern). The kind selects the ACTIVITY
 /// floor-key suffix — ONE shared `:activity` floor across all three target
-/// kinds (Kurt ruling 2026-10-18) — and, on the active path, the human-tier
-/// delivery aperture (`user_stated` + `user_confirmed`; §5 rev-15 of the
-/// #282 spec). Message mode is
+/// kinds (Kurt ruling 2026-10-18). Message mode is
 /// byte-for-byte untouched: `QueryKind::Message` reproduces today's keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryKind {
@@ -599,12 +597,9 @@ fn gated_entries(
         if blob.len() != dim * 4 {
             continue;
         }
-        // The delivery aperture (issue #282 §5 rev-15): the activity-active
-        // path admits the HUMAN-TIER SET — `user_stated` AND
-        // `user_confirmed` — as a provenance-set membership test, applied
-        // BEFORE the arm-internal truncate (`:635` below) so a top-N of
-        // filtered-out facts never shadows an admitted fact ranked below it.
-        // Message mode and the merge pass `None` (unchanged).
+        // Issue #344: the delivery aperture was removed — every live provenance
+        // is admitted on the activity path. The filter application below survives
+        // for the parameter's remaining callers; both arms now pass `None`.
         if let Some(want) = provenance_filter {
             let admitted = provenance_for(source_type.as_deref())
                 .is_some_and(|p| want.contains(&p.as_str()));
@@ -762,14 +757,13 @@ pub fn two_stage_entries(
 ) -> Result<TwoStageResult> {
     let max = max.min(MAX_ENTRIES);
     let k = two_stage_k(profile_key);
-    // The delivery aperture rides with the kind (issue #282 §5 rev-15):
-    // activity admits the human tier — `user_stated` AND `user_confirmed`;
-    // message never filters. The v1-merge is dead under activity (its
-    // `v1_floor` is `None` — no v1 `:activity` row ships), so the filter
-    // below is inert there by construction.
+    // The delivery aperture is REMOVED (issue #344, INTENT rule 10 amended
+    // 2026-11-12/13): neither kind filters by provenance. The parameter stays
+    // threaded for the merge pass and future filters; its removal is a
+    // follow-up commit in this PR.
     let provenance_filter: Option<&[&str]> = match kind {
         QueryKind::Message => None,
-        QueryKind::Activity => Some(&["user_stated", "user_confirmed"][..]),
+        QueryKind::Activity => None,
     };
     // One skip set for ALL selections ("one id, one list"):
     let mut skip: HashSet<String> = exclude.iter().cloned().collect();
