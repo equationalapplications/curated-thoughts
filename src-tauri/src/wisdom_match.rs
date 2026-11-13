@@ -2810,12 +2810,11 @@ mod tests {
             format!("{TS_KEY}:activity:two-stage:chunk-hop")
         );
         // The fixture's only rule-(ii)-reachable fact is f1
-        // (`librarian_inferred`), so the `user_stated` aperture filters the
-        // delivery to empty — which is exactly the §5 contract on this
-        // brain (the aperture test below pins both sides of it).
+        // (`librarian_inferred`), and with the aperture removed (issue
+        // #344) it IS delivered on the activity path.
         assert!(
-            entries.is_empty(),
-            "aperture: f1 (librarian_inferred) must not be delivered"
+            entries.iter().any(|e| e.id == "f1"),
+            "aperture removed: f1 (librarian_inferred) is delivered"
         );
     }
 
@@ -2893,19 +2892,17 @@ mod tests {
         assert!(run.outcome.rule.is_none());
     }
 
-    /// rev-13 M1 APERTURE (lib, active path only): with the activity
-    /// composite forcing a cell-4 run, the delivered entries contain NO
-    /// non-`user_stated` fact even though rule (ii) opens doc1 (whose fact
-    /// f1 is `librarian_inferred`); corrections are NOT aperture-filtered
-    /// (rev-13 M1: corrections bypass the aperture); `open` reflects the
-    /// post-aperture list. The message call on the same vectors still
-    /// delivers f1 (message mode is untouched).
+    /// Issue #344: the delivery aperture is removed. With the activity
+    /// composite forcing a cell-4 run, the delivered entries INCLUDE f1
+    /// (the `librarian_inferred` fact that rule (ii) reaches via doc1);
+    /// the message call on the same vectors still delivers f1 (message
+    /// mode is untouched).
     #[test]
-    fn activity_aperture_delivers_user_stated_only_on_the_active_path() {
+    fn activity_delivers_every_provenance_on_the_active_path() {
         let conn = fixture();
-        // f1 (librarian_inferred) is the only rule-(ii)-reachable fact; f2
-        // (user_stated) is NOT rule-reachable, so the activity-active run
-        // opens on f1's doc and the aperture filters f1 away entirely.
+        // f1 (librarian_inferred) is the only rule-(ii)-reachable fact; the
+        // activity-active run opens on f1's doc and f1 IS delivered — the
+        // aperture that used to filter it away is gone (issue #344).
         let (entries, outcome) = two_stage_entries(
             &conn,
             &unit_vec(1),
@@ -2923,10 +2920,8 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
         assert!(
-            !entries
-                .iter()
-                .any(|e| e.provenance.as_deref() != Some("user_stated")),
-            "aperture: every delivered entry is user_stated"
+            entries.iter().any(|e| e.id == "f1"),
+            "aperture removed: f1 (librarian_inferred) is delivered on the activity path"
         );
         // The message path on the same vectors is UNFILTERED (f1 delivered):
         // The MESSAGE control uses the message composite value (0.45 — the
@@ -2977,12 +2972,14 @@ mod tests {
         .unwrap();
     }
 
-    /// Task 8 (§5 rev-15): the activity aperture admits the human-tier SET —
-    /// `user_stated` AND `user_confirmed`; `immutable_document` and a
-    /// stored type outside the provenance vocabulary (NULL provenance) do
-    /// not. Delivered labels stay `provenance_for(stored)` verbatim.
+    /// Task 8 / issue #344: the aperture is gone — ALL seeded provenances
+    /// deliver on the activity path, INCLUDING the `f-np` row
+    /// (`source_type = "raw_note"` → `provenance_for` → `None`):
+    /// out-of-vocabulary source types deliver with a null label, as
+    /// message mode already does. Delivered labels stay
+    /// `provenance_for(stored)` verbatim.
     #[test]
-    fn activity_admits_confirmed_and_stated() {
+    fn activity_delivers_all_four_provenances_including_null_label() {
         let conn = fixture();
         seed_aperture_entry(&conn, "f-cf", "user_confirmed");
         seed_aperture_entry(&conn, "f-st", "user_stated");
@@ -3005,53 +3002,74 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
         // All four carry cosine 0.0 (u4 blobs vs the u1 query), so the
-        // delivered order is the id tie-break over the admitted set only.
+        // delivered order is the id tie-break over the full seeded set.
         let got: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(
             got,
-            vec!["f-cf", "f-st"],
-            "user_confirmed joins user_stated; immutable_document and NULL provenance stay out"
+            vec!["f-cf", "f-im", "f-np", "f-st", "f1"],
+            "aperture removed: every provenance delivers (incl. the fixture's \
+             f1); id tie-break order"
         );
         assert_eq!(entries[0].provenance.as_deref(), Some("user_confirmed"));
-        assert_eq!(entries[1].provenance.as_deref(), Some("user_stated"));
+        assert_eq!(entries[1].provenance.as_deref(), Some("immutable_document"));
+        assert_eq!(
+            entries[2].provenance.as_deref(),
+            None,
+            "out-of-vocabulary source type delivers with a null label"
+        );
+        assert_eq!(entries[3].provenance.as_deref(), Some("user_stated"));
+        assert_eq!(entries[4].provenance.as_deref(), Some("librarian_inferred"));
     }
 
-    /// Task 8 non-shadowing pin (§5 fairness rule): the aperture filter runs
-    /// BEFORE the arm-internal truncate, so with max=1 a high-ranking
-    /// non-admitted fact is dropped rather than consuming the slot and
-    /// shadowing the admitted fact ranked below it.
+    // (The §5 rev-15 non-shadowing pin `non_admitted_fact_never_shadows_
+    // admitted_below` was deleted with the aperture — issue #344, spec §6.3:
+    // no caller can pass a filter anymore, so the property has no production
+    // exerciser. #282 §5 remains the record.)
+
+    /// Issue #344 Task 3 Step 5: with the aperture removed, agent-tier facts
+    /// deliver on the activity path, and the exactly-once discipline holds —
+    /// the `exclude ∪ corrections_absent_ids` skip set keeps each id at
+    /// exactly one appearance across the run.
     #[test]
-    fn non_admitted_fact_never_shadows_admitted_below() {
+    fn activity_exactly_once_with_agent_tier_correction_and_fact() {
         let conn = fixture();
-        seed_aperture_entry(&conn, "f-im-high", "immutable_document");
-        seed_aperture_entry(&conn, "f-st-low", "user_stated");
-        // The immutable fact outranks: cosine 1.0 vs 0.0 against the query.
-        conn.execute(
-            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'f-im-high'",
-            params![ts_blob(&unit_vec(1))],
-        )
-        .unwrap();
+        // Mirror the seeding shape of the neighboring tests: rule-(ii)-
+        // reachable rows (evidence names h-c1), u4 blobs (cosine 0 vs the
+        // u1 query) so the id tie-break governs.
+        seed_aperture_entry(&conn, "f-corr", "librarian_inferred");
+        seed_aperture_entry(&conn, "f-old", "librarian_inferred");
+        seed_aperture_entry(&conn, "f-plain", "librarian_inferred");
+        // f-old is superseded by f-corr; the correction channel (driven by
+        // the caller from find_corrections) delivers f-corr for the absent
+        // f-old, so f-old rides the skip set.
+        supersede(&conn, "f-old", "f-corr");
         let (entries, _outcome) = two_stage_entries(
             &conn,
             &unit_vec(1),
             &unit_vec(1),
             Scheme::Raw,
             None,
-            Some(0.40),
-            1, // ONE slot: a post-truncate filter would deliver nothing
+            Some(0.40), // the activity composite floor (test table)
+            8,
             &HashSet::new(),
-            &HashSet::new(),
+            &HashSet::from(["f-old".to_string()]),
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
         )
         .unwrap();
-        let got: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        let count = |id: &str| entries.iter().filter(|e| e.id == id).count();
         assert_eq!(
-            got,
-            vec!["f-st-low"],
-            "the non-admitted high-ranker must be filtered pre-truncate, never shadow"
+            count("f-corr"),
+            1,
+            "the correction head appears EXACTLY once across the run"
         );
+        assert_eq!(
+            count("f-plain"),
+            1,
+            "the ordinary agent-tier fact appears EXACTLY once"
+        );
+        assert_eq!(count("f-old"), 0, "the superseded id never delivers");
     }
 
     /// rev-8 M2 / spec §4: `QueryKind::Activity` + explicit `--single-stage`
