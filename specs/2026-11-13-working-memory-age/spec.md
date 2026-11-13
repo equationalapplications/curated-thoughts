@@ -1,7 +1,7 @@
 # `working-memory-age`: a chunks-only folder whose chunks drop out of search with age
 
 **Date:** 2026-11-13
-**Status:** Draft — awaits the owner's approval (Step-3 review). OQ1 DECIDED (owner, 2026-11-13): no code default in CT; the hard-coded default belongs to CTI, handled elsewhere. OQ2 still open. Rev 4: addresses the Opus spec delta round 3 (2 MAJOR: `aged_out` DROPPED — no surfacing ships, rationale in §9; registration is UNCONDITIONAL re-register-per-query, no guard, policy snapshot per query so config edits take effect next query; 3 MINOR fixed; research requests verified, §11). Rev 3: register-before-prepare at every filtered consumer (43 open sites make named-open incomplete); completeness test in §6.5. Rev 2: addresses the Opus spec review round 1 (4 MAJOR / 2 MINOR, all fixed: fifth consumer `recall_chunks`, `resolve_prefix` strip-then-relative, tie rule DECIDED larger-wins, `aged_out` flag, benchmark backdating, day-boundary semantics). Backed by the converged investigation of 2026-11-13 (Opus Tier-3 rounds 1-3 + Fable Tier-4 rev 4; every finding verified against the tree at `d26654a3` and addressed).
+**Status:** Draft — awaits the owner's approval (Step-3 review). OQ1 DECIDED (owner, 2026-11-13): no code default in CT; the hard-coded default belongs to CTI, handled elsewhere. OQ2 DECIDED (owner, 2026-11-13): structural neighbors stay exempt. All open questions resolved. Rev 4: addresses the Opus spec delta round 3 (2 MAJOR: `aged_out` DROPPED — no surfacing ships, rationale in §9; registration is UNCONDITIONAL re-register-per-query, no guard, policy snapshot per query so config edits take effect next query; 3 MINOR fixed; research requests verified, §11). Rev 3: register-before-prepare at every filtered consumer (43 open sites make named-open incomplete); completeness test in §6.5. Rev 2: addresses the Opus spec review round 1 (4 MAJOR / 2 MINOR, all fixed: fifth consumer `recall_chunks`, `resolve_prefix` strip-then-relative, tie rule DECIDED larger-wins, `aged_out` flag, benchmark backdating, day-boundary semantics). Backed by the converged investigation of 2026-11-13 (Opus Tier-3 rounds 1-3 + Fable Tier-4 rev 4; every finding verified against the tree at `d26654a3` and addressed).
 **Issue:** #347. **Owner rulings:** 2026-11-12/13 (design); 90-day default proposed here, not ruled.
 
 ## 1. Problem
@@ -106,7 +106,7 @@ Three review rounds could not produce an honest signal at SQL level: hidden rows
 ## 10. Open questions for the owner
 
 - **OQ1 — the 90-day default — DECIDED (owner, 2026-11-13, option 1): no code default in CT.** The documented example config carries the 90-day value. Option 2 (a hard-coded default) was rejected FOR THIS REPO; the owner notes the hard-coded default will live in **curated-thoughts-integrations instead, handled by another agent** — out of scope here (see §12, CTI changes).
-- **OQ2 — structural neighbors.** Keep `get_structural_neighbors` exempt (recommended: it is navigation, and the app's search box still filters), or filter it too so no app surface shows aged working memory.
+- **OQ2 — structural neighbors — DECIDED (owner, 2026-11-13, option 1): keep exempt.** `get_structural_neighbors` stays age-unfiltered: it is navigation, not recall, and aged notes stay findable by deliberate browsing. Search surfaces still filter. (Option 2, filtering every app surface, was rejected.)
 
 ## 11. Verified answers to the delta round's research requests (rev 4)
 
