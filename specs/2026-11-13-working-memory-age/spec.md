@@ -1,7 +1,7 @@
 # `working-memory-age`: a chunks-only folder whose chunks drop out of search with age
 
 **Date:** 2026-11-13
-**Status:** Draft — awaits the owner's approval (Step-3 review). Rev 2: addresses the Opus spec review (4 MAJOR / 2 MINOR, all fixed: fifth consumer `recall_chunks` + register-at-open rule, `resolve_prefix` misuse forbidden — strip-then-relative, tie rule DECIDED larger-wins, `aged_out` defined as a flag via one COUNT, benchmark backdating required, day-boundary semantics and subquery cost stated). Backed by the converged investigation of 2026-11-13 (Opus Tier-3 rounds 1-3 + Fable Tier-4 rev 4; every finding verified against the tree at `d26654a3` and addressed).
+**Status:** Draft — awaits the owner's approval (Step-3 review). Rev 3: addresses the Opus spec delta (2 MAJOR / 3 MINOR, all fixed: register-before-prepare at every filtered consumer replaces the register-at-open rule — 43 open sites make named-open incomplete; `aged_out` given a precise request-scoped negated-fragment definition and named emitters; completeness test defined in §6.5; numbering and OQ1-pending fixes). Rev 2: addresses the Opus spec review round 1 (4 MAJOR / 2 MINOR, all fixed: fifth consumer `recall_chunks`, `resolve_prefix` strip-then-relative, tie rule DECIDED larger-wins, `aged_out` flag, benchmark backdating, day-boundary semantics). Backed by the converged investigation of 2026-11-13 (Opus Tier-3 rounds 1-3 + Fable Tier-4 rev 4; every finding verified against the tree at `d26654a3` and addressed).
 **Issue:** #347. **Owner rulings:** 2026-11-12/13 (design); 90-day default proposed here, not ruled.
 
 ## 1. Problem
@@ -24,7 +24,7 @@ A working-memory folder holds session notes and handoffs. The owner rules it `ch
 3. Resolution reuses the `match_prefixes` core (`config/mod.rs:250-303`) on an already-relative path. **The scalar function must NOT call `resolve_prefix` with the raw absolute path** (rev 2, Opus MAJOR-2): the absolute branch pays `fs::canonicalize` calls on a strip miss (`walk_vault.rs:134/:138`). The function strips the captured root itself, then calls `resolve_prefix(&map, rel, None)`; `NoMatch` and `Unplaceable` both mean NULL ("never ages").
 4. **Tie rule (DECIDED, rev 2 — Opus MAJOR-3): when two same-depth keys conflict, the LARGER age wins** — aging hides data, and hiding is the less conservative outcome; the diagnostic names the rule (`Tie` outcome, `config/mod.rs:294-298`; tiers settle the same case with most-conservative-wins, `:368`).
 5. Add a resolver wrapper next to `ingest_tier_for` (for example `age_days_for(path) -> Option<u64>`) on the policy type.
-5. **Default: there is NO code default.** 90 days is the value the spec's example config documents:
+6. **Default: there is NO code default (pending OQ1 — this states the recommended option).** 90 days is the value the spec's example config documents:
    ```json
    "ingest": { "folder_tiers": { "records": "chunks-only" },
                "folder_ages":  { "records": 90 } }
@@ -60,9 +60,10 @@ Does NOT apply to:
 The age depends on each row's path, so per-row resolution must happen in SQL. Three mechanisms were weighed in the investigation; the spec chooses **(a)**:
 
 1. Add one `pub fn register_ct_functions(&Connection)` to `tauri_app_lib`. It registers one scalar function, `ct_folder_age_days(path)`, which returns the configured cutoff in days for the row's folder, or NULL when the folder is unconfigured.
-2. **Register at connection-OPEN sites, not per query** (rev 2, Opus MAJOR-1): `semantic_search` takes any `&Connection`, so per-query registration cannot be complete. Registration happens in every connection-open path: `open_brain_readonly` (`tauri_app_lib::retrieval`), the sidecar's connection open (`curated_thoughts_mcp.rs`), the app's database open path, and the CLI's open path. The plan names each open site; §11's test runs every recall entry point on a freshly opened connection.
+2. **Register before prepare, at every filtered consumer** (rev 3, Opus delta MAJOR-1): the repo has 43 `Connection::open`/`open_with_flags` call sites across 19 production files, so a register-at-open rule with named sites cannot be complete — a missed site fails the query with `no such function` even on empty config. Instead, every consumer that runs a filtered query calls `register_ct_functions(conn)` immediately before preparing it. The function is idempotent and cheap (it guards on an already-registered check), so calling it per query is safe on any connection, including test fixtures on raw connections. `open_brain_readonly` additionally registers at open, so the parity fixture stays honest.
 3. Enable rusqlite's `functions` feature (workspace level; today the workspace has `["bundled"]`, `src-tauri` has `["backup"]`, tools inherits none). This is a new pattern in this repo; the shared helper keeps it in ONE function body.
-4. Extend `tools/tests/shared_queries.rs:14` to pin the fragment on both crates (its fixture runs on `open_brain_readonly`, `:25-28`, so it doubles as the registration test). Update the SQL-shape assertions (`tools/src/queries.rs:1269-1272`).
+4. Extend `tools/tests/shared_queries.rs:14` to pin the fragment on both crates (its fixture runs on `open_brain_readonly`, `:25-28`). Update the SQL-shape assertions (`tools/src/queries.rs:1269-1272`).
+5. **Registration completeness test (rev 3, replaces the rev-2 §11 pointer):** one test runs EVERY recall entry point — the five shared-SQL consumers, `semantic_search`, `related_chunks`, and the app commands `search_vault`/`get_related_chunks` — each on a freshly opened raw connection and with an age configured for one folder. Any missed `register_ct_functions` call fails the entry point with `no such function`; the test asserts success instead.
 
 The function's runtime rules (from the investigation, Fable M2):
 
@@ -98,15 +99,30 @@ This is a recall change, so the gates apply: no superseded fact injected; LongMe
 
 **Backdating requirement (rev 2, Opus MINOR-1):** scratch brains are freshly indexed, so `MIN(run_at)` is about now and the filter never fires in a plain benchmark run. The benchmark fixture must backdate `ingest_runs.run_at` on a known share of documents (or set age 0 on one folder), and the gates run BOTH with the filter active and with it off, so the delta is measurable.
 
-## 9. Surfacing (DECIDED, rev 2 — Opus MAJOR-4)
+## 9. Surfacing (DECIDED, rev 3 — Opus MAJOR-4 round 1 + delta MAJOR-2)
 
-Age-filtered responses must not lie by silence. The filter runs in SQL, so hidden rows never reach Rust; counting what would have ranked needs their scores and defeats the filter. The spec therefore defines a FLAG, not a count: `aged_out: true` on a search response when at least one chunk was excluded, computed by ONE cheap COUNT query over the age-keyed folders with the same WHERE predicate and no vector work. Absent flag = false. The field placement follows the existing response shapes; the plan fixes it.
+Age-filtered responses must not lie by silence. The filter runs in SQL, so hidden rows never reach Rust; counting what would have ranked needs their scores and defeats the filter. The spec therefore defines a FLAG, not a count:
+
+1. **Meaning:** `aged_out: true` when at least one chunk WOULD have matched this request's non-age filters and fails the age arm. Not a vault-wide count — that is true on nearly every search and says nothing.
+2. **Computation:** ONE COUNT query per filtered search. It keeps the request's non-age filters (path filters, document filters) and the `d.status = 'indexed'` arm as they are, and NEGATES the age arm:
+   ```sql
+   SELECT COUNT(*) FROM chunks c JOIN documents d ON c.doc_id = d.id
+   WHERE d.status = 'indexed' /* AND the request's non-age filters */
+     AND NOT ( ct_folder_age_days(d.path) IS NULL
+            OR (SELECT MIN(ir.run_at) FROM ingest_runs ir
+                 WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed') IS NULL
+            OR (unixepoch() - (SELECT MIN(ir.run_at) FROM ingest_runs ir
+                 WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed')) / 86400
+              <= ct_folder_age_days(d.path) )
+   ```
+   A count above zero sets the flag. No vector work.
+3. **Emitters (DECIDED):** `semantic_search` (it serves MCP `vault_semantic_search`, the CLI facade, and the app's `search_vault`) and the recall chunk leg (`RECALL_CHUNKS_SQL_BASE` consumers). NOT emitted by `related_chunks` or `get_structural_neighbors` — navigation surfaces stay clean. The flag rides on the response alongside the results; the plan fixes the exact field.
 
 ## 10. Open questions for the owner
 
-- **OQ1 — the 90-day default.** The ruling left the default open. Options:
-  1. Document 90 days in the example config, no code default. (Recommended: the ruling says "default 90 days" as a proposal; the example makes it visible and changeable without a release.)
-  2. Hard-code 90 days as the code default for any folder that has `chunks-only` but no age entry.
+- **OQ1 — the 90-day default (§3.6 states option 1 as the recommended pending this ruling).** The ruling left the default open. Options:
+   1. Document 90 days in the example config, no code default. (Recommended: the ruling says "default 90 days" as a proposal; the example makes it visible and changeable without a release.)
+   2. Hard-code 90 days as the code default for any folder that has `chunks-only` but no age entry.
 - **OQ2 — structural neighbors.** Keep `get_structural_neighbors` exempt (recommended: it is navigation, and the app's search box still filters), or filter it too so no app surface shows aged working memory.
 
 ## 11. Out of scope
