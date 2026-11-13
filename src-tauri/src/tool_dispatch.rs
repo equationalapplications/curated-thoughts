@@ -368,13 +368,25 @@ pub(crate) struct RankedChunkRow {
 /// Recall-leg SQL over real chunker strategies (ast_*). Vectors live in the
 /// separate embeddings table. With the AST predicate appended this matches the
 /// sidecar's `curated_recall_context` / `curated_search_code` leg exactly.
-pub(crate) const RECALL_CHUNKS_SQL_BASE: &str = "
+/// Pub for the cross-crate verbatim-twin parity test
+/// (`tools/tests/shared_queries.rs`); the SQL is part of the MCP sidecar
+/// contract.
+pub const RECALL_CHUNKS_SQL_BASE: &str = "
     SELECT c.id, c.chunk_text, e.vector, d.path, c.start_line, c.end_line,
            c.symbol_name, c.strategy, c.entity_id
     FROM chunks c
     JOIN documents d ON c.doc_id = d.id
     JOIN embeddings e ON e.chunk_id = c.id
     WHERE d.status = 'indexed'
+    AND (
+      ct_folder_age_days(d.path) IS NULL
+   OR (SELECT MIN(ir.run_at) FROM ingest_runs ir
+        WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed') IS NULL
+   OR (unixepoch()
+       - (SELECT MIN(ir.run_at) FROM ingest_runs ir
+          WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed')) / 86400
+       <= ct_folder_age_days(d.path)
+    )
 ";
 pub(crate) const RECALL_CHUNKS_AST_FILTER: &str = " AND c.strategy LIKE 'ast%'";
 
@@ -689,7 +701,10 @@ pub async fn dispatch_curated_recall_context(
 
         // Code chunks: real chunker strategies (ast_*). Vectors live in the
         // separate embeddings table.
-        let code_sql = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
+        let code_sql = {
+            crate::register_ct_functions(&conn_guard);
+            format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}")
+        };
         let code_chunks = code_rows_to_json(fetch_ranked_chunks(
             &conn_guard,
             &code_sql,
@@ -807,6 +822,7 @@ pub async fn dispatch_curated_search_code(
     let conn = ctx.conn.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<Value> {
         let conn_guard = lock_conn(&conn)?;
+        crate::register_ct_functions(&conn_guard);
         let sql = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
 
         if let Some(ref sym) = p.symbol {
@@ -1513,6 +1529,12 @@ mod dispatch_tests {
                 position INTEGER, start_line INTEGER, end_line INTEGER, symbol_name TEXT,
                 strategy TEXT, entity_id TEXT);
              CREATE TABLE embeddings (chunk_id INTEGER PRIMARY KEY, vector BLOB);
+             CREATE TABLE ingest_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                run_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                outcome TEXT NOT NULL CHECK(outcome IN ('indexed', 'error'))
+            );
              INSERT INTO documents VALUES (1, 'notes/a.md', 'indexed');
              INSERT INTO chunks VALUES (1, 1, 'hello world', 0, 1, 2, NULL, 'plain', 'tier_working');
              INSERT INTO embeddings VALUES (1, x'0000803f00000000');",
@@ -1537,7 +1559,14 @@ mod dispatch_tests {
              CREATE TABLE chunks (id INTEGER PRIMARY KEY, doc_id INTEGER, chunk_text TEXT,
                 position INTEGER, start_line INTEGER, end_line INTEGER, symbol_name TEXT,
                 strategy TEXT, entity_id TEXT);
-             CREATE TABLE embeddings (chunk_id INTEGER PRIMARY KEY, vector BLOB);",
+             CREATE TABLE embeddings (chunk_id INTEGER PRIMARY KEY, vector BLOB);
+             CREATE TABLE ingest_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                run_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                outcome TEXT NOT NULL CHECK(outcome IN ('indexed', 'error'))
+            );
+            ",
         )
         .unwrap();
         let hits = dispatch_vault_semantic_search(&conn, &[1.0], Some(999)).unwrap();
@@ -2086,6 +2115,12 @@ mod curated_memory_tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
                 vector BLOB NOT NULL
+            );
+            CREATE TABLE ingest_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                run_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                outcome TEXT NOT NULL CHECK(outcome IN ('indexed', 'error'))
             );
             INSERT INTO curated_entities VALUES
               ('ent-1', 'Farmhouse', 'concept', '', NULL, 1756000000, 1756000000, NULL);
