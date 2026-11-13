@@ -175,6 +175,29 @@ pub fn drain_prompts_at(
     crate::prompt_drop::drain_unverified_matches(&vault_root, cap).map_err(|e| e.to_string())
 }
 
+/// Build the capture context from app state. The db path comes from the open
+/// app db; the vault root from the configured brain config — the same
+/// resolution every *_at backend function accepts explicitly.
+fn capture_context(
+    db_state: &State<'_, DbState>,
+    embed_profile: &State<'_, crate::EmbedProfileState>,
+) -> Result<crate::db::wisdom::CaptureContext, String> {
+    let db_path = {
+        let guard = db_state.0.lock().map_err(|e| e.to_string())?;
+        guard
+            .0
+            .path()
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "brain db has no path".to_string())?
+    };
+    let profile = embed_profile.0.lock().map_err(|e| e.to_string())?.clone();
+    Ok(crate::db::wisdom::CaptureContext {
+        db_path,
+        vault_root: crate::db::stated_ledger::resolve_vault_root().map_err(|e| e.to_string())?,
+        profile,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,25 +294,3 @@ mod tests {
     }
 }
 
-/// Build the capture context from app state. The db path comes from the open
-/// app db; the vault root from the configured brain config — the same
-/// resolution every *_at backend function accepts explicitly.
-fn capture_context(
-    db_state: &State<'_, DbState>,
-    embed_profile: &State<'_, crate::EmbedProfileState>,
-) -> Result<crate::db::wisdom::CaptureContext, String> {
-    let db_path = {
-        let guard = db_state.0.lock().map_err(|e| e.to_string())?;
-        guard
-            .0
-            .path()
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| "brain db has no path".to_string())?
-    };
-    let profile = embed_profile.0.lock().map_err(|e| e.to_string())?.clone();
-    Ok(crate::db::wisdom::CaptureContext {
-        db_path,
-        vault_root: crate::db::stated_ledger::resolve_vault_root().map_err(|e| e.to_string())?,
-        profile,
-    })
-}
