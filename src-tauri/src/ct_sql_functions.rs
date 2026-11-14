@@ -31,6 +31,17 @@ pub fn register_ct_functions(conn: &rusqlite::Connection) {
 /// that must inject a policy an in-memory connection cannot carry.
 pub fn register_ct_functions_with_policy(conn: &rusqlite::Connection, policy: &crate::config::IngestPolicy) {
     let policy: Arc<crate::config::IngestPolicy> = Arc::new(policy.clone());
+    // Capture BOTH prefixes ONCE at registration (CodeRabbit PR #350):
+    // the configured vault-root prefix AND its canonical form. `walk_vault`
+    // emits canonical paths (walk_vault.rs:262-311), so rows indexed under
+    // a symlinked or aliased root carry the canonical spelling while the
+    // config may carry the configured one. `fs::canonicalize` here is
+    // fine — once per registration, never per row.
+    let canonical: Option<Arc<std::path::PathBuf>> = policy
+        .vault_root
+        .as_ref()
+        .and_then(|r| std::fs::canonicalize(r).ok())
+        .map(Arc::new);
     conn.create_scalar_function(
         "ct_folder_age_days",
         1,
@@ -41,11 +52,20 @@ pub fn register_ct_functions_with_policy(conn: &rusqlite::Connection, policy: &c
             let Some(root) = policy.vault_root.as_deref() else {
                 return Ok(None);
             };
-            // Pure string strip_prefix against the captured root; a
-            // placement miss => NULL ("never ages").
-            let rel = match std::path::Path::new(&raw).strip_prefix(root) {
+            // Pure string strip_prefix against the captured roots; a miss
+            // on BOTH => NULL ("never ages"). No per-row filesystem calls.
+            let path = std::path::Path::new(&raw);
+            let rel = match path.strip_prefix(root) {
                 Ok(r) => r.to_string_lossy().into_owned(),
-                Err(_) => return Ok(None),
+                Err(_) => {
+                    let Some(canon) = canonical.as_deref() else {
+                        return Ok(None);
+                    };
+                    match path.strip_prefix(canon) {
+                        Ok(r) => r.to_string_lossy().into_owned(),
+                        Err(_) => return Ok(None),
+                    }
+                }
             };
             Ok(policy.folder_ages_lookup(&rel)) // deepest-prefix, larger-wins tie
         },
@@ -108,6 +128,78 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outside, None, "path outside the vault root never ages");
+    }
+
+    /// CodeRabbit PR #350: `walk_vault` emits CANONICAL paths
+    /// (walk_vault.rs:262-311), so rows indexed through a symlinked /
+    /// aliased vault root carry the canonical spelling while the config
+    /// carries the configured one. The scalar must try both prefixes —
+    /// the cutoff applies either way (both captured once per
+    /// registration; no per-row filesystem calls).
+    #[test]
+    fn ct_folder_age_days_tries_canonical_prefix_when_configured_misses() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real_root = tmp.path().join("real_vault");
+        std::fs::create_dir_all(real_root.join("records")).unwrap();
+        let alias_root = tmp.path().join("alias_vault");
+        std::os::unix::fs::symlink(&real_root, &alias_root).unwrap();
+
+        let mut ages = HashMap::new();
+        ages.insert("records".to_string(), 90u64);
+        let pol = IngestPolicy {
+            tiers: IngestConfig {
+                folder_ages: ages,
+                ..Default::default()
+            },
+            // CONFIGURED root is the alias; the canonical prefix (the
+            // real_vault spelling) differs.
+            vault_root: Some(alias_root.clone()),
+            ..Default::default()
+        };
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        register_ct_functions_with_policy(&conn, &pol);
+
+        // Row under the CANONICAL spelling (what walk_vault emitted).
+        let canonical_row = real_root.join("records/a.md").to_string_lossy().into_owned();
+        let aged: Option<i64> = conn
+            .query_row(
+                "SELECT ct_folder_age_days(?1)",
+                [canonical_row.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            aged,
+            Some(90),
+            "canonical-spelled row under the aliased root must still age"
+        );
+
+        // Row under the CONFIGURED (alias) spelling still works too.
+        let alias_row = alias_root.join("records/b.md").to_string_lossy().into_owned();
+        let via_alias: Option<i64> = conn
+            .query_row(
+                "SELECT ct_folder_age_days(?1)",
+                [alias_row.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(via_alias, Some(90), "configured-prefix strip must keep working");
+
+        // Outside both prefixes: NULL.
+        let outside_row = tmp
+            .path()
+            .join("elsewhere/records/c.md")
+            .to_string_lossy()
+            .into_owned();
+        let outside: Option<i64> = conn
+            .query_row(
+                "SELECT ct_folder_age_days(?1)",
+                [outside_row.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outside, None, "path under neither prefix never ages");
     }
 
     #[test]
