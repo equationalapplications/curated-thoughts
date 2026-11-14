@@ -143,6 +143,11 @@ mod tests {
         std::fs::create_dir_all(real_root.join("records")).unwrap();
         let alias_root = tmp.path().join("alias_vault");
         std::os::unix::fs::symlink(&real_root, &alias_root).unwrap();
+        // walk_vault emits the CANONICAL spelling of the real root — on
+        // macOS the tempdir itself lives under a /var -> /private/var
+        // symlink, so canonicalize the real root for the seeded row
+        // (platform-neutral emulation of what the walker emits).
+        let real_root_emitted = std::fs::canonicalize(&real_root).unwrap();
 
         let mut ages = HashMap::new();
         ages.insert("records".to_string(), 90u64);
@@ -161,7 +166,10 @@ mod tests {
         register_ct_functions_with_policy(&conn, &pol);
 
         // Row under the CANONICAL spelling (what walk_vault emitted).
-        let canonical_row = real_root.join("records/a.md").to_string_lossy().into_owned();
+        let canonical_row = real_root_emitted
+            .join("records/a.md")
+            .to_string_lossy()
+            .into_owned();
         let aged: Option<i64> = conn
             .query_row(
                 "SELECT ct_folder_age_days(?1)",
