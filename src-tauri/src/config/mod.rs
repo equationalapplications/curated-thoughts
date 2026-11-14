@@ -1875,23 +1875,39 @@ impl BrainConfig {
                     Ok(m) => report.config.ingest.folder_ages = m,
                     Err(_) => {
                         // Entry-by-entry salvage; drop only bad entries
-                        // (mirrors the folder_tiers salvage above).
+                        // (mirrors the folder_tiers salvage above). When
+                        // ANY entry (or the whole value) is rejected, set
+                        // the `raw_ingest` preservation marker (CodeRabbit
+                        // PR #350, same mechanism the folder_ontology
+                        // salvage uses): a later `write()` then leaves the
+                        // ON-DISK `ingest` value untouched, so the rejected
+                        // setting + its diagnostic survive until the user
+                        // hand-fixes it instead of being permanently
+                        // dropped.
                         if let Some(map) = fa.as_object() {
+                            let mut any_dropped = false;
                             for (k, v) in map {
                                 match serde_json::from_value::<u64>(v.clone()) {
                                     Ok(days) => {
                                         report.config.ingest.folder_ages.insert(k.clone(), days);
                                     }
-                                    Err(e) => report.diagnostics.push(format!(
-                                        "ingest.folder_ages entry {k:?} dropped: {e}"
-                                    )),
+                                    Err(e) => {
+                                        any_dropped = true;
+                                        report.diagnostics.push(format!(
+                                            "ingest.folder_ages entry {k:?} dropped: {e}"
+                                        ));
+                                    }
                                 }
+                            }
+                            if any_dropped {
+                                report.config.raw_ingest = Some(ing.clone());
                             }
                         } else {
                             report.diagnostics.push(
                                 "ingest.folder_ages unparseable (not an object); no folders age"
                                     .to_string(),
                             );
+                            report.config.raw_ingest = Some(ing.clone());
                         }
                     }
                 }
@@ -2459,6 +2475,72 @@ mod tests {
             "a degraded load must preserve folder_ages"
         );
         assert_eq!(report.config.ingest.age_days_for("records/a.md"), Some(90));
+    }
+
+    /// CodeRabbit PR #350: when salvage DROPS a `folder_ages` entry (or the
+    /// whole value), the `raw_ingest` preservation marker must be set —
+    /// same mechanism the folder_ontology salvage uses — so a later
+    /// `write()` leaves the on-disk `ingest` value untouched and the
+    /// rejected setting + its diagnostic survive instead of being
+    /// permanently dropped from the file.
+    #[test]
+    fn salvaged_folder_ages_drop_sets_raw_ingest_and_write_preserves() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = BrainPaths {
+            brain_dir: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.json"),
+            db_path: tmp.path().join("brain.db"),
+        };
+        let degraded = r#"{"vault_path":"/v","ingest":{"folder_ages":{"records":"90","notes":7}}}"#;
+        std::fs::write(&paths.config_path, degraded).unwrap();
+
+        let report = BrainConfig::load_lenient(&paths).unwrap();
+        // Salvage: good entry kept, bad entry dropped with a diagnostic.
+        assert_eq!(
+            report.config.ingest.folder_ages.get("notes"),
+            Some(&7),
+            "the salvageable entry must be kept"
+        );
+        assert!(!report.config.ingest.folder_ages.contains_key("records"));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|m| m.contains("folder_ages entry \"records\" dropped")),
+            "expected a drop diagnostic for the bad entry; got {:?}",
+            report.diagnostics
+        );
+        // Preservation marker set.
+        assert!(
+            report.config.raw_ingest.is_some(),
+            "a dropped folder_ages entry must set the raw_ingest marker"
+        );
+
+        // write() must preserve the ON-DISK block verbatim.
+        report.config.write(&paths).unwrap();
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.config_path).unwrap()).unwrap();
+        let ages = on_disk
+            .get("ingest")
+            .and_then(|i| i.get("folder_ages"))
+            .expect("ingest.folder_ages must survive the write");
+        assert_eq!(
+            ages.get("records").and_then(|v| v.as_str()),
+            Some("90"),
+            "the rejected entry must stay on disk (the user's hand fix must not be erased)"
+        );
+        assert_eq!(ages.get("notes").and_then(|v| v.as_u64()), Some(7));
+
+        // Re-loading the preserved file still reports the degradation.
+        let reloaded = BrainConfig::load_lenient(&paths).unwrap();
+        assert!(
+            reloaded
+                .diagnostics
+                .iter()
+                .any(|m| m.contains("folder_ages entry \"records\" dropped")),
+            "re-load must keep reporting the rejected entry"
+        );
+        assert_eq!(reloaded.config.ingest.folder_ages.get("notes"), Some(&7));
     }
 
 
