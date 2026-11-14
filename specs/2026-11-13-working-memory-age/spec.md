@@ -1,7 +1,7 @@
 # `working-memory-age`: a chunks-only folder whose chunks drop out of search with age
 
 **Date:** 2026-11-13
-**Status:** Draft — awaits the owner's approval (Step-3 review). OQ1 DECIDED (owner, 2026-11-13): no code default in CT; the hard-coded default belongs to CTI, handled elsewhere. OQ2 DECIDED (owner, 2026-11-13): structural neighbors stay exempt. All open questions resolved. Rev 4: addresses the Opus spec delta round 3 (2 MAJOR: `aged_out` DROPPED — no surfacing ships, rationale in §9; registration is UNCONDITIONAL re-register-per-query, no guard, policy snapshot per query so config edits take effect next query; 3 MINOR fixed; research requests verified, §11). Rev 3: register-before-prepare at every filtered consumer (43 open sites make named-open incomplete); completeness test in §6.5. Rev 2: addresses the Opus spec review round 1 (4 MAJOR / 2 MINOR, all fixed: fifth consumer `recall_chunks`, `resolve_prefix` strip-then-relative, tie rule DECIDED larger-wins, `aged_out` flag, benchmark backdating, day-boundary semantics). Backed by the converged investigation of 2026-11-13 (Opus Tier-3 rounds 1-3 + Fable Tier-4 rev 4; every finding verified against the tree at `d26654a3` and addressed).
+**Status:** Draft — awaits the owner's approval (Step-3 review). OQ1 DECIDED (owner, 2026-11-13): no code default in CT; the hard-coded default belongs to CTI, handled elsewhere. OQ2 DECIDED (owner, 2026-11-13): structural neighbors stay exempt. All open questions resolved. Rev 4: addresses the Opus spec delta round 3 (2 MAJOR: `aged_out` DROPPED — no surfacing ships, rationale in §9; registration is UNCONDITIONAL re-register-per-query, no guard, policy snapshot per query so config edits take effect next query; 3 MINOR fixed; research requests verified, §11). Rev 3: register-before-prepare at every filtered consumer (43 open sites make named-open incomplete); completeness test in §6.5. Rev 2: addresses the Opus spec review round 1 (4 MAJOR / 2 MINOR, all fixed: fifth consumer `recall_chunks`, `resolve_prefix` strip-then-relative, tie rule DECIDED larger-wins, `aged_out` flag, benchmark backdating, day-boundary semantics). Backed by the converged investigation of 2026-11-13 (Opus Tier-3 rounds 1-3 + Fable Tier-4 rev 4; every finding verified against the tree at `d26654a3` and addressed). Step-4 battery (LongMemEval/abstention/paraphrase) benchmark-pending — no in-repo runner; the hit-rate gate (docs/benchmarks/2026-11-13-working-memory-age-hit-rate.md) ran green 2026-11-13.
 **Issue:** #347. **Owner rulings:** 2026-11-12/13 (design); 90-day default proposed here, not ruled.
 
 ## 1. Problem
@@ -24,10 +24,10 @@ A working-memory folder holds session notes and handoffs. The owner rules it `ch
 3. Resolution reuses the `match_prefixes` core (`config/mod.rs:250-303`) on an already-relative path. **The scalar function must NOT call `resolve_prefix` with the raw absolute path** (rev 2, Opus MAJOR-2): the absolute branch pays `fs::canonicalize` calls on a strip miss (`walk_vault.rs:134/:138`). The function strips the captured root itself, then calls `resolve_prefix(&map, rel, None)`; `NoMatch` and `Unplaceable` both mean NULL ("never ages").
 4. **Tie rule (DECIDED, rev 2 — Opus MAJOR-3): when two same-depth keys conflict, the LARGER age wins** — larger hides less, which is the conservative outcome, matching tiers' most-conservative-wins (`config/mod.rs:294-298`, `:368`); the diagnostic names the rule.
 5. Add a resolver wrapper next to `ingest_tier_for` (for example `age_days_for(path) -> Option<u64>`) on the policy type.
-6. **Default: there is NO code default (DECIDED — OQ1, owner 2026-11-13, option 1).** 90 days is the value the spec's example config documents:
+6. **Default: there is NO code default (DECIDED — OQ1, owner 2026-11-13, option 1).** 90 days is the value the spec's example config documents. **The example prefix is `documents/records`, NOT root-level `records/`: the walker prunes a root-level `records/` folder from ingestion** (`walk_vault.rs:262-311`), and `folder_tiers` does not override that pruning — a root-level example would never produce searchable chunks (CodeRabbit PR #350). The example is an ingestible prefix:
    ```json
-   "ingest": { "folder_tiers": { "records": "chunks-only" },
-               "folder_ages":  { "records": 90 } }
+   "ingest": { "folder_tiers": { "documents/records": "chunks-only" },
+               "folder_ages":  { "documents/records": 90 } }
    ```
 
 ## 4. The age basis (DECIDED)
