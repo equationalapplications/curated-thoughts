@@ -1,10 +1,10 @@
 {
   "schema": 1,
-  "code_sha": "unversioned",
-  "generated_utc": "2026-11-13T19:39:03.654064186+00:00",
+  "code_sha": "5fdef5f36b7f64af920455dd404d13d60b316b4a",
+  "generated_utc": "2026-11-13T22:59:25.828192672+00:00",
   "probes": {
     "path": "calibration-run/grid-20261113-activity/activity-mixed-probes.jsonl",
-    "sha256": "bbb63f9d7f8e741640d6fe32aeee902827d87d813e5f326764e2990f9c3cc66f",
+    "sha256": "2a5043a37f1cc65df1c8d2d99a395ad147b09beb68e6f8804a8ff682f7daf6af",
     "count": 215,
     "relevant": 90,
     "fp": 125
@@ -33,16 +33,16 @@
   "single_stage": {
     "hit2": 0.16666666666666666,
     "hit1": 0.16666666666666666,
-    "fp": 0,
-    "opens": 24,
-    "entries_per_open": 1.2916666666666667
+    "fp": 3,
+    "opens": 27,
+    "entries_per_open": 1.3333333333333333
   },
   "two_stage": {
     "hit2": 0.2111111111111111,
     "hit1": 0.2111111111111111,
-    "fp": 58,
-    "opens": 129,
-    "entries_per_open": 1.7364341085271318
+    "fp": 50,
+    "opens": 121,
+    "entries_per_open": 1.743801652892562
   },
   "two_stage_passes": false,
   "letter": "act_hit1 >= base_hit1 && act_fp <= base_fp",
@@ -88,12 +88,12 @@
   "embeds": {
     "per_message": 1,
     "scheme": "raw",
-    "latency_ms_p50": 32.8378421875,
-    "latency_ms_p95": 40.525920125000006
+    "latency_ms_p50": 38.52878703125,
+    "latency_ms_p95": 40.504524624999995
   },
   "injection": {
     "rule": "restricted-cosine",
-    "opens": 129,
+    "opens": 121,
     "entries_per_open_median": 2.0
   },
   "merge_attribution": {
@@ -102,7 +102,7 @@
     "v1merged_total": 0
   },
   "v1_merge": {
-    "latency_ms_p95": 737.5992249999999,
+    "latency_ms_p95": 1913.0001399999999,
     "volume_total": 0,
     "measured": "combined-call"
   },

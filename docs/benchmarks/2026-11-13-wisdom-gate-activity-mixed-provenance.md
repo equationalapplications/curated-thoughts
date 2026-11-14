@@ -122,3 +122,70 @@ accept a `--small-labeled-set` flag to close the gap for good.
 - Floor movement 0.65 → 0.70 reflects BOTH the mixed pool AND the brain
   growing 509 → 1185 facts since the last calibration; the two effects are
   confounded in this single re-derivation.
+
+## Addendum — CodeRabbit #349 re-run (2026-11-13, same day)
+
+The review of this PR flagged two sampler-integrity findings and one
+build-provenance finding (CodeRabbit 4568979416 / 4568979424 / 4568979403).
+The full procedure above was RE-RUN with the fixes; this section supersedes
+the numbers above where they differ.
+
+**Sampler fixes (`gen_probes.py`).**
+1. Positive sampling now applies the scorer's temporal eligibility —
+   `AND (superseded_by IS NULL OR superseded_at > :now)` and
+   `AND (valid_to IS NULL OR valid_to > :now)` with the scorer's `now`
+   semantics (current epoch ms at generation time), each condition added only
+   when the snapshot has that column (all present in the 2026-11-13 snapshot).
+   `deleted_at IS NULL` kept.
+2. The negatives' `find` invocation passes grouping as `(` / `)` (not
+   `"\\("`/`"\\)"`) in the subprocess arg list and hard-fails on a non-zero
+   find exit.
+
+**Pool effect.** The positive pool did NOT change: same 30 facts (29
+`librarian_inferred` + 1 `user_confirmed`, 90 positive probes). The negative
+set drifted by repo-state delta (the v2 negatives are real repo files absent
+from the corpus; the repo grew between the morning run and this re-run), so
+`activity-mixed-probes.jsonl`'s negative membership differs — 125 negatives
+still. Consequences below.
+
+**Build provenance.** ALL cells this time were produced by ONE binary built
+with `CT_BUILD_SHA=5fdef5f36b7f64af920455dd404d13d60b316b4a` (the prior run
+mixed an unversioned binary with one versioned re-run — `check_grid` would
+have rejected the grid). `pick --grid` passes `check_grid` (no "grid mixes
+builds").
+
+**Cells (unified build 5fdef5f3, restricted-cosine k=8, baseline = v1 @
+registered raw floor 0.70):**
+
+| floor | act hit@1 | act FP (of 125) | base hit@1 | base FP | letter |
+|---|---|---|---|---|---|
+| 0.55 | 0.222 | 76 | 0.167 | 3 | fail (FP) |
+| 0.60 | 0.211 | 50 | 0.167 | 3 | fail (FP) |
+| 0.65 | 0.211 | 21 | 0.167 | 3 | fail (FP) |
+| 0.68 | 0.189 | 9 | 0.167 | 3 | fail (FP) |
+| **0.70** | **0.167** | **3** | 0.167 | 3 | **pass (equalities)** |
+| 0.72 | 0.167 | 2 | 0.167 | 3 | pass |
+| 0.74* | 0.144 | 2 | 0.167 | 3 | fail (hit@1) |
+| 0.76* | 0.122 | 2 | 0.167 | 3 | fail (hit@1) |
+| 0.78* | 0.122 | **0** | 0.167 | 3 | fail (hit@1) |
+
+\* boundary probes beyond the 0.55–0.72 grid, run to locate the FP-0
+boundary (FP 0 is reached only at 0.78, where hit@1 0.122 is far below the
+baseline — the letter fails there, so no FP-0 letter-passing floor exists).
+
+**Floor decision: UNCHANGED at 0.70.** On this pool there is NO FP-0
+letter-passing floor: two refreshed negatives open the gate even at 0.76
+while hit@1 falls below baseline from 0.74 — the letter's FP criterion
+(`act_fp ≤ base_fp`) is RELATIVE to the baseline, and the baseline itself now
+leaks 3 (baseline FP went 0 → 3 purely from the negative-set drift). The
+lowest floor passing the pinned #282 letter is 0.70 (act FP 3 = baseline FP
+3, hit@1 equal), and it preserves the most recall — same value as the
+morning derivation. `WISDOM_GATE_FLOORS` row value unchanged; the row comment
+records the re-verification.
+
+**Honesty note.** The morning run's "FP-0 at 0.70" no longer holds on the
+refreshed negative set; what holds is "act FP == baseline FP == 3 at 0.70".
+The three leaking negatives are real repo files (absent from the brain
+corpus by construction) whose basenames now collide topically with live
+facts — a labeling artifact of the v2 negative style under repo drift, not a
+gate regression: the baseline leaks the same probes.

@@ -6,7 +6,7 @@ Read-only over the scratch brain copy. Mirrors the 2026-10-18 probe shapes
 user_stated-only restriction: positives are sampled across the live
 population's actual provenance mix (librarian_inferred + user_confirmed).
 """
-import json, re, sqlite3, subprocess, random, collections, os
+import json, re, sqlite3, subprocess, random, collections, os, time
 
 DB = "/home/kv-thinkpad-t420-ubuntu/ct-calibration-scratch/brain-dir-20261113/brain.db"
 REPO = "/mnt/kv-work/build/worktrees/curated-thoughts/rule10-delivery"
@@ -14,9 +14,21 @@ OUT = "/mnt/kv-work/build/worktrees/curated-thoughts/rule10-delivery/calibration
 os.makedirs(OUT, exist_ok=True)
 
 conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+
+# Temporal eligibility: the SAME conditions the scorer applies at query time
+# (wisdom_match.rs:474-478) with the SAME `now` semantics — current epoch ms
+# at generation time (the scorer's now_ms is current time at run time).
+# CodeRabbit 4568979416: the positive-sampling pool previously ignored
+# supersession/expiry, so a probe could expect a fact whose live head is a
+# different id — the scorer would count it a miss/FP the sampler never saw.
+now_ms = int(time.time() * 1000)
+cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_wiki_entries)").fetchall()}
+elig_sql = "AND (superseded_by IS NULL OR superseded_at > :now) " if "superseded_by" in cols else ""
+elig_sql += "AND (valid_to IS NULL OR valid_to > :now) " if "valid_to" in cols else ""
 rows = conn.execute(
     "SELECT id, source_type, title, body FROM llm_wiki_entries "
-    "WHERE deleted_at IS NULL").fetchall()
+    "WHERE deleted_at IS NULL " + elig_sql,
+    {"now": now_ms}).fetchall()
 
 PATH_RE = re.compile(r"(?:[A-Za-z0-9_\-]+/)+[A-Za-z0-9_\-]+\.(?:md|sh|rs|ts|tsx|json|py|toml|yaml|yml)")
 CMD_RE = re.compile(r"`([^`\n]{4,80})`")
@@ -87,13 +99,15 @@ neg = []
 # (a) real files in the CT repo not mentioned in any fact body
 out = subprocess.run(
     ["find", ".", "-type", "f",
-     "\\(", "-name", "*.md", "-o", "-name", "*.rs", "-o", "-name", "*.ts",
+     "(", "-name", "*.md", "-o", "-name", "*.rs", "-o", "-name", "*.ts",
      "-o", "-name", "*.tsx", "-o", "-name", "*.json", "-o", "-name", "*.sh",
-     "-o", "-name", "*.toml", "-o", "-name", "*.yml", "\\)",
+     "-o", "-name", "*.toml", "-o", "-name", "*.yml", ")",
      "-not", "-path", "./target/*", "-not", "-path", "./.git/*",
-     "-not", "-path", "./node_modules/*", "-not", "-path", "./.cargo*"],
-    cwd=REPO, capture_output=True, text=True).stdout.splitlines()
-repo_paths = sorted({p[2:] for p in out})
+     "-not", "-path", "./node_modules/*", "-not", "-path", "./.cargo-shared-target/*"],
+    cwd=REPO, capture_output=True, text=True)
+if out.returncode != 0:
+    raise SystemExit(f"find failed (exit {out.returncode}): {out.stderr}")
+repo_paths = sorted({p[2:] for p in out.stdout.splitlines()})
 random.shuffle(repo_paths)
 for p in repo_paths:
     if len(neg) >= 60:

@@ -108,14 +108,19 @@ pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
     // Activity composite key (issue #282, spec §3 `<raw>:activity:two-stage:<rule>`;
     // ONE shared floor across all probe kinds): calibrated 2026-10-18 @ 0.65 on a
     // user_stated-only positive pool; re-derived 2026-11-13 from a mixed-provenance
-    // pool (issue #344); prior value calibrated on user_stated-only positives.
-    // Mixed pool (30 facts: 29 librarian_inferred + 1 user_confirmed, 90 positives,
-    // 125 negatives) on the current live-brain population (1185 facts):
-    // restricted-cosine, k=8 (TWO_STAGE_K default): floor 0.70 is the lowest
-    // FP-0 cell passing the #282 letter (act hit@1 0.167 >= v1 baseline 0.167,
-    // act FP 0 = baseline FP 0); 0.68 leaks FP 5. Cells
-    // `calibration-run/grid-20261113-activity/cells/` —
-    // docs/benchmarks/2026-11-13-wisdom-gate-activity-mixed-provenance.md.
+    // pool (issue #344) and RE-VERIFIED 2026-11-13 after the CodeRabbit #349
+    // sampler fix (temporal-eligibility-true positives, find grouping fix) on the
+    // same 30-fact pool (29 librarian_inferred + 1 user_confirmed, 90 positives,
+    // 125 negatives) — membership unchanged. Still 0.70: the lowest floor passing
+    // the #282 letter (act hit@1 0.167 >= baseline 0.167, act FP 3 <= baseline
+    // FP 3 — the letter's FP criterion is RELATIVE to the baseline, and this
+    // pool's refreshed negative set is no longer FP-0 anywhere the letter
+    // passes: FP 2 persists to 0.76, FP 0 only at 0.78 where hit@1 0.122 is
+    // below baseline, so no FP-0 letter-passing floor exists; 0.70 preserves
+    // the most recall). Cells (all ONE unified
+    // build 5fdef5f3, CT_BUILD_SHA) `calibration-run/grid-20261113-activity/cells/`
+    // — docs/benchmarks/2026-11-13-wisdom-gate-activity-mixed-provenance.md
+    // (addendum).
     (
         "external:qwen/qwen3-embedding-4b:activity:two-stage:restricted-cosine",
         0.70,

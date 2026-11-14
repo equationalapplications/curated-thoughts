@@ -89,127 +89,127 @@
 {"text": "cat home/kv-thinkpad-t420-ubuntu/Documents/equational-wiki/immutable-source-files/agents/projects/synapsetree-byok-open-questions-decision-log.md", "expect": ["fact_ad277819bf29e30ce02bbb1f"]}
 {"text": "synapsetree byok open questions decision log", "expect": ["fact_ad277819bf29e30ce02bbb1f"]}
 {"text": "src/__tests__/errorFeed.test.ts", "expect": []}
-{"text": "src/__tests__/a11y-contrast.test.ts", "expect": []}
-{"text": "src-tauri/src/recall_bench_fixture.rs", "expect": []}
-{"text": "src/hooks/useRelatedChunks.ts", "expect": []}
-{"text": "src/__tests__/BrainMode.test.tsx", "expect": []}
-{"text": "docs/superpowers/specs/2026-09-08-wiki-edge-integrity-wave-design.md", "expect": []}
-{"text": "src-tauri/src/wiki_graph.rs", "expect": []}
-{"text": "src/components/modes/BrainMode.tsx", "expect": []}
-{"text": "src/a11y/inertGuard.ts", "expect": []}
-{"text": "docs/mcp-write-tools-okf-frontmatter.md", "expect": []}
-{"text": "src-tauri/tests/ontology_selection.rs", "expect": []}
-{"text": "docs/superpowers/specs/2026-10-01-issue253-deps-release-rule-design.md", "expect": []}
-{"text": "src/components/settings/PrivacyPanel.tsx", "expect": []}
-{"text": "src-tauri/src/db/wisdom.rs", "expect": []}
-{"text": "docs/superpowers/specs/2026-09-01-wiki-reader-contract-and-forget-outbox-design.md", "expect": []}
-{"text": "src/__tests__/applyOntologyChange.test.ts", "expect": []}
-{"text": "src/hooks/useChunkOverlay.ts", "expect": []}
-{"text": "calibration-run/grid-20261018-activity/sweep-path-chunk-hop-f0.55.json", "expect": []}
-{"text": "src-tauri/tests/vault_config_regression.rs", "expect": []}
-{"text": "tools/tests/ct_watch_e2e.rs", "expect": []}
-{"text": "src-tauri/tests/config_leniency.rs", "expect": []}
-{"text": "docs/superpowers/specs/2026-09-30-llm-wiki-7-9-adoption-design.md", "expect": []}
-{"text": "src-tauri/src/librarian/synthesis.rs", "expect": []}
-{"text": "src-tauri/tests/fixtures/yaml-bench-k8s-curated/qrels.json", "expect": []}
-{"text": "tools/src/bin/ingest_vault_once.rs", "expect": []}
-{"text": "docs/superpowers/specs/2026-05-07-core-llm-wiki-vector-ranker-design.md", "expect": []}
-{"text": "src-tauri/fixtures/okf/golden-v2/index.md", "expect": []}
-{"text": "src-tauri/tests/ast_symbol.rs", "expect": []}
-{"text": "src-tauri/src/okf/related_section.rs", "expect": []}
-{"text": "src-tauri/src/pipeline/watchdog/diagnostics.rs", "expect": []}
-{"text": "docs/superpowers/specs/2026-07-05-clanker-desktop-bridge-alignment-design.md", "expect": []}
-{"text": "src-tauri/src/db/breaker.rs", "expect": []}
-{"text": "src/components/review/ReviewProposalEditor.tsx", "expect": []}
-{"text": "docs/superpowers/specs/2026-10-01-issue245-frontmatter-key-drop-guard-design.md", "expect": []}
-{"text": "src-tauri/src/db/migration.rs", "expect": []}
-{"text": "src-tauri/tests/config_load.rs", "expect": []}
-{"text": "docs/superpowers/specs/2026-09-03-build-artifact-hygiene-design.md", "expect": []}
-{"text": "calibration-run/grid-20261018-activity/sweep-pattern-restricted-cosine-f0.55.json", "expect": []}
-{"text": "specs/2026-11-13-rule10-mid-task-delivery/spec.md", "expect": []}
-{"text": "src-tauri/src/pipeline/mod.rs", "expect": []}
+{"text": "src/a11y/useRovingTabindex.ts", "expect": []}
+{"text": "src-tauri/src/proposals_api.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-05-07-ast-symbol-chunking-design.md", "expect": []}
+{"text": "tools/tests/ct_write_cmds.rs", "expect": []}
+{"text": "src-tauri/src/db/entities.rs", "expect": []}
+{"text": "src-tauri/src/watcher/mod.rs", "expect": []}
+{"text": "src-tauri/tests/fixtures/wisdom_gate_bench/external_qwen_qwen3-embedding-4b_two-stage_chunk-hop/expected.json", "expect": []}
+{"text": "src/components/brain/EntityPage.tsx", "expect": []}
+{"text": "tools/tests/ct_wiki_sweep.rs", "expect": []}
 {"text": "tools/tests/ct_merge_duplicates.rs", "expect": []}
-{"text": "calibration-run/grid-20261018-activity/sweep-pattern-chunk-hop-f0.55.json", "expect": []}
-{"text": "docs/superpowers/specs/2026-08-25-ct-headless-cli-phase2-watch.md", "expect": []}
-{"text": "src/__tests__/StepIndicator.test.tsx", "expect": []}
-{"text": "src/components/modes/LibraryMode.tsx", "expect": []}
-{"text": "docs/superpowers/specs/2026-09-09-issue186-phase2-flip-design.md", "expect": []}
-{"text": "src-tauri/src/okf/concept.rs", "expect": []}
-{"text": "src/__tests__/StepFastembed.test.tsx", "expect": []}
-{"text": "docs/superpowers/specs/2026-08-24-librarian-completer-timeout-reasoning-design.md", "expect": []}
+{"text": "calibration-run/grid-20261113-activity/cells/cell-f0.72.json", "expect": []}
+{"text": "src/__tests__/StepModel.test.tsx", "expect": []}
+{"text": "src-tauri/tests/fixtures/code-bench-curated/qrels.json", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-30-llm-wiki-7-9-adoption-design.md", "expect": []}
+{"text": "src-tauri/tests/fixtures/scifact/queries.json", "expect": []}
+{"text": "src-tauri/src/chunker/ast_symbol.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-05-13-phase3-three-tier-memory.md", "expect": []}
+{"text": "src-tauri/tests/yaml_bench_synthetic.rs", "expect": []}
+{"text": "src/__tests__/a11y-contrast.test.ts", "expect": []}
+{"text": "src-tauri/tests/retrieval_facade.rs", "expect": []}
 {"text": "src/__tests__/useChunkOverlay.test.ts", "expect": []}
-{"text": "docs/superpowers/specs/2026-09-22-llm-wiki-7-7-adoption-design.md", "expect": []}
-{"text": "src/lib/searchProfiling.ts", "expect": []}
-{"text": "src-tauri/src/okf/types.rs", "expect": []}
-{"text": "src/__tests__/EditorPane.test.tsx", "expect": []}
-{"text": "src-tauri/fixtures/okf/golden-v1/entities/demo/facts/fact_beta.md", "expect": []}
-{"text": "src/__tests__/ProposalDiff.component.test.tsx", "expect": []}
-{"text": ".hermes/reviews/2026-09-24_pr228-round1-dispositions.md", "expect": []}
-{"text": "src-tauri/tests/entities_api.rs", "expect": []}
-{"text": "docs/a11y/conformance-ledger.md", "expect": []}
-{"text": "src/__tests__/SetupWizard.test.tsx", "expect": []}
-{"text": "src-tauri/tests/resolution_precedence.rs", "expect": []}
-{"text": "src-tauri/src/scifact_fixture.rs", "expect": []}
-{"text": "src/components/privacy/PrivacyShieldIcon.tsx", "expect": []}
-{"text": "src/components/privacy/EphemeralDisclosureModal.tsx", "expect": []}
-{"text": "docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/freezeD-expected.json", "expect": []}
-{"text": "src-tauri/src/setup/ollama.rs", "expect": []}
-{"text": "tools/src/walk_list.rs", "expect": []}
-{"text": "src-tauri/tests/wisdom_gate_bench.rs", "expect": []}
-{"text": "src/hooks/useIndexingStatus.ts", "expect": []}
-{"text": "src-tauri/src/db/okf_ddl.rs", "expect": []}
-{"text": "src/__tests__/AppShell.queueBadge.test.tsx", "expect": []}
-{"text": "src-tauri/fixtures/okf/golden-v1/entities/demo/tasks/task_follow.md", "expect": []}
-{"text": "src/a11y/__tests__/useRovingTabindex.test.tsx", "expect": []}
-{"text": "src-tauri/fixtures/okf/golden-v2/entities/demo/facts/fact_stale.md", "expect": []}
-{"text": "src/components/shell/SearchResults.tsx", "expect": []}
-{"text": "src-tauri/src/db/wiki_forget.rs", "expect": []}
-{"text": "docs/superpowers/specs/2026-09-23-readme-refresh-design.md", "expect": []}
-{"text": "calibration-run/grid-20261113-activity/cells/cell-f0.55.json", "expect": []}
+{"text": "src/components/brain/EntitySummarySection.tsx", "expect": []}
+{"text": "src/__tests__/safeUnlisten.test.ts", "expect": []}
+{"text": "docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/cellD.json", "expect": []}
+{"text": "tools/src/paths.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-10-14-core-llm-wiki-7.13.0-bump-design.md", "expect": []}
+{"text": "src/__tests__/EntityPage.test.tsx", "expect": []}
 {"text": "src/components/review/ReviewQueueList.tsx", "expect": []}
-{"text": "src-tauri/tests/librarian_evidence_e2e.rs", "expect": []}
-{"text": "src-tauri/src/db/evidence_reanchor.rs", "expect": []}
-{"text": "src/lib/wiki.ts", "expect": []}
-{"text": "docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/step0-curves-ADE.json", "expect": []}
-{"text": "src/__tests__/TimelineMode.test.tsx", "expect": []}
-{"text": ".hermes/reviews/2026-09-24_pr228-round3-dispositions.md", "expect": []}
-{"text": "calibration-run/grid-20261018-activity/sweep-command-restricted-cosine-f0.70.json", "expect": []}
-{"text": "docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/step0-bootstrap.json", "expect": []}
-{"text": "src-tauri/src/chunker/prose.rs", "expect": []}
-{"text": "src-tauri/src/watcher/fs_watcher.rs", "expect": []}
-{"text": "tools/tests/ct_graph_wiki.rs", "expect": []}
-{"text": "tools/src/bin/export_okf_bundle.rs", "expect": []}
-{"text": "docs/superpowers/specs/2026-08-31-ingest-drain-stall-watchdog-design.md", "expect": []}
-{"text": "docs/superpowers/specs/2026-09-03-trusted-link-load-boundary-validation-design.md", "expect": []}
-{"text": "docs/superpowers/plans/2026-10-07-issue265-wisdom-instruction-prefix.md", "expect": []}
-{"text": "docs/superpowers/specs/2026-05-11-default-vault-and-vault-switching-design.md", "expect": []}
-{"text": "src/jest-dom-vitest.d.ts", "expect": []}
-{"text": "docs/superpowers/specs/2026-09-15-clippy-enforcement-design.md", "expect": []}
-{"text": "docs/superpowers/specs/2026-09-15-deletion-side-effects-design.md", "expect": []}
-{"text": "tools/src/graph_reanchor.rs", "expect": []}
+{"text": "src/components/review/ReviewProposalEditor.tsx", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-28-issue240-shrink-guard-investigation.md", "expect": []}
+{"text": "src-tauri/src/db/heal_ontology.rs", "expect": []}
+{"text": "src-tauri/tests/chunk_commands.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-01-memory-architecture-intent-implementation-design.md", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-03-release-toolchain-guard-design.md", "expect": []}
+{"text": "docs/superpowers/specs/2026-08-22-dependency-remediation-design.md", "expect": []}
+{"text": "src-tauri/src/db/outbox_format.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-08-wiki-edge-integrity-wave-design.md", "expect": []}
+{"text": "calibration-run/grid-20261018-activity/sweep-pattern-chunk-hop-f0.55.json", "expect": []}
+{"text": "src-tauri/fixtures/okf/golden-v1/entities/demo/facts/fact_alpha.md", "expect": []}
+{"text": "src-tauri/tests/code_bench_synthetic.rs", "expect": []}
+{"text": "calibration-run/grid-20261018-activity/sweep-path-chunk-hop-f0.55.json", "expect": []}
+{"text": "calibration-run/grid-20261018-activity/sweep-pattern-restricted-cosine-f0.55.json", "expect": []}
+{"text": "tools/src/bin/calibrate_wisdom_gate.rs", "expect": []}
+{"text": "src/components/settings/PrivacyPanel.tsx", "expect": []}
+{"text": "src-tauri/src/db/evidence_repair.rs", "expect": []}
+{"text": "tools/src/bin/gen_yaml_synthetic_bench.rs", "expect": []}
 {"text": "src-tauri/tests/wiki_maintenance.rs", "expect": []}
-{"text": "git log -p src-tauri/tests/vault_config_regression.rs", "expect": []}
-{"text": "rg TODO docs/superpowers/specs/2026-08-25-ct-headless-cli-phase2-watch.md", "expect": []}
+{"text": "src/components/settings/AgentIntegrationPanel.tsx", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-14-watcher-extension-gate-design.md", "expect": []}
+{"text": "src-tauri/src/cloud_bridge/protocol.rs", "expect": []}
+{"text": "tools/tests/graph_reanchor.rs", "expect": []}
+{"text": "docs/benchmarks/2026-11-13-wisdom-gate-activity-mixed-provenance.md", "expect": []}
+{"text": "src-tauri/tests/wisdom_gate_bench.rs", "expect": []}
+{"text": ".hermes/reviews/2026-09-24_pr228-round1-dispositions.md", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-28-issue236-listen-registration-design.md", "expect": []}
+{"text": "src/__tests__/TimelineMode.test.tsx", "expect": []}
+{"text": "src-tauri/src/db/stated_ledger.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-10-01-issue253-deps-release-rule-investigation.md", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-04-ingest-integrity-wave-design.md", "expect": []}
+{"text": "src-tauri/tests/virtual_path.rs", "expect": []}
+{"text": "docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/freezeE-run.json", "expect": []}
+{"text": "src-tauri/tests/config_write.rs", "expect": []}
+{"text": "src/hooks/useIndexingStatus.ts", "expect": []}
+{"text": "docs/superpowers/specs/2026-08-31-ingest-drain-stall-watchdog-design.md", "expect": []}
+{"text": "src-tauri/src/mcp_server.rs", "expect": []}
+{"text": "src-tauri/tests/wisdom_gate_canary_fixture.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-10-watcher-walker-brain-dir-exclusion-design.md", "expect": []}
+{"text": "src-tauri/src/okf/zip_io.rs", "expect": []}
+{"text": "src-tauri/src/okf/related_section.rs", "expect": []}
+{"text": "docs/benchmarks/2026-10-07-wisdom-gate-qwen3-embedding-4b.md", "expect": []}
+{"text": "src/lib/reviewDecisions.ts", "expect": []}
+{"text": "src/a11y/__tests__/useRovingTabindex.test.tsx", "expect": []}
+{"text": "calibration-run/grid-20261018-100351/pick-report.json", "expect": []}
+{"text": "src/components/modes/TasksMode.tsx", "expect": []}
+{"text": "src-tauri/src/db/schema_guard.rs", "expect": []}
+{"text": "calibration-run/grid-20261113-activity/cells/cell-0.70-versioned.json", "expect": []}
+{"text": "src/components/privacy/PrivacyShieldIcon.tsx", "expect": []}
+{"text": "src/components/modes/BrainMode.tsx", "expect": []}
+{"text": "docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/cellA.json", "expect": []}
+{"text": "src/lib/wiki.ts", "expect": []}
+{"text": "src-tauri/src/recall_bench_fixture.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-08-21-phase-8-plan-b-peek-panels-design.md", "expect": []}
+{"text": ".hermes/reviews/2026-09-24_pr228-round3-dispositions.md", "expect": []}
+{"text": "docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/freezeF-expected.json", "expect": []}
+{"text": "calibration-run/grid-20261018-activity/sweep-command-restricted-cosine-f0.70.json", "expect": []}
+{"text": "src/components/settings/FolderRulesPanel.tsx", "expect": []}
+{"text": "src-tauri/src/chunker/limits.rs", "expect": []}
+{"text": "tools/src/walk_list.rs", "expect": []}
+{"text": "src-tauri/tests/entities_api.rs", "expect": []}
+{"text": "tools/src/bin/export_okf_bundle.rs", "expect": []}
+{"text": "src/__tests__/StepOllama.test.tsx", "expect": []}
+{"text": "src/components/privacy/EphemeralDisclosureModal.tsx", "expect": []}
+{"text": "docs/superpowers/specs/2026-10-23-intent-status-compliance.md", "expect": []}
+{"text": "src/__tests__/wiki.test.ts", "expect": []}
+{"text": "src-tauri/src/db/breaker.rs", "expect": []}
+{"text": "docs/superpowers/specs/2026-08-27-agent-deposit-write-path.md", "expect": []}
+{"text": "docs/superpowers/specs/2026-09-09-issue186-phase2-flip-design.md", "expect": []}
+{"text": "docs/superpowers/specs/2026-08-31-wiki-graph-reanchor-entry-embeddings-design.md", "expect": []}
+{"text": "src/__tests__/AppShell.test.tsx", "expect": []}
+{"text": "git log -p src-tauri/tests/yaml_bench_synthetic.rs", "expect": []}
+{"text": "rg TODO calibration-run/grid-20261018-activity/sweep-pattern-restricted-cosine-f0.55.json", "expect": []}
 {"text": "rg TODO calibration-run/grid-20261018-activity/sweep-command-restricted-cosine-f0.70.json", "expect": []}
-{"text": "git log -p src-tauri/src/okf/related_section.rs", "expect": []}
-{"text": "less docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/freezeD-expected.json", "expect": []}
-{"text": "less docs/superpowers/specs/2026-09-23-readme-refresh-design.md", "expect": []}
-{"text": "cat src-tauri/src/okf/related_section.rs", "expect": []}
-{"text": "less docs/superpowers/specs/2026-09-15-deletion-side-effects-design.md", "expect": []}
-{"text": "git log -p specs/2026-11-13-rule10-mid-task-delivery/spec.md", "expect": []}
-{"text": "less docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/step0-bootstrap.json", "expect": []}
-{"text": "nvim docs/superpowers/specs/2026-07-05-clanker-desktop-bridge-alignment-design.md", "expect": []}
 {"text": "git log -p src/components/review/ReviewQueueList.tsx", "expect": []}
-{"text": "less src/components/shell/SearchResults.tsx", "expect": []}
-{"text": "rg TODO src-tauri/src/db/wisdom.rs", "expect": []}
-{"text": "cat docs/superpowers/plans/2026-10-07-issue265-wisdom-instruction-prefix.md", "expect": []}
-{"text": "less src-tauri/tests/ast_symbol.rs", "expect": []}
-{"text": "cat src/components/modes/BrainMode.tsx", "expect": []}
-{"text": "less src-tauri/tests/ontology_selection.rs", "expect": []}
 {"text": "less docs/superpowers/specs/2026-08-31-ingest-drain-stall-watchdog-design.md", "expect": []}
+{"text": "less calibration-run/grid-20261113-activity/cells/cell-0.70-versioned.json", "expect": []}
+{"text": "cat src/components/review/ReviewQueueList.tsx", "expect": []}
+{"text": "less docs/superpowers/specs/2026-09-09-issue186-phase2-flip-design.md", "expect": []}
+{"text": "git log -p calibration-run/grid-20261018-activity/sweep-pattern-chunk-hop-f0.55.json", "expect": []}
+{"text": "less src/components/settings/FolderRulesPanel.tsx", "expect": []}
+{"text": "nvim docs/superpowers/specs/2026-09-28-issue240-shrink-guard-investigation.md", "expect": []}
+{"text": "git log -p src/components/modes/BrainMode.tsx", "expect": []}
+{"text": "less src/components/modes/TasksMode.tsx", "expect": []}
+{"text": "rg TODO src-tauri/tests/fixtures/code-bench-curated/qrels.json", "expect": []}
+{"text": "cat docs/superpowers/specs/2026-10-23-intent-status-compliance.md", "expect": []}
+{"text": "less src/__tests__/EntityPage.test.tsx", "expect": []}
+{"text": "cat src-tauri/tests/fixtures/wisdom_gate_bench/external_qwen_qwen3-embedding-4b_two-stage_chunk-hop/expected.json", "expect": []}
+{"text": "less tools/tests/ct_merge_duplicates.rs", "expect": []}
+{"text": "less src/__tests__/StepOllama.test.tsx", "expect": []}
 {"text": "git log -p calibration-run/grid-20261018-activity/sweep-command-restricted-cosine-f0.70.json", "expect": []}
-{"text": "less docs/superpowers/specs/2026-08-24-librarian-completer-timeout-reasoning-design.md", "expect": []}
-{"text": "cat src-tauri/src/pipeline/mod.rs", "expect": []}
-{"text": "nvim src/components/review/ReviewProposalEditor.tsx", "expect": []}
-{"text": "git log -p .hermes/reviews/2026-09-24_pr228-round3-dispositions.md", "expect": []}
-{"text": "less docs/superpowers/specs/2026-10-01-issue245-frontmatter-key-drop-guard-design.md", "expect": []}
+{"text": "less src/components/settings/AgentIntegrationPanel.tsx", "expect": []}
+{"text": "cat src-tauri/fixtures/okf/golden-v1/entities/demo/facts/fact_alpha.md", "expect": []}
+{"text": "nvim src-tauri/tests/chunk_commands.rs", "expect": []}
+{"text": "git log -p docs/benchmarks/2026-10-07-wisdom-gate-prefix-2x2/freezeF-expected.json", "expect": []}
+{"text": "less docs/superpowers/specs/2026-09-01-memory-architecture-intent-implementation-design.md", "expect": []}
