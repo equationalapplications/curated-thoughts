@@ -114,10 +114,9 @@ pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
     // 125 negatives) — membership unchanged. Still 0.70: the lowest floor passing
     // the #282 letter (act hit@1 0.167 >= baseline 0.167, act FP 3 <= baseline
     // FP 3 — the letter's FP criterion is RELATIVE to the baseline, and this
-    // pool's refreshed negative set is no longer FP-0 anywhere the letter
-    // passes: FP 2 persists to 0.76, FP 0 only at 0.78 where hit@1 0.122 is
-    // below baseline, so no FP-0 letter-passing floor exists; 0.70 preserves
-    // the most recall). Cells (all ONE unified
+    // pool's refreshed negative set is no longer FP-0 anywhere: FP 2 persists to
+    // 0.76 while hit@1 drops below baseline at 0.74, so no FP-0 letter-passing
+    // floor exists; 0.70 preserves the most recall). Cells (all ONE unified
     // build 5fdef5f3, CT_BUILD_SHA) `calibration-run/grid-20261113-activity/cells/`
     // — docs/benchmarks/2026-11-13-wisdom-gate-activity-mixed-provenance.md
     // (addendum).
@@ -1266,6 +1265,15 @@ pub fn wisdom_match_two_stage_with_v1(
     //   cell 4: ts present + cov = 100%        → two-stage runs
     // The cell decision ITSELF is re-derived inside the core from the same
     // floors; here we only route (and the core re-probes coverage).
+    //
+    // Corrections BEFORE selection: the resolver maps each excluded id to its
+    // reachable live head. That head must join the selection skip set
+    // (`exclude` ∪ correction heads) BEFORE `two_stage_entries`
+    // runs — otherwise a rule-reachable head can appear in `ts_entries` AND in
+    // `corrections`, delivered twice ("one id, one list"). The resolver itself
+    // is unchanged (no provenance filter, by design).
+    let corrections = find_corrections_public(conn, exclude, now_ms, scheme)?;
+    let correction_heads: HashSet<String> = corrections.iter().map(|c| c.id.clone()).collect();
     let (ts_entries, outcome) = two_stage_entries(
         conn,
         query_vec_raw,
@@ -1275,7 +1283,7 @@ pub fn wisdom_match_two_stage_with_v1(
         ts_floor,
         max,
         &exclude.iter().cloned().collect(),
-        &HashSet::new(),
+        &correction_heads,
         now_ms,
         profile_key,
         kind,
@@ -1313,9 +1321,8 @@ pub fn wisdom_match_two_stage_with_v1(
     }
 
     // Two-stage ran: the arm's entries ARE the final entries. Corrections
-    // flow through the v1 resolver unchanged (the entries themselves carry
-    // the skip set already).
-    let corrections = find_corrections_public(conn, exclude, now_ms, scheme)?;
+    // were resolved BEFORE selection (their heads joined the skip set), so
+    // a reachable head can never also appear in `ts_entries`.
     Ok(TwoStageRun {
         result: WisdomMatch {
             schema: SCHEMA_VERSION,
@@ -3027,48 +3034,68 @@ mod tests {
 
     /// Issue #344 Task 3 Step 5: with the aperture removed, agent-tier facts
     /// deliver on the activity path, and the exactly-once discipline holds —
-    /// the `exclude ∪ corrections_absent_ids` skip set keeps each id at
-    /// exactly one appearance across the run.
+    /// across BOTH delivery lists (entries + corrections), each id appears at
+    /// most once. Drives the ORCHESTRATOR (`wisdom_match_two_stage_with_v1`):
+    /// the correction head joins the selection skip set BEFORE selection
+    /// (CodeRabbit #349), so a rule-reachable head of an excluded fact can
+    /// never ALSO appear in `ts_entries` and be delivered twice.
     #[test]
     fn activity_exactly_once_with_agent_tier_correction_and_fact() {
         let conn = fixture();
         // Mirror the seeding shape of the neighboring tests: rule-(ii)-
         // reachable rows (evidence names h-c1), u4 blobs (cosine 0 vs the
-        // u1 query) so the id tie-break governs.
+        // u1 query) so the id tie-break governs. The head f-corr is
+        // librarian_inferred AND rule-(ii)-reachable from the fixture's
+        // chunk, so the pre-fix orchestrator delivered it BOTH as a stage
+        // entry and as a correction.
         seed_aperture_entry(&conn, "f-corr", "librarian_inferred");
         seed_aperture_entry(&conn, "f-old", "librarian_inferred");
         seed_aperture_entry(&conn, "f-plain", "librarian_inferred");
-        // f-old is superseded by f-corr; the correction channel (driven by
-        // the caller from find_corrections) delivers f-corr for the absent
-        // f-old, so f-old rides the skip set.
+        // f-old is superseded by f-corr; the caller excludes f-old and the
+        // orchestrator resolves the correction (head f-corr) itself.
         supersede(&conn, "f-old", "f-corr");
-        let (entries, _outcome) = two_stage_entries(
+        let m = wisdom_match_two_stage_with_v1(
             &conn,
             &unit_vec(1),
             &unit_vec(1),
             Scheme::Raw,
-            None,
-            Some(0.40), // the activity composite floor (test table)
             8,
-            &HashSet::new(),
-            &HashSet::from(["f-old".to_string()]),
+            &["f-old".to_string()],
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
         )
-        .unwrap();
-        let count = |id: &str| entries.iter().filter(|e| e.id == id).count();
+        .unwrap()
+        .result;
+        let entries_count = |id: &str| m.entries.iter().filter(|e| e.id == id).count();
+        let total_count =
+            |id: &str| m.entries.iter().chain(m.corrections.iter()).filter(|e| e.id == id).count();
+        // Entries-level assertions (unchanged shape for the unrelated rows).
+        // The head itself is carried by the CORRECTIONS channel: it joins
+        // the selection skip set, so it never also appears as an entry.
         assert_eq!(
-            count("f-corr"),
-            1,
-            "the correction head appears EXACTLY once across the run"
+            entries_count("f-corr"),
+            0,
+            "the head rides the corrections channel, never duplicated as an entry"
         );
         assert_eq!(
-            count("f-plain"),
+            entries_count("f-plain"),
             1,
             "the ordinary agent-tier fact appears EXACTLY once"
         );
-        assert_eq!(count("f-old"), 0, "the superseded id never delivers");
+        assert_eq!(entries_count("f-old"), 0, "the superseded id never delivers");
+        // Across BOTH lists: the head is delivered exactly once TOTAL.
+        assert_eq!(
+            total_count("f-corr"),
+            1,
+            "the head must not be double-delivered (entry + correction)"
+        );
+        assert_eq!(
+            m.corrections.len(),
+            1,
+            "the exclusion still carries the correction channel"
+        );
+        assert_eq!(m.corrections[0].supersedes, vec!["f-old"]);
     }
 
     /// rev-8 M2 / spec §4: `QueryKind::Activity` + explicit `--single-stage`
