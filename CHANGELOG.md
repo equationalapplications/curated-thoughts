@@ -1,3 +1,17 @@
+## [3.13.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.12.0...v3.13.0) (2026-11-14)
+
+### Features
+
+* **config:** ct_folder_age_days scalar function + register_ct_functions (issue [#347](https://github.com/equationalapplications/curated-thoughts/issues/347)) ([89f98b6](https://github.com/equationalapplications/curated-thoughts/commit/89f98b681c60d37a3ac6a4f1ce68d22098273ab4))
+* **config:** ingest.folder_ages — per-folder chunk age-out (issue [#347](https://github.com/equationalapplications/curated-thoughts/issues/347)) ([b18b1be](https://github.com/equationalapplications/curated-thoughts/commit/b18b1be14dacf169fc91976e064f78c6103fae67))
+* **search:** age-out predicate in the shared chunk-search SQL (issue [#347](https://github.com/equationalapplications/curated-thoughts/issues/347)) ([83c21bb](https://github.com/equationalapplications/curated-thoughts/commit/83c21bb1890acfa7f8508b2e749494291839d660))
+* **search:** register the age predicate at every filtered consumer + completeness test (issue [#347](https://github.com/equationalapplications/curated-thoughts/issues/347)) ([d6f241d](https://github.com/equationalapplications/curated-thoughts/commit/d6f241de253524f368635f7007af25184468007a))
+
+### Bug Fixes
+
+* **config:** raw_ingest preservation marker on folder_ages salvage drops; record benchmark-pending for the step-4 battery (CodeRabbit [#350](https://github.com/equationalapplications/curated-thoughts/issues/350)) ([6a67a7b](https://github.com/equationalapplications/curated-thoughts/commit/6a67a7b5a14b89b4ee73634525b78d4db75077fc))
+* **config:** try configured and canonical vault-root prefixes in ct_folder_age_days (CodeRabbit [#350](https://github.com/equationalapplications/curated-thoughts/issues/350)) ([4e1cf13](https://github.com/equationalapplications/curated-thoughts/commit/4e1cf13d68cdaf9d18bd88a123bf237bf9daa88a))
+
 ## [3.12.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.7...v3.12.0) (2026-11-14)
 
 ### Features
