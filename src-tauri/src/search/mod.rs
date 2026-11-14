@@ -147,14 +147,26 @@ pub fn semantic_search(
     query_vec: &[f32],
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = {
+        crate::register_ct_functions(conn);
+        conn.prepare(
         "SELECT e.chunk_id, e.vector, c.chunk_text, c.position, c.start_line, c.end_line, \
          COALESCE(c.symbol_name, '') as symbol_name, c.strategy, c.entity_id, d.path
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
          JOIN documents d ON d.id = c.doc_id
-         WHERE d.status = 'indexed'",
-    )?;
+         WHERE d.status = 'indexed'
+         AND (
+           ct_folder_age_days(d.path) IS NULL
+        OR (SELECT MIN(ir.run_at) FROM ingest_runs ir
+             WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed') IS NULL
+        OR (unixepoch()
+            - (SELECT MIN(ir.run_at) FROM ingest_runs ir
+               WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed')) / 86400
+            <= ct_folder_age_days(d.path)
+         )",
+    )?
+    };
 
     let mut results: Vec<(f32, SearchResult)> = Vec::new();
     let mut rows = stmt.query([])?;
@@ -206,12 +218,24 @@ pub fn related_chunks(
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
     let doc_vecs: Vec<Vec<f32>> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = {
+            crate::register_ct_functions(conn);
+            conn.prepare(
             "SELECT e.vector FROM embeddings e
              JOIN chunks c ON c.id = e.chunk_id
              JOIN documents d ON d.id = c.doc_id
-             WHERE d.path = ?1 AND d.status = 'indexed'",
-        )?;
+             WHERE d.path = ?1 AND d.status = 'indexed'
+             AND (
+               ct_folder_age_days(d.path) IS NULL
+            OR (SELECT MIN(ir.run_at) FROM ingest_runs ir
+                 WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed') IS NULL
+            OR (unixepoch()
+                - (SELECT MIN(ir.run_at) FROM ingest_runs ir
+                   WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed')) / 86400
+                <= ct_folder_age_days(d.path)
+             )",
+        )?
+        };
         let mut rows = stmt.query([doc_path])?;
         let mut vecs = Vec::new();
         while let Some(row) = rows.next()? {
@@ -235,14 +259,26 @@ pub fn related_chunks(
     let n = doc_vecs.len() as f32;
     avg.iter_mut().for_each(|x| *x /= n);
 
-    let mut stmt = conn.prepare(
+    let mut stmt = {
+        crate::register_ct_functions(conn);
+        conn.prepare(
         "SELECT e.chunk_id, e.vector, c.chunk_text, c.position, c.start_line, c.end_line, \
          COALESCE(c.symbol_name, '') as symbol_name, c.strategy, c.entity_id, d.path
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
          JOIN documents d ON d.id = c.doc_id
-         WHERE d.path != ?1 AND d.status = 'indexed'",
-    )?;
+         WHERE d.path != ?1 AND d.status = 'indexed'
+         AND (
+           ct_folder_age_days(d.path) IS NULL
+        OR (SELECT MIN(ir.run_at) FROM ingest_runs ir
+             WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed') IS NULL
+        OR (unixepoch()
+            - (SELECT MIN(ir.run_at) FROM ingest_runs ir
+               WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed')) / 86400
+            <= ct_folder_age_days(d.path)
+         )",
+    )?
+    };
 
     let mut results: Vec<(f32, SearchResult)> = Vec::new();
     let mut rows = stmt.query([doc_path])?;

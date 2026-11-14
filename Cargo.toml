@@ -27,7 +27,7 @@ schemars = { version = "1", features = ["derive"] }
 # src-tauri needs ["full", "test-util"]; tools needs ["rt", "macros", "signal"].
 tokio = { version = "1" }
 # "backup" is src-tauri-only.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 # Three sites, two feature sets: src-tauri's optional dependency and tools both
 # use ["macros", "transport-io", "schemars"], but src-tauri's dev-dependency
 # uses ["client", "transport-child-process"]. Carrying features here would

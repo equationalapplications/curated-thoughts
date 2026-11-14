@@ -2,6 +2,8 @@
 //! via the real retrieval API (Task 2 pattern from shared_queries.rs).
 #![allow(dead_code)]
 
+pub mod ct_age;
+
 use std::fs;
 use std::process::{Command, Output};
 
@@ -11,7 +13,7 @@ use tempfile::tempdir;
 use tauri_app_lib::chunker::{Chunk, ChunkStrategyTag};
 use tauri_app_lib::embedder::embed_one;
 use tauri_app_lib::retrieval::{
-    self, insert_chunk, insert_embedding, mark_document_indexed, upsert_document, AppDb,
+    self, AppDb, insert_chunk, insert_embedding, mark_document_indexed, upsert_document,
 };
 
 pub const AST_CHUNK_TEXT: &str = "fn my_fn() { todo!() }";

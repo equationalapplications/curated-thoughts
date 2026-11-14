@@ -80,6 +80,15 @@ pub const RECALL_CHUNKS_SQL_BASE: &str = "
     JOIN documents d ON c.doc_id = d.id
     JOIN embeddings e ON e.chunk_id = c.id
     WHERE d.status = 'indexed'
+    AND (
+      ct_folder_age_days(d.path) IS NULL
+   OR (SELECT MIN(ir.run_at) FROM ingest_runs ir
+        WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed') IS NULL
+   OR (unixepoch()
+       - (SELECT MIN(ir.run_at) FROM ingest_runs ir
+          WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed')) / 86400
+       <= ct_folder_age_days(d.path)
+    )
 ";
 pub const RECALL_CHUNKS_AST_FILTER: &str = " AND c.strategy LIKE 'ast%'";
 
@@ -313,6 +322,11 @@ pub fn recall_chunks(
     ast_only: bool,
 ) -> Result<Vec<ScoredChunk>> {
     let query_embedding = embed_one(profile, query.to_string()).context("failed to embed query")?;
+    // Register the working-memory-age scalar before every prepare — the
+    // SQL below references ct_folder_age_days (Task 4 registers at the
+    // sidecar bin sites; this library entry point needs it too for the
+    // shared-query gate to hold).
+    tauri_app_lib::register_ct_functions(conn);
     let mut sql = RECALL_CHUNKS_SQL_BASE.to_string();
     if ast_only {
         sql.push_str(RECALL_CHUNKS_AST_FILTER);
@@ -1314,7 +1328,22 @@ mod tests {
         assert!(RECALL_CHUNKS_AST_FILTER.starts_with(" AND "));
         assert!(!RECALL_CHUNKS_AST_FILTER.contains("indexed"));
         let joined = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
-        assert!(joined.matches("WHERE").count() == 1);
+        // 3 WHEREs since working-memory-age: the base WHERE plus the two
+        // age-fragment subqueries (plan Task 3 Step 2).
+        assert!(joined.matches("WHERE").count() == 3);
+    }
+
+    #[test]
+    fn recall_chunks_sql_base_carries_the_age_out_fragment() {
+        // The working-memory-age predicate (spec 2026-11-13): both NULL
+        // arms mandatory, `outcome = 'indexed'` only. The exact text is
+        // part of the verbatim-twin contract with src-tauri's copy.
+        assert!(RECALL_CHUNKS_SQL_BASE.contains("ct_folder_age_days(d.path) IS NULL"));
+        assert!(RECALL_CHUNKS_SQL_BASE.contains(
+            "(SELECT MIN(ir.run_at) FROM ingest_runs ir\n        WHERE ir.doc_id = c.doc_id AND ir.outcome = 'indexed') IS NULL"
+        ));
+        assert!(RECALL_CHUNKS_SQL_BASE.contains("<= ct_folder_age_days(d.path)"));
+        assert!(RECALL_CHUNKS_SQL_BASE.contains("unixepoch()"));
     }
 
     #[test]
