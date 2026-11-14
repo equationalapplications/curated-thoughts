@@ -2,16 +2,16 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use rmcp::{handler::server::wrapper::Parameters, tool, tool_router, ServiceExt};
+use rmcp::{ServiceExt, handler::server::wrapper::Parameters, tool, tool_router};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 use curated_thoughts_tools::cli_common::{
-    fetch_ranked_chunks, rank_wiki_entries as shared_rank_wiki_entries, resolve_symbol,
-    RECALL_CHUNKS_AST_FILTER, RECALL_CHUNKS_SQL_BASE,
+    RECALL_CHUNKS_AST_FILTER, RECALL_CHUNKS_SQL_BASE, fetch_ranked_chunks,
+    rank_wiki_entries as shared_rank_wiki_entries, resolve_symbol,
 };
-use tauri_app_lib::embedder::{embed_batch, EmbedProfile};
+use tauri_app_lib::embedder::{EmbedProfile, embed_batch};
 use tauri_app_lib::retrieval;
 
 fn rmcp_internal(e: anyhow::Error) -> rmcp::ErrorData {
@@ -237,6 +237,7 @@ impl VaultMcpServer {
         // Code chunks: real chunker strategies (ast_*). Vectors live in the
         // separate embeddings table.
         let code_sql = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
+        tauri_app_lib::register_ct_functions(&conn);
         let code_chunks = fetch_ranked(&conn, &code_sql, limit_code)?;
 
         // Build response
@@ -361,6 +362,7 @@ impl VaultMcpServer {
             })?;
 
         let mut sql = format!("{RECALL_CHUNKS_SQL_BASE}{RECALL_CHUNKS_AST_FILTER}");
+        tauri_app_lib::register_ct_functions(&conn);
 
         if let Some(ref sym) = symbol {
             sql.push_str(" AND c.symbol_name LIKE '%' || ?1 || '%'");
@@ -421,7 +423,7 @@ impl VaultMcpServer {
                     return Err(rmcp::ErrorData::internal_error(
                         format!("no chunk found with symbol '{sym}'"),
                         None,
-                    ))
+                    ));
                 }
             }
         } else {
@@ -714,8 +716,8 @@ mod tests {
     fn recall_wiki_tolerates_mixed_updated_at_types() {
         let conn = open_fixture_db();
         insert_entry(&conn, "newest", "Farmhouse Notes", "1756000000", "inferred"); // INTEGER epoch
-                                                                                    // TEXT-form value from an older writer: unparseable -> coerces to 0,
-                                                                                    // but its higher confidence keeps the expected order deterministic.
+        // TEXT-form value from an older writer: unparseable -> coerces to 0,
+        // but its higher confidence keeps the expected order deterministic.
         insert_entry(&conn, "middle", "Farmhouse Ledger", "'[PHONE]'", "verified");
         insert_entry(&conn, "unknown", "Farmhouse Chores", "NULL", "inferred"); // NULL
 
