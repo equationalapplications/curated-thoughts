@@ -221,18 +221,14 @@ mod tests {
         let vault = tempfile::TempDir::new().unwrap();
         let brain = vault.path().join(BRAIN_DIR);
         std::fs::create_dir_all(&brain).unwrap();
-        let confirmations = match enabled {
-            Some(false) => r#","confirmations":{"enabled":false}"#,
-            Some(true) => r#","confirmations":{"enabled":true}"#,
-            None => "",
-        };
-        let config = format!(
-            r#"{{"vault_path":"{}",{}}}"#,
-            vault.path().display(),
-            confirmations.trim_start_matches(',')
-        );
+        // Build the config with serde (not format!): a backslash-bearing
+        // vault path must land as a properly escaped JSON string.
+        let mut config = serde_json::json!({ "vault_path": vault.path() });
+        if let Some(enabled) = enabled {
+            config["confirmations"] = serde_json::json!({ "enabled": enabled });
+        }
         let config_path = brain.join("config.json");
-        std::fs::write(&config_path, config).unwrap();
+        std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
         (vault, config_path)
     }
 

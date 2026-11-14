@@ -2087,6 +2087,22 @@ impl BrainConfig {
             }
         }
         obj.insert("wiki".to_string(), wiki_value);
+        // Persist the confirmations block (CodeRabbit #349): `write()` is a
+        // raw-document merge — without this insert, a `confirmations.enabled`
+        // flip was never written back to disk. Typed keys win (a modeled
+        // `enabled` overwrites the on-disk one); UNKNOWN nested keys in the
+        // on-disk block survive the round-trip, like every other modeled
+        // section above.
+        let mut conf_value = serde_json::to_value(&self.confirmations)?;
+        if let (Some(conf_obj), Some(preserved_obj)) = (
+            conf_value.as_object_mut(),
+            obj.get("confirmations").and_then(|v| v.as_object()),
+        ) {
+            for (k, v) in preserved_obj {
+                conf_obj.entry(k.clone()).or_insert(v.clone());
+            }
+        }
+        obj.insert("confirmations".to_string(), conf_value);
         // F4/R2.2.4: persist the ingest-policy block (empty maps serialize
         // as `{}`, keeping the block visible and hand-editable) — UNLESS the
         // load was degraded (`raw_ingest` set): then leave the ON-DISK
@@ -3061,6 +3077,34 @@ mod tests {
         // fixture directory the loads below must read.
         let report = BrainConfig::load_lenient(&paths).unwrap();
         assert!(report.config.ontology_degraded.global);
+    }
+
+    /// CodeRabbit #349: `write()` persists the confirmations block — a
+    /// `confirmations.enabled=false` round-trips through load→write→reload,
+    /// and UNKNOWN nested keys in the on-disk confirmations block survive
+    /// (typed keys win, like every other modeled section).
+    #[test]
+    fn write_persists_confirmations_block_and_unknown_nested_keys_survive() {
+        let (_tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"vault_path":"/v","confirmations":{"enabled":false,"experimental_channel":"beta"}}"#,
+        );
+        let cfg = BrainConfig::load(&paths).unwrap();
+        assert!(!cfg.confirmations.enabled);
+        cfg.write(&paths).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.config_path).unwrap()).unwrap();
+        let conf = root.get("confirmations").expect("confirmations block written");
+        assert_eq!(conf.get("enabled"), Some(&serde_json::json!(false)));
+        // Unknown nested key survived the write cycle.
+        assert_eq!(
+            conf.get("experimental_channel"),
+            Some(&serde_json::json!("beta"))
+        );
+        // And it still reloads as OFF (no silent reset to the default ON).
+        let again = BrainConfig::load(&paths).unwrap();
+        assert!(!again.confirmations.enabled);
     }
 
     /// R2.2.4: degraded load + write → the on-disk ingest block survives
