@@ -137,6 +137,7 @@ mod tests {
     /// the cutoff applies either way (both captured once per
     /// registration; no per-row filesystem calls).
     #[test]
+    #[cfg(unix)] // std::os::unix::fs::symlink has no Windows counterpart
     fn ct_folder_age_days_tries_canonical_prefix_when_configured_misses() {
         let tmp = tempfile::TempDir::new().unwrap();
         let real_root = tmp.path().join("real_vault");
