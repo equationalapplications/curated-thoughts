@@ -472,8 +472,8 @@ impl IngestConfig {
             // absolute branch, so the vault root is never consulted.
             PrefixOutcome::NoMatch | PrefixOutcome::Unplaceable => None,
         };
-        if under.is_some() {
-            return under.unwrap();
+        if let Some(resolved) = under {
+            return resolved;
         }
         // The folder ITSELF (query is the bare folder name, no file
         // component): exact normalized-key match, larger wins on a tie.
