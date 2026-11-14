@@ -189,3 +189,72 @@ The three leaking negatives are real repo files (absent from the brain
 corpus by construction) whose basenames now collide topically with live
 facts — a labeling artifact of the v2 negative style under repo drift, not a
 gate regression: the baseline leaks the same probes.
+
+## Addendum 2 — sampler v2: embedding/scheme eligibility (CodeRabbit #349, second re-run, same day)
+
+Review follow-up 4570174108: the first re-run's sampler applied temporal
+eligibility but NOT the scorer's embedding/scheme eligibility — a positive
+with a NULL `embedding_blob` or an embedding from another scheme can never be
+returned by `score_entries` and was silently counted as a miss, biasing the
+floor down. `gen_probes.py` now applies the scorer's FULL
+`entry_eligibility_where` predicate (wisdom_match.rs:465-483) for the run's
+scheme: non-null title/body, `embedding_blob IS NOT NULL`, and
+`AND embed_scheme = 'raw'` (V27+ shape), on top of the temporal arms and
+`deleted_at IS NULL` from the first fix.
+
+**Pool effect.** The positive pool DID change this time — that is the bias
+being fixed: 8 of the prior 30 sampled facts carry instr1 embeddings (889
+instr1 vs 296 raw live facts) and were silent misses. The eligible pool is 22
+facts (21 `librarian_inferred` + 1 `user_confirmed`) → 66 positive probes ×
+3 shapes + 125 negatives = **191 probes** (was 215). `probes_sha256`
+`e7b94ec7…`, `facts_sha256` in `freeze/expected.json`'s `calibration` block.
+The negatives were regenerated with `gen_negatives_v2.py` (whole-corpus
+filtering, 100 neg-path + 25 neg-command): an intermediate regen that reused
+`gen_probes.py`'s INLINE perturbation negatives reintroduced the DISCARDED
+v1 style (positive-stem perturbations sit inside the brain's topic space) and
+failed the FP-0 kernel replay at FP 28/125 — caught by the gate, discarded,
+never used for any floor decision.
+
+**Grid (unified build 5fdef5f3, ALL 9 cells re-run, restricted-cosine k=8,
+baseline = v1 @ registered raw floor 0.70):**
+
+| floor | act hit@1 | act FP (of 125) | base hit@1 | base FP | letter |
+|---|---|---|---|---|---|
+| 0.55 | 0.576 | 75 | 0.439 | 1 | fail (FP) |
+| 0.60 | 0.561 | 48 | 0.439 | 1 | fail (FP) |
+| 0.65 | 0.530 | 15 | 0.439 | 1 | fail (FP) |
+| 0.68 | 0.485 | 7 | 0.439 | 1 | fail (FP) |
+| 0.70 | 0.439 | 1 | 0.439 | 1 | pass (FP equality) |
+| **0.72** | **0.439** | **0** | 0.439 | 1 | **pass (FP-0)** |
+| 0.74 | 0.394 | 0 | 0.439 | 1 | fail (hit@1) |
+| 0.76 | 0.333 | 0 | 0.439 | 1 | fail (hit@1) |
+| 0.78 | 0.318 | 0 | 0.439 | 1 | fail (hit@1) |
+
+`pick --grid` accepts the grid (no build-mix) and lands on 0.72.
+
+**Floor decision: MOVED 0.70 → 0.72.** The pinned re-derivation rule is the
+LOWEST FP-0 letter-passing floor per the #282 letter. On this pool 0.70
+passes only on FP equality (act FP 1 == baseline FP 1, hit@1 equal), while
+0.72 passes with act FP 0 (hit@1 still equal to baseline; hit@2 strictly
+higher). 0.74+ fail on hit@1 (0.394 < 0.439), so 0.72 is the pick and the
+boundary is clean on both sides. `WISDOM_GATE_FLOORS` row updated
+0.70 → 0.72 with the derivation recorded in the row comment.
+
+**Freeze + replay.** Fresh freeze (`calibrate_wisdom_gate --freeze`, same
+disclosed temporary fixture-size gate-disable, reverted before commit;
+`tools/` carries no diff) regenerated `vectors.json.gz` (22 facts + 191
+probes, raw scheme, 2560-dim — byte format identical to the prior snapshot);
+`expected.json` = verbatim `calibrate_two_stage flip` output on cell-f0.72 +
+updated `calibration`/`freeze_provenance` blocks. FP-0 replay and the full
+bench suite re-run on the new snapshot at floor 0.72 (results in the PR
+#349 reply).
+
+**Honesty note.** The absolute hit@1/FP numbers moved sharply from addendum 1
+(hit@1 0.167→0.439, FP 3→1) for stacked reasons: the pool shrank to
+scheme-eligible facts (66 positives — denominators changed), and the
+negative set regenerated against the smaller stem set / current repo state
+(`random.seed(344)` on a different population). The letter is relative to the
+baseline and both arms share every drift effect. One baseline negative still
+leaks (repo-drift labeling artifact, same as addendum 1); at 0.72 the
+two-stage arm no longer leaks it. The two addenda's absolute numbers are NOT
+comparable.

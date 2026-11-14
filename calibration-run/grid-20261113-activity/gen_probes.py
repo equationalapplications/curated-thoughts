@@ -25,9 +25,20 @@ now_ms = int(time.time() * 1000)
 cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_wiki_entries)").fetchall()}
 elig_sql = "AND (superseded_by IS NULL OR superseded_at > :now) " if "superseded_by" in cols else ""
 elig_sql += "AND (valid_to IS NULL OR valid_to > :now) " if "valid_to" in cols else ""
+# Embedding/scheme eligibility (CodeRabbit 4570174108): a positive with a
+# NULL embedding_blob or an embedding from ANOTHER scheme can never be
+# returned by score_entries — it would be silently counted as a miss and
+# bias the floor down. Apply the scorer's `entry_eligibility_where`
+# predicates (wisdom_match.rs:465-483) for THIS run's scheme (raw):
+# non-null title/body/blob + `AND embed_scheme = 'raw'` on the V27+ shape
+# (empty on pre-V27, where rows are de-facto raw).
+RUN_SCHEME = "raw"
+elig_sql += "AND e.title IS NOT NULL AND e.body IS NOT NULL "
+elig_sql += "AND e.embedding_blob IS NOT NULL "
+elig_sql += f"AND e.embed_scheme = '{RUN_SCHEME}' " if "embed_scheme" in cols else ""
 rows = conn.execute(
-    "SELECT id, source_type, title, body FROM llm_wiki_entries "
-    "WHERE deleted_at IS NULL " + elig_sql,
+    "SELECT id, source_type, title, body FROM llm_wiki_entries e "
+    "WHERE e.deleted_at IS NULL " + elig_sql,
     {"now": now_ms}).fetchall()
 
 PATH_RE = re.compile(r"(?:[A-Za-z0-9_\-]+/)+[A-Za-z0-9_\-]+\.(?:md|sh|rs|ts|tsx|json|py|toml|yaml|yml)")

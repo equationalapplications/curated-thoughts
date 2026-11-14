@@ -108,21 +108,26 @@ pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
     // Activity composite key (issue #282, spec §3 `<raw>:activity:two-stage:<rule>`;
     // ONE shared floor across all probe kinds): calibrated 2026-10-18 @ 0.65 on a
     // user_stated-only positive pool; re-derived 2026-11-13 from a mixed-provenance
-    // pool (issue #344) and RE-VERIFIED 2026-11-13 after the CodeRabbit #349
-    // sampler fix (temporal-eligibility-true positives, find grouping fix) on the
-    // same 30-fact pool (29 librarian_inferred + 1 user_confirmed, 90 positives,
-    // 125 negatives) — membership unchanged. Still 0.70: the lowest floor passing
-    // the #282 letter (act hit@1 0.167 >= baseline 0.167, act FP 3 <= baseline
-    // FP 3 — the letter's FP criterion is RELATIVE to the baseline, and this
-    // pool's refreshed negative set is no longer FP-0 anywhere: FP 2 persists to
-    // 0.76 while hit@1 drops below baseline at 0.74, so no FP-0 letter-passing
-    // floor exists; 0.70 preserves the most recall). Cells (all ONE unified
-    // build 5fdef5f3, CT_BUILD_SHA) `calibration-run/grid-20261113-activity/cells/`
-    // — docs/benchmarks/2026-11-13-wisdom-gate-activity-mixed-provenance.md
-    // (addendum).
+    // pool (issue #344) and RE-VERIFIED 2026-11-13 TWICE after the CodeRabbit
+    // #349 sampler fixes: first temporal-eligibility-true positives + find
+    // grouping, then (second re-run) the scorer's FULL embedding/scheme
+    // eligibility in sampling (embedding_blob IS NOT NULL + embed_scheme =
+    // 'raw' + non-null title/body) — 8 of the prior 30 positives were
+    // scheme-ineligible silent misses, so the pool is now 22 fully eligible
+    // facts (21 librarian_inferred + 1 user_confirmed, 66 positives, 125
+    // v2 negatives), 191 probes. Floor MOVED 0.70 -> 0.72 on this pool: 0.70
+    // passes the #282 letter only on FP equality (act hit@1 0.439 == baseline
+    // 0.439, act FP 1 == baseline FP 1), while 0.72 is the LOWEST FP-0
+    // letter-passing floor (act hit@1 0.439 >= baseline, act FP 0 <= baseline
+    // 1) — the pinned re-derivation rule picks the lowest FP-0 letter-passing
+    // floor, and 0.74+ fail on hit@1 (0.394 < 0.439). Cells (all ONE unified
+    // build 5fdef5f3, CT_BUILD_SHA)
+    // `calibration-run/grid-20261113-activity/cells/` —
+    // docs/benchmarks/2026-11-13-wisdom-gate-activity-mixed-provenance.md
+    // (addendum 2).
     (
         "external:qwen/qwen3-embedding-4b:activity:two-stage:restricted-cosine",
-        0.70,
+        0.72,
     ),
 ];
 

@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "code_sha": "5fdef5f36b7f64af920455dd404d13d60b316b4a",
-  "generated_utc": "2026-11-13T22:55:52.096331994+00:00",
+  "generated_utc": "2026-11-14T01:35:52.970495661+00:00",
   "probes": {
-    "path": "calibration-run/grid-20261113-activity/activity-mixed-probes.jsonl",
-    "sha256": "2a5043a37f1cc65df1c8d2d99a395ad147b09beb68e6f8804a8ff682f7daf6af",
-    "count": 215,
-    "relevant": 90,
+    "path": "../activity-mixed-probes.jsonl",
+    "sha256": "e7b94ec71509007b9fd5c448d52d78fa1fc8d88bfafaa39fd5fef7e4d1562a55",
+    "count": 191,
+    "relevant": 66,
     "fp": 125
   },
   "baseline": {
@@ -31,18 +31,18 @@
     "fraction": 1.0
   },
   "single_stage": {
-    "hit2": 0.16666666666666666,
-    "hit1": 0.16666666666666666,
-    "fp": 3,
-    "opens": 27,
-    "entries_per_open": 1.3333333333333333
+    "hit2": 0.45454545454545453,
+    "hit1": 0.4393939393939394,
+    "fp": 1,
+    "opens": 36,
+    "entries_per_open": 1.4722222222222223
   },
   "two_stage": {
-    "hit2": 0.16666666666666666,
-    "hit1": 0.16666666666666666,
-    "fp": 2,
-    "opens": 23,
-    "entries_per_open": 1.3478260869565217
+    "hit2": 0.4393939393939394,
+    "hit1": 0.4393939393939394,
+    "fp": 0,
+    "opens": 33,
+    "entries_per_open": 1.4242424242424243
   },
   "two_stage_passes": true,
   "letter": "act_hit1 >= base_hit1 && act_fp <= base_fp",
@@ -50,50 +50,50 @@
   "query_kind": "path",
   "heldout": {
     "splits": 5,
-    "half_size": 107,
+    "half_size": 95,
     "seed": 271828,
     "per_split": [
       {
-        "relevant": 45,
+        "relevant": 33,
         "fp": 62,
-        "single_stage_hit2": 0.17777777777777778,
-        "two_stage_hit2": 0.17777777777777778
+        "single_stage_hit2": 0.3939393939393939,
+        "two_stage_hit2": 0.3939393939393939
       },
       {
-        "relevant": 45,
+        "relevant": 33,
         "fp": 62,
-        "single_stage_hit2": 0.2222222222222222,
-        "two_stage_hit2": 0.2222222222222222
+        "single_stage_hit2": 0.3939393939393939,
+        "two_stage_hit2": 0.36363636363636365
       },
       {
-        "relevant": 45,
+        "relevant": 33,
         "fp": 62,
-        "single_stage_hit2": 0.17777777777777778,
-        "two_stage_hit2": 0.17777777777777778
+        "single_stage_hit2": 0.45454545454545453,
+        "two_stage_hit2": 0.42424242424242425
       },
       {
-        "relevant": 45,
+        "relevant": 33,
         "fp": 62,
-        "single_stage_hit2": 0.15555555555555556,
-        "two_stage_hit2": 0.15555555555555556
+        "single_stage_hit2": 0.45454545454545453,
+        "two_stage_hit2": 0.45454545454545453
       },
       {
-        "relevant": 45,
+        "relevant": 33,
         "fp": 62,
-        "single_stage_hit2": 0.15555555555555556,
-        "two_stage_hit2": 0.15555555555555556
+        "single_stage_hit2": 0.5151515151515151,
+        "two_stage_hit2": 0.48484848484848486
       }
     ]
   },
   "embeds": {
     "per_message": 1,
     "scheme": "raw",
-    "latency_ms_p50": 57.1656361875,
-    "latency_ms_p95": 68.0960244347826
+    "latency_ms_p50": 31.7453506875,
+    "latency_ms_p95": 34.05756475
   },
   "injection": {
     "rule": "restricted-cosine",
-    "opens": 23,
+    "opens": 33,
     "entries_per_open_median": 1.0
   },
   "merge_attribution": {
@@ -102,7 +102,7 @@
     "v1merged_total": 0
   },
   "v1_merge": {
-    "latency_ms_p95": 1840.242746,
+    "latency_ms_p95": 742.95574,
     "volume_total": 0,
     "measured": "combined-call"
   },
