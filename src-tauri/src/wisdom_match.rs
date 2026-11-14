@@ -1272,7 +1272,16 @@ pub fn wisdom_match_two_stage_with_v1(
     // runs — otherwise a rule-reachable head can appear in `ts_entries` AND in
     // `corrections`, delivered twice ("one id, one list"). The resolver itself
     // is unchanged (no provenance filter, by design).
-    let corrections = find_corrections_public(conn, exclude, now_ms, scheme)?;
+    // Pre-V24 degradation (the SAME guard `wisdom_match_impl` applies at
+    // :404): `resolve_head` queries `superseded_by`, which does not exist on
+    // a pre-V24 table — with a non-empty exclude that would be a SQL error
+    // BEFORE the v1 fallback could engage. On the degraded shape resolve
+    // NOTHING; the fallback path behaves exactly as before the reorder.
+    let corrections = if temporal_columns(conn, Some(scheme))?.has_superseded_by {
+        find_corrections_public(conn, exclude, now_ms, scheme)?
+    } else {
+        Vec::new()
+    };
     let correction_heads: HashSet<String> = corrections.iter().map(|c| c.id.clone()).collect();
     let (ts_entries, outcome) = two_stage_entries(
         conn,
@@ -2332,6 +2341,55 @@ mod tests {
         assert_eq!(run.outcome.floor_key_used, "");
         assert!(run.result.entries.is_empty());
         assert_eq!(run.result.gate, GATE_UNCALIBRATED);
+    }
+
+    /// Pre-V24 degradation + non-empty exclusion list (CodeRabbit #349,
+    /// finding B): the pre-selection corrections call must degrade to
+    /// "resolve nothing" on a table WITHOUT the `superseded_by` column —
+    /// `resolve_head`'s SQL would otherwise error BEFORE the §4 cell-1 v1
+    /// fallback could engage. Pins: no SQL error, and the fallback SHAPE
+    /// identical to the pre-reorder behavior (`ran=false`, rule None, v1
+    /// result carried; the excluded id can never surface as an entry).
+    #[test]
+    fn pre_v24_table_with_nonempty_exclude_falls_back_without_sql_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_wiki_entries (
+                id TEXT PRIMARY KEY, entity_id TEXT NOT NULL, title TEXT, body TEXT,
+                source_type TEXT, embedding_blob BLOB, deleted_at INTEGER)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries VALUES ('f1', 'ent', 'T f1', 'B f1', 'user_stated', ?1, NULL)",
+            params![ts_blob(&unit_vec(4))],
+        )
+        .unwrap();
+        let run = wisdom_match_two_stage_with_v1(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            8,
+            &["excluded-old-id".to_string()],
+            TS_NOW,
+            TS_KEY,
+            QueryKind::Message,
+        )
+        .unwrap();
+        assert!(
+            !run.ran,
+            "pre-V28 coverage probe miss ⇒ cell-1 v1 fallback, never a two-stage run"
+        );
+        assert!(run.outcome.rule.is_none());
+        assert_eq!(
+            run.result.gate,
+            format!("semantic-v1:{TS_KEY}"),
+            "the fallback carries the v1 label — same behavior as before the reorder"
+        );
+        assert!(
+            !run.result.entries.iter().any(|e| e.id == "excluded-old-id"),
+            "an excluded id can never surface as an entry"
+        );
     }
 
     /// Task-5 fix round (reviewer Important #1/#2): the PUB pre-embed
