@@ -1,7 +1,7 @@
 # `areas`: statement delivery scoped to a named repo area
 
 **Date:** 2026-11-14
-**Status:** Draft — spec for approval. Q14 DECIDED (owner, 2026-11-14, msg `1571117780348964967`): C-prime, the synced `area` column. Q13 RESOLVED by the record: no fourth band. Q9 CLOSED (owner, #343): no backfill. Q11 RULED: every role gets the company band. Kind drop order: owner approved an explicit deferral to the bump lane (2026-11-14, spec stop, option 1). Backed by the converged investigation of 2026-11-13/14 (two Fable consults + a strict re-gate at APPROVE WITH NITS, $4.7405/94 turns; every decisive cite controller-verified live against CT main `35a51810`). Lane spend: $46.61.
+**Status:** Draft — spec for approval. Rev 2 (2026-11-14): addresses Opus review round 1 (3 MAJOR / 2 MINOR, all fixed: migration is V30, not V27 — V27–V29 taken; the three-arm predicate is a NEW composable function, not a change to `entry_eligibility_where`; the rename runs through the outbox). Q14 DECIDED (owner, 2026-11-14, msg `1571117780348964967`): C-prime, the synced `area` column. Q13 RESOLVED by the record: no fourth band. Q9 CLOSED (owner, #343): no backfill. Q11 RULED: every role gets the company band. Kind drop order: owner approved an explicit deferral to the bump lane (2026-11-14, spec stop, option 1). Backed by the converged investigation of 2026-11-13/14 (two Fable consults + a strict re-gate at APPROVE WITH NITS, $4.7405/94 turns; every decisive cite controller-verified live against CT main `35a51810`). Lane spend: $46.61.
 **Issue:** #345.
 
 ## 1. Problem
@@ -47,7 +47,7 @@ The ruling: a repo has a few named areas, such as "deploy", "keys" and "api". A 
 
 ## 5. Storage: the `area` column
 
-1. Add migration V27: `ALTER TABLE llm_wiki_entries ADD COLUMN area TEXT NULL;` (the latest migration today is V26, `db/connection.rs:821`).
+1. Add migration V30: `ALTER TABLE llm_wiki_entries ADD COLUMN area TEXT NULL;` (the latest migration today is V29 — V27 is the embed-scheme stamp `db/connection.rs:829`, V28 is `documents.embed_key` `:1116`, V29 `:1321`; CT wires new migrations in `db/connection.rs`, so V30 lands there with the others).
 2. The column is CT-local, added by CT's own migration. This follows the `tier` precedent (`db/schema.rs:363`) and the `embed_scheme` precedent (`db/connection.rs:1065`).
 3. The DDL mirror gate is unaffected: `package_ddl_matches_rust` (`db/ddl_compat.rs:42`) compares the package DDL only. CT-local columns live outside that comparison.
 4. The column holds the area name as spelled in the areas file. The name is self-describing on any machine. NULL means whole-repo.
@@ -77,19 +77,19 @@ A commit-only guard test passes even when the model can never emit `area`. The a
 1. `wiki_fact_outbox_payload` (`db/commit.rs:1249`) gains `area: Option<&str>`, emitted in the JSON payload.
 2. There are exactly SIX call sites; all gain the argument: `db/commit.rs:1740`, `db/commit.rs:1960`, `db/wisdom.rs:499`, `db/drafts.rs:69`, `db/restore_sync.rs:596`, `db/bundle_apply.rs:517`.
 3. The payload intentionally exceeds the engine `WikiFact` shape. The schema guard records `area` as a named CT-local divergence, like `tier` and `embed_scheme`.
-4. **The receive mechanism, named.** The payload travels as `OutboxEvent.payload` JSON to the configured sink (`outbox/mod.rs:13-21`; the `Sink` trait at `:45`). Receiving machines read entries from the remote database (INTENT rule 5). CT has no other inbound applier today.
+4. **The receive mechanism, named.** The payload travels as `OutboxEvent.payload` JSON to the configured sink (`outbox/mod.rs:14-29`, `OutboxConfig`; the `Sink` trait at `:46`). Receiving machines read entries from the remote database (INTENT rule 5). CT has no other inbound applier today.
 5. Tests: the built payload JSON carries `area`. A round trip through `sync_batch` passes the payload through unchanged. The receiving side reconstructs the row with the field.
 
 ## 9. The delivery predicate: three arms, every arm repo-bound
 
 1. `gated_entries` is brain-wide (`wisdom_match.rs:541-547`). Every arm must bind the repo or org hub. A fragment that omits the hub cross-matches same-named areas across repos.
-2. One SQL fragment in `entry_eligibility_where` is the single source of truth:
+2. The three arms are a NEW composable function `band_predicate_where(bindings: &BandBindings) -> String` in `wisdom_match.rs`. The existing `entry_eligibility_where` (`wisdom_match.rs:470`, signature `(t: &Temporal) -> String`) and its consumers (`:502`, `:547`, `two_stage.rs:96`, `:132`) stay untouched. SCOPED calls compose the two: temporal eligibility, then the band predicate. UNSCOPED callers pass no bindings and run today's SQL. Single source of truth: the three arms exist only in the new function.
    - area arm: `e.entity_id = :repo AND e.area = :area`
    - repo arm: `e.entity_id = :repo AND e.area IS NULL`
    - org arm: `e.entity_id = :org AND e.area IS NULL`
 3. The path resolver maps `--path=` to the repo hub and the area name. It binds BOTH. It resolves patterns against the areas file.
 4. In SCOPED mode with no area resolved, the area arm is OMITTED, not bound to NULL. Omission is the form the re-gate verified.
-5. The stage-1 complement inherits the same fragment.
+5. The stage-1 complement inherits the same `band_predicate_where` function.
 6. Corrections are band-independent: `find_corrections` is exclude-driven (`wisdom_match.rs:1368-1398`). CTI rule 3 depends on this. Pin it with a test.
 7. The predicate is provenance-blind: two fixtures differing only in `source_type` produce identical SCOPED output (CT#344; `INTENT.md:198-208`).
 8. **Backstop test.** Without an areas file, the message-mode outputs of `ct wisdom match` and `ct recall` stay byte-identical for the same seeded brain. The byte-pin test lives at `tool_dispatch.rs:2189` (`message_mode_output_byte_identical`).
@@ -113,7 +113,7 @@ A commit-only guard test passes even when the model can never emit `area`. The a
 ## 12. Renames
 
 1. The actor is the owner. The owner runs `ct wisdom areas rename <old> <new>` against a hub whose areas file defines `new`.
-2. The command updates `llm_wiki_entries.area` where `area = old AND entity_id = <repo hub>`.
+2. The rename runs through the commit/outbox path, NOT a bare UPDATE. One transaction: `UPDATE llm_wiki_entries SET area = :new WHERE area = :old AND entity_id = <repo hub>`, then `push_entries_outbox` (`db/commit.rs:1342`) emits one outbox Update row per affected entry. A bare UPDATE would replicate nothing: remote machines would keep the old name and SCOPED delivery would silently break there.
 3. This is a direct column rewrite. It does not collide with the #343 no-reprocessing ruling: nothing re-extracts or re-processes facts.
 4. Until the rename runs, stale-name rows match no arm and drop out of SCOPED delivery (accepted; see §14 for the check command deferral).
 
@@ -149,15 +149,14 @@ The new-fact INSERT sets no `okf_type` (`db/commit.rs:1697-1702`). The budget dr
 
 ## 17. Files this spec touches
 
-- `db/schema.rs`: migration V27.
-- `db/connection.rs`: migration wiring.
+- `db/connection.rs`: migration V30 body and wiring (alongside V27–V29; older CT migrations live in `schema.rs`, e.g. `tier` at `:363`).
 - `db/commit.rs`: INSERT gains the column; payload builder; two call sites; the `new_name` drop.
 - `db/wisdom.rs`, `db/drafts.rs`, `db/restore_sync.rs`, `db/bundle_apply.rs`: one call site each.
 - `librarian/synthesis.rs`: `LlmFact.area`, the payload builder, the schema string, the areas clause, the attach clause.
-- `wisdom_match.rs`: `WisdomItem` fields; the delivery fragment and its three arms; the corrections pin.
+- `wisdom_match.rs`: `WisdomItem` fields; the NEW `band_predicate_where` function and its three arms; the corrections pin.
 - `tool_dispatch.rs`: SCOPED wiring; the pin comment update.
 - `config/`: the `wisdom.areas_paths` key.
-- CLI: `ct wisdom match --path=`; `ct wisdom areas rename <old> <new>`.
+- CLI: `ct wisdom match --path=`; `ct wisdom areas rename <old> <new>` (through `push_entries_outbox`).
 - Tests per §7, §8.5, §9, §10, §11.
 
 ## 18. Conventions of record
@@ -166,3 +165,9 @@ The new-fact INSERT sets no `okf_type` (`db/commit.rs:1697-1702`). The budget dr
 - Recall and injection gates: no superseded fact is ever injected; cached on-request output stays byte-identical (`INTENT.md` step 4).
 - Facts stay inside the project they came from (`INTENT.md` rule 8). Areas narrow further inside a project. They never widen.
 - Cites name CT main `35a51810` (v3.13.0). Line numbers may shift; reviewers re-locate by symbol name if a line moves.
+
+## 19. Benchmark gates
+
+1. The INTENT step-4 benchmark gates (no superseded fact injected; LongMemEval hit rate and abstention precision; paraphrase; exactly-once) apply to the UNSCOPED path. The concrete gate is the byte-identical backstop test (§9.8): UNSCOPED behavior must not move.
+2. SCOPED delivery is NEW behavior with no prior baseline. There is nothing to regress against. Its gates are the tests this spec names: the three-layer acceptance test (§7), the band-predicate tests (§9), the provenance-blind test (§9.7), and the corrections pin (§9.6).
+3. The spec claims no attach rate in advance (§11.2). The measured result lands in the plan, not here.
