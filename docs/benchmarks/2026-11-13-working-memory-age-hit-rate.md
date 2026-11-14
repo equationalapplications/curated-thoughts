@@ -13,7 +13,10 @@ reproduce the `WMA-BENCH` lines).
 - Per query: 1 relevant fresh doc in the unaged `notes/` folder with cosine
   0.9 to its query, plus 5 aged distractor docs in the `records/` folder at
   cosines 0.95 / 0.94 / 0.93 / 0.92 / 0.91 — all above the fresh doc, so the
-  distractors crowd out the relevant doc when the filter is off.
+  distractors crowd out the relevant doc when the filter is off. (Each
+  distractor vector carries an orthogonal component of magnitude
+  `sqrt(1-s²)` in an unused dimension, so its cosine to the query really is
+  `s` — CodeRabbit PR #350.)
 - `ingest.folder_ages: {"records": 0}`; the aged docs' `ingest_runs.run_at`
   is backdated 400 days (`UPDATE ingest_runs SET run_at = unixepoch()
   - 400*86400`), since scratch brains are freshly indexed and the filter
@@ -27,11 +30,14 @@ reproduce the `WMA-BENCH` lines).
 | metric | filter inactive | filter active |
 |---|---|---|
 | hit@5 | 0.000 | 1.000 |
-| aged rows in top-5 (across queries) | 320 | 0 |
+| aged rows across full result sets (≤50/query) | 320 | 0 |
+| aged rows in top-5 (across queries) | 40 | 0 |
 | aged docs excluded | no | **yes** |
 | unaged ranking identical between configs | — | **yes** |
 
-**hit@5 delta: +1.000** (0.000 → 1.000).
+**hit@5 delta: +1.000** (0.000 → 1.000). The 320 figure is FULL result sets
+(each query ranks up to 50 docs), not the top-5 window; the top-5-restricted
+count is 40 (8 queries × 5 aged distractors) → 0 with the filter active.
 
 ## Gates
 

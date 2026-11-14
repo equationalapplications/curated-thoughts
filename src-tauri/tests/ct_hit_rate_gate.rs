@@ -110,7 +110,14 @@ fn hit_rate_gate_filter_active_vs_inactive() {
                     };
                     let id = insert_chunk(&db.0, d, &c, 0, "tier_fact", "").unwrap();
                     let mut v = vec![0.0f32; DIM];
+                    // v[j] alone would have cosine 1.0 to the unit query
+                    // (its norm would be s). Add the orthogonal remainder
+                    // in an unused dimension (dims QUERIES..DIM carry no
+                    // query mass) so cosine(query, v) really is s
+                    // (CodeRabbit PR #350).
                     v[j] = *s;
+                    v[QUERIES + j] = (1.0 - s * s).sqrt();
+                    debug_assert!((v.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-5);
                     insert_embedding(&db.0, id, &v).unwrap();
                     mark_document_indexed(&db.0, d, "h").unwrap();
                     aged_doc_ids.push(d);
@@ -168,6 +175,14 @@ fn hit_rate_gate_filter_active_vs_inactive() {
                     .filter(|p| p.contains("/records/"))
                     .count()
             };
+            // Top-5-restricted counter: aged rows counted only within each
+            // query's first K results (the ranking window users see).
+            let aged_in_top_k = |results: &[Vec<String>]| -> usize {
+                results
+                    .iter()
+                    .map(|top| top[..K.min(top.len())].iter().filter(|p| p.contains("/records/")).count())
+                    .sum()
+            };
             // Unaged ranking must be IDENTICAL between configs: filter only
             // removes aged rows, never reorders or drops unaged ones.
             let unaged_only = |top: &Vec<String>| -> Vec<String> {
@@ -187,9 +202,14 @@ fn hit_rate_gate_filter_active_vs_inactive() {
             println!("WMA-BENCH hit@{K} filter-active   = {active_hit:.3}");
             println!("WMA-BENCH hit@{K} delta           = {delta:+.3}");
             println!(
-                "WMA-BENCH aged rows in top-{K}: inactive={} active={}",
+                "WMA-BENCH aged rows across full result sets (≤{RANK_LIMIT}/query): inactive={} active={}",
                 aged_in(&inactive_results),
                 aged_in(&active_results)
+            );
+            println!(
+                "WMA-BENCH aged rows in top-{K}: inactive={} active={}",
+                aged_in_top_k(&inactive_results),
+                aged_in_top_k(&active_results)
             );
             println!(
                 "WMA-BENCH queries={QUERIES} aged_distractors_per_query={AGED_DISTRACTORS_PER_QUERY} corpus_docs={}",
