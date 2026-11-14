@@ -1,7 +1,7 @@
 # `areas`: statement delivery scoped to a named repo area
 
 **Date:** 2026-11-14
-**Status:** Draft — spec for approval. Rev 2 (2026-11-14): addresses Opus review round 1 (3 MAJOR / 2 MINOR, all fixed: migration is V30, not V27 — V27–V29 taken; the three-arm predicate is a NEW composable function, not a change to `entry_eligibility_where`; the rename runs through the outbox). Q14 DECIDED (owner, 2026-11-14, msg `1571117780348964967`): C-prime, the synced `area` column. Q13 RESOLVED by the record: no fourth band. Q9 CLOSED (owner, #343): no backfill. Q11 RULED: every role gets the company band. Kind drop order: owner approved an explicit deferral to the bump lane (2026-11-14, spec stop, option 1). Backed by the converged investigation of 2026-11-13/14 (two Fable consults + a strict re-gate at APPROVE WITH NITS, $4.7405/94 turns; every decisive cite controller-verified live against CT main `35a51810`). Lane spend: $46.61.
+**Status:** Draft — spec for approval. Rev 3 (2026-11-14): Opus round 2 returned APPROVE WITH NITS ($1.6702/78 turns); its one MINOR is folded — §9.7's provenance-blind cite corrected from `INTENT.md:198-208` (lands on rule 10) to `INTENT.md:261-263` (the provenance prohibition), controller-verified live. Rev 2 (2026-11-14): addresses Opus review round 1 (3 MAJOR / 2 MINOR, all fixed: migration is V30, not V27 — V27–V29 taken; the three-arm predicate is a NEW composable function, not a change to `entry_eligibility_where`; the rename runs through the outbox). Q14 DECIDED (owner, 2026-11-14, msg `1571117780348964967`): C-prime, the synced `area` column. Q13 RESOLVED by the record: no fourth band. Q9 CLOSED (owner, #343): no backfill. Q11 RULED: every role gets the company band. Kind drop order: owner approved an explicit deferral to the bump lane (2026-11-14, spec stop, option 1). Backed by the converged investigation of 2026-11-13/14 (two Fable consults + a strict re-gate at APPROVE WITH NITS, $4.7405/94 turns; every decisive cite controller-verified live against CT main `35a51810`). Lane spend: $48.28 ($46.61 through rev 2 + $1.6702 Opus round 2).
 **Issue:** #345.
 
 ## 1. Problem
@@ -91,7 +91,7 @@ A commit-only guard test passes even when the model can never emit `area`. The a
 4. In SCOPED mode with no area resolved, the area arm is OMITTED, not bound to NULL. Omission is the form the re-gate verified.
 5. The stage-1 complement inherits the same `band_predicate_where` function.
 6. Corrections are band-independent: `find_corrections` is exclude-driven (`wisdom_match.rs:1368-1398`). CTI rule 3 depends on this. Pin it with a test.
-7. The predicate is provenance-blind: two fixtures differing only in `source_type` produce identical SCOPED output (CT#344; `INTENT.md:198-208`).
+7. The predicate is provenance-blind: two fixtures differing only in `source_type` produce identical SCOPED output (CT#344; `INTENT.md:261-263`).
 8. **Backstop test.** Without an areas file, the message-mode outputs of `ct wisdom match` and `ct recall` stay byte-identical for the same seeded brain. The byte-pin test lives at `tool_dispatch.rs:2189` (`message_mode_output_byte_identical`).
 
 ## 10. Per-item `band` and `area` output fields
