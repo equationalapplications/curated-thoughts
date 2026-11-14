@@ -1,0 +1,10 @@
+{
+  "facts_sha256": "7b1c5f236fdf1dd741dff7bcc21b60c3409410dd2e6c7a3865bfb4f3320b18e2",
+  "floor": 0.57,
+  "fp_rate": 0.032,
+  "hit_at_2": 0.8333333333333334,
+  "model_key": "external:qwen/qwen3-embedding-4b",
+  "n_irrelevant": 125,
+  "n_relevant": 90,
+  "probes_sha256": "bbb63f9d7f8e741640d6fe32aeee902827d87d813e5f326764e2990f9c3cc66f"
+}

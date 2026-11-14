@@ -921,6 +921,43 @@ pub fn ingest_policy_for_db(db_path: Option<&str>) -> IngestPolicy {
     policy
 }
 
+/// True unless config.json explicitly sets confirmations.enabled=false.
+/// Uses `brain_paths_for` (honors CURATED_BRAIN_CONFIG / CURATED_BRAIN_DB —
+/// retrieval/mod.rs `brain_paths_for`), so every process agrees when their
+/// overrides agree (spec §7.5). Degraded/missing config => true — the same
+/// discipline as the ingest keys: a broken file never silently disables the
+/// confirmation surface (spec §7.6).
+pub fn confirmation_enabled_for_db(db_path: Option<&str>) -> bool {
+    let Some(brain_dir) = db_path
+        .filter(|p| !p.is_empty())
+        .and_then(|p| std::path::Path::new(p).parent())
+    else {
+        // No path = no config file to read = ON (mirrors the policy loader).
+        return true;
+    };
+    confirmation_enabled_at(&crate::retrieval::brain_paths_for(brain_dir).config_path)
+}
+
+/// [`confirmation_enabled_for_db`] for an explicit config path — the form
+/// callers that already resolved `brain_paths` (the app drain command, via
+/// `resolve_brain_paths`) use.
+pub fn confirmation_enabled_at(config_path: &std::path::Path) -> bool {
+    let contents = match fs::read(config_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+        // EACCES, EISDIR, …: NOT "missing". Resolves ON — degraded configs
+        // never turn the confirmation surface off (spec §7.6).
+        Err(_) => return true,
+    };
+    let Ok(text) = std::str::from_utf8(&contents) else {
+        return true;
+    };
+    match BrainConfig::load_lenient_from_str(text) {
+        Ok(report) => report.config.confirmations.enabled,
+        Err(_) => true,
+    }
+}
+
 /// Parse the ingest policy from the EXACT bytes read for the cache key —
 /// the same-bytes parse rule (r11-m5). Lenient parse errors degrade to a
 /// flagged policy instead of the silent default.
@@ -969,6 +1006,28 @@ fn parse_ingest_policy_from_bytes(contents: &[u8]) -> IngestPolicy {
     policy
 }
 
+/// Confirmation-surface switch (issue #344). Absent = true (today's
+/// behavior). Malformed/unreadable config resolves to true — the same
+/// degraded discipline as the ingest keys (`ingest_policy_for_db`'s rules).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfirmationsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+fn default_true() -> bool {
+    true
+}
+// MANUAL Default: the derived impl would give `enabled: false`, silently
+// switching the surface OFF for a config with no `confirmations` block
+// (spec §7.2: absent = ON).
+impl Default for ConfirmationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+        }
+    }
+}
+
 /// Unified configuration for a brain directory.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BrainConfig {
@@ -1003,6 +1062,11 @@ pub struct BrainConfig {
     /// block must never route a working config into `load_lenient`.
     #[serde(default)]
     pub ingest: IngestConfig,
+    /// Confirmation-surface switch (issue #344). `#[serde(default)]` on
+    /// purpose: an absent block is ON — this must never route a working
+    /// config into `load_lenient`.
+    #[serde(default)]
+    pub confirmations: ConfirmationsConfig,
     /// Approved symlink `(link, target)` pairs. Written only by the approval
     /// flows (`ct trust`, the Desktop review prompt) — never hand-edited.
     #[serde(default)]
@@ -1195,6 +1259,7 @@ impl BrainConfig {
             "ontology",
             "wiki",
             "ingest",
+            "confirmations",
             "trusted_links",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
@@ -1454,6 +1519,7 @@ impl BrainConfig {
             "ontology",
             "wiki",
             "ingest",
+            "confirmations",
             "trusted_links",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
@@ -1467,7 +1533,14 @@ impl BrainConfig {
             Some(serde_json::Value::Object(unknown_keys))
         };
 
-        // Extract nested unknown keys from generation block
+        // Confirmations switch (issue #344): typed extraction — the lenient
+        // arm builds the config block-by-block, so the serde field never sees
+        // the raw JSON. A malformed block resolves to the default (ON — spec
+        // §7.6), never OFF.
+        if let Some(c) = obj.get("confirmations") {
+            report.config.confirmations =
+                serde_json::from_value::<ConfirmationsConfig>(c.clone()).unwrap_or_default();
+        }
         if let Some(gen_val) = obj.get("generation").and_then(|v| v.as_object()) {
             let known_gen_keys = [
                 "provider",
@@ -2014,6 +2087,22 @@ impl BrainConfig {
             }
         }
         obj.insert("wiki".to_string(), wiki_value);
+        // Persist the confirmations block (CodeRabbit #349): `write()` is a
+        // raw-document merge — without this insert, a `confirmations.enabled`
+        // flip was never written back to disk. Typed keys win (a modeled
+        // `enabled` overwrites the on-disk one); UNKNOWN nested keys in the
+        // on-disk block survive the round-trip, like every other modeled
+        // section above.
+        let mut conf_value = serde_json::to_value(&self.confirmations)?;
+        if let (Some(conf_obj), Some(preserved_obj)) = (
+            conf_value.as_object_mut(),
+            obj.get("confirmations").and_then(|v| v.as_object()),
+        ) {
+            for (k, v) in preserved_obj {
+                conf_obj.entry(k.clone()).or_insert(v.clone());
+            }
+        }
+        obj.insert("confirmations".to_string(), conf_value);
         // F4/R2.2.4: persist the ingest-policy block (empty maps serialize
         // as `{}`, keeping the block visible and hand-editable) — UNLESS the
         // load was degraded (`raw_ingest` set): then leave the ON-DISK
@@ -2330,7 +2419,72 @@ mod tests {
         );
     }
 
-    /// The policy loader follows the db's brain dir, sees hand-edits on the
+    /// ── confirmations.enabled (issue #344, plan Task 5) ────────────────────
+    /// Absent key / missing config → ON (today's behavior, spec §7.2/§7.6).
+    #[test]
+    fn confirmation_enabled_defaults_true_when_absent() {
+        let brain = tempfile::TempDir::new().unwrap();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                let db = brain.path().join("brain.db");
+                let db = db.to_str().unwrap();
+                // No config file at all.
+                assert!(confirmation_enabled_for_db(Some(db)));
+                // A config with NO confirmations key.
+                std::fs::write(brain.path().join("config.json"), r#"{"vault_path":"/v"}"#).unwrap();
+                assert!(confirmation_enabled_for_db(Some(db)));
+                assert!(confirmation_enabled_for_db(None));
+            },
+        );
+    }
+
+    /// An explicit `enabled:false` turns the whole confirmation surface off.
+    #[test]
+    fn confirmation_enabled_false_when_set() {
+        let brain = tempfile::TempDir::new().unwrap();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                let db = brain.path().join("brain.db");
+                let db = db.to_str().unwrap();
+                std::fs::write(
+                    brain.path().join("config.json"),
+                    r#"{"vault_path":"/v","confirmations":{"enabled":false}}"#,
+                )
+                .unwrap();
+                assert!(!confirmation_enabled_for_db(Some(db)));
+            },
+        );
+    }
+
+    /// Malformed / unreadable config resolves to ON — the degraded-load
+    /// discipline (spec §7.6): a broken file never silently disables the
+    /// confirmation surface.
+    #[test]
+    fn confirmation_enabled_malformed_config_resolves_true() {
+        let brain = tempfile::TempDir::new().unwrap();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                let db = brain.path().join("brain.db");
+                let db = db.to_str().unwrap();
+                std::fs::write(brain.path().join("config.json"), "not json at all").unwrap();
+                assert!(confirmation_enabled_for_db(Some(db)));
+            },
+        );
+    }
+
+    /// The ingest policy loader follows the db's brain dir, sees hand-edits on the
     /// next call (content-keyed cache), and defaults to full for in-memory dbs.
     #[test]
     fn ingest_policy_for_db_reads_and_refreshes() {
@@ -2923,6 +3077,34 @@ mod tests {
         // fixture directory the loads below must read.
         let report = BrainConfig::load_lenient(&paths).unwrap();
         assert!(report.config.ontology_degraded.global);
+    }
+
+    /// CodeRabbit #349: `write()` persists the confirmations block — a
+    /// `confirmations.enabled=false` round-trips through load→write→reload,
+    /// and UNKNOWN nested keys in the on-disk confirmations block survive
+    /// (typed keys win, like every other modeled section).
+    #[test]
+    fn write_persists_confirmations_block_and_unknown_nested_keys_survive() {
+        let (_tmp, paths) = degraded_fixture_dir();
+        write_cfg(
+            &paths,
+            r#"{"vault_path":"/v","confirmations":{"enabled":false,"experimental_channel":"beta"}}"#,
+        );
+        let cfg = BrainConfig::load(&paths).unwrap();
+        assert!(!cfg.confirmations.enabled);
+        cfg.write(&paths).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.config_path).unwrap()).unwrap();
+        let conf = root.get("confirmations").expect("confirmations block written");
+        assert_eq!(conf.get("enabled"), Some(&serde_json::json!(false)));
+        // Unknown nested key survived the write cycle.
+        assert_eq!(
+            conf.get("experimental_channel"),
+            Some(&serde_json::json!("beta"))
+        );
+        // And it still reloads as OFF (no silent reset to the default ON).
+        let again = BrainConfig::load(&paths).unwrap();
+        assert!(!again.confirmations.enabled);
     }
 
     /// R2.2.4: degraded load + write → the on-disk ingest block survives

@@ -55,9 +55,7 @@ pub const PROVENANCE_VOCAB: &[&str] = &[
 /// (prose) or an activity target (`--path=`/`--command=`/`--pattern=` — a
 /// bare path, command or search pattern). The kind selects the ACTIVITY
 /// floor-key suffix — ONE shared `:activity` floor across all three target
-/// kinds (Kurt ruling 2026-10-18) — and, on the active path, the human-tier
-/// delivery aperture (`user_stated` + `user_confirmed`; §5 rev-15 of the
-/// #282 spec). Message mode is
+/// kinds (Kurt ruling 2026-10-18). Message mode is
 /// byte-for-byte untouched: `QueryKind::Message` reproduces today's keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryKind {
@@ -108,25 +106,28 @@ pub const WISDOM_GATE_FLOORS: &[(&str, f32)] = &[
     // 05dfe7bb) — docs/benchmarks/2026-10-18-wisdom-gate-two-stage-chunk-hop.md.
     ("external:qwen/qwen3-embedding-4b:two-stage:chunk-hop", 0.65),
     // Activity composite key (issue #282, spec §3 `<raw>:activity:two-stage:<rule>`;
-    // ONE shared `:activity` floor across all three kinds — Kurt ruling 2026-10-18):
-    // calibrated 2026-10-18 on the Kurt-approved scratch COPY of the live brain (14
-    // facts relabeled user_stated in the copy only; 12–18 positives per kind — SMALL
-    // SAMPLES, scratch-label stand-in pending Option 2 app attestations).
-    // restricted-cosine @ 0.65, k=8
-    // (TWO_STAGE_K default): hit@1 0.278/0.250/0.250 vs v1-baseline 0.111/0.083/0.167
-    // (path/command/pattern), FP 0 everywhere vs 1. Letter per #282 §7 passed in every
-    // kind; campaign `calibration-run/grid-20261018-activity/` (24 recorded cells +
-    // 3 winning cells re-run at build bad0cdbb91f3) —
-    // docs/benchmarks/2026-10-18-wisdom-gate-activity-restricted-cosine.md.
-    // Provenance note (Tier-1.5 r4): the freeze ran via a TEMPORARY, disclosed
-    // gate-disable of calibrate_wisdom_gate's fixture-size gate (reverted after
-    // the freeze — see freeze_provenance in the fixture's expected.json); the
-    // floor registration itself is this constant, unaffected by tooling. Flip
-    // go (covering the scratch-label stand-in AND the calibration methodology)
-    // approved by Kurt 2026-10-19.
+    // ONE shared floor across all probe kinds): calibrated 2026-10-18 @ 0.65 on a
+    // user_stated-only positive pool; re-derived 2026-11-13 from a mixed-provenance
+    // pool (issue #344) and RE-VERIFIED 2026-11-13 TWICE after the CodeRabbit
+    // #349 sampler fixes: first temporal-eligibility-true positives + find
+    // grouping, then (second re-run) the scorer's FULL embedding/scheme
+    // eligibility in sampling (embedding_blob IS NOT NULL + embed_scheme =
+    // 'raw' + non-null title/body) — 8 of the prior 30 positives were
+    // scheme-ineligible silent misses, so the pool is now 22 fully eligible
+    // facts (21 librarian_inferred + 1 user_confirmed, 66 positives, 125
+    // v2 negatives), 191 probes. Floor MOVED 0.70 -> 0.72 on this pool: 0.70
+    // passes the #282 letter only on FP equality (act hit@1 0.439 == baseline
+    // 0.439, act FP 1 == baseline FP 1), while 0.72 is the LOWEST FP-0
+    // letter-passing floor (act hit@1 0.439 >= baseline, act FP 0 <= baseline
+    // 1) — the pinned re-derivation rule picks the lowest FP-0 letter-passing
+    // floor, and 0.74+ fail on hit@1 (0.394 < 0.439). Cells (all ONE unified
+    // build 5fdef5f3, CT_BUILD_SHA)
+    // `calibration-run/grid-20261113-activity/cells/` —
+    // docs/benchmarks/2026-11-13-wisdom-gate-activity-mixed-provenance.md
+    // (addendum 2).
     (
         "external:qwen/qwen3-embedding-4b:activity:two-stage:restricted-cosine",
-        0.65,
+        0.72,
     ),
 ];
 
@@ -599,12 +600,9 @@ fn gated_entries(
         if blob.len() != dim * 4 {
             continue;
         }
-        // The delivery aperture (issue #282 §5 rev-15): the activity-active
-        // path admits the HUMAN-TIER SET — `user_stated` AND
-        // `user_confirmed` — as a provenance-set membership test, applied
-        // BEFORE the arm-internal truncate (`:635` below) so a top-N of
-        // filtered-out facts never shadows an admitted fact ranked below it.
-        // Message mode and the merge pass `None` (unchanged).
+        // Issue #344: the delivery aperture was removed — every live provenance
+        // is admitted on the activity path. The filter application below survives
+        // for the parameter's remaining callers; both arms now pass `None`.
         if let Some(want) = provenance_filter {
             let admitted = provenance_for(source_type.as_deref())
                 .is_some_and(|p| want.contains(&p.as_str()));
@@ -762,14 +760,13 @@ pub fn two_stage_entries(
 ) -> Result<TwoStageResult> {
     let max = max.min(MAX_ENTRIES);
     let k = two_stage_k(profile_key);
-    // The delivery aperture rides with the kind (issue #282 §5 rev-15):
-    // activity admits the human tier — `user_stated` AND `user_confirmed`;
-    // message never filters. The v1-merge is dead under activity (its
-    // `v1_floor` is `None` — no v1 `:activity` row ships), so the filter
-    // below is inert there by construction.
+    // The delivery aperture is REMOVED (issue #344, INTENT rule 10 amended
+    // 2026-11-12/13): neither kind filters by provenance. The parameter stays
+    // threaded for the merge pass and future filters; its removal is a
+    // follow-up commit in this PR.
     let provenance_filter: Option<&[&str]> = match kind {
         QueryKind::Message => None,
-        QueryKind::Activity => Some(&["user_stated", "user_confirmed"][..]),
+        QueryKind::Activity => None,
     };
     // One skip set for ALL selections ("one id, one list"):
     let mut skip: HashSet<String> = exclude.iter().cloned().collect();
@@ -1273,6 +1270,24 @@ pub fn wisdom_match_two_stage_with_v1(
     //   cell 4: ts present + cov = 100%        → two-stage runs
     // The cell decision ITSELF is re-derived inside the core from the same
     // floors; here we only route (and the core re-probes coverage).
+    //
+    // Corrections BEFORE selection: the resolver maps each excluded id to its
+    // reachable live head. That head must join the selection skip set
+    // (`exclude` ∪ correction heads) BEFORE `two_stage_entries`
+    // runs — otherwise a rule-reachable head can appear in `ts_entries` AND in
+    // `corrections`, delivered twice ("one id, one list"). The resolver itself
+    // is unchanged (no provenance filter, by design).
+    // Pre-V24 degradation (the SAME guard `wisdom_match_impl` applies at
+    // :404): `resolve_head` queries `superseded_by`, which does not exist on
+    // a pre-V24 table — with a non-empty exclude that would be a SQL error
+    // BEFORE the v1 fallback could engage. On the degraded shape resolve
+    // NOTHING; the fallback path behaves exactly as before the reorder.
+    let corrections = if temporal_columns(conn, Some(scheme))?.has_superseded_by {
+        find_corrections_public(conn, exclude, now_ms, scheme)?
+    } else {
+        Vec::new()
+    };
+    let correction_heads: HashSet<String> = corrections.iter().map(|c| c.id.clone()).collect();
     let (ts_entries, outcome) = two_stage_entries(
         conn,
         query_vec_raw,
@@ -1282,7 +1297,7 @@ pub fn wisdom_match_two_stage_with_v1(
         ts_floor,
         max,
         &exclude.iter().cloned().collect(),
-        &HashSet::new(),
+        &correction_heads,
         now_ms,
         profile_key,
         kind,
@@ -1320,9 +1335,8 @@ pub fn wisdom_match_two_stage_with_v1(
     }
 
     // Two-stage ran: the arm's entries ARE the final entries. Corrections
-    // flow through the v1 resolver unchanged (the entries themselves carry
-    // the skip set already).
-    let corrections = find_corrections_public(conn, exclude, now_ms, scheme)?;
+    // were resolved BEFORE selection (their heads joined the skip set), so
+    // a reachable head can never also appear in `ts_entries`.
     Ok(TwoStageRun {
         result: WisdomMatch {
             schema: SCHEMA_VERSION,
@@ -2334,6 +2348,55 @@ mod tests {
         assert_eq!(run.result.gate, GATE_UNCALIBRATED);
     }
 
+    /// Pre-V24 degradation + non-empty exclusion list (CodeRabbit #349,
+    /// finding B): the pre-selection corrections call must degrade to
+    /// "resolve nothing" on a table WITHOUT the `superseded_by` column —
+    /// `resolve_head`'s SQL would otherwise error BEFORE the §4 cell-1 v1
+    /// fallback could engage. Pins: no SQL error, and the fallback SHAPE
+    /// identical to the pre-reorder behavior (`ran=false`, rule None, v1
+    /// result carried; the excluded id can never surface as an entry).
+    #[test]
+    fn pre_v24_table_with_nonempty_exclude_falls_back_without_sql_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_wiki_entries (
+                id TEXT PRIMARY KEY, entity_id TEXT NOT NULL, title TEXT, body TEXT,
+                source_type TEXT, embedding_blob BLOB, deleted_at INTEGER)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries VALUES ('f1', 'ent', 'T f1', 'B f1', 'user_stated', ?1, NULL)",
+            params![ts_blob(&unit_vec(4))],
+        )
+        .unwrap();
+        let run = wisdom_match_two_stage_with_v1(
+            &conn,
+            &unit_vec(1),
+            &unit_vec(1),
+            Scheme::Raw,
+            8,
+            &["excluded-old-id".to_string()],
+            TS_NOW,
+            TS_KEY,
+            QueryKind::Message,
+        )
+        .unwrap();
+        assert!(
+            !run.ran,
+            "pre-V28 coverage probe miss ⇒ cell-1 v1 fallback, never a two-stage run"
+        );
+        assert!(run.outcome.rule.is_none());
+        assert_eq!(
+            run.result.gate,
+            format!("semantic-v1:{TS_KEY}"),
+            "the fallback carries the v1 label — same behavior as before the reorder"
+        );
+        assert!(
+            !run.result.entries.iter().any(|e| e.id == "excluded-old-id"),
+            "an excluded id can never surface as an entry"
+        );
+    }
+
     /// Task-5 fix round (reviewer Important #1/#2): the PUB pre-embed
     /// precheck — the shared §3 embed-skip authority. Every caller (CLI,
     /// Task-14/15 harness) invokes it BEFORE any embed_one and branches its
@@ -2816,12 +2879,11 @@ mod tests {
             format!("{TS_KEY}:activity:two-stage:chunk-hop")
         );
         // The fixture's only rule-(ii)-reachable fact is f1
-        // (`librarian_inferred`), so the `user_stated` aperture filters the
-        // delivery to empty — which is exactly the §5 contract on this
-        // brain (the aperture test below pins both sides of it).
+        // (`librarian_inferred`), and with the aperture removed (issue
+        // #344) it IS delivered on the activity path.
         assert!(
-            entries.is_empty(),
-            "aperture: f1 (librarian_inferred) must not be delivered"
+            entries.iter().any(|e| e.id == "f1"),
+            "aperture removed: f1 (librarian_inferred) is delivered"
         );
     }
 
@@ -2899,19 +2961,17 @@ mod tests {
         assert!(run.outcome.rule.is_none());
     }
 
-    /// rev-13 M1 APERTURE (lib, active path only): with the activity
-    /// composite forcing a cell-4 run, the delivered entries contain NO
-    /// non-`user_stated` fact even though rule (ii) opens doc1 (whose fact
-    /// f1 is `librarian_inferred`); corrections are NOT aperture-filtered
-    /// (rev-13 M1: corrections bypass the aperture); `open` reflects the
-    /// post-aperture list. The message call on the same vectors still
-    /// delivers f1 (message mode is untouched).
+    /// Issue #344: the delivery aperture is removed. With the activity
+    /// composite forcing a cell-4 run, the delivered entries INCLUDE f1
+    /// (the `librarian_inferred` fact that rule (ii) reaches via doc1);
+    /// the message call on the same vectors still delivers f1 (message
+    /// mode is untouched).
     #[test]
-    fn activity_aperture_delivers_user_stated_only_on_the_active_path() {
+    fn activity_delivers_every_provenance_on_the_active_path() {
         let conn = fixture();
-        // f1 (librarian_inferred) is the only rule-(ii)-reachable fact; f2
-        // (user_stated) is NOT rule-reachable, so the activity-active run
-        // opens on f1's doc and the aperture filters f1 away entirely.
+        // f1 (librarian_inferred) is the only rule-(ii)-reachable fact; the
+        // activity-active run opens on f1's doc and f1 IS delivered — the
+        // aperture that used to filter it away is gone (issue #344).
         let (entries, outcome) = two_stage_entries(
             &conn,
             &unit_vec(1),
@@ -2929,10 +2989,8 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
         assert!(
-            !entries
-                .iter()
-                .any(|e| e.provenance.as_deref() != Some("user_stated")),
-            "aperture: every delivered entry is user_stated"
+            entries.iter().any(|e| e.id == "f1"),
+            "aperture removed: f1 (librarian_inferred) is delivered on the activity path"
         );
         // The message path on the same vectors is UNFILTERED (f1 delivered):
         // The MESSAGE control uses the message composite value (0.45 — the
@@ -2983,12 +3041,14 @@ mod tests {
         .unwrap();
     }
 
-    /// Task 8 (§5 rev-15): the activity aperture admits the human-tier SET —
-    /// `user_stated` AND `user_confirmed`; `immutable_document` and a
-    /// stored type outside the provenance vocabulary (NULL provenance) do
-    /// not. Delivered labels stay `provenance_for(stored)` verbatim.
+    /// Task 8 / issue #344: the aperture is gone — ALL seeded provenances
+    /// deliver on the activity path, INCLUDING the `f-np` row
+    /// (`source_type = "raw_note"` → `provenance_for` → `None`):
+    /// out-of-vocabulary source types deliver with a null label, as
+    /// message mode already does. Delivered labels stay
+    /// `provenance_for(stored)` verbatim.
     #[test]
-    fn activity_admits_confirmed_and_stated() {
+    fn activity_delivers_all_four_provenances_including_null_label() {
         let conn = fixture();
         seed_aperture_entry(&conn, "f-cf", "user_confirmed");
         seed_aperture_entry(&conn, "f-st", "user_stated");
@@ -3011,53 +3071,94 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
         // All four carry cosine 0.0 (u4 blobs vs the u1 query), so the
-        // delivered order is the id tie-break over the admitted set only.
+        // delivered order is the id tie-break over the full seeded set.
         let got: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(
             got,
-            vec!["f-cf", "f-st"],
-            "user_confirmed joins user_stated; immutable_document and NULL provenance stay out"
+            vec!["f-cf", "f-im", "f-np", "f-st", "f1"],
+            "aperture removed: every provenance delivers (incl. the fixture's \
+             f1); id tie-break order"
         );
         assert_eq!(entries[0].provenance.as_deref(), Some("user_confirmed"));
-        assert_eq!(entries[1].provenance.as_deref(), Some("user_stated"));
+        assert_eq!(entries[1].provenance.as_deref(), Some("immutable_document"));
+        assert_eq!(
+            entries[2].provenance.as_deref(),
+            None,
+            "out-of-vocabulary source type delivers with a null label"
+        );
+        assert_eq!(entries[3].provenance.as_deref(), Some("user_stated"));
+        assert_eq!(entries[4].provenance.as_deref(), Some("librarian_inferred"));
     }
 
-    /// Task 8 non-shadowing pin (§5 fairness rule): the aperture filter runs
-    /// BEFORE the arm-internal truncate, so with max=1 a high-ranking
-    /// non-admitted fact is dropped rather than consuming the slot and
-    /// shadowing the admitted fact ranked below it.
+    // (The §5 rev-15 non-shadowing pin `non_admitted_fact_never_shadows_
+    // admitted_below` was deleted with the aperture — issue #344, spec §6.3:
+    // no caller can pass a filter anymore, so the property has no production
+    // exerciser. #282 §5 remains the record.)
+
+    /// Issue #344 Task 3 Step 5: with the aperture removed, agent-tier facts
+    /// deliver on the activity path, and the exactly-once discipline holds —
+    /// across BOTH delivery lists (entries + corrections), each id appears at
+    /// most once. Drives the ORCHESTRATOR (`wisdom_match_two_stage_with_v1`):
+    /// the correction head joins the selection skip set BEFORE selection
+    /// (CodeRabbit #349), so a rule-reachable head of an excluded fact can
+    /// never ALSO appear in `ts_entries` and be delivered twice.
     #[test]
-    fn non_admitted_fact_never_shadows_admitted_below() {
+    fn activity_exactly_once_with_agent_tier_correction_and_fact() {
         let conn = fixture();
-        seed_aperture_entry(&conn, "f-im-high", "immutable_document");
-        seed_aperture_entry(&conn, "f-st-low", "user_stated");
-        // The immutable fact outranks: cosine 1.0 vs 0.0 against the query.
-        conn.execute(
-            "UPDATE llm_wiki_entries SET embedding_blob = ?1 WHERE id = 'f-im-high'",
-            params![ts_blob(&unit_vec(1))],
-        )
-        .unwrap();
-        let (entries, _outcome) = two_stage_entries(
+        // Mirror the seeding shape of the neighboring tests: rule-(ii)-
+        // reachable rows (evidence names h-c1), u4 blobs (cosine 0 vs the
+        // u1 query) so the id tie-break governs. The head f-corr is
+        // librarian_inferred AND rule-(ii)-reachable from the fixture's
+        // chunk, so the pre-fix orchestrator delivered it BOTH as a stage
+        // entry and as a correction.
+        seed_aperture_entry(&conn, "f-corr", "librarian_inferred");
+        seed_aperture_entry(&conn, "f-old", "librarian_inferred");
+        seed_aperture_entry(&conn, "f-plain", "librarian_inferred");
+        // f-old is superseded by f-corr; the caller excludes f-old and the
+        // orchestrator resolves the correction (head f-corr) itself.
+        supersede(&conn, "f-old", "f-corr");
+        let m = wisdom_match_two_stage_with_v1(
             &conn,
             &unit_vec(1),
             &unit_vec(1),
             Scheme::Raw,
-            None,
-            Some(0.40),
-            1, // ONE slot: a post-truncate filter would deliver nothing
-            &HashSet::new(),
-            &HashSet::new(),
+            8,
+            &["f-old".to_string()],
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
         )
-        .unwrap();
-        let got: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        .unwrap()
+        .result;
+        let entries_count = |id: &str| m.entries.iter().filter(|e| e.id == id).count();
+        let total_count =
+            |id: &str| m.entries.iter().chain(m.corrections.iter()).filter(|e| e.id == id).count();
+        // Entries-level assertions (unchanged shape for the unrelated rows).
+        // The head itself is carried by the CORRECTIONS channel: it joins
+        // the selection skip set, so it never also appears as an entry.
         assert_eq!(
-            got,
-            vec!["f-st-low"],
-            "the non-admitted high-ranker must be filtered pre-truncate, never shadow"
+            entries_count("f-corr"),
+            0,
+            "the head rides the corrections channel, never duplicated as an entry"
         );
+        assert_eq!(
+            entries_count("f-plain"),
+            1,
+            "the ordinary agent-tier fact appears EXACTLY once"
+        );
+        assert_eq!(entries_count("f-old"), 0, "the superseded id never delivers");
+        // Across BOTH lists: the head is delivered exactly once TOTAL.
+        assert_eq!(
+            total_count("f-corr"),
+            1,
+            "the head must not be double-delivered (entry + correction)"
+        );
+        assert_eq!(
+            m.corrections.len(),
+            1,
+            "the exclusion still carries the correction channel"
+        );
+        assert_eq!(m.corrections[0].supersedes, vec!["f-old"]);
     }
 
     /// rev-8 M2 / spec §4: `QueryKind::Activity` + explicit `--single-stage`
