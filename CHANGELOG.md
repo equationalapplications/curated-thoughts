@@ -1,3 +1,21 @@
+## [3.12.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.7...v3.12.0) (2026-11-14)
+
+### Features
+
+* **calibrate:** accept mixed-provenance positives for the [#344](https://github.com/equationalapplications/curated-thoughts/issues/344) floor re-tune ([5fdef5f](https://github.com/equationalapplications/curated-thoughts/commit/5fdef5f36b7f64af920455dd404d13d60b316b4a))
+* **config:** confirmations.enabled turns the whole confirmation surface off (issue [#344](https://github.com/equationalapplications/curated-thoughts/issues/344)) ([db45e6f](https://github.com/equationalapplications/curated-thoughts/commit/db45e6fc0897848a96e8e3ea66bf3c85af0b2de2))
+* **wisdom:** re-derive the :activity floor from a mixed-provenance pool (issue [#344](https://github.com/equationalapplications/curated-thoughts/issues/344)) ([ba132ed](https://github.com/equationalapplications/curated-thoughts/commit/ba132ed51a4eb67e7118daf879ebe83c6f82a77d))
+* **wisdom:** remove the activity delivery aperture (issue [#344](https://github.com/equationalapplications/curated-thoughts/issues/344)) ([9455394](https://github.com/equationalapplications/curated-thoughts/commit/945539443afb85edab063dc2900b4ada80a5628c))
+* **wisdom:** surface unverified matches from ct wisdom match (issue [#344](https://github.com/equationalapplications/curated-thoughts/issues/344) OQ1) ([cced688](https://github.com/equationalapplications/curated-thoughts/commit/cced688817b4612e66ab2240bce59aae357aaaeb))
+
+### Bug Fixes
+
+* **calibrate:** eligibility-true probe sampling, unified build ids, floor re-check (CodeRabbit [#349](https://github.com/equationalapplications/curated-thoughts/issues/349)) ([0ac536c](https://github.com/equationalapplications/curated-thoughts/commit/0ac536cecc3ffe74e73fef6caff8861b0386c7be))
+* **calibrate:** embedding/scheme eligibility in probe sampling — grid + floor re-check (CodeRabbit [#349](https://github.com/equationalapplications/curated-thoughts/issues/349)) ([0127d99](https://github.com/equationalapplications/curated-thoughts/commit/0127d993672ee9a56d153b52cd3c02324d7c7f83))
+* **config:** persist confirmations in BrainConfig::write + serde-built test fixture (CodeRabbit [#349](https://github.com/equationalapplications/curated-thoughts/issues/349)) ([1fada58](https://github.com/equationalapplications/curated-thoughts/commit/1fada58c7d4702c0f4e957cbdf1f65950a1c5fd6))
+* **wisdom:** guard pre-selection corrections behind has_superseded_by — pre-V24 safe (CodeRabbit [#349](https://github.com/equationalapplications/curated-thoughts/issues/349)) ([dd5bedf](https://github.com/equationalapplications/curated-thoughts/commit/dd5bedf5dd92f43555a686428ff836fb1bad492a))
+* **wisdom:** resolve correction heads before activity selection — no double delivery (CodeRabbit [#349](https://github.com/equationalapplications/curated-thoughts/issues/349)) ([2c28790](https://github.com/equationalapplications/curated-thoughts/commit/2c287902af28987e5acee8762cd2a38714093188))
+
 ## [3.11.7](https://github.com/equationalapplications/curated-thoughts/compare/v3.11.6...v3.11.7) (2026-11-11)
 
 ### Bug Fixes

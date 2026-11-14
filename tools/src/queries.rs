@@ -831,6 +831,13 @@ pub fn wisdom_match_cmd(
 ) -> Result<i32> {
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
+    // Active Verification Prompting root (issue #344 OQ1): the same vault the
+    // app's drain reads — VaultConfig over this brain's config.json. `None`
+    // (no vault configured) degrades to no prompts, never an error.
+    let vault_root = tauri_app_lib::vault::config::VaultConfig::new(brain.paths.config_path.clone())
+        .vault_root()
+        .ok()
+        .flatten();
     let profile = retrieval::load_embed_profile(&brain.paths.config_path)
         .context("loading embed profile from vault config.json")?;
     let stub = std::env::var("CURATED_EMBED_STUB").ok();
@@ -906,13 +913,14 @@ pub fn wisdom_match_cmd(
                     print_two_stage_audit(&run.outcome);
                     print_gate_decision(read_scheme, &run.result);
                     print_wisdom_match(&run.result, json_mode);
+                    emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &run.result);
                     return Ok(0);
                 }
                 // Post-embed degradation (rev-8/9/10 M1): the attempt's
                 // `TwoStageRun.result` is DISCARDED, never printed; the
                 // fallback re-runs the message path the stage flags select
                 // on the REUSED vectors (raw: schemed == raw clone).
-                let _ = run_message_path(
+                let (fallback_result, _) = run_message_path(
                     &conn,
                     &key,
                     read_scheme,
@@ -924,6 +932,7 @@ pub fn wisdom_match_cmd(
                     matches!(stage_mode, WisdomStageMode::TwoStage),
                     json_mode,
                 )?;
+                emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &fallback_result);
                 return Ok(0);
             }
             // Cell != 4 (uncalibrated / degraded BEFORE any embed): fall
@@ -992,7 +1001,7 @@ pub fn wisdom_match_cmd(
             }
         }
     };
-    let _ = run_message_path(
+    let (message_result, _) = run_message_path(
         &conn,
         &key,
         read_scheme,
@@ -1004,7 +1013,42 @@ pub fn wisdom_match_cmd(
         two_stage_active,
         json_mode,
     )?;
+    emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &message_result);
     Ok(0)
+}
+
+/// Active Verification Prompting from the `ct wisdom match` surface (issue
+/// #344 OQ1, owner ruling: the prompt IS wired in). One prompt per delivered
+/// non-human fact — entries and corrections (the exactly-once skip set keeps
+/// the two lists disjoint, so each delivered id emits exactly once). Infallible
+/// end to end; the confirmations.enabled switch (Task 5) gates it inside
+/// `emit_unverified_matches` — flag off touches NOTHING on disk.
+fn emit_wisdom_unverified(
+    vault_root: Option<&std::path::Path>,
+    conn: &rusqlite::Connection,
+    query: &str,
+    result: &wm::WisdomMatch,
+) {
+    use tauri_app_lib::prompt_drop::{ResolvedHit, emit_unverified_matches};
+    let Some(root) = vault_root else {
+        return;
+    };
+    if result.entries.is_empty() && result.corrections.is_empty() {
+        return;
+    }
+    let mut hits: Vec<ResolvedHit> = result
+        .entries
+        .iter()
+        .map(|e| ResolvedHit {
+            fact_id: &e.id,
+            source_type: e.provenance.as_deref(),
+        })
+        .collect();
+    hits.extend(result.corrections.iter().map(|c| ResolvedHit {
+        fact_id: &c.id,
+        source_type: c.provenance.as_deref(),
+    }));
+    emit_unverified_matches(Some(root), conn, &hits, query, "wisdom_match");
 }
 
 /// The pinned gate-decision stderr line (four fields — spec §3.1: it carries

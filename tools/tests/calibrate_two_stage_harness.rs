@@ -626,7 +626,6 @@ fn score_entries_parity_with_core_gated_entries() {
         &shape,
         Scheme::Raw,
         NOW_MS,
-        None,
     )
     .expect("driver score_entries");
     let core = wisdom_match_with_floor(
@@ -690,7 +689,6 @@ fn score_entries_parity_with_core_gated_entries() {
         &shape,
         Scheme::Raw,
         NOW_MS,
-        None,
     )
     .expect("driver score_entries (max 2)");
     let core_top2 = wisdom_match_with_floor(

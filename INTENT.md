@@ -120,7 +120,8 @@ is `wisdom_pending`, a separate read-only list of unprocessed deposits,
 which is never mixed into recall results.
 
 A fact that has been ingested but not yet confirmed by a person is not
-pending. It is live, recallable, and labeled with its provenance;
+pending. It is live, recallable, and labeled with its provenance, as
+per-hit `source_type` and `verified` labels;
 `wisdom_pending` never lists it.
 
 *Why:* agents should get an honest answer ("not ready yet") rather than
@@ -194,19 +195,17 @@ facts are retired, but only by the machine that ingested them.
 
 *Why:* agent deposits become an append-only record you can audit.
 
-### 10. Unconfirmed facts are recallable, labeled, and rarely delivered mid-task
+### 10. Unconfirmed facts are recallable, labeled, and may be offered for confirmation
 
-Every live fact is recallable on demand and carries its provenance, as
-per-hit `source_type` and `verified` labels. Mid-task
-delivery admits only human-tier facts: `user_stated` and `user_confirmed` —
-with the standing #265 exception: corrections of any provenance always
-flow. The confirmation queue is the app's list of facts the person has not
-yet confirmed; confirming stamps the fact, it never asks the person to
-retype. When an unconfirmed fact matches during an agent's recall, the app
-offers the person a confirmation prompt.
+Every live fact is recallable on demand. The confirmation queue is the app's
+list of facts the person has not yet confirmed; confirming stamps the fact,
+it never asks the person to retype. When an unconfirmed fact matches during
+an agent's recall, the app may offer the person a confirmation prompt. The
+`confirmations.enabled` setting turns the whole confirmation surface off.
 
-*Why:* a wrong fact pushed mid-task is worse than a missed one; a labeled
-fact on request is neither.
+*Why:* human approval records accountability; it does not gate delivery.
+Quality comes from the pipeline. Corrections and supersession are the
+safety net.
 
 ## Who verifies: users and scope
 

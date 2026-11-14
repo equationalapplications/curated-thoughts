@@ -1,42 +1,31 @@
 {
-  "schema_note": "Activity two-stage freeze (issue #282 flip, 2026-10-18). Flip fields below are verbatim output of `calibrate_two_stage flip` on the winning artifact; the calibration block adds provenance. vectors.json.gz was frozen over the campaign's 14 labeled facts + the full 196-probe union (path/command/pattern splits) via a TEMPORARY uncommitted gate-disable in calibrate_wisdom_gate (its fixture-size gate \u2014 facts>=100/probes>=200 \u2014 predates small labeled sets; the #271 freeze predates that gate). Floor registered in WISDOM_GATE_FLOORS; k on TWO_STAGE_K's default row (8).",
   "baseline_floor": 0.699999988079071,
   "baseline_key": "external:qwen/qwen3-embedding-4b",
-  "floor": 0.6499999761581421,
+  "floor": 0.7200000286102295,
   "gate_key": "external:qwen/qwen3-embedding-4b:activity:two-stage:restricted-cosine",
   "k": 8,
   "note": "Floor/rule/k derived from the paired calibration artifact. replay_two_stage additionally requires vectors.json.gz, which ONLY the freeze-producing live run writes; never hand-edit this file.",
-  "probe_count": 74,
-  "probes_sha256": "6000eaa3c802be5fd676ff3e79d00887726af338b31ce8bb49530589f51dd910",
+  "probe_count": 191,
+  "probes_sha256": "e7b94ec71509007b9fd5c448d52d78fa1fc8d88bfafaa39fd5fef7e4d1562a55",
   "rule": "restricted-cosine",
   "schema": 1,
-  "source_artifact_code_sha": "bad0cdbb91f388428d37b9aebb277a5383780419",
+  "source_artifact_code_sha": "5fdef5f36b7f64af920455dd404d13d60b316b4a",
   "calibration": {
-    "campaign": "calibration-run/grid-20261018-activity",
-    "artifact": "cell-path-restricted-cosine-0.65-8.json",
-    "build_sha": "bad0cdbb91f388428d37b9aebb277a5383780419",
-    "probe_files": {
-      "path": {
-        "sha256": "6000eaa3c802be5fd676ff3e79d00887726af338b31ce8bb49530589f51dd910",
-        "file": "probes-path.jsonl (committed in calibration-run/grid-20261018-activity/, 74 lines; command/pattern splits committed beside it) — same value as the top-level probes_sha256; corrected 2026-10-19 (Tier-1.5 r1 finding 1: the previously recorded 7665ca64… matched no file on disk)"
-      }
+    "campaign": "calibration-run/grid-20261113-activity",
+    "artifact": "cells/cell-f0.72.json",
+    "build_sha": "5fdef5f36b7f64af920455dd404d13d60b316b4a",
+    "probe_file": "activity-mixed-probes.jsonl",
+    "probes_sha256": "e7b94ec71509007b9fd5c448d52d78fa1fc8d88bfafaa39fd5fef7e4d1562a55",
+    "facts_file": "activity-mixed-facts.jsonl",
+    "facts_sha256": "96acebf1f34e09cf4ad0d16df4b0c3900a4377ae0ddcde8e5aaea0de45fe7b04",
+    "provenance_mix": {
+      "librarian_inferred_facts": 21,
+      "user_confirmed_facts": 1,
+      "positive_probes": 66,
+      "negative_probes": 125
     },
-    "freeze_provenance": "vectors.json.gz produced by a live calibrate_wisdom_gate --freeze run at build bad0cdbb91f388428d37b9aebb277a5383780419 (tools harness), using a TEMPORARY uncommitted gate-disable of the tool's fixture-size gate (facts>=100/probes>=200 — predates small labeled sets). The disable was reverted immediately after the freeze; the committed tool keeps its guard. SCOPE: top-level flip fields (probe_count=74, probes_sha256) describe the WINNING PATH-KIND artifact; vectors.json.gz covers the FULL 196-probe union (probe_union.sha256) + the 14 labeled facts (facts.sha256).",
-    "probe_union": {
-      "count": 196,
-      "sha256": "9d371784eac0c70f3a2d55fcea32a858f31fe851d412e927ef953a20212592db",
-      "splits": "path 18+/56-, command 12+/52-, pattern 12+/46-"
-    },
-    "facts": {
-      "count": 14,
-      "sha256": "304df9b428d724aa3ee779ce4949cc6db168f95a414ec2322aa896d4fe7b9d35",
-      "note": "user_stated relabels on a Kurt-approved scratch COPY; live brain untouched"
-    },
-    "letters": {
-      "path": "act_hit1 0.278 vs base 0.111, FP 0 vs 1 \u2014 PASS",
-      "command": "act_hit1 0.250 vs base 0.083, FP 0 vs 1 \u2014 PASS",
-      "pattern": "act_hit1 0.250 vs base 0.167, FP 0 vs 1 \u2014 PASS"
-    },
-    "benchmark_doc": "docs/benchmarks/2026-10-18-wisdom-gate-activity-restricted-cosine.md"
-  }
+    "query_kind": "path (union probe set; kind labels only, ONE shared floor)",
+    "floor_delta": "0.65 (2026-10-18) -> 0.70 (2026-11-13 addendum 1) -> 0.72 (addendum 2: lowest FP-0 letter-passing floor on the scheme-eligible pool)"
+  },
+  "freeze_provenance": "The 2026-10-18 snapshot was NOT regenerable from committed tooling. This snapshot was produced 2026-11-13 by this delivery's recorded procedure (see the prior freeze_provenance in git history for the full disclosure): the same temporary, disclosed gate-disable of calibrate_wisdom_gate's fixture-size gate (facts>=100 -> small labeled set; reverted immediately after the freeze \u2014 tools/src/bin/calibrate_wisdom_gate.rs is unmodified in this commit), `calibrate_wisdom_gate --freeze` over the mixed-provenance probe set with the real OpenRouter qwen/qwen3-embedding-4b embedder, then expected.json replaced with the verbatim `calibrate_two_stage flip` output on the winning cell. RE-RUN 2026-11-13 #2 (CodeRabbit #349, finding B): the probe sampler now ALSO applies the scorer's embedding/scheme eligibility (embedding_blob IS NOT NULL + embed_scheme = 'raw' + non-null title/body, from entry_eligibility_where) on top of the temporal eligibility from the first re-run \u2014 8 of the prior 30 sampled positive facts were ineligible under the scorer and could never be returned (silent-miss bias); the positive pool is now 22 fully scheme-eligible facts (21 librarian_inferred + 1 user_confirmed, 66 positives). Negatives regenerated with gen_negatives_v2.py (whole-corpus filtering; the inline perturbation negatives are the discarded v1 style \u2014 they leak in the FP-0 kernel replay). ALL 9 grid cells (0.55-0.78) re-run on ONE unified build 5fdef5f3 (CT_BUILD_SHA): 0.70 passes only on FP equality (act FP 1 == baseline 1); 0.72 is the LOWEST FP-0 letter-passing floor (act hit@1 0.439 >= baseline, act FP 0) \u2014 floor MOVED 0.70 -> 0.72; 0.74-0.78 fail on hit@1. vectors.json.gz regenerated by this re-run's freeze (byte format identical: model_key + facts + probes, raw scheme, 2560-dim)."
 }

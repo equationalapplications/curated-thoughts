@@ -1,0 +1,20 @@
+{
+  "generated": "2026-11-13",
+  "brain": "scratch copy brain-dir-20261113/brain.db (sqlite .backup of live ~/.brain/brain.db, read-only)",
+  "positive_facts": {
+    "user_confirmed": 1,
+    "librarian_inferred": 21
+  },
+  "positive_shapes": {
+    "path": 22,
+    "command": 22,
+    "pattern": 22
+  },
+  "negative_kinds": {
+    "neg-path": 100,
+    "neg-command": 25
+  },
+  "probes_total": 191,
+  "note": "mixed-provenance pool per issue #344 (no user_stated-only restriction)",
+  "negative_generation": "v2: real CT-repo files (and command variants) absent from the entire brain corpus, per the 2026-10-18 record"
+}

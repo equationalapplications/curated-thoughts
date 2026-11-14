@@ -185,8 +185,8 @@ pub fn drain_unverified_matches(vault_root: &Path, cap: usize) -> Result<DrainRe
             total_unacked: 0,
         });
     }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -201,9 +201,7 @@ pub fn drain_unverified_matches(vault_root: &Path, cap: usize) -> Result<DrainRe
         let mut v: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!(
-                    "curated-thoughts: prompt drain malformed line kept unchanged: {e}"
-                );
+                eprintln!("curated-thoughts: prompt drain malformed line kept unchanged: {e}");
                 out_lines.push(line.to_string());
                 continue;
             }
@@ -214,9 +212,7 @@ pub fn drain_unverified_matches(vault_root: &Path, cap: usize) -> Result<DrainRe
         // repeat on every 30-second poll with no self-recovery. Keep it
         // verbatim, don't count it, never panic (spec §4 poisoned-file bound).
         let Some(obj) = v.as_object_mut() else {
-            eprintln!(
-                "curated-thoughts: prompt drain non-object line kept unchanged"
-            );
+            eprintln!("curated-thoughts: prompt drain non-object line kept unchanged");
             out_lines.push(line.to_string());
             continue;
         };
@@ -241,8 +237,7 @@ pub fn drain_unverified_matches(vault_root: &Path, cap: usize) -> Result<DrainRe
         }
         out_lines.push(serde_json::to_string(&v)?);
     }
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut body = out_lines.join("\n");
     if !body.is_empty() {
         body.push('\n');
@@ -288,8 +283,7 @@ fn has_unacked_line(path: &Path, fact_id: &str) -> bool {
                 continue;
             }
         };
-        if v.get("fact_id").and_then(|f| f.as_str()) == Some(fact_id)
-            && v.get("acked_at").is_none()
+        if v.get("fact_id").and_then(|f| f.as_str()) == Some(fact_id) && v.get("acked_at").is_none()
         {
             return true;
         }
@@ -329,6 +323,13 @@ pub fn emit_unverified_matches(
     surface: &str,
 ) {
     use std::collections::HashMap;
+    // Confirmation-surface switch (issue #344, spec §7.3): when the setting is
+    // off, the prompt is never offered and NOTHING is touched on disk — no
+    // append, no drop-file creation, no rewrite. The flag resolves through the
+    // conn's own brain dir (brain_paths_for honors the env overrides).
+    if !crate::config::confirmation_enabled_for_db(conn.path()) {
+        return;
+    }
     let Some(root) = vault_root else {
         return;
     };
@@ -350,17 +351,14 @@ pub fn emit_unverified_matches(
             return;
         }
     };
-    let rows = stmt.query_map(
-        rusqlite::params_from_iter(ids.iter()),
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
-        },
-    );
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+        ))
+    });
     let mut payload: HashMap<String, RowPayload> = HashMap::new();
     // Batch-level binding error: the WHOLE payload batch degrades to
     // all-hits-skipped, so it logs the batch (plural) token — the per-row
@@ -461,7 +459,12 @@ mod tests {
         assert_eq!(line["query"], "shipping checklist");
         assert!(line["ts"].is_i64(), "emitter stamps ts");
         // The plan's pinned field set — exactly these keys.
-        let mut keys: Vec<&str> = line.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = line
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort();
         assert_eq!(
             keys,
@@ -470,7 +473,10 @@ mod tests {
 
         // A different fact still appends.
         emit_unverified_match(root, scratch_ev("w2"));
-        assert_eq!(fs::read_to_string(drop_path(root)).unwrap().lines().count(), 2);
+        assert_eq!(
+            fs::read_to_string(drop_path(root)).unwrap().lines().count(),
+            2
+        );
 
         // The app acks w1's line; the NEXT emit for w1 must append again —
         // the dedupe is UNACKED-scoped, not per-file.
@@ -480,8 +486,11 @@ mod tests {
         emit_unverified_match(root, scratch_ev("w1"));
         let text = fs::read_to_string(drop_path(root)).unwrap();
         assert_eq!(text.lines().count(), 2, "acked line no longer suppresses");
-        assert!(text.lines().all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok()),
-            "every line is a single-line JSON object");
+        assert!(
+            text.lines()
+                .all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok()),
+            "every line is a single-line JSON object"
+        );
     }
 
     #[test]
@@ -596,5 +605,67 @@ mod tests {
         );
         let use_needle = format!("use {needle}");
         assert!(!src.contains(&use_needle));
+    }
+
+    /// ── confirmations.enabled gate (issue #344, plan Task 5) ───────────────
+    /// Minimal `llm_wiki_entries` fixture: only the columns emit's SQL touches
+    /// (id, title, body, source_ref, deleted_at). Returns a FILE conn so the
+    /// gate can resolve the config via the db path's brain dir.
+    fn flag_fixture(enabled: Option<bool>) -> (tempfile::TempDir, std::path::PathBuf, Connection) {
+        let vault = tempfile::TempDir::new().unwrap();
+        let brain = vault.path().join(crate::prompt_drop::BRAIN_DIR);
+        std::fs::create_dir_all(&brain).unwrap();
+        let config = match enabled {
+            Some(true) => r#"{"vault_path":"/v","confirmations":{"enabled":true}}"#.to_string(),
+            Some(false) => r#"{"vault_path":"/v","confirmations":{"enabled":false}}"#.to_string(),
+            None => r#"{"vault_path":"/v"}"#.to_string(),
+        };
+        std::fs::write(brain.join("config.json"), config).unwrap();
+        let conn = Connection::open(brain.join("brain.db")).unwrap();
+        conn.execute(
+            "CREATE TABLE llm_wiki_entries (
+                id TEXT PRIMARY KEY, title TEXT, body TEXT,
+                source_ref TEXT, deleted_at INTEGER
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, title, body, source_ref, deleted_at)
+             VALUES ('w1', 't', 'b', '/v/n.md', NULL)",
+            [],
+        )
+        .unwrap();
+        (vault, brain, conn)
+    }
+
+    fn flag_emit(conn: &Connection, vault: &std::path::Path) {
+        let hits = [ResolvedHit {
+            fact_id: "w1",
+            source_type: Some("librarian_inferred"),
+        }];
+        emit_unverified_matches(Some(vault), conn, &hits, "gate query", "wisdom_match");
+    }
+
+    /// flag OFF → emit touches NOTHING on disk (plan Task 5 Step 3).
+    #[test]
+    fn flag_off_emits_nothing() {
+        let (vault, _brain, conn) = flag_fixture(Some(false));
+        flag_emit(&conn, vault.path());
+        assert!(
+            !drop_path(vault.path()).exists(),
+            "the drop file must not be created while confirmations.enabled=false"
+        );
+    }
+
+    /// flag ON (and absent) → emits as today.
+    #[test]
+    fn flag_on_emits_as_today() {
+        let (vault, _brain, conn) = flag_fixture(Some(true));
+        flag_emit(&conn, vault.path());
+        assert!(drop_path(vault.path()).exists());
+        let (vault, _brain, conn) = flag_fixture(None);
+        flag_emit(&conn, vault.path());
+        assert!(drop_path(vault.path()).exists(), "absent key = ON");
     }
 }
