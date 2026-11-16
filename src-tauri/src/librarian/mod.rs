@@ -6,14 +6,14 @@
 mod synthesis;
 
 use crate::db::queries::get_document_by_path;
-use crate::librarian::synthesis::{run_synthesis, SynthesisMode};
+use crate::librarian::synthesis::{run_synthesis, AreasVocab, SynthesisMode};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 pub use synthesis::active_generation_model;
 pub(crate) use synthesis::llm_generation_configured;
 pub use synthesis::SynthesisFailure;
-pub(crate) use synthesis::{LlmCompleter, run_synthesis_with_completer};
+pub(crate) use synthesis::LlmCompleter;
 
 pub struct ChunkRow {
     pub id: i64,
@@ -330,6 +330,14 @@ fn generate_summary_inner(
         _ => SynthesisMode::Summarize,
     };
 
+    // Task 6 (spec 2026-11-14-areas §6.8.4): read the deposit's hand-written
+    // `hub:` frontmatter and resolve it through the Task 3 survivor rule.
+    // ANY problem — unreadable file, no wisdom block, unresolved hub —
+    // degrades to `absent` (the `note_declares_no_wisdom` reader precedent):
+    // UNSCOPED synthesis, never an ingest refusal.
+    let deposit_hub = read_deposit_hub(conn, source_path);
+    let areas = load_areas_vocab(conn);
+
     let chunks: Vec<ChunkRow> = {
         let mut stmt = conn.prepare("PRAGMA table_info(chunks)")?;
         let mut rows = stmt.query([])?;
@@ -403,7 +411,7 @@ fn generate_summary_inner(
     match completer {
         Some(c) => {
             let watermark_model = active_generation_model(model);
-            run_synthesis_with_completer(
+            crate::librarian::synthesis::run_synthesis_areas_with_completer(
                 conn,
                 source_path,
                 &chunks,
@@ -414,6 +422,8 @@ fn generate_summary_inner(
                 c,
                 watermark_model.as_str(),
                 force,
+                deposit_hub.as_deref(),
+                &areas,
             )
         }
         None => {
@@ -427,9 +437,111 @@ fn generate_summary_inner(
                 auto_approve,
                 vault_root,
                 force,
+                deposit_hub.as_deref(),
+                &areas,
             )
         }
     }
+}
+
+/// The §11.2 no-owner-signal bucket (Task 6): a deposit whose `hub:` key
+/// cannot resolve to a configured repo hub counts here. Read by tests and —
+/// in Task 10 — by the measurement fixture.
+pub(crate) static DEPOSIT_HUB_UNRESOLVED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+// Non-test callers arrive with the Task 10 measurement fixture; the allow
+// keeps the -D-warnings gate clean until then.
+#[allow(dead_code)]
+pub(crate) fn deposit_hub_unresolved_count() -> usize {
+    DEPOSIT_HUB_UNRESOLVED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn note_deposit_hub_unresolved() -> usize {
+    DEPOSIT_HUB_UNRESOLVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// The raw `hub:` frontmatter key of a deposit note (§6.8.4 — HAND-WRITTEN
+/// by the deposit carrier). Absent or non-string → None; the resolver, not
+/// this parser, decides whether the value binds.
+pub(crate) fn deposit_hub_from_content(content: &str) -> Option<String> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let (fm, _) = crate::okf::frontmatter::parse_frontmatter(content);
+    match fm.fields.get("hub") {
+        Some(crate::okf::types::OkfFrontmatterValue::String(s)) if !s.trim().is_empty() => {
+            Some(s.trim().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The brain config's `wisdom` block for THIS connection: the config.json
+/// beside the brain.db on the connection's own path; pathless connections
+/// (tests) fall back to the process brain dir (`CURATED_BRAIN_DIR`-aware,
+/// same family as [`crate::config::ingest_policy_for_db`]). Any load problem
+/// degrades to None — UNSCOPED, never an error.
+fn wisdom_config_for_conn(conn: &Connection) -> Option<crate::config::WisdomConfig> {
+    let brain_dir = conn
+        .path()
+        .filter(|p| !p.is_empty())
+        .and_then(|p| std::path::Path::new(p).parent())
+        .map(|dir| dir.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from(crate::get_brain_dir_inner()));
+    let paths = crate::retrieval::brain_paths_for(&brain_dir);
+    let text = std::fs::read_to_string(&paths.config_path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    crate::config::WisdomConfig::from_value(v.get("wisdom").unwrap_or(&serde_json::Value::Null))
+        .ok()
+        .flatten()
+}
+
+/// Read + resolve the deposit's `hub:` key (§6.8.4). Returns the RESOLVED
+/// surviving hub entity id on success; None (absent) on unreadable file,
+/// missing key, no wisdom block, or an unresolved hub (§11.2 bucket tick).
+pub(crate) fn read_deposit_hub(conn: &Connection, source_path: &str) -> Option<String> {
+    let Ok(content) = std::fs::read_to_string(source_path) else {
+        return None;
+    };
+    let hub_id = deposit_hub_from_content(&content)?;
+    let Some(cfg) = wisdom_config_for_conn(conn) else {
+        note_deposit_hub_unresolved();
+        return None;
+    };
+    match crate::config::hub_resolver::resolve_hub_id(conn, &cfg, &hub_id) {
+        crate::config::hub_resolver::DepositHub::Hub(survivor) => Some(survivor),
+        _ => {
+            note_deposit_hub_unresolved();
+            None
+        }
+    }
+}
+
+/// Load the configured hubs' area names (§6.3): one entry per configured
+/// `wisdom.areas_paths` key that resolves to a LIVE hub and whose areas file
+/// loads — keyed by the RESOLVED survivor id, names read through the Task 3
+/// areas-file CACHED LOADER. Never a one-shot serde_yaml read here. Load
+/// problems degrade: the hub simply contributes no vocabulary.
+pub(crate) fn load_areas_vocab(conn: &Connection) -> AreasVocab {
+    let Some(cfg) = wisdom_config_for_conn(conn) else {
+        return AreasVocab::new();
+    };
+    let mut out = AreasVocab::new();
+    for (id, path) in &cfg.areas_paths {
+        let survivor = match crate::config::hub_resolver::resolve_hub_id(conn, &cfg, id) {
+            crate::config::hub_resolver::DepositHub::Hub(s) => s,
+            _ => continue,
+        };
+        if out.contains_key(&survivor) {
+            continue;
+        }
+        if let Ok(file) = crate::config::hub_resolver::load_areas_file(path) {
+            out.insert(
+                survivor,
+                file.areas.into_iter().map(|(name, _)| name).collect(),
+            );
+        }
+    }
+    out
 }
 
 #[cfg(test)]

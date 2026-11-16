@@ -100,6 +100,11 @@ struct LlmFact {
     confidence: Option<String>,
     #[serde(default)]
     evidence: Vec<String>,
+    /// §6 (i): repo-hub scope the model copied from the target hub's areas
+    /// list. Validated against the matched hub's file (§6.6) before it may
+    /// ride a `fact_add` payload; commit binds it verbatim, no re-check.
+    #[serde(default)]
+    area: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -491,6 +496,7 @@ fn load_candidate_entities(
     source_path: &str,
     source_chunks: &[ChunkRow],
     mean_embedding: Option<&[f32]>,
+    force_include: Option<&str>,
 ) -> Result<Vec<CandidateEntity>> {
     let chunk_text: String = source_chunks.iter().map(|c| c.text.as_str()).collect();
     let name_hits = name_match_entities(conn, source_path, &chunk_text)?;
@@ -519,6 +525,24 @@ fn load_candidate_entities(
 
     let mut ranked: Vec<(String, f32)> = scores.into_iter().collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // §6.3(a): the owning hub named by the deposit's `hub:` frontmatter is
+    // FORCE-INCLUDED as a candidate — deduplicated (already-ranked means
+    // moved to rank 1), THEN the list truncates, so the owning hub can never
+    // be candidate-gated away from its own deposit (#381-class hazard). A
+    // dead id (not in live_entities) is never inserted.
+    if let Some(hub) = force_include {
+        let live = conn
+            .query_row(
+                "SELECT 1 FROM live_entities WHERE id = ?1 AND deleted_at IS NULL",
+                [hub],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if live {
+            ranked.retain(|(id, _)| id != hub);
+            ranked.insert(0, (hub.to_string(), f32::NEG_INFINITY));
+        }
+    }
     ranked.truncate(MAX_CANDIDATES);
 
     let mut out = Vec::new();
@@ -600,6 +624,14 @@ fn assemble_numbered_context(chunks: &[ChunkRow], numbered: &[NumberedChunk]) ->
     body
 }
 
+/// Configured repo-hub areas vocabulary (spec 2026-11-14-areas §6.3):
+/// RESOLVED hub entity id → that hub's ordered area names, loaded through
+/// the Task 3 areas-file CACHED LOADER (`config::hub_resolver::load_areas_file`).
+/// Only hubs with a loadable areas file appear; the prompt clause (§6.3b),
+/// the validate-pass §6.6 vocabulary check, and the §6.5 NOCASE union all
+/// read this one structure.
+pub(crate) type AreasVocab = BTreeMap<String, Vec<String>>;
+
 const SYNTHESIS_SYSTEM_PROMPT_BASE_SUMMARIZE: &str =
             "You are a knowledge librarian. Analyze the document and emit structured JSON proposals for entity summary updates only. \
              Output ONLY valid JSON matching the schema — no markdown fences, no commentary.\n\n\
@@ -619,7 +651,7 @@ const SYNTHESIS_SYSTEM_PROMPT_BASE_SYNTHESIZE: &str =
              Schema:\n\
              {\"proposals\":[{\"target\":{\"existing_id\":\"...\"}|{\"new\":{\"name\":\"...\",\"type\":\"person|project|concept|...\"}},\
              \"reasoning\":\"one paragraph why\",\"summary_update\":\"full replacement prose or null\",\
-             \"facts\":[{\"op\":\"add|update|archive\",\"target_id\":null,\"body\":\"...\",\"tags\":[],\"confidence\":\"certain|inferred\",\"evidence\":[\"C3\"]}],\
+             \"facts\":[{\"op\":\"add|update|archive\",\"target_id\":null,\"area\":\"area name copied exactly from the target hub's areas list (hub targets only; omit otherwise)\",\"body\":\"...\",\"tags\":[],\"confidence\":\"certain|inferred\",\"evidence\":[\"C3\"]}],\
              \"edges\":[{\"source\":\"self\"|{\"existing_id\":\"...\"}|{\"new_name\":\"...\"},\"target\":\"self\"|{\"existing_id\":\"...\"}|{\"new_name\":\"...\"},\"edge_type\":\"...\"}],\
              \"tasks\":[{\"description\":\"...\",\"evidence\":[\"C2\"]}]}]}\n\n\
              Rules:\n\
@@ -662,6 +694,7 @@ fn build_system_prompt(
     edge_vocabulary: &[&str],
     edge_vocabulary_by_target: &BTreeMap<String, Vec<String>>,
     node_vocabulary: &[&str],
+    areas_by_hub: &AreasVocab,
 ) -> String {
     let mut prompt = String::from(match mode {
         SynthesisMode::Summarize => SYNTHESIS_SYSTEM_PROMPT_BASE_SUMMARIZE,
@@ -708,6 +741,23 @@ fn build_system_prompt(
              than inventing a new type.",
             node_vocabulary.join(", ")
         ));
+    }
+    // Task 6 (§6.3b + §11.1 attach clause): one `For <hub>: areas = …` line
+    // per configured hub IN the candidate set, keyed by the same RESOLVED id
+    // the force-include inserted — never a merged list (two hubs can define
+    // the same name). The model must copy an id that is actually in the set,
+    // or the validate pass's candidate gate would drop its proposal (#381).
+    if matches!(mode, SynthesisMode::Synthesize) && !areas_by_hub.is_empty() {
+        prompt.push_str(
+            "\n\nSome candidate entities above are repo hubs with AREAS — a fixed \
+             list of area names for that hub. For a fact whose target is one of \
+             those hubs, add an \"area\" field whose value is copied EXACTLY from \
+             that hub's list; omit the \"area\" field for every other target. A \
+             value outside the target hub's list is rejected.",
+        );
+        for (hub, names) in areas_by_hub {
+            prompt.push_str(&format!("\nFor {hub}: areas = {}.", names.join(", ")));
+        }
     }
     prompt
 }
@@ -883,7 +933,8 @@ fn validate_llm_output(
     numbered: &[NumberedChunk],
     model: &str,
     trigger_doc_id: i64,
-) -> Result<Vec<ValidatedProposal>> {
+    areas: &AreasVocab,
+) -> Result<(Vec<ValidatedProposal>, Vec<String>)> {
     let candidate_ids: HashSet<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
     let injected_fact_ids: HashSet<&str> = candidates
         .iter()
@@ -895,10 +946,32 @@ fn validate_llm_output(
         numbered.iter().map(|c| (c.chunk_id, c.doc_id)).collect();
 
     let mut validated = Vec::new();
+    // Task 6 (§6.3c/§6.5/§6.6): drops are REPORTED, never silent — the run
+    // path logs these and the tests assert them. Legacy drops (unknown
+    // non-hub target) stay silent, preserving today's behavior.
+    let mut dropped: Vec<String> = Vec::new();
+    // §6.5 union: all configured area names NOCASE, across every hub. A
+    // new_name endpoint colliding with any of them would mint an entity that
+    // shadows an area name.
+    let area_names_lower: Vec<String> = areas
+        .values()
+        .flatten()
+        .map(|n| n.to_lowercase())
+        .collect();
     for llm_prop in &raw.proposals {
         let (kind, entity_id, proposed_name, proposed_type) = match &llm_prop.target {
             LlmTarget::Existing { existing_id } => {
                 if !candidate_ids.contains(existing_id.as_str()) {
+                    // §6.3(c): a target naming a CONFIGURED hub id, or any
+                    // proposal carrying `area`, is REPORTED before the drop —
+                    // still not committed, but never lost silently.
+                    if areas.contains_key(existing_id)
+                        || llm_prop.facts.iter().any(|f| f.area.is_some())
+                    {
+                        dropped.push(format!(
+                            "proposal target {existing_id} dropped: not in the batch's candidate set (candidate gate); its facts were not committed"
+                        ));
+                    }
                     continue;
                 }
                 (
@@ -935,20 +1008,51 @@ fn validate_llm_output(
         if mode == SynthesisMode::Synthesize {
             for fact in &llm_prop.facts {
                 let evidence = resolve_evidence(&fact.evidence, &chunk_by_label);
+                // §6.6: `area` is legal ONLY on a fact whose target is a
+                // configured hub IN the candidate set, and the value must be
+                // in THAT hub's areas file (exact match — the model cannot
+                // slide in a near-duplicate like "deployment"). Every other
+                // carrier — New targets (which carry no hub id), non-hub
+                // existing targets, or out-of-vocabulary values — is
+                // rejected AND reported.
+                let validated_area: Option<&String> = match &fact.area {
+                    None => None,
+                    Some(area) => {
+                        let allowed = match (&llm_prop.target, entity_id.as_deref()) {
+                            (_, Some(id)) => areas.get(id).map(|v| v.as_slice()),
+                            (_, None) => None,
+                        };
+                        match allowed {
+                            Some(names) if names.iter().any(|n| n == area) => Some(area),
+                            _ => {
+                                dropped.push(format!(
+                                    "fact_add dropped: area \"{area}\" is not in the target's areas vocabulary (§6.6)"
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                };
                 match fact.op.as_str() {
                     "add" => {
                         let Some(body) = fact.body.as_ref().filter(|b| !b.trim().is_empty()) else {
                             continue;
                         };
+                        let mut payload = serde_json::json!({
+                            "body": body,
+                            "tags": fact.tags,
+                            "confidence": fact.confidence.as_deref().unwrap_or("inferred"),
+                        });
+                        // §6 (i): the validated area rides the fact_add
+                        // payload; commit binds it verbatim (no re-check).
+                        if let Some(area) = validated_area {
+                            payload["area"] = serde_json::Value::String(area.clone());
+                        }
                         items.push(NewProposalItem {
                             id: generate_id("item_"),
                             item_type: "fact_add".into(),
                             target_id: None,
-                            payload: serde_json::json!({
-                                "body": body,
-                                "tags": fact.tags,
-                                "confidence": fact.confidence.as_deref().unwrap_or("inferred"),
-                            }),
+                            payload,
                             evidence,
                         });
                     }
@@ -994,6 +1098,20 @@ fn validate_llm_output(
             }
 
             for edge in &llm_prop.edges {
+                // §6.5: a new_name endpoint NOCASE-equal to ANY configured
+                // area name is dropped WITH a reason — such an entity would
+                // shadow the area namespace. Near-duplicates that merely
+                // extend the name are untouched.
+                let new_name = endpoint_new_name(&edge.source)
+                    .or_else(|| endpoint_new_name(&edge.target));
+                if let Some(name) = new_name {
+                    if area_names_lower.iter().any(|n| *n == name.to_lowercase()) {
+                        dropped.push(format!(
+                            "edge_add dropped: new_name \"{name}\" collides (NOCASE) with a configured area name (§6.5)"
+                        ));
+                        continue;
+                    }
+                }
                 items.push(NewProposalItem {
                     id: generate_id("item_"),
                     item_type: "edge_add".into(),
@@ -1044,7 +1162,14 @@ fn validate_llm_output(
             sources,
         });
     }
-    Ok(validated)
+    Ok((validated, dropped))
+}
+
+/// The string value of a `{ "new_name": ... }` edge endpoint, if any.
+fn endpoint_new_name(v: &serde_json::Value) -> Option<String> {
+    v.get("new_name")
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string())
 }
 
 fn write_synthesis_error(vault_root: Option<&Path>, msg: &str) {
@@ -1090,11 +1215,12 @@ fn parse_and_validate(
     numbered: &[NumberedChunk],
     model: &str,
     trigger_doc_id: i64,
-) -> Result<Vec<ValidatedProposal>> {
+    areas: &AreasVocab,
+) -> Result<(Vec<ValidatedProposal>, Vec<String>)> {
     let stripped = strip_json_fences(raw_json);
     let parsed: LlmSynthesisOutput =
         serde_json::from_str(&stripped).context("invalid synthesis JSON")?;
-    validate_llm_output(&parsed, mode, candidates, numbered, model, trigger_doc_id)
+    validate_llm_output(&parsed, mode, candidates, numbered, model, trigger_doc_id, areas)
 }
 
 fn call_llm_with_retry(completer: &dyn LlmCompleter, system: &str, user: &str) -> Result<String> {
@@ -1167,12 +1293,14 @@ pub fn run_synthesis(
     auto_approve: bool,
     vault_root: Option<&Path>,
     force: bool,
+    deposit_hub: Option<&str>,
+    areas: &AreasVocab,
 ) -> Result<()> {
     let completer = build_llm_completer(model)?.context("LLM provider not configured")?;
     // Record the CONFIGURED model (the one that will actually serve the call),
     // not the caller's fallback recommendation.
     let watermark_model = active_generation_model(model);
-    run_synthesis_with_completer(
+    run_synthesis_areas_with_completer(
         conn,
         source_path,
         source_chunks,
@@ -1183,6 +1311,8 @@ pub fn run_synthesis(
         completer.as_ref(),
         watermark_model.as_str(),
         force,
+        deposit_hub,
+        areas,
     )
 }
 
@@ -1206,6 +1336,11 @@ pub(crate) fn llm_generation_configured() -> bool {
     )
 }
 
+/// UNSCOPED completer seam: pre-areas signature, byte-identical behavior.
+/// Test-only since Task 6 — production rides
+/// [`run_synthesis_areas_with_completer`] with the hub read from
+/// `librarian::read_deposit_hub`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_synthesis_with_completer(
     conn: &mut Connection,
@@ -1216,10 +1351,46 @@ pub(crate) fn run_synthesis_with_completer(
     auto_approve: bool,
     vault_root: Option<&Path>,
     completer: &dyn LlmCompleter,
-    // Model string recorded in watermarks and proposal provenance (the
-    // configured generation model; may differ from the `model` fallback arg).
     watermark_model: &str,
     force: bool,
+) -> Result<()> {
+    // UNSCOPED seam: no hub signal, no areas vocabulary. Pre-areas behavior,
+    // byte-identical — the LEDGER's UNSCOPED pins ride this entry point.
+    run_synthesis_areas_with_completer(
+        conn,
+        source_path,
+        source_chunks,
+        trigger_doc_id,
+        mode,
+        auto_approve,
+        vault_root,
+        completer,
+        watermark_model,
+        force,
+        None,
+        &BTreeMap::new(),
+    )
+}
+
+/// Scoped form of [`run_synthesis_with_completer`] (Task 6, spec §6):
+/// `deposit_hub` is the RESOLVED owning hub from the deposit's `hub:`
+/// frontmatter (None = absent/unresolved — degrade, never error) and
+/// `areas` carries the configured hubs' area names for the per-hub prompt
+/// clause, the force-include, and the validate-pass §6.5/§6.6 checks.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_synthesis_areas_with_completer(
+    conn: &mut Connection,
+    source_path: &str,
+    source_chunks: &[ChunkRow],
+    trigger_doc_id: i64,
+    mode: SynthesisMode,
+    auto_approve: bool,
+    vault_root: Option<&Path>,
+    completer: &dyn LlmCompleter,
+    watermark_model: &str,
+    force: bool,
+    deposit_hub: Option<&str>,
+    areas: &AreasVocab,
 ) -> Result<()> {
     if !force {
         // Watermark gate: skip docs whose content hash and active model
@@ -1244,8 +1415,13 @@ pub(crate) fn run_synthesis_with_completer(
     }
     let chunk_ids: Vec<i64> = source_chunks.iter().map(|c| c.id).collect();
     let mean_embedding = mean_chunk_embedding(conn, &chunk_ids)?;
-    let candidates =
-        load_candidate_entities(conn, source_path, source_chunks, mean_embedding.as_deref())?;
+    let candidates = load_candidate_entities(
+        conn,
+        source_path,
+        source_chunks,
+        mean_embedding.as_deref(),
+        deposit_hub,
+    )?;
     let numbered = load_numbered_chunks(conn, source_chunks)?;
 
     let context_body = assemble_numbered_context(source_chunks, &numbered);
@@ -1319,7 +1495,18 @@ pub(crate) fn run_synthesis_with_completer(
         ),
     };
     let node_vocab: Vec<&str> = node_vocab_owned.iter().map(String::as_str).collect();
-    let system = build_system_prompt(mode, &vocab, &vocab_by_target, &node_vocab);
+    // Task 6 (§6.3b): the clause lists only configured hubs IN the candidate
+    // set — an unresolved id in the clause would reproduce the #381 drop.
+    let areas_by_hub: AreasVocab = if matches!(mode, SynthesisMode::Synthesize) {
+        areas
+            .iter()
+            .filter(|(id, _)| candidates.iter().any(|c| c.id == **id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    let system = build_system_prompt(mode, &vocab, &vocab_by_target, &node_vocab, &areas_by_hub);
     let user = format!("Document to analyze:\n\n{truncated}");
 
     let raw = match call_llm_with_retry(completer, &system, &user) {
@@ -1330,13 +1517,14 @@ pub(crate) fn run_synthesis_with_completer(
         }
     };
 
-    let validated = match parse_and_validate(
+    let (validated, dropped) = match parse_and_validate(
         &raw,
         mode,
         &candidates,
         &numbered,
         watermark_model,
         trigger_doc_id,
+        areas,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -1344,6 +1532,12 @@ pub(crate) fn run_synthesis_with_completer(
             return finish_failed_synthesis(conn, trigger_doc_id, source_path, vault_root, msg);
         }
     };
+    // §6.3(c)/§6.5/§6.6: reported drops are journaled to stderr so a proposal
+    // that names a ranked-out hub or collides with the area namespace is
+    // never lost silently. Still not committed.
+    for reason in &dropped {
+        eprintln!("[librarian] synthesis drop for {source_path}: {reason}");
+    }
 
     if validated.is_empty() {
         write_synth_watermark(conn, trigger_doc_id, watermark_model)?;
@@ -1759,6 +1953,7 @@ mod tests {
                         tags: vec![],
                         confidence: None,
                         evidence: vec!["C1".into()],
+                        area: None,
                     },
                     LlmFact {
                         op: "add".into(),
@@ -1767,19 +1962,21 @@ mod tests {
                         tags: vec![],
                         confidence: None,
                         evidence: vec!["C1".into()],
+                        area: None,
                     },
                 ],
                 edges: vec![],
                 tasks: vec![],
             }],
         };
-        let validated = validate_llm_output(
+        let (validated, _dropped) = validate_llm_output(
             &raw,
             SynthesisMode::Synthesize,
             &candidates,
             &numbered,
             "test",
             10,
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(validated.len(), 1);
@@ -1815,13 +2012,14 @@ mod tests {
                     tags: vec![],
                     confidence: None,
                     evidence: vec!["C99".into(), "C1".into()],
+                    area: None,
                 }],
                 edges: vec![],
                 tasks: vec![],
             }],
         };
-        let validated =
-            validate_llm_output(&raw, SynthesisMode::Synthesize, &[], &numbered, "test", 10)
+        let (validated, _dropped) =
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &[], &numbered, "test", 10, &BTreeMap::new())
                 .unwrap();
         assert_eq!(validated[0].items[0].evidence.len(), 1);
         assert_eq!(validated[0].items[0].evidence[0].chunk_id, Some(1));
@@ -1855,6 +2053,7 @@ mod tests {
                     tags: vec![],
                     confidence: None,
                     evidence: vec!["C1".into()],
+                    area: None,
                 }],
                 edges: vec![LlmEdge {
                     source: serde_json::json!("self"),
@@ -1867,8 +2066,8 @@ mod tests {
                 }],
             }],
         };
-        let validated =
-            validate_llm_output(&raw, SynthesisMode::Summarize, &[], &numbered, "test", 10)
+        let (validated, _dropped) =
+            validate_llm_output(&raw, SynthesisMode::Summarize, &[], &numbered, "test", 10, &BTreeMap::new())
                 .unwrap();
         assert_eq!(validated.len(), 1);
         assert_eq!(validated[0].items.len(), 1);
@@ -3099,6 +3298,7 @@ mod tests {
             &["depends_on", "owned_by"],
             &BTreeMap::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert!(
             prompt.contains("depends_on") && prompt.contains("owned_by"),
@@ -3112,7 +3312,7 @@ mod tests {
 
     #[test]
     fn system_prompt_without_vocabulary_is_unchanged_shape() {
-        let prompt = build_system_prompt(SynthesisMode::Synthesize, &[], &BTreeMap::new(), &[]);
+        let prompt = build_system_prompt(SynthesisMode::Synthesize, &[], &BTreeMap::new(), &[], &BTreeMap::new());
         assert!(
             !prompt.contains("ONLY the following edge_type"),
             "an empty vocabulary must not emit a closed-vocabulary clause"
@@ -3307,6 +3507,525 @@ mod tests {
         assert!(
             !beta_clause.contains("alpha_only_rel") && !beta_clause.contains("depends_on"),
             "ent-beta's clause leaked ent-alpha's vocabulary: {beta_clause}"
+        );
+    }
+
+    // ---- Task 6 (spec 2026-11-14-areas §6): Librarian areas write path ----
+    //
+    // Prompt-form/parse/force-include/drops/truncation-order UNIT tests live
+    // here per VISIBILITY; `tests/areas_write_path.rs` keeps only E2E
+    // ingest-through-file assertions. Fixtures HAND-WRITE `hub:` frontmatter
+    // and hand-build the areas vocabulary (legal per §6.8.4); the areas file
+    // itself is loaded through the Task 3 cached loader in production and the
+    // E2E test.
+
+    type AreasVocab = BTreeMap<String, Vec<String>>;
+
+    fn areas_vocab(entries: &[(&str, &[&str])]) -> AreasVocab {
+        entries
+            .iter()
+            .map(|(hub, names)| {
+                (
+                    (*hub).to_string(),
+                    names.iter().map(|s| (*s).to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Named first test (filter cannot pass vacuously): two hubs are
+    /// CONFIGURED but only the owning hub is IN the candidate set — the
+    /// prompt must carry exactly one `For <hub>: areas = …` line keyed by
+    /// the resolved id, never a merged list, plus the §11.1 attach clause.
+    #[test]
+    fn areas_write_path_per_hub_clause() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/immutable-source-files/alpha-deploy.md",
+            "Alpha deploy notes for the runbook",
+        );
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-a1");
+        seed_entity_with_fact(&conn, "ent-beta", "Beta", "fact-b1");
+        // "Beta" is configured but its name appears nowhere in the chunk, so
+        // it is NOT a candidate — the clause must not mention it.
+        let areas = areas_vocab(&[
+            ("ent-alpha", &["deploy", "infra"]),
+            ("ent-beta", &["deploy", "ops"]),
+        ]);
+        let json = serde_json::json!({ "proposals": [] }).to_string();
+        let mock = MockCompleter::new(vec![json]);
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "Alpha deploy notes for the runbook".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: "/vault/immutable-source-files/alpha-deploy.md".into(),
+        }];
+
+        run_synthesis_areas_with_completer(
+            &mut conn,
+            "/vault/immutable-source-files/alpha-deploy.md",
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            None,
+            &mock,
+            "test-model",
+            false,
+            Some("ent-alpha"),
+            &areas,
+        )
+        .unwrap();
+
+        let system = mock.last_system();
+        assert!(
+            system.contains("For ent-alpha: areas = deploy, infra."),
+            "owning hub's areas clause missing: {system}"
+        );
+        assert!(
+            !system.contains("For ent-beta:"),
+            "a configured hub that is NOT in the candidate set must not get a clause: {system}"
+        );
+        assert!(
+            !system.contains("deploy, infra, ops"),
+            "a single merged areas list is forbidden (§6.3): {system}"
+        );
+        assert!(
+            system.contains("\"area\""),
+            "attach clause must instruct the model to add the area field: {system}"
+        );
+    }
+
+    /// §6.3(a) TRUNCATION ORDER: the force-included owning hub must survive a
+    /// full candidate set — dedupe + move to rank 1 happens BEFORE the
+    /// truncate to MAX_CANDIDATES = 8. A dead id is never inserted.
+    #[test]
+    fn areas_write_path_force_include_survives_truncation() {
+        let conn = open_in_memory().unwrap();
+        for i in 0..9 {
+            conn.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES (?1, ?2, 'concept', 'filler', 100, 100)",
+                params![format!("ent-fill{i}"), format!("Filler{i}")],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent-hub', 'RepoHub', 'concept', 'hub', 100, 100)",
+            [],
+        )
+        .unwrap();
+        // Ten name-hit candidates for an eight-slot truncate: the hub's tie
+        // order among equals is HashMap-random, so WITHOUT the force-include
+        // it can rank out — exactly the #381-class hazard.
+        let chunk_text: String = (0..9)
+            .map(|i| format!("Filler{i} "))
+            .chain(std::iter::once("RepoHub ".to_string()))
+            .collect();
+        let ranked = load_candidate_entities(
+            &conn,
+            "/vault/immutable-source-files/repo.md",
+            &[ChunkRow {
+                id: 1,
+                entity_id: "tier_working::abc".into(),
+                text: chunk_text,
+                symbol_name: None,
+                start_line: 1,
+                end_line: 1,
+                tier: "user_doc".into(),
+                path: "/vault/immutable-source-files/repo.md".into(),
+            }],
+            None,
+            Some("ent-hub"),
+        )
+        .unwrap();
+        assert_eq!(ranked.len(), MAX_CANDIDATES, "truncate still applies");
+        assert_eq!(
+            ranked.first().map(|c| c.id.as_str()),
+            Some("ent-hub"),
+            "force-included hub must sit at rank 1 after truncate"
+        );
+        assert_eq!(
+            ranked.iter().filter(|c| c.id == "ent-hub").count(),
+            1,
+            "force-include dedupes: hub appears exactly once"
+        );
+        // Dead id: never inserted (live-check before insert).
+        let dead = load_candidate_entities(
+            &conn,
+            "/vault/immutable-source-files/repo.md",
+            &[ChunkRow {
+                id: 1,
+                entity_id: "tier_working::abc".into(),
+                text: "Alpha deploy notes".into(),
+                symbol_name: None,
+                start_line: 1,
+                end_line: 1,
+                tier: "user_doc".into(),
+                path: "/vault/immutable-source-files/repo.md".into(),
+            }],
+            None,
+            Some("ent-ghost"),
+        )
+        .unwrap();
+        assert!(
+            dead.iter().all(|c| c.id != "ent-ghost"),
+            "a dead force-include id must not become a candidate"
+        );
+    }
+
+    /// §6 (i)+(ii): `LlmFact.area` parses and rides the `fact_add` payload.
+    #[test]
+    fn areas_write_path_area_rides_fact_add_payload() {
+        let candidates = vec![CandidateEntity {
+            id: "ent-hub".into(),
+            name: "RepoHub".into(),
+            entity_type: "concept".into(),
+            summary_snippet: "hub".into(),
+            facts: vec![],
+        }];
+        let areas = areas_vocab(&[("ent-hub", &["deploy"])]);
+        let raw = LlmSynthesisOutput {
+            proposals: vec![LlmProposal {
+                target: LlmTarget::Existing {
+                    existing_id: "ent-hub".into(),
+                },
+                reasoning: "Because".into(),
+                summary_update: None,
+                facts: vec![LlmFact {
+                    op: "add".into(),
+                    target_id: None,
+                    body: Some("Deploys land in infra.".into()),
+                    tags: vec![],
+                    confidence: None,
+                    evidence: vec![],
+                    area: Some("deploy".into()),
+                }],
+                edges: vec![],
+                tasks: vec![],
+            }],
+        };
+        let (validated, dropped) =
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+                .unwrap();
+        assert!(dropped.is_empty(), "in-vocabulary area must not drop: {dropped:?}");
+        let fact = validated[0]
+            .items
+            .iter()
+            .find(|i| i.item_type == "fact_add")
+            .expect("fact_add item must survive");
+        assert_eq!(
+            fact.payload.get("area").and_then(|v| v.as_str()),
+            Some("deploy"),
+            "area must ride the fact_add payload"
+        );
+    }
+
+    /// §6.6: an `area` value outside the matched hub's areas-file vocabulary
+    /// is rejected AND reported (never silently lost).
+    #[test]
+    fn areas_write_path_out_of_vocab_area_rejected_and_reported() {
+        let candidates = vec![CandidateEntity {
+            id: "ent-hub".into(),
+            name: "RepoHub".into(),
+            entity_type: "concept".into(),
+            summary_snippet: "hub".into(),
+            facts: vec![],
+        }];
+        let areas = areas_vocab(&[("ent-hub", &["deploy"])]);
+        let raw = LlmSynthesisOutput {
+            proposals: vec![LlmProposal {
+                target: LlmTarget::Existing {
+                    existing_id: "ent-hub".into(),
+                },
+                reasoning: "Because".into(),
+                summary_update: None,
+                facts: vec![
+                    LlmFact {
+                        op: "add".into(),
+                        target_id: None,
+                        body: Some("Bad vocab.".into()),
+                        tags: vec![],
+                        confidence: None,
+                        evidence: vec![],
+                        area: Some("networking".into()),
+                    },
+                    LlmFact {
+                        op: "add".into(),
+                        target_id: None,
+                        body: Some("No area at all.".into()),
+                        tags: vec![],
+                        confidence: None,
+                        evidence: vec![],
+                        area: None,
+                    },
+                    LlmFact {
+                        op: "add".into(),
+                        target_id: None,
+                        body: Some("Good vocab.".into()),
+                        tags: vec![],
+                        confidence: None,
+                        evidence: vec![],
+                        area: Some("deploy".into()),
+                    },
+                ],
+                edges: vec![],
+                tasks: vec![],
+            }],
+        };
+        let (validated, dropped) =
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+                .unwrap();
+        let bodies: Vec<&str> = validated[0]
+            .items
+            .iter()
+            .filter(|i| i.item_type == "fact_add")
+            .filter_map(|i| i.payload.get("body").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            bodies,
+            vec!["No area at all.", "Good vocab."],
+            "only in-vocabulary / arealess facts survive"
+        );
+        assert_eq!(dropped.len(), 1, "the rejection must be reported: {dropped:?}");
+        assert!(
+            dropped[0].contains("networking"),
+            "the report names the offending value: {dropped:?}"
+        );
+    }
+
+    /// §6.6: `area` on a non-hub existing target or on any NEW target is
+    /// rejected + reported — the model cannot invent near-duplicate hubs.
+    #[test]
+    fn areas_write_path_area_on_non_hub_and_new_targets_rejected() {
+        let candidates = vec![CandidateEntity {
+            id: "ent-plain".into(),
+            name: "Plain".into(),
+            entity_type: "concept".into(),
+            summary_snippet: "plain".into(),
+            facts: vec![],
+        }];
+        // ent-plain is NOT a configured hub; the areas map is non-empty so a
+        // vacuous pass (empty map) cannot sneak through.
+        let areas = areas_vocab(&[("ent-hub", &["deploy"])]);
+        let mk_fact = |body: &str, area: Option<&str>| LlmFact {
+            op: "add".into(),
+            target_id: None,
+            body: Some(body.into()),
+            tags: vec![],
+            confidence: None,
+            evidence: vec![],
+            area: area.map(|s| s.into()),
+        };
+        let raw = LlmSynthesisOutput {
+            proposals: vec![
+                LlmProposal {
+                    target: LlmTarget::Existing {
+                        existing_id: "ent-plain".into(),
+                    },
+                    reasoning: "Because".into(),
+                    summary_update: None,
+                    facts: vec![mk_fact("Area on a plain entity.", Some("deploy"))],
+                    edges: vec![],
+                    tasks: vec![],
+                },
+                LlmProposal {
+                    target: LlmTarget::New {
+                        new: LlmNewEntity {
+                            name: "Fresh".into(),
+                            entity_type: "concept".into(),
+                        },
+                    },
+                    reasoning: "Because".into(),
+                    summary_update: None,
+                    facts: vec![mk_fact("Area on a new entity.", Some("deploy"))],
+                    edges: vec![],
+                    tasks: vec![],
+                },
+            ],
+        };
+        let (validated, dropped) =
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+                .unwrap();
+        for prop in &validated {
+            assert!(
+                prop.items.iter().all(|i| i.payload.get("area").is_none()),
+                "no fact_add on a non-hub/new target may carry area"
+            );
+        }
+        assert_eq!(
+            dropped.len(),
+            2,
+            "both rejections must be reported: {dropped:?}"
+        );
+    }
+
+    /// §6.5: an edge_add whose new_name endpoint NOCASE-equals a configured
+    /// area name is dropped WITH a reason; near-duplicates that merely share
+    /// a prefix are untouched.
+    #[test]
+    fn areas_write_path_new_name_area_collision_dropped() {
+        let candidates = vec![CandidateEntity {
+            id: "ent-hub".into(),
+            name: "RepoHub".into(),
+            entity_type: "concept".into(),
+            summary_snippet: "hub".into(),
+            facts: vec![],
+        }];
+        let areas = areas_vocab(&[("ent-hub", &["Deploy"])]);
+        let raw = LlmSynthesisOutput {
+            proposals: vec![LlmProposal {
+                target: LlmTarget::Existing {
+                    existing_id: "ent-hub".into(),
+                },
+                reasoning: "Because".into(),
+                summary_update: None,
+                facts: vec![],
+                edges: vec![
+                    LlmEdge {
+                        source: serde_json::json!("self"),
+                        target: serde_json::json!({ "new_name": "deploy" }),
+                        edge_type: "related_to".into(),
+                    },
+                    LlmEdge {
+                        source: serde_json::json!("self"),
+                        target: serde_json::json!({ "new_name": "deployment" }),
+                        edge_type: "related_to".into(),
+                    },
+                ],
+                tasks: vec![],
+            }],
+        };
+        let (validated, dropped) =
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+                .unwrap();
+        let edge_names: Vec<String> = validated[0]
+            .items
+            .iter()
+            .filter(|i| i.item_type == "edge_add")
+            .filter_map(|i| {
+                i.payload
+                    .get("target")
+                    .and_then(|v| v.get("new_name"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        assert_eq!(
+            edge_names,
+            vec!["deployment"],
+            "exact NOCASE collision dropped, near-duplicate kept"
+        );
+        assert_eq!(dropped.len(), 1, "the §6.5 drop must carry a reason: {dropped:?}");
+        assert!(
+            dropped[0].contains("deploy"),
+            "the reason names the colliding new_name: {dropped:?}"
+        );
+    }
+
+    /// §6.3(c): a proposal whose target names a CONFIGURED hub id (or carries
+    /// area) yet is not in the candidate set is REPORTED (still uncommitted);
+    /// a plain unknown target stays on the legacy silent drop.
+    #[test]
+    fn areas_write_path_candidate_gate_drop_is_reported() {
+        let areas = areas_vocab(&[("ent-hub", &["deploy"])]);
+        let mk_prop = |existing_id: &str, area: Option<&str>| LlmSynthesisOutput {
+            proposals: vec![LlmProposal {
+                target: LlmTarget::Existing {
+                    existing_id: existing_id.into(),
+                },
+                reasoning: "Because".into(),
+                summary_update: None,
+                facts: vec![LlmFact {
+                    op: "add".into(),
+                    target_id: None,
+                    body: Some("A fact.".into()),
+                    tags: vec![],
+                    confidence: None,
+                    evidence: vec![],
+                    area: area.map(|s| s.into()),
+                }],
+                edges: vec![],
+                tasks: vec![],
+            }],
+        };
+        // Hub id ranked out of the candidate set: MUST be reported.
+        let (validated, dropped) = validate_llm_output(
+            &mk_prop("ent-hub", None),
+            SynthesisMode::Synthesize,
+            &[],
+            &[],
+            "test",
+            10,
+            &areas,
+        )
+        .unwrap();
+        assert!(validated.is_empty());
+        assert!(!dropped.is_empty(), "candidate-gate drop of a hub target must be reported");
+        assert!(dropped[0].contains("ent-hub"), "report names the target: {dropped:?}");
+        // Plain unknown target, no area, not configured: legacy silent drop.
+        let (validated, dropped) = validate_llm_output(
+            &mk_prop("ent-nowhere", None),
+            SynthesisMode::Synthesize,
+            &[],
+            &[],
+            "test",
+            10,
+            &areas,
+        )
+        .unwrap();
+        assert!(validated.is_empty());
+        assert!(dropped.is_empty(), "legacy silent drop is preserved: {dropped:?}");
+    }
+
+    /// §6.8.4 negatives: a live NON-configured hub id resolves Unresolved and
+    /// degrades to `absent` (no force-include); hand-written `hub:`
+    /// frontmatter parses; the §11.2 no-owner bucket is counted.
+    #[test]
+    fn areas_write_path_unresolved_hub_degrades_absent() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent-stray', 'Stray', 'concept', 's', 100, 100)",
+            [],
+        )
+        .unwrap();
+        let cfg = crate::config::WisdomConfig {
+            areas_paths: vec![(
+                "ent-hub".to_string(),
+                std::path::PathBuf::from("/tmp/nowhere/.ct-areas.yaml"),
+            )],
+            org_entity_id: None,
+        };
+        assert!(
+            matches!(
+                crate::config::hub_resolver::resolve_hub_id(&conn, &cfg, "ent-stray"),
+                crate::config::hub_resolver::DepositHub::Unresolved(_)
+            ),
+            "a live non-configured entity must resolve Unresolved"
+        );
+        // Hand-written hub: frontmatter (§6.8.4) parses to the raw key.
+        assert_eq!(
+            crate::librarian::deposit_hub_from_content("---\nhub: ent-stray\n---\nbody\n"),
+            Some("ent-stray".to_string())
+        );
+        assert_eq!(
+            crate::librarian::deposit_hub_from_content("---\ntitle: t\n---\nbody\n"),
+            None
+        );
+        // And the unresolved bucket ticked.
+        let before = crate::librarian::deposit_hub_unresolved_count();
+        let _ = crate::librarian::note_deposit_hub_unresolved();
+        assert_eq!(
+            crate::librarian::deposit_hub_unresolved_count(),
+            before + 1,
+            "§11.2 no-owner bucket must increment"
         );
     }
 }
