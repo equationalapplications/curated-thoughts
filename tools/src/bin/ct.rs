@@ -482,6 +482,31 @@ enum WisdomCmd {
         #[command(subcommand)]
         cmd: SchemeCmd,
     },
+    /// Areas administration (spec 2026-11-14-areas §12): rename.
+    Areas {
+        #[command(subcommand)]
+        cmd: AreasCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AreasCmd {
+    /// Rename an area across the hub's merge group, through the commit/outbox
+    /// path (spec §12). Dry-run preview by default; `--yes` executes.
+    Rename {
+        /// The hub's entity id, named DIRECTLY by its configured
+        /// `wisdom.areas_paths` key (owner ruling 2026-11-16). No --path
+        /// resolution on a write.
+        #[arg(long)]
+        hub: String,
+        /// The area name to rename FROM.
+        old: String,
+        /// The area name to rename TO — must be defined by the hub's areas file.
+        new: String,
+        /// Execute the rename. Without it: read-only preview.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -890,6 +915,9 @@ fn run(cmd: Cmd) -> Result<i32> {
                 }
                 SchemeCmd::Activate { target } => cli_common::wisdom_scheme_activate_cmd(&target),
             },
+            WisdomCmd::Areas {
+                cmd: AreasCmd::Rename { hub, old, new, yes },
+            } => curated_thoughts_tools::cmds::wisdom_areas_rename_cmd(&hub, &old, &new, yes),
         },
         Cmd::Drift { json } => curated_thoughts_tools::drift::drift_cmd(json),
         Cmd::Reindex { cmd } => match cmd {

@@ -218,8 +218,10 @@ fn is_canonical_prefix(root: &str, path: &str) -> bool {
 
 /// Resolve `id` through the redirect chain to its live survivor.
 /// `Err` = unresolvable, CARRYING the descriptive reason (m3: never the
-/// bare string "unresolved") — cycle or dead survivor.
-fn live_survivor(conn: &Connection, id: &str) -> std::result::Result<String, String> {
+/// bare string "unresolved") — cycle or dead survivor. `pub(crate)` so the
+/// rename entry point (`db::areas_rename`) reuses the ONE chain walk +
+/// liveness rule rather than re-implementing it (spec §12.1 rev 12).
+pub(crate) fn live_survivor(conn: &Connection, id: &str) -> std::result::Result<String, String> {
     match resolve_redirect_chain(conn, id) {
         Ok(ChainResolution::Cycle(at)) => Err(format!("redirect cycle at {at}")),
         Ok(ChainResolution::None) if is_live(conn, id) => Ok(id.to_string()),
@@ -243,7 +245,7 @@ fn is_live(conn: &Connection, id: &str) -> bool {
 
 /// A configured key's "home" survivor for the §3.3 collision check:
 /// chain-resolved (cycle keys are skipped — they cannot silently win).
-fn configured_survivors(conn: &Connection, cfg: &WisdomConfig) -> Vec<(String, String)> {
+pub(crate) fn configured_survivors(conn: &Connection, cfg: &WisdomConfig) -> Vec<(String, String)> {
     cfg.areas_paths
         .iter()
         // Cycle keys are skipped here — they cannot silently win (§3.3);
@@ -255,7 +257,7 @@ fn configured_survivors(conn: &Connection, cfg: &WisdomConfig) -> Vec<(String, S
 /// Same-survivor collision between two configured keys (§3.3): the
 /// §9.3 longest-prefix rule must never silently pick one of two areas
 /// files — the whole block is treated as unresolved, FAIL CLOSED.
-fn detect_collision(pairs: &[(String, String)]) -> Option<String> {
+pub(crate) fn detect_collision(pairs: &[(String, String)]) -> Option<String> {
     for (i, (a_id, a_sur)) in pairs.iter().enumerate() {
         for (b_id, b_sur) in pairs.iter().skip(i + 1) {
             if a_sur == b_sur {

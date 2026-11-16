@@ -53,7 +53,10 @@ pub struct ResolveOptions {
     /// their own transaction; a resolve reached from one of them must do the
     /// same, or a crash between the two writes leaves a durable decision with
     /// no record of who made it. `None` on paths that are not curated tool
-    /// calls (the desk, the CLI, the librarian) and log elsewhere or not at all.
+    /// calls (the desk, the CLI, the librarian) and log elsewhere or not at
+    /// all — SOLE exception (spec §12.5 rev 12): `ct wisdom areas rename`
+    /// writes ONE in-transaction `curated_agent_log` row via
+    /// [`log_agent_access_checked_with_summary`].
     pub audit: Option<ResolveAudit>,
 }
 
@@ -81,6 +84,27 @@ pub struct ResolveAudit {
 /// `&Transaction` (deref coercion) so write tools audit inside the same
 /// transaction as the mutation. A failed INSERT propagates: fail-closed,
 /// unlike the best-effort legacy logger used by the pre-existing read tools.
+pub fn log_agent_access_checked_with_summary(
+    conn: &Connection,
+    client: &str,
+    tool: &str,
+    entity_id: Option<&str>,
+    operation: &str,
+    summary: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![client, tool, operation, entity_id, summary],
+    )
+    .map_err(|e| anyhow::anyhow!("audit log insert failed for {tool}: {e}"))?;
+    Ok(())
+}
+
+/// The pre-Task-9 delegate: same row shape with `summary = NULL`. The one
+/// summary-carrying caller today is `ct wisdom areas rename` (spec §12.5
+/// rev 12), which goes through [`log_agent_access_checked_with_summary`]
+/// INSIDE its rename transaction.
 pub fn log_agent_access_checked(
     conn: &Connection,
     client: &str,
@@ -88,13 +112,7 @@ pub fn log_agent_access_checked(
     entity_id: Option<&str>,
     operation: &str,
 ) -> Result<()> {
-    conn.execute(
-        "INSERT INTO curated_agent_log (client, tool, operation, entity_id, summary)
-         VALUES (?1, ?2, ?3, ?4, NULL)",
-        rusqlite::params![client, tool, operation, entity_id],
-    )
-    .map_err(|e| anyhow::anyhow!("audit log insert failed for {tool}: {e}"))?;
-    Ok(())
+    log_agent_access_checked_with_summary(conn, client, tool, entity_id, operation, None)
 }
 
 /// A precomputed entry embedding together with the exact text it was derived

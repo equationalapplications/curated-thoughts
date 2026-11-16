@@ -2046,6 +2046,64 @@ pub fn print_proposal_detail(detail: &tauri_app_lib::db::proposals::ProposalDeta
     }
 }
 
+// ---------------------------------------------------------------------------
+// Task 9 (spec 2026-11-14-areas §12, rev 12): `ct wisdom areas rename`
+// ---------------------------------------------------------------------------
+
+/// `ct wisdom areas rename --hub <entity id> <old> <new> [--yes]`.
+///
+/// Dry-run DEFAULT: without `--yes`, the preview (hub, old → new, affected
+/// row count) prints and NOTHING is written; `--yes` executes. All guardrails
+/// (unknown hub listing every configured key, dead/colliding hub, `new` not
+/// defined by the hub's areas file, zero matching rows) live in
+/// `tauri_app_lib::db::areas_rename::areas_rename` — the CLI is the thin
+/// open-brain + config-load + print shell. Errors exit nonzero (refuse,
+/// never degrade).
+pub fn wisdom_areas_rename_cmd(hub: &str, old: &str, new: &str, yes: bool) -> Result<i32> {
+    use tauri_app_lib::config::BrainConfig;
+    use tauri_app_lib::db::areas_rename::areas_rename;
+
+    let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+    if !paths.db_path.exists() {
+        anyhow::bail!(
+            "brain.db not found at {} — run ingest first",
+            paths.db_path.display()
+        );
+    }
+    tauri_app_lib::db::connection::migrate_brain_db(&paths.db_path);
+    let conn = rusqlite::Connection::open_with_flags(
+        &paths.db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .map_err(|e| anyhow::anyhow!("open rw {}: {e}", paths.db_path.display()))?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+
+    let cfg = BrainConfig::load(&paths).map_err(|e| {
+        anyhow::anyhow!("load brain config {}: {e}", paths.config_path.display())
+    })?;
+    let Some(wisdom) = cfg.wisdom.as_ref() else {
+        anyhow::bail!(
+            "rename refused: wisdom.areas_paths is not configured in {} — there is no hub \
+             to rename against",
+            paths.config_path.display()
+        );
+    };
+
+    let report = areas_rename(&conn, wisdom, hub, old, new, yes)?;
+    if report.executed {
+        println!(
+            "renamed {} fact row(s) on hub {}: {} -> {}",
+            report.rows, report.hub, report.old, report.new
+        );
+    } else {
+        println!(
+            "dry-run: hub {}: {} -> {} would rename {} fact row(s); pass --yes to execute",
+            report.hub, report.old, report.new, report.rows
+        );
+    }
+    Ok(0)
+}
+
 #[cfg(test)]
 use tempfile::TempDir;
 
