@@ -103,9 +103,10 @@ fn seed_deposit(
     .unwrap();
 
     // Auto-approve the source folder so the proposal commits instead of
-    // landing in the pending queue.
+    // landing in the pending queue. (OR IGNORE: the measurement fixture
+    // seeds several deposits into the SAME folder.)
     conn.execute(
-        "INSERT INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES (?1, 'synthesize', 1)",
+        "INSERT OR IGNORE INTO folder_rules (folder_path, librarian_mode, auto_approve) VALUES (?1, 'synthesize', 1)",
         [source_path
             .parent()
             .unwrap()
@@ -345,4 +346,266 @@ fn e2e_unresolved_hub_degrades_to_null_area() {
         None,
         "an unresolved hub must leave the area column NULL (UNSCOPED)"
     );
+}
+
+/// §11.2 measured attach rate (Task 10): a realistic fixture brain — four
+/// deposits with hubs (one attaches, one misses, one over-attaches, one
+/// baits the candidate gate), one unconfigured deposit, one unresolved-hub
+/// deposit — driven through the REAL pipeline with a mock model that both
+/// attaches and misses. The four §11.2 buckets are read from DB state and
+/// the §6.8.5 counters' deltas; the counts are printed (run with
+/// `-- --nocapture` to see them) and recorded in the LEDGER + PR body.
+/// The spec claims no rate in advance (§19.3) — this fixture measures.
+#[test]
+fn measurement_attach_rate_four_buckets() {
+    use tauri_app_lib::librarian::wisdom_hub_unconfigured_count;
+
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let app = TestApp::new();
+    let _brain_dir_guard = EnvVarGuard::new("CURATED_BRAIN_DIR");
+    std::env::set_var(
+        "CURATED_BRAIN_DIR",
+        app.tmp.path().to_string_lossy().to_string(),
+    );
+    let _embed_guard = EnvVarGuard::new("CURATED_EMBED_STUB");
+    std::env::set_var("CURATED_EMBED_STUB", "constant8");
+
+    let mut conn = open_in_memory().unwrap();
+    for (id, name) in [
+        ("hub-m", "MainHub"),     // configured hub (owns deposits 1-3)
+        ("hub-gate", "GateHub"),  // configured hub, NOT in any candidate set
+        ("ent-over", "OverHub"),  // the more-specific entity the fixture expects
+        ("ent-stray", "StrayHub"), // live but NOT configured
+    ] {
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1, ?2, 'concept', 'entity', 100, 100)",
+            [id, name],
+        )
+        .unwrap();
+    }
+
+    // TWO DISTINCT areas files: the Task-2 duplicate-directory guard drops
+    // the whole wisdom block when two hubs share one file (fail-closed) —
+    // the fixture needs both hubs CONFIGURED, so each gets its own file.
+    let checkout_a = app.tmp.path().join("checkout-a");
+    let checkout_b = app.tmp.path().join("checkout-b");
+    std::fs::create_dir_all(&checkout_a).unwrap();
+    std::fs::create_dir_all(&checkout_b).unwrap();
+    let areas_yaml = checkout_a.join(".ct-areas.yaml");
+    let areas_yaml_b = checkout_b.join(".ct-areas.yaml");
+    let vocab = "areas:\n  deploy:\n    - infra/**\n  networking:\n    - net/**\n";
+    std::fs::write(&areas_yaml, vocab).unwrap();
+    std::fs::write(&areas_yaml_b, vocab).unwrap();
+
+    let vault = app.tmp.path().join("vault");
+
+    // Write the generation block + wisdom block (two configured hubs), then
+    // return a helper that re-points the mock URL (each deposit gets its own
+    // mockito server) without disturbing the wisdom block.
+    write_generation_config(&app);
+    let cfg_path = app.tmp.path().join("config.json");
+    {
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        cfg["wisdom"] = serde_json::json!({
+            "areas_paths": {
+                "hub-m": areas_yaml.to_string_lossy(),
+                "hub-gate": areas_yaml_b.to_string_lossy()
+            },
+            "org_entity_id": "org-m"
+        });
+        std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+    }
+    let set_url = |url: &str| {
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        cfg["generation"]["external_url"] = serde_json::Value::String(url.to_string());
+        std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+    };
+
+    // Run one deposit through the pipeline with the given model JSON.
+    let mut run_deposit = |file: &str,
+                           frontmatter: &str,
+                           body: &str,
+                           target: &str,
+                           area: Option<&str>| {
+        let (_doc_id, source_str) =
+            seed_deposit(&conn, &vault, file, frontmatter, body);
+        let mut fact = serde_json::json!({
+            "op": "add", "body": format!("Fact for {file}."), "tags": [],
+            "confidence": "inferred", "evidence": ["C1"]
+        });
+        if let Some(a) = area {
+            fact["area"] = serde_json::Value::String(a.to_string());
+        }
+        let llm_json = serde_json::json!({
+            "proposals": [{
+                "target": { "existing_id": target },
+                "reasoning": "Measurement fixture.",
+                "summary_update": null,
+                "facts": [fact],
+                "edges": [],
+                "tasks": []
+            }]
+        });
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                "{{\"choices\":[{{\"message\":{{\"content\":{}}}}}]}}",
+                serde_json::to_string(&llm_json.to_string()).unwrap()
+            ))
+            .create();
+        set_url(&server.url());
+        let result = generate_summary(&mut conn, &source_str, "test-model", false);
+        assert!(
+            result.is_ok(),
+            "deposit {file} must never refuse ingest: {result:?}"
+        );
+        server
+    };
+
+    // §11.2 counter deltas start here (process-global; the whole fixture
+    // runs under ENV_LOCK, sibling tests' ticks only ever ADD ticks).
+    let unresolved_before = deposit_hub_unresolved_count();
+    let unconf_before = wisdom_hub_unconfigured_count();
+
+    // Deposit 1 — CORRECT ATTACH: owning hub, model attaches in-vocab area.
+    let _s1 = run_deposit(
+        "deploy-note.md",
+        "---\nhub: hub-m\ntitle: Deploy note\n---",
+        "Runbook updates for the release pipeline.",
+        "hub-m",
+        Some("deploy"),
+    );
+    // Deposit 2 — MODEL MISS: owning hub, model proposes NO area.
+    let _s2 = run_deposit(
+        "miss-note.md",
+        "---\nhub: hub-m\ntitle: Miss note\n---",
+        "Follow-up notes on the release pipeline.",
+        "hub-m",
+        None,
+    );
+    // Deposit 3 — HUB-OVER-ATTACH: the fixture expects the more-specific
+    // OverHub entity (named in the body, so it ranks as a candidate), but
+    // the force-included hub pulls the attach up to hub-m.
+    let _s3 = run_deposit(
+        "over-note.md",
+        "---\nhub: hub-m\ntitle: Over note\n---",
+        "OverHub specific tuning that a hub-level attach would smear.",
+        "hub-m",
+        Some("deploy"),
+    );
+    // Deposit 4 — CANDIDATE-GATE DROP: model targets the CONFIGURED
+    // GateHub, which carries no embedding and no name hit, so it is not in
+    // the batch's candidate set → reported drop, nothing commits.
+    let _s4 = run_deposit(
+        "gate-bait.md",
+        "---\ntitle: Gate bait\n---",
+        "Notes that never mention the second repository by name.",
+        "hub-gate",
+        Some("deploy"),
+    );
+    // Deposit 5 — NO-OWNER (unresolved): live but unconfigured StrayHub.
+    let _s5 = run_deposit(
+        "stray-note.md",
+        "---\nhub: ent-stray\ntitle: Stray note\n---",
+        "StrayHub notes without a configured hub.",
+        "ent-stray",
+        None,
+    );
+
+    // Deposit 6 — NO-OWNER (wisdom unconfigured): the wisdom block is
+    // dropped fail-closed, so scoping is impossible (§6.8.5 distinct bucket).
+    {
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        cfg.as_object_mut().unwrap().remove("wisdom");
+        std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+    }
+    let _s6 = run_deposit(
+        "unconf-note.md",
+        "---\nhub: hub-m\ntitle: Unconf note\n---",
+        "Notes deposited with no wisdom block at all.",
+        "hub-m",
+        None,
+    );
+
+    // ---- Bucket counts, read from REAL DB state + counter deltas ----
+    let committed =
+        |entity: &str| -> Vec<Option<String>> {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT area FROM llm_wiki_entries
+                     WHERE entity_id = ?1 AND deleted_at IS NULL AND body LIKE 'Fact for %'",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([entity], |r| r.get::<_, Option<String>>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+
+    // Per-deposit classification on hub-m's committed facts (bodies are
+    // unique per deposit: "Fact for <file>."):
+    let area_for = |file: &str| -> Option<String> {
+        let needle = format!("Fact for {file}.");
+        let mut stmt = conn
+            .prepare(
+                "SELECT area FROM llm_wiki_entries
+                 WHERE entity_id = 'hub-m' AND deleted_at IS NULL AND body = ?1",
+            )
+            .unwrap();
+        let mut rows = stmt
+            .query_map([needle], |r| r.get::<_, Option<String>>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>();
+        assert!(rows.len() <= 1, "one deposit commits one fact");
+        rows.pop().flatten()
+    };
+    // Deposit 1: fixture expects hub-m — area present → CORRECT attach.
+    let attached = usize::from(area_for("deploy-note.md").is_some());
+    // Deposit 2: fixture expects hub-m — no area → MODEL MISS.
+    let model_misses = usize::from(area_for("miss-note.md").is_none());
+    // Deposit 3: fixture expects the more-specific ent-over, got hub-m + area
+    // → HUB-OVER-ATTACH (the rank-1 force-include pull-up §11.2 warns about).
+    let hub_over_attach = usize::from(area_for("over-note.md").is_some());
+    // Bucket: candidate-gate drops — the gate-bait proposal must NOT commit.
+    let gate_dropped_committed = committed("hub-gate").len();
+    assert_eq!(
+        gate_dropped_committed, 0,
+        "a candidate-gate-dropped proposal must commit nothing"
+    );
+    let gate_drops = 1; // the bait proposal (reported drop; stderr names hub-gate)
+    // Bucket: no-owner-signal — both §6.8.5 sub-counters' deltas.
+    let unresolved_delta = deposit_hub_unresolved_count() - unresolved_before;
+    let unconf_delta = wisdom_hub_unconfigured_count() - unconf_before;
+    let no_owner = unresolved_delta + unconf_delta;
+
+    println!("MEASUREMENT §11.2 four buckets:");
+    println!("  candidate-gate drops: {gate_drops} (bait proposal uncommitted: {gate_dropped_committed} rows)");
+    println!("  model misses:         {model_misses}");
+    println!(
+        "  no-owner-signal:      {no_owner} (unresolved {unresolved_delta} + wisdom-unconfigured {unconf_delta})"
+    );
+    println!("  hub-over-attach:      {hub_over_attach}");
+    println!("  correctly attached:   {attached} of 6 deposits (attach rate incl. over-attach: {}/6 scoped-relevant)", attached + hub_over_attach);
+
+    // Fixture-integrity pins (the measurement means nothing without these):
+    assert_eq!(attached, 1, "exactly one deposit should attach correctly");
+    assert_eq!(model_misses, 1, "exactly one deposit should be a model miss");
+    assert_eq!(hub_over_attach, 1, "exactly one deposit should over-attach to the hub");
+    assert_eq!(unresolved_delta, 1, "the stray-hub deposit must tick unresolved");
+    assert_eq!(
+        unconf_delta, 1,
+        "the no-wisdom deposit must tick wisdom-unconfigured (§6.8.5 distinct bucket)"
+    );
+    let stray_rows = committed("ent-stray").len();
+    assert_eq!(stray_rows, 1, "the unresolved-hub deposit still commits UNSCOPED");
 }

@@ -125,7 +125,7 @@ fn v30_area_column_added_when_migrating_a_v29_brain() {
     )
     .unwrap();
 
-    migrate_open_db(&conn, tmp.path().parent()).expect("migrate must upgrade the V29 brain");
+    migrate_open_db(&conn, Some(tmp.path())).expect("migrate must upgrade the V29 brain");
 
     let (ctype, notnull, dflt) = column_info(&conn, "area")
         .expect("migration must add llm_wiki_entries.area");
