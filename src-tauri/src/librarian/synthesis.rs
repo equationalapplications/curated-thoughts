@@ -4136,6 +4136,11 @@ mod tests {
     /// frontmatter parses; the §11.2 no-owner bucket is counted.
     #[test]
     fn areas_write_path_unresolved_hub_degrades_absent() {
+        // Gauntlet fix 6: take the librarian ENV_LOCK around the whole
+        // snapshot→mutate→assert window — this test ticks the process-global
+        // §11.2 counters that other tests snapshot, so it must not interleave
+        // with a sibling's counter window.
+        let _env_lock = crate::librarian::tests::ENV_LOCK.lock().unwrap();
         let conn = open_in_memory().unwrap();
         conn.execute(
             "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)

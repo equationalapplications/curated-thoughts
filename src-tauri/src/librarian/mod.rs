@@ -658,7 +658,13 @@ mod tests {
     // tripping the issue-#178 guard (CI: rust-ubuntu/rust-macos failed at
     // rev-12 head on `test_generate_summary_skips_when_no_chunks`). Every
     // env-sensitive test here takes this lock around its `with_vars` window.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Gauntlet fix 6: `pub(crate)` so the sibling counter tests —
+    // `wisdom_config_duplicate_directory_degrades_with_diagnostic` (this
+    // module, env-sensitive `with_brain_dir`) and
+    // `synthesis::areas_write_path_unresolved_hub_degrades_absent` (ticks the
+    // same process-global §11.2 counters other tests snapshot) — take the
+    // SAME lock instead of racing the lock-holders.
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
     use crate::db::connection::open_in_memory;
 
@@ -1007,6 +1013,9 @@ mod tests {
     /// silently discarded.
     #[test]
     fn wisdom_config_duplicate_directory_degrades_with_diagnostic() {
+        // Gauntlet fix 6: same ENV_LOCK as the with_brain_dir users — the
+        // snapshot→mutate→assert window must not race a sibling's env window.
+        let _env_lock = ENV_LOCK.lock().unwrap();
         let config = r#"{"vault_path":"/vault","wisdom":{"areas_paths":{
             "hub-a":"/repo/a/.ct-areas.yaml","hub-b":"/repo/a/./.ct-areas.yaml"}}}"#;
         with_brain_dir(config, |_brain, conn| {
