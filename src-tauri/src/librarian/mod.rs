@@ -548,7 +548,7 @@ fn wisdom_config_for_conn_reporting(
     }
 }
 
-fn wisdom_config_for_conn(conn: &Connection) -> Option<crate::config::WisdomConfig> {
+pub(crate) fn wisdom_config_for_conn(conn: &Connection) -> Option<crate::config::WisdomConfig> {
     let (cfg, diagnostics) = wisdom_config_for_conn_reporting(conn);
     for line in &diagnostics {
         // The lib-internal caller convention: load-side diagnostics print

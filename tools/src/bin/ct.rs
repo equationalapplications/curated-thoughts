@@ -393,6 +393,11 @@ enum WisdomCmd {
         /// Optional tags (repeatable).
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// Optional ABSOLUTE path of the checkout this deposit concerns;
+        /// resolved against the configured wisdom.areas_paths roots and
+        /// rendered as a `hub:` frontmatter key. Relative paths are refused.
+        #[arg(long = "repo-path")]
+        repo_path: Option<String>,
         /// Confirm the write.
         #[arg(long)]
         yes: bool,
@@ -582,12 +587,20 @@ fn wisdom_deposit_cmd(
     title: &str,
     body: &str,
     tags: &[String],
+    repo_path: Option<&str>,
     yes: bool,
 ) -> Result<i32> {
     use tauri_app_lib::wisdom_deposit::{
         dispatch_wisdom_deposit_awaiting_kick, WisdomDepositParams,
     };
     require_yes(yes, "wisdom deposit")?;
+    // §6.8.2: absolutize a given --repo-path against the cwd (pure string
+    // operation); there is NO cwd default — the param either comes or it
+    // doesn't, and the door maps a missing param to `hub_reason: "absent"`.
+    let repo_path = repo_path
+        .map(std::path::absolute)
+        .transpose()?
+        .map(|p| p.to_string_lossy().into_owned());
     let (ctx, _paths) = wisdom_ctx()?;
     let v = block_on(dispatch_wisdom_deposit_awaiting_kick(
         &ctx,
@@ -597,6 +610,7 @@ fn wisdom_deposit_cmd(
             body: body.to_string(),
             tags: (!tags.is_empty()).then(|| tags.to_vec()),
             attribution: None,
+            repo_path,
         },
     ))?;
     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
@@ -792,8 +806,9 @@ fn run(cmd: Cmd) -> Result<i32> {
                 title,
                 body,
                 tags,
+                repo_path,
                 yes,
-            } => wisdom_deposit_cmd(&path, &title, &body, &tags, yes),
+            } => wisdom_deposit_cmd(&path, &title, &body, &tags, repo_path.as_deref(), yes),
             WisdomCmd::Status { path, json } => wisdom_status_cmd(&path, json),
             WisdomCmd::ProposeSupersession {
                 target_ref,

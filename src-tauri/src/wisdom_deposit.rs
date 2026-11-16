@@ -51,6 +51,12 @@ pub struct WisdomDepositParams {
     /// byte-identically to the pre-attribution format.
     #[serde(default)]
     pub attribution: Option<DepositAttribution>,
+    /// Optional ABSOLUTE path of the checkout the deposit concerns (§6.8.2).
+    /// Resolved at deposit time against the configured `wisdom.areas_paths`
+    /// roots; a relative path is refused at the door; a missing param maps
+    /// to `hub_reason: "absent"` BEFORE the resolver runs (tier-3 r1 n1).
+    #[serde(default)]
+    pub repo_path: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -179,19 +185,28 @@ fn render_deposit_file(
     body: &str,
     tags: &[String],
     attribution: Option<&DepositAttribution>,
+    hub: Option<&str>,
 ) -> String {
     let title = flatten_line(title);
     let mut out = String::new();
-    // Attribution frontmatter rides FIRST (D4): the deposit file itself is the
-    // authoritative carrier, downstream copies inherit it. No attribution →
-    // no frontmatter, byte-identical to the pre-attribution render (pinned by
-    // test). The speaker is line-flattened so a newline cannot forge
-    // frontmatter lines; `source` is regex-validated at argument validation.
-    if let Some(a) = attribution {
+    // Frontmatter rides FIRST (D4): the deposit file itself is the
+    // authoritative carrier, downstream copies inherit it. NO attribution AND
+    // NO hub → no frontmatter at all, byte-identical to the pre-attribution
+    // render (pinned by test). When present, attribution lines come FIRST and
+    // `hub:` is LAST in the ONE leading block (§6.8.4: both Librarian legs
+    // read the hub through the file). The speaker is line-flattened so a
+    // newline cannot forge frontmatter lines; `source` is regex-validated at
+    // argument validation; the hub id is the resolver's survivor output.
+    if attribution.is_some() || hub.is_some() {
         out.push_str("---\n");
-        out.push_str(&format!("attributed_speaker: {}\n", flatten_line(&a.speaker)));
-        out.push_str(&format!("attribution_kind: {}\n", a.kind.as_str()));
-        out.push_str(&format!("attribution_source: {}\n", a.source));
+        if let Some(a) = attribution {
+            out.push_str(&format!("attributed_speaker: {}\n", flatten_line(&a.speaker)));
+            out.push_str(&format!("attribution_kind: {}\n", a.kind.as_str()));
+            out.push_str(&format!("attribution_source: {}\n", a.source));
+        }
+        if let Some(h) = hub {
+            out.push_str(&format!("hub: {h}\n"));
+        }
         out.push_str("---\n");
     }
     out.push_str(&format!("# {title}\n\n"));
@@ -467,6 +482,14 @@ pub(crate) fn deposit_status_row(
     }
 
     let mut out = json!({ "path": vault_relative_path, "state": state, "facts": fact_ids });
+    // §6.8.5: status RE-READS `hub` from the deposit FILE (read-only; both
+    // legs see the hub through the file, §6.8.4). `hub_reason` is REPLY-ONLY
+    // (spec rev-9 m1) and is never echoed here.
+    let hub = vault_root.and_then(|root| {
+        let abs = root.join(vault_relative_path);
+        crate::librarian::read_deposit_hub_content(conn, &abs.to_string_lossy(), None)
+    });
+    out["hub"] = json!(hub);
     if let Some((s, err, updated)) = kick {
         out["kick"] = json!(s);
         // #325: the error text is only agent-visible while the RESOLVED
@@ -877,6 +900,32 @@ async fn await_kick(ctx: &ToolDispatchContext, v: &Value, handle: Option<KickHan
     }
 }
 
+/// Deposit-time hub resolution at the DOOR (§6.8.2). Returns
+/// `(hub_id, hub_reason)`: `hub_reason` is `Some` ONLY when `hub_id` is
+/// `None`, and is one of `"absent"` (missing param — translated BEFORE the
+/// resolver runs, tier-3 r1 n1: the resolver takes `&str`), 
+/// `"wisdom_unconfigured"`, `"no_prefix"`, or `"unresolved"`. A RELATIVE
+/// `repo_path` is refused at the door.
+fn resolve_repo_hub(
+    conn: &rusqlite::Connection,
+    repo_path: Option<&str>,
+) -> Result<(Option<String>, Option<&'static str>)> {
+    let Some(rp) = repo_path.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok((None, Some("absent")));
+    };
+    if !std::path::Path::new(rp).is_absolute() {
+        bail!("repo_path must be an ABSOLUTE path (relative refused at the door): {rp}");
+    }
+    let cfg = crate::librarian::wisdom_config_for_conn(conn);
+    use crate::config::hub_resolver::DepositHub;
+    Ok(match crate::config::hub_resolver::resolve_deposit_hub(conn, cfg.as_ref(), rp) {
+        DepositHub::Hub(id) => (Some(id), None),
+        DepositHub::Unconfigured => (None, Some("wisdom_unconfigured")),
+        DepositHub::NoPrefix => (None, Some("no_prefix")),
+        DepositHub::Unresolved(_) => (None, Some("unresolved")),
+    })
+}
+
 fn vault_dir(ctx: &ToolDispatchContext) -> Result<PathBuf> {
     ctx.vault_dir
         .clone()
@@ -943,11 +992,21 @@ async fn deposit_inner(
         bail!("deposit_exists: {} (append-only; supersede instead)", rel);
     }
 
+    // Door-side hub resolution (§6.8.2) BEFORE any file is created: a relative
+    // repo_path is refused here, a missing param is translated to `absent`
+    // before the resolver runs (tier-3 r1 n1), and a resolved hub renders as
+    // the `hub:` frontmatter key (LAST in the block).
+    let (hub_id, hub_reason) = {
+        let conn = ctx.conn.lock().map_err(|_| anyhow!("conn mutex poisoned"))?;
+        resolve_repo_hub(&conn, p.repo_path.as_deref())?
+    };
+
     let content = render_deposit_file(
         &p.title,
         &p.body,
         p.tags.as_deref().unwrap_or(&[]),
         p.attribution.as_ref(),
+        hub_id.as_deref(),
     );
     // The whole lane chain down to the deposit's parent must exist before
     // validation: safe_vault_path's MayCreate canonicalizes the parent and
@@ -1040,14 +1099,20 @@ async fn deposit_inner(
         "no_ingest_host"
     };
 
-    Ok((
-        json!({
-            "path": rel,
-            "pending": true,
-            "kick": kick_label,
-        }),
-        handle,
-    ))
+    // Reply contract (§6.8.5): `hub` is always present; `hub_reason` carries
+    // the four null-reasons ONLY when `hub` is null (success has no reason in
+    // the contract's value set) and is REPLY-ONLY — status never echoes it
+    // (spec rev-9 m1).
+    let mut reply = json!({
+        "path": rel,
+        "pending": true,
+        "kick": kick_label,
+        "hub": hub_id,
+    });
+    if let Some(reason) = hub_reason {
+        reply["hub_reason"] = json!(reason);
+    }
+    Ok((reply, handle))
 }
 
 /// Agent-facing ingest state for one deposited file (`wisdom_deposit_status`
@@ -1414,6 +1479,7 @@ mod tests {
             let v = dispatch_wisdom_deposit(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: "immutable-source-files/agents/note-1.md".into(),
                     title: "Alpha ships v2".into(),
                     body: "Alpha v2 ships 2026-11-01 behind a flag.".into(),
@@ -1433,6 +1499,7 @@ mod tests {
             let err = dispatch_wisdom_deposit(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: "immutable-source-files/agents/note-1.md".into(),
                     title: "x".into(),
                     body: "y".into(),
@@ -1456,6 +1523,7 @@ mod tests {
             let err = dispatch_wisdom_deposit(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: "immutable-source-files/agents-archive/note.md".into(),
                     title: "x".into(),
                     body: "y".into(),
@@ -1484,6 +1552,7 @@ mod tests {
             dispatch_wisdom_deposit(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Evidence note".into(),
                     body: "body".into(),
@@ -1608,6 +1677,7 @@ mod tests {
                 let err = dispatch_wisdom_deposit(
                     &ctx,
                     WisdomDepositParams {
+                        repo_path: None,
                         path: bad.into(),
                         title: "t".into(),
                         body: "b".into(),
@@ -1622,6 +1692,7 @@ mod tests {
             let err = dispatch_wisdom_deposit(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: "immutable-source-files/agents/ok.md".into(),
                     title: " ".into(),
                     body: "b".into(),
@@ -1646,6 +1717,7 @@ mod tests {
             let v = dispatch_wisdom_deposit(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: "immutable-source-files/agents/note-2.md".into(),
                     title: "Beta facts".into(),
                     body: "Beta is written in Rust.".into(),
@@ -1879,6 +1951,7 @@ mod tests {
             let err = dispatch_wisdom_deposit(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: "immutable-source-files/agents/sneaky.md".into(),
                     title: "t".into(),
                     body: "b".into(),
@@ -1920,6 +1993,7 @@ mod tests {
             "Alpha ships v2\n\n# Unrelated heading",
             "body",
             &["tag\nwith newline".to_string()],
+            None,
             None,
         );
         assert_eq!(
@@ -2230,6 +2304,7 @@ mod tests {
             let v = dispatch_wisdom_deposit(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: "immutable-source-files/agents/topic/sub/note.md".into(),
                     title: "Nested".into(),
                     body: "Nested deposits land in fresh topic dirs.".into(),
@@ -2256,6 +2331,7 @@ mod tests {
             let err = dispatch_wisdom_deposit(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: "immutable-source-files/agents/../../escaped/note.md".into(),
                     title: "t".into(),
                     body: "b".into(),
@@ -2367,7 +2443,39 @@ mod tests {
             "Beta is written in Rust.",
             &["alpha".to_string()],
             attribution,
+            None,
         )
+    }
+
+    #[test]
+    fn hub_line_renders_last_in_the_frontmatter_block() {
+        // hub-only: the block is exactly the hub line.
+        assert!(render_deposit_file(
+            "Test title",
+            "Beta is written in Rust.",
+            &[],
+            None,
+            Some("hub-a"),
+        )
+        .starts_with("---\nhub: hub-a\n---\n"));
+        // attribution + hub: attribution lines FIRST, hub LAST, ONE block.
+        let a = DepositAttribution {
+            speaker: "kurt".into(),
+            kind: AttributionKind::RestatedAtDirection,
+            source: "discord:123".into(),
+        };
+        let md = render_deposit_file(
+            "Test title",
+            "Beta is written in Rust.",
+            &[],
+            Some(&a),
+            Some("hub-a"),
+        );
+        assert_eq!(
+            md,
+            "---\nattributed_speaker: kurt\nattribution_kind: restated_at_direction\nattribution_source: discord:123\nhub: hub-a\n---\n# Test title\n\nBeta is written in Rust.\n",
+            "attribution first, hub LAST in one leading block"
+        );
     }
 
     #[test]
@@ -2407,6 +2515,7 @@ mod tests {
             dispatch_wisdom_deposit_awaiting_kick(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Kurt's direction".into(),
                     body: "Deploy the staging stack nightly.".into(),
@@ -2509,6 +2618,7 @@ mod tests {
             dispatch_wisdom_deposit_awaiting_kick(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Kurt's direction".into(),
                     body: "Deploy the staging stack nightly.".into(),
@@ -2589,6 +2699,7 @@ mod tests {
             dispatch_wisdom_deposit_awaiting_kick(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Runtime facts".into(),
                     body: "The exporter ships with retry budgets disabled.".into(),
@@ -2690,6 +2801,7 @@ mod tests {
             dispatch_wisdom_deposit_awaiting_kick(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Runtime facts".into(),
                     body: "The exporter ships with retry budgets disabled.".into(),
@@ -2768,6 +2880,7 @@ mod tests {
             dispatch_wisdom_deposit_awaiting_kick(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Runtime facts".into(),
                     body: "The exporter ships with retry budgets disabled.".into(),
@@ -2874,6 +2987,7 @@ mod tests {
             dispatch_wisdom_deposit_awaiting_kick(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Runtime facts".into(),
                     body: "The exporter ships with retry budgets disabled.".into(),
@@ -2964,6 +3078,7 @@ mod tests {
             dispatch_wisdom_deposit_awaiting_kick(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Runtime facts".into(),
                     body: "The exporter ships with retry budgets disabled.".into(),
@@ -3076,6 +3191,7 @@ mod tests {
             dispatch_wisdom_deposit_awaiting_kick(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Runtime facts".into(),
                     body: "The exporter ships with retry budgets disabled.".into(),
@@ -3089,6 +3205,7 @@ mod tests {
             dispatch_wisdom_deposit(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: "immutable-source-files/agents/still-waiting.md".into(),
                     title: "Untouched".into(),
                     body: "No kick ran for this one.".into(),
@@ -3516,6 +3633,7 @@ mod tests {
             dispatch_wisdom_deposit_awaiting_kick(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Grocery list".into(),
                     body: "Milk, eggs, coffee filters.".into(),
@@ -3594,6 +3712,7 @@ mod tests {
             dispatch_wisdom_deposit_awaiting_kick(
                 &ctx,
                 WisdomDepositParams {
+                    repo_path: None,
                     path: rel.into(),
                     title: "Kurt's direction".into(),
                     body: "Deploy the staging stack nightly.".into(),
