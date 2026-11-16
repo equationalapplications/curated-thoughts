@@ -9,6 +9,8 @@ SDD ledger for the `areas` implementation (PR #352, branch `areas`). Two discipl
 | Task 1 | DONE (review APPROVE WITH NITS 0/0/3m, minors deferred→Task 10 sweep) | c781601d | V30 migration + INSERT area bind; schema_guard forward-port ruled in (see plan Task 7) |
 | Task 2 | DONE (review REQUEST CHANGES → fix round 1 clean: clippy exit 0; minors → Task 10 sweep) | 26e0bdb5 + 8392d6b8 | WisdomConfig + duplicate-dir drop + relative-path refusal (controller ruling) |
 | Task 3 | DONE (review REQUEST CHANGES → fix round 1 checklist-verified: 25/25, clippy 0) | bb0fa604 + 647d0c2f | hub resolver; resolve_scoped amended to ScopedResolution three-way (controller ruling, review MAJOR-2) |
+| Task 4 | DONE (review Approve w/ 1M → ruled pre-V30 degrade fix verified; minors folded) | 561405fa + 92605597 | band_predicate_where + WisdomItem band/area; pre-V30 SCOPED degrades never errors (controller ruling) |
+| Task 5 | dispatched 2026-11-16 | pending | SCOPED CLI wiring (ct wisdom match --path=) |
 
 ## Working notes
 
