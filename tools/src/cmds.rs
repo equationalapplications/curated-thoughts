@@ -2070,12 +2070,21 @@ pub fn wisdom_areas_rename_cmd(hub: &str, old: &str, new: &str, yes: bool) -> Re
             paths.db_path.display()
         );
     }
-    tauri_app_lib::db::connection::migrate_brain_db(&paths.db_path);
-    let conn = rusqlite::Connection::open_with_flags(
-        &paths.db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-    )
-    .map_err(|e| anyhow::anyhow!("open rw {}: {e}", paths.db_path.display()))?;
+    // Gauntlet fix 8: a DRY RUN must not mutate the database — that includes
+    // the SCHEMA. `migrate_brain_db` writes (user_version bumps, ALTERs), so
+    // it runs ONLY on the execute path. The preview opens the db READ-ONLY
+    // and inspects it as-is; a schema too old to answer the preview bails
+    // with an actionable error instead of being silently migrated.
+    if yes {
+        tauri_app_lib::db::connection::migrate_brain_db(&paths.db_path);
+    }
+    let flags = if yes {
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+    } else {
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+    };
+    let conn = rusqlite::Connection::open_with_flags(&paths.db_path, flags)
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", paths.db_path.display()))?;
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
 
     let cfg = BrainConfig::load(&paths).map_err(|e| {
@@ -2089,7 +2098,20 @@ pub fn wisdom_areas_rename_cmd(hub: &str, old: &str, new: &str, yes: bool) -> Re
         );
     };
 
-    let report = areas_rename(&conn, wisdom, hub, old, new, yes)?;
+    let report = match areas_rename(&conn, wisdom, hub, old, new, yes) {
+        Ok(r) => r,
+        // Gauntlet fix 8: dry-run on a pre-V30 (or otherwise too-old) db
+        // cannot be answered — bail with the actionable upgrade hint rather
+        // than migrating underneath the preview.
+        Err(e)
+            if !yes && format!("{e:#}").contains("no such table") => anyhow::bail!(
+                "rename preview impossible: {} schema is too old for the areas preview \
+                 (missing tables) — run `ct ingest` (or migrate) to bring brain.db up to \
+                 date, then retry",
+                paths.db_path.display()
+            ),
+        Err(e) => return Err(e),
+    };
     if report.executed {
         println!(
             "renamed {} fact row(s) on hub {}: {} -> {}",
@@ -2112,7 +2134,80 @@ mod tests {
     use super::*;
     use tauri_app_lib::db::queries::upsert_document;
 
-    // ---- replace_trusted_links (repointed-symlink dedup) ----
+    // ---- Gauntlet fix 8: dry-run must not migrate ----
+
+    /// `ct wisdom areas rename` (no --yes) on a PRE-V30 brain.db: the preview
+    /// must NOT run `migrate_brain_db` — the db file's bytes are untouched,
+    /// and the unusable schema surfaces as an actionable error instead.
+    #[test]
+    fn areas_rename_dry_run_on_pre_v30_db_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("brain.db");
+        // A pre-V30 db: old-era tables exist (entities + redirects) but the
+        // V30 areas tables (`llm_wiki_entries`) do not, so the preview
+        // capture cannot be answered without migrating (which the dry run
+        // must not do).
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE curated_entities (
+                     id TEXT PRIMARY KEY, name TEXT, entity_type TEXT, summary TEXT,
+                     created_at INTEGER, updated_at INTEGER, deleted_at INTEGER);
+                 CREATE TABLE entity_redirects (entity_id TEXT PRIMARY KEY, merged_into TEXT);
+                 CREATE VIEW live_entities AS
+                     SELECT ce.* FROM curated_entities ce WHERE NOT EXISTS (
+                         SELECT 1 FROM entity_redirects r WHERE r.entity_id = ce.id);
+                 INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                     VALUES ('ent-hub', 'Hub', 'concept', 's', 100, 100);",
+            )
+            .unwrap();
+        }
+        // The areas file must parse so the guard failure comes from the
+        // capture SELECT, not an earlier refusal.
+        std::fs::create_dir_all(tmp.path().join("nowhere")).unwrap();
+        std::fs::write(
+            tmp.path().join("nowhere/.ct-areas.yaml"),
+            "areas:\n  deploy:\n    - \"**\"\n  new-area:\n    - \"**\"\n",
+        )
+        .unwrap();
+        let areas_yaml = tmp.path().join("nowhere/.ct-areas.yaml");
+        let cfg_path = tmp.path().join("config.json");
+        std::fs::write(
+            &cfg_path,
+            format!(
+                r#"{{"vault_path":"/tmp/nowhere-vault","wisdom":{{"areas_paths":{{"ent-hub":"{}"}}}}}}"#,
+                areas_yaml.display()
+            ),
+        )
+        .unwrap();
+        let before = std::fs::read(&db).unwrap();
+        let db_str = db.to_string_lossy().into_owned();
+        let cfg_str = cfg_path.to_string_lossy().into_owned();
+        temp_env::with_var("CURATED_BRAIN_DB", Some(&db_str), || {
+            temp_env::with_var("CURATED_BRAIN_CONFIG", Some(&cfg_str), || {
+                let r = wisdom_areas_rename_cmd("ent-hub", "deploy", "new-area", false);
+                let msg = format!(
+                    "{}",
+                    r.expect_err("dry-run on pre-V30 db must error")
+                );
+                assert!(
+                    msg.contains("too old"),
+                    "error must be actionable about the stale schema: {msg}"
+                );
+                assert!(
+                    msg.contains("ingest") || msg.contains("migrate"),
+                    "error must name the upgrade path: {msg}"
+                );
+            });
+        });
+        let after = std::fs::read(&db).unwrap();
+        assert_eq!(
+            before, after,
+            "dry-run on a pre-V30 db must not modify a single byte (no migration, no write)"
+        );
+    }
+
+
 
     fn trusted_link(
         link: &str,

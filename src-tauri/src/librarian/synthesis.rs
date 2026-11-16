@@ -1034,6 +1034,16 @@ fn validate_llm_output(
                                 _ => {
                                     // m4: the label names the ACTUAL op — the
                                     // dropped item may be an update/archive too.
+                                    //
+                                    // Deferred (gauntlet finding 9): a pending
+                                    // proposal whose area was valid at propose
+                                    // time can go stale when a later
+                                    // `areas rename` changes the vocabulary —
+                                    // commit does not re-validate (settled
+                                    // Task-6 architecture: commit has no
+                                    // config and never re-checks vocabulary).
+                                    // Follow-up issue owns any staleness
+                                    // sweep; deliberately NOT fixed here.
                                     dropped.push(format!(
                                         "fact_{} dropped: area \"{area}\" is not in the target's areas vocabulary (§6.6)",
                                         fact.op

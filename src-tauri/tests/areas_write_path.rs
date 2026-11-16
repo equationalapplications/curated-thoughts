@@ -553,7 +553,13 @@ fn measurement_attach_rate_four_buckets() {
 
     // Per-deposit classification on hub-m's committed facts (bodies are
     // unique per deposit: "Fact for <file>."):
-    let area_for = |file: &str| -> Option<String> {
+    //
+    // Gauntlet finding 10 (partial tighten): the helper DISTINGUISHES a
+    // committed-NULL area (MODEL MISS — the model had a committed fact but
+    // attached no area) from a never-committed deposit (candidate-gate or
+    // other DROP, zero rows). Both were `None` before; only the former is a
+    // model miss, so the drop classification can't inflate it.
+    let area_for = |file: &str| -> (bool, Option<String>) {
         let needle = format!("Fact for {file}.");
         let mut stmt = conn
             .prepare(
@@ -567,15 +573,19 @@ fn measurement_attach_rate_four_buckets() {
             .map(|r| r.unwrap())
             .collect::<Vec<_>>();
         assert!(rows.len() <= 1, "one deposit commits one fact");
-        rows.pop().flatten()
+        let committed = !rows.is_empty();
+        (committed, rows.pop().flatten())
     };
     // Deposit 1: fixture expects hub-m — area present → CORRECT attach.
-    let attached = usize::from(area_for("deploy-note.md").is_some());
-    // Deposit 2: fixture expects hub-m — no area → MODEL MISS.
-    let model_misses = usize::from(area_for("miss-note.md").is_none());
+    let (_, attached_area) = area_for("deploy-note.md");
+    let attached = usize::from(attached_area.is_some());
+    // Deposit 2: fixture expects hub-m — committed but NO area → MODEL MISS.
+    let (miss_committed, _) = area_for("miss-note.md");
+    let model_misses = usize::from(miss_committed);
     // Deposit 3: fixture expects the more-specific ent-over, got hub-m + area
     // → HUB-OVER-ATTACH (the rank-1 force-include pull-up §11.2 warns about).
-    let hub_over_attach = usize::from(area_for("over-note.md").is_some());
+    let (_, over_area) = area_for("over-note.md");
+    let hub_over_attach = usize::from(over_area.is_some());
     // Bucket: candidate-gate drops — the gate-bait proposal must NOT commit.
     let gate_dropped_committed = committed("hub-gate").len();
     assert_eq!(
