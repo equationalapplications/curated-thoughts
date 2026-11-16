@@ -233,6 +233,30 @@ mod tests {
         assert_eq!(payload_verified[1]["by"], LOCAL_REVIEWER);
     }
 
+    /// Review round 1 m4: promoting a draft PRESERVES an existing `deploy`
+    /// area in the pushed Update payload.
+    #[test]
+    fn promoted_draft_payload_preserves_existing_area() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "fact_da", "tier_fact", "draft", None);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET area = 'deploy' WHERE id = 'fact_da'",
+            [],
+        )
+        .unwrap();
+
+        promote_draft(&conn, "fact_da", "tier_fact", NOW).unwrap();
+
+        let rows = outbox_rows(&conn, "fact_da");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].2["area"],
+            serde_json::json!("deploy"),
+            "promote must preserve the existing area, got: {}",
+            rows[0].2
+        );
+    }
+
     #[test]
     fn missing_or_deleted_or_foreign_entry_is_not_found_and_writes_nothing() {
         let conn = open_in_memory().unwrap();

@@ -277,7 +277,41 @@ fn bundle_import_fact_payloads_carry_null_area() {
 
     let payload = outbox_payload(&conn, "fact_b1");
     assert!(
-        payload["area"].is_null(),
-        "bundle fact payload must carry area: null, got: {payload}"
+        // Review round 1 m3: `contains_key` beside `is_null` — key PRESENCE
+        // is the §8.3 promise; a payload that omits the key must fail here.
+        payload.as_object().unwrap().contains_key("area") && payload["area"].is_null(),
+        "bundle fact payload must carry a PRESENT area: null key, got: {payload}"
+    );
+}
+
+/// Review round 1 m1+m2: the §8.4 summary line is surfaced in
+/// `ImportResult.warnings` (GUI operators never see stdout) and appears
+/// EXACTLY ONCE per import — no duplicate announcements.
+#[test]
+fn bundle_import_summary_line_appears_exactly_once_in_warnings() {
+    let mut conn = open_in_memory().unwrap();
+    let bundle = ParsedBundle {
+        profile: Some(LLM_WIKI_PROFILE_V2.into()),
+        entities: vec![ParsedEntity {
+            entity_id: "ent_w".into(),
+            display_name: Some("Project W".into()),
+            summary: Some("Warnings summary.".into()),
+            facts: vec![bundle_fact("fact_w1", "ent_w")],
+            ..ParsedEntity::default()
+        }],
+        ..ParsedBundle::default()
+    };
+    let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+    let line = "1 facts imported; bundles carry no area; all land whole-repo";
+    let occurrences = result
+        .warnings
+        .iter()
+        .filter(|w| w.as_str() == line)
+        .count();
+    assert_eq!(
+        occurrences, 1,
+        "exactly ONE summary line per import in warnings, got {occurrences}: {:?}",
+        result.warnings
     );
 }

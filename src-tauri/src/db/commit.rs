@@ -3807,7 +3807,10 @@ mod tests {
             "librarian_inferred", None, "src", None, None, None, None, 100, 100,
             None, Some("stable"), None, None, None, None, None,
         );
-        assert!(payload["area"].is_null(), "whole-repo area serializes null");
+        assert!(
+            payload.as_object().unwrap().contains_key("area") && payload["area"].is_null(),
+            "whole-repo area serializes null; key presence is the §8.3 promise (r1 m3)"
+        );
     }
 
     /// Task 7 (§8.5): the outbox ROW staged by the pub-visible fact_add path
@@ -3853,6 +3856,40 @@ mod tests {
             payload["area"],
             serde_json::json!("deploy"),
             "outbox payload must carry the area, got: {payload}"
+        );
+    }
+
+    /// Review round 1 m4: `commit_fact_update` must PRESERVE an existing
+    /// `deploy` area — an update never un-scopes a scoped fact.
+    #[test]
+    fn fact_update_preserves_existing_area() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-ua", "Existing", "Summary", 100);
+        seed_fact_row(&conn, "fact_ua", "ent-ua", "The original body.");
+        conn.execute(
+            "UPDATE llm_wiki_entries SET area = 'deploy' WHERE id = 'fact_ua'",
+            [],
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx("ent-ua");
+        let item = test_item("item-ua", "fact_update", Some("fact_ua"));
+        let payload = serde_json::json!({ "body": "A totally new body." });
+        commit_fact_update(&conn, &mut ctx, &item, &payload).unwrap();
+
+        let raw: String = conn
+            .query_row(
+                "SELECT payload FROM llm_wiki_outbox
+                 WHERE table_name = 'entries' AND record_id = 'fact_ua'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            payload["area"],
+            serde_json::json!("deploy"),
+            "fact_update payload must preserve the existing area, got: {payload}"
         );
     }
 

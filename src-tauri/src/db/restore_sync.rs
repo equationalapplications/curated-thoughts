@@ -909,6 +909,44 @@ mod tests {
         );
     }
 
+    /// Review round 1 M2: a reasserted payload must carry the row's seeded
+    /// area — the reassert SELECT reads `area` and forwards it into
+    /// `wiki_fact_outbox_payload`; a dropped column would silently un-scope
+    /// every fact on restore.
+    #[test]
+    fn reasserted_payload_carries_seeded_area() {
+        let live = open_in_memory().unwrap();
+        seed(&live);
+        let state = capture(&live).unwrap();
+
+        let restored = open_in_memory().unwrap();
+        restored
+            .execute(
+                "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at, area)
+                 VALUES ('fact_scoped', 'ent_r', 'T', 'B', 1, 1, 'deploy')",
+                [],
+            )
+            .unwrap();
+
+        sync(&restored, &state, 1000).unwrap();
+
+        let raw: String = restored
+            .query_row(
+                "SELECT payload FROM llm_wiki_outbox
+                 WHERE table_name = 'entries' AND record_id = 'fact_scoped'
+                   AND operation = 'INSERT'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            payload["area"],
+            serde_json::json!("deploy"),
+            "reasserted payload must carry the seeded area, got: {payload}"
+        );
+    }
+
     #[test]
     fn sync_skips_repushed_ids_the_restored_file_already_has() {
         // THE WEDGE CASE. llm_wiki_outbox.id is TEXT PRIMARY KEY. The outbox

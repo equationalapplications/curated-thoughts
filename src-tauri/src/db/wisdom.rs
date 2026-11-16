@@ -684,6 +684,37 @@ mod tests {
         assert_eq!(outbox_count(&conn, &fact.id, "UPDATE"), 1);
     }
 
+    /// Review round 1 m4: update_wisdom PRESERVES an existing `deploy` area
+    /// in the pushed Update payload — editing a body never un-scopes it.
+    #[test]
+    fn update_wisdom_payload_preserves_existing_area() {
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&mut conn);
+        let fact = seed_fact(&conn, &entity_id, "Old body.");
+        conn.execute(
+            "UPDATE llm_wiki_entries SET area = 'deploy' WHERE id = ?1",
+            params![&fact.id],
+        )
+        .unwrap();
+
+        update_wisdom(&mut conn, &entity_id, &fact.id, "New body with more detail.").unwrap();
+
+        let raw: String = conn
+            .query_row(
+                "SELECT payload FROM llm_wiki_outbox
+                 WHERE table_name = 'entries' AND record_id = ?1 AND operation = 'UPDATE'",
+                params![&fact.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            payload["area"],
+            serde_json::json!("deploy"),
+            "update payload must preserve the existing area, got: {payload}"
+        );
+    }
+
     #[test]
     fn update_wisdom_clears_embedding_blob_so_sweep_rederives_it() {
         temp_env::with_vars([("CURATED_EMBED_STUB", Some("constant8"))], || {
