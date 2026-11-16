@@ -591,6 +591,30 @@ pub(crate) fn read_deposit_hub_content(
     }
 }
 
+/// NON-COUNTING, non-printing read variant of [`read_deposit_hub_content`]
+/// for the STATUS surface (§6.8.5 re-read; task-8 review M3): the same
+/// content-parse + resolution, but NO §11.2 bucket tick and NO diagnostic
+/// stderr — a status poll must not distort the §11.2 measurement buckets or
+/// print per poll. The §11.2 tick belongs to the synthesis/ingest leg only.
+pub(crate) fn read_deposit_hub_content_quiet(
+    conn: &Connection,
+    source_path: &str,
+    content: Option<&str>,
+) -> Option<String> {
+    let content = match content {
+        Some(c) => c,
+        None => &std::fs::read_to_string(source_path).ok()?,
+    };
+    let hub_id = deposit_hub_from_content(content)?;
+    // Quiet: the lenient load's diagnostics are data for the SYNTHESIS legs
+    // to print; the status poll discards them without printing.
+    let (cfg, _diagnostics) = wisdom_config_for_conn_reporting(conn);
+    match crate::config::hub_resolver::resolve_hub_id(conn, cfg.as_ref()?, &hub_id) {
+        crate::config::hub_resolver::DepositHub::Hub(survivor) => Some(survivor),
+        _ => None,
+    }
+}
+
 /// Load the configured hubs' area names (§6.3): one entry per configured
 /// `wisdom.areas_paths` key that resolves to a LIVE hub and whose areas file
 /// loads — keyed by the RESOLVED survivor id, names read through the Task 3

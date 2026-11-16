@@ -409,25 +409,41 @@ fn e2e_repo_path_outside_every_checkout_is_no_prefix_with_null_area() {
             matches!(kstate.as_str(), "chunked" | "ingested"),
             "kick must complete: {kstate} {kerr:?}"
         );
-        let all: Vec<String> = {
-            let mut stmt = conn.prepare("SELECT entity_id FROM llm_wiki_entries").unwrap();
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
-            rows.map(|r| r.unwrap()).collect()
-        };
-        let area: Option<String> = conn
+        // M4 ruling (non-vacuous): pin ONE concrete branch, distinguishing
+        // "no row" (§6.6 drop) from "row committed degraded with area NULL".
+        let (n_rows, n_null_area): (i64, i64) = conn
             .query_row(
-                "SELECT area FROM llm_wiki_entries WHERE entity_id = 'hub-a' AND deleted_at IS NULL",
+                "SELECT COUNT(*), COALESCE(SUM(area IS NULL), 0) FROM llm_wiki_entries \
+                 WHERE entity_id = 'hub-a' AND deleted_at IS NULL",
                 [],
-                |r| r.get::<_, Option<String>>(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .ok()
-            .flatten();
-        // §6.8: whatever the unscoped pipeline decided (fact dropped at the
-        // §6.6 gate, or committed degraded), the committed fact must never
-        // carry a stamped area without a resolved deposit hub.
+            .unwrap();
+        if n_rows > 0 {
+            assert_eq!(
+                n_null_area, n_rows,
+                "committed-degraded rows must carry area IS NULL ({n_rows} rows)"
+            );
+        } else {
+            // §6.6 drop branch: the kick COMPLETED (asserted above) yet no
+            // hub-a fact committed at all — the drop is the pinned outcome.
+            assert_eq!(
+                n_rows, 0,
+                "§6.6 drop branch: no hub-a entry may exist"
+            );
+        }
+        // And NEVER a stamped area anywhere: a committed fact must not carry
+        // an area without a resolved deposit hub.
+        let stamped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE area IS NOT NULL AND deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(
-            area, None,
-            "no area may be stamped without a resolved hub (entries: {all:?})"
+            stamped, 0,
+            "no committed fact may carry a stamped area without a resolved hub"
         );
     });
 }
@@ -466,6 +482,99 @@ fn relative_repo_path_is_refused_at_the_door() {
         assert!(
             !vault.join(rel).exists(),
             "a refused deposit must write nothing"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// (iii-b) M2 ruling: ONLY a MISSING param is `absent`; empty/whitespace
+// repo_path is present-but-invalid → door refusal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn empty_or_whitespace_repo_path_is_refused_at_the_door() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = dir.path().join("vault");
+    let checkout = make_checkout(dir.path(), "hub-a");
+
+    let brain_str = vault.to_string_lossy().into_owned();
+    with_brain(&brain_str, || async move {
+        let ctx = carrier_ctx(&vault);
+        write_generation_config(&vault);
+        patch_config(&vault, "wisdom", wisdom_block(&checkout, "hub-a"));
+        for (label, rp) in [
+            ("empty", ""),
+            ("whitespace", "   \t "),
+        ] {
+            let rel = format!("immutable-source-files/agents/m2_{label}.md");
+            let v = dispatch_wisdom_deposit_awaiting_kick(
+                &ctx,
+                WisdomDepositParams {
+                    repo_path: Some(rp.to_string()),
+                    ..deposit_params(&rel, "Test title", "Beta is written in Rust.")
+                },
+            )
+            .await;
+            let err = match v {
+                Ok(reply) => panic!("{label} repo_path must be REFUSED, not `absent`: {reply:?}"),
+                Err(e) => e,
+            };
+            let msg = format!("{err:#}").to_lowercase();
+            assert!(
+                msg.contains("empty") || msg.contains("absolute"),
+                "{label} refusal must name the offense: {msg}"
+            );
+            assert!(
+                !vault.join(&rel).exists(),
+                "a refused deposit must write nothing"
+            );
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// (iii-c) quoting-nit ruling: door-side guard — a hub value that
+// `parse_scalar_value` would MISREAD when rendered unquoted (number-like,
+// `null`/bool, `: `-bearing) is refused at the door, never rendered
+// ---------------------------------------------------------------------------
+
+#[test]
+fn number_like_hub_value_is_refused_at_the_door() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = dir.path().join("vault");
+    // A CONFIGURED key that `parse_scalar_value` would parse back as a
+    // Number: rendering `hub: 12345` unquoted loses the string on re-parse.
+    let checkout = make_checkout(dir.path(), "12345");
+
+    let brain_str = vault.to_string_lossy().into_owned();
+    with_brain(&brain_str, || async move {
+        let ctx = carrier_ctx(&vault);
+        write_generation_config(&vault);
+        patch_config(&vault, "wisdom", wisdom_block(&checkout, "12345"));
+        {
+            let conn = ctx.conn.lock().unwrap();
+            add_entity(&conn, "12345");
+        }
+        let rel = "immutable-source-files/agents/m2_numlike.md";
+        let err = dispatch_wisdom_deposit_awaiting_kick(
+            &ctx,
+            WisdomDepositParams {
+                repo_path: Some(checkout.join("f.rs").to_string_lossy().into_owned()),
+                ..deposit_params(rel, "Test title", "Beta is written in Rust.")
+            },
+        )
+        .await
+        .expect_err("a number-like hub value must be refused at the door");
+        let msg = format!("{err:#}").to_lowercase();
+        assert!(
+            msg.contains("hub") && (msg.contains("quote") || msg.contains("scalar") || msg.contains("misread")),
+            "refusal must name the quoting hazard: {msg}"
+        );
+        assert!(
+            !vault.join(rel).exists(),
+            "a refused deposit must write nothing (no misreadable `hub:` line)"
         );
     });
 }
@@ -742,9 +851,11 @@ fn absent_hub_emits_no_production_report_line() {
 /// configured hub: the deposit door itself still succeeds (a stray hub file
 /// in the lane never blocks a deposit), and the door-visible reply —
 /// `wisdom_deposit_status` re-reading `hub` from the file — carries
-/// `hub: null` (never echoing hub_reason) while the §11.2 unresolved bucket
-/// ticks via the shared read (the door-side twin of Task 6's read-side
-/// test).
+/// `hub: null` (never echoing hub_reason) WITHOUT ticking any §11.2 bucket:
+/// M3 ruling — status uses the NON-COUNTING, non-printing read variant, so
+/// the §11.2 unresolved tick is pinned to the SYNTHESIS/ingest leg only
+/// (that leg's tick is pinned by `areas_write_path.rs::
+/// e2e_unresolved_hub_degrades_to_null_area` via the real hub read).
 #[test]
 fn hand_written_hub_to_live_nonconfigured_entity_unresolved() {
     let _env_lock = ENV_LOCK.lock().unwrap();
@@ -796,7 +907,8 @@ fn hand_written_hub_to_live_nonconfigured_entity_unresolved() {
         .await
         .expect("a hand-written stray hub file must never block a deposit");
 
-        // Door-visible reply: status re-reads the stray hub → unresolved.
+        // Door-visible reply: status re-reads the stray hub → unresolved,
+        // via the NON-COUNTING read (M3): no §11.2 tick from a status poll.
         let unresolved_before = deposit_hub_unresolved_count();
         let s = dispatch_wisdom_deposit_status(
             &ctx,
@@ -812,9 +924,11 @@ fn hand_written_hub_to_live_nonconfigured_entity_unresolved() {
             "a live NON-configured entity resolves to hub: null"
         );
         assert!(s.get("hub_reason").is_none(), "status never echoes hub_reason");
-        assert!(
-            deposit_hub_unresolved_count() > unresolved_before,
-            "the unresolved hub must tick the §11.2 bucket"
+        assert_eq!(
+            deposit_hub_unresolved_count(),
+            unresolved_before,
+            "M3: a status poll must NOT tick the §11.2 unresolved bucket \
+             (the tick belongs to the synthesis/ingest leg only)"
         );
     });
 }

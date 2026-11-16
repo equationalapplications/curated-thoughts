@@ -285,6 +285,19 @@ fn parse_scalar_value(raw: &str) -> OkfFrontmatterValue {
     OkfFrontmatterValue::String(trimmed.to_string())
 }
 
+/// Whether `raw`, rendered UNQUOTED as a frontmatter scalar value, parses
+/// back as a String (task-8 review quoting nit): `null`/bool literals and
+/// number-like values would be misread as non-string scalars, and a
+/// `: `-bearing value breaks single-key line parsing. Renderers MUST quote
+/// or refuse such values.
+pub(crate) fn renders_as_string_scalar(raw: &str) -> bool {
+    !raw.contains(": ")
+        && matches!(
+            parse_scalar_value(raw),
+            OkfFrontmatterValue::String(_)
+        )
+}
+
 /// Parse a single-level flow mapping `{ k: v, k2: v2 }` into a `String` holding the
 /// verbatim text (anchor/alias-safe). Returns `None` for malformed input.
 ///

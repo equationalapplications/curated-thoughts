@@ -482,12 +482,14 @@ pub(crate) fn deposit_status_row(
     }
 
     let mut out = json!({ "path": vault_relative_path, "state": state, "facts": fact_ids });
-    // §6.8.5: status RE-READS `hub` from the deposit FILE (read-only; both
-    // legs see the hub through the file, §6.8.4). `hub_reason` is REPLY-ONLY
+    // §6.8.5: status RE-READS `hub` from the deposit FILE via the
+    // NON-COUNTING, non-printing variant (M3: a status poll must not tick
+    // the §11.2 buckets — that measurement belongs to the synthesis/ingest
+    // leg — nor print config diagnostics). `hub_reason` is REPLY-ONLY
     // (spec rev-9 m1) and is never echoed here.
     let hub = vault_root.and_then(|root| {
         let abs = root.join(vault_relative_path);
-        crate::librarian::read_deposit_hub_content(conn, &abs.to_string_lossy(), None)
+        crate::librarian::read_deposit_hub_content_quiet(conn, &abs.to_string_lossy(), None)
     });
     out["hub"] = json!(hub);
     if let Some((s, err, updated)) = kick {
@@ -902,28 +904,49 @@ async fn await_kick(ctx: &ToolDispatchContext, v: &Value, handle: Option<KickHan
 
 /// Deposit-time hub resolution at the DOOR (§6.8.2). Returns
 /// `(hub_id, hub_reason)`: `hub_reason` is `Some` ONLY when `hub_id` is
-/// `None`, and is one of `"absent"` (missing param — translated BEFORE the
-/// resolver runs, tier-3 r1 n1: the resolver takes `&str`), 
-/// `"wisdom_unconfigured"`, `"no_prefix"`, or `"unresolved"`. A RELATIVE
-/// `repo_path` is refused at the door.
+/// `None`, and is one of `"absent"` (MISSING param ONLY — task-8 review M2:
+/// an empty/whitespace value is PRESENT but invalid and is refused below,
+/// never translated to `absent`), `"wisdom_unconfigured"`, `"no_prefix"`,
+/// or `"unresolved"`. A RELATIVE `repo_path` is refused at the door, and a
+/// resolved hub whose id `parse_scalar_value` would misread when rendered
+/// unquoted (number-like, `null`/bool, `: `-bearing — quoting nit) is
+/// refused before any file is written.
 fn resolve_repo_hub(
     conn: &rusqlite::Connection,
     repo_path: Option<&str>,
 ) -> Result<(Option<String>, Option<&'static str>)> {
-    let Some(rp) = repo_path.map(str::trim).filter(|s| !s.is_empty()) else {
+    // M2: ONLY a missing param translates to `absent`; an empty/whitespace
+    // value is present-but-invalid and falls through to the door refusals.
+    let Some(rp) = repo_path else {
         return Ok((None, Some("absent")));
     };
+    let rp = rp.trim();
+    if rp.is_empty() {
+        bail!("repo_path must be a non-empty ABSOLUTE path (empty/whitespace refused at the door)");
+    }
     if !std::path::Path::new(rp).is_absolute() {
         bail!("repo_path must be an ABSOLUTE path (relative refused at the door): {rp}");
     }
     let cfg = crate::librarian::wisdom_config_for_conn(conn);
     use crate::config::hub_resolver::DepositHub;
-    Ok(match crate::config::hub_resolver::resolve_deposit_hub(conn, cfg.as_ref(), rp) {
+    let (hub_id, reason) = match crate::config::hub_resolver::resolve_deposit_hub(conn, cfg.as_ref(), rp) {
         DepositHub::Hub(id) => (Some(id), None),
         DepositHub::Unconfigured => (None, Some("wisdom_unconfigured")),
         DepositHub::NoPrefix => (None, Some("no_prefix")),
         DepositHub::Unresolved(_) => (None, Some("unresolved")),
-    })
+    };
+    // Quoting-nit guard: the hub id renders UNQUOTED as the `hub:` frontmatter
+    // scalar (§6.8.4, both legs re-parse it through the file) — a value the
+    // scalar parser would misread must never be rendered; refuse at the door.
+    if let Some(id) = &hub_id {
+        if !crate::okf::frontmatter::renders_as_string_scalar(id) {
+            bail!(
+                "hub id {id:?} cannot be rendered as an unquoted frontmatter scalar \
+                 (number-like, null/bool, or ': '-bearing) — refused at the door"
+            );
+        }
+    }
+    Ok((hub_id, reason))
 }
 
 fn vault_dir(ctx: &ToolDispatchContext) -> Result<PathBuf> {
