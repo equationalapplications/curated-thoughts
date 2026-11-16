@@ -652,6 +652,13 @@ pub(crate) fn load_areas_vocab(conn: &Connection) -> AreasVocab {
 
 #[cfg(test)]
 mod tests {
+    // Process-global env vars (`CURATED_BRAIN_DIR` et al.) race across test
+    // threads: a sibling's `temp_env::with_vars` window can clear the var
+    // while this module's resolve runs, routing it to the LIVE brain and
+    // tripping the issue-#178 guard (CI: rust-ubuntu/rust-macos failed at
+    // rev-12 head on `test_generate_summary_skips_when_no_chunks`). Every
+    // env-sensitive test here takes this lock around its `with_vars` window.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
     use crate::db::connection::open_in_memory;
 
@@ -674,14 +681,22 @@ mod tests {
 
     #[test]
     fn test_generate_summary_skips_when_no_chunks() {
-        let mut conn = open_in_memory().unwrap();
-        let result = generate_summary(
-            &mut conn,
-            "/vault/documents/nonexistent.md",
-            "llama3.2:1b",
-            false,
-        );
-        assert!(result.is_ok());
+        // Hermetic: pin a redirected brain dir for the whole call — without
+        // this, the internal resolve could land on the LIVE brain (issue
+        // #178 guard panic) whenever no sibling held a with_vars window.
+        let brain = tempfile::TempDir::new().unwrap();
+        let brain_str = brain.path().to_string_lossy().into_owned();
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        temp_env::with_vars([("CURATED_BRAIN_DIR", Some(brain_str.as_str()))], || {
+            let mut conn = open_in_memory().unwrap();
+            let result = generate_summary(
+                &mut conn,
+                "/vault/documents/nonexistent.md",
+                "llama3.2:1b",
+                false,
+            );
+            assert!(result.is_ok());
+        });
     }
 
     /// Run `f` against a file-backed brain db in a redirected brain dir whose
@@ -694,6 +709,7 @@ mod tests {
         let brain = tempfile::TempDir::new().unwrap();
         let brain_str = brain.path().to_string_lossy().into_owned();
         std::fs::write(brain.path().join("config.json"), config).unwrap();
+        let _env_lock = ENV_LOCK.lock().unwrap();
         temp_env::with_vars(
             [
                 ("CURATED_BRAIN_DIR", Some(brain_str.as_str())),
