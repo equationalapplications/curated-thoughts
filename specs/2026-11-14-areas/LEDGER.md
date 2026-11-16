@@ -12,6 +12,7 @@ SDD ledger for the `areas` implementation (PR #352, branch `areas`). Two discipl
 | Task 4 | DONE (review Approve w/ 1M → ruled pre-V30 degrade fix verified; minors folded) | 561405fa + 92605597 | band_predicate_where + WisdomItem band/area; pre-V30 SCOPED degrades never errors (controller ruling) |
 | Task 5 | DONE (review Approve w/ 1M → ruled load-side diagnostics printed at CLI, fix round 1 checklist-verified: 26+9/0, clippy 0) | 1c1ed34c + 9df97d47 | SCOPED CLI wiring; minors m1–m4 folded; m5 reason-string tokens → Task 10 sweep |
 | Task 6 | DONE (review REQUEST CHANGES 4M/6m → all 4 MAJORs ruled+fixed, fix round 1 checklist-verified: 1610/0 lib, 2/0 E2E, clippy 0) | add3c87b + d3031de3 + 08666f2c | write path: hub read, force-include, per-hub clause, LlmFact.area, drops; m2 drops-counter → Task 10 sweep |
+| Task 7 | DONE (review REQUEST CHANGES 2M/4m → both MAJORs ruled+fixed, fix round 1 checklist-verified: 1617/0 lib, 4/0 outbox, clippy 0) | 792218d5 + 8d95180b + d913dbc0 | outbox payload area + six call sites + §8.4 summary (post-commit, warnings-routed); schema_guard untouched |
 
 ## Working notes
 
