@@ -536,7 +536,7 @@ fn reassert_entries(conn: &Connection, now_ms: i64) -> Result<()> {
         "SELECT id, entity_id, title, body, tags, confidence, source_type, source_hash,
                 source_ref, okf_type, okf_sources, okf_verified, okf_usage_window,
                 created_at, updated_at, deleted_at, lifecycle_status, stale_after,
-                generated_by, last_verified_at, last_verified_by
+                generated_by, last_verified_at, last_verified_by, area
            FROM llm_wiki_entries",
     )?;
     struct Row {
@@ -561,6 +561,7 @@ fn reassert_entries(conn: &Connection, now_ms: i64) -> Result<()> {
         generated_by: Option<String>,
         last_verified_at: Option<i64>,
         last_verified_by: Option<String>,
+        area: Option<String>,
     }
     let rows = stmt
         .query_map([], |r| {
@@ -586,6 +587,7 @@ fn reassert_entries(conn: &Connection, now_ms: i64) -> Result<()> {
                 generated_by: r.get(18)?,
                 last_verified_at: r.get(19)?,
                 last_verified_by: r.get(20)?,
+                area: r.get(21)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -615,6 +617,7 @@ fn reassert_entries(conn: &Connection, now_ms: i64) -> Result<()> {
             row.generated_by.as_deref(),
             row.last_verified_at,
             row.last_verified_by.as_deref(),
+            row.area.as_deref(),
         );
         crate::db::commit::push_entries_outbox(
             conn,

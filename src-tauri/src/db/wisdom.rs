@@ -412,7 +412,7 @@ pub fn update_wisdom_in_tx(
                 "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at,
                         source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
                         lifecycle_status, stale_after, generated_by,
-                        last_verified_at, last_verified_by
+                        last_verified_at, last_verified_by, area
                  FROM llm_wiki_entries
                  WHERE id = ? AND entity_id IN ({placeholders}) AND deleted_at IS NULL"
             ),
@@ -438,6 +438,7 @@ pub fn update_wisdom_in_tx(
                     r.get::<_, Option<String>>(12)?,
                     r.get::<_, Option<i64>>(13)?,
                     r.get::<_, Option<String>>(14)?,
+                    r.get::<_, Option<String>>(15)?,
                 ))
             },
         )
@@ -458,6 +459,7 @@ pub fn update_wisdom_in_tx(
         existing_generated_by,
         existing_last_verified_at,
         existing_last_verified_by,
+        existing_area,
     )) = existing
     else {
         bail!("wisdom not found or archived: {wisdom_id}");
@@ -518,6 +520,7 @@ pub fn update_wisdom_in_tx(
             existing_generated_by.as_deref(),
             existing_last_verified_at,
             existing_last_verified_by.as_deref(),
+            existing_area.as_deref(),
         ),
         now_ms,
     )?;

@@ -1268,6 +1268,7 @@ pub(crate) fn wiki_fact_outbox_payload(
     generated_by: Option<&str>,
     last_verified_at: Option<i64>,
     last_verified_by: Option<&str>,
+    area: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "id": id,
@@ -1288,6 +1289,7 @@ pub(crate) fn wiki_fact_outbox_payload(
         "generated_by": generated_by,
         "last_verified_at": last_verified_at,
         "last_verified_by": last_verified_by,
+        "area": area,
         "created_at": created_at,
         "updated_at": updated_at,
         "last_accessed_at": null,
@@ -1771,6 +1773,9 @@ fn commit_fact_add(
             None,
             None,
             None,
+            // Task 7: the payload carries the SAME area the INSERT bound —
+            // column and payload can never disagree.
+            area,
         ),
         ctx.now_ms,
     )?;
@@ -1803,7 +1808,7 @@ fn commit_fact_update(
 
     // (source_ref, created_at, body, source_hash, okf_type, okf_sources,
     //  okf_verified, okf_usage_window, lifecycle_status, stale_after,
-    //  generated_by, last_verified_at, last_verified_by)
+    //  generated_by, last_verified_at, last_verified_by, area)
     type WikiFactRow = Option<(
         String,
         i64,
@@ -1817,6 +1822,7 @@ fn commit_fact_update(
         Option<i64>,
         Option<String>,
         Option<i64>,
+        Option<String>,
         Option<String>,
     )>;
 
@@ -1840,7 +1846,7 @@ fn commit_fact_update(
                         body,
                         source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
                         lifecycle_status, stale_after, generated_by,
-                        last_verified_at, last_verified_by
+                        last_verified_at, last_verified_by, area
                  FROM llm_wiki_entries
                  WHERE id = ? AND entity_id IN ({cluster_placeholders}) AND deleted_at IS NULL"
             ),
@@ -1862,6 +1868,7 @@ fn commit_fact_update(
                     r.get(10)?,
                     r.get(11)?,
                     r.get(12)?,
+                    r.get(13)?,
                 ))
             },
         )
@@ -1880,6 +1887,7 @@ fn commit_fact_update(
         existing_generated_by,
         existing_last_verified_at,
         existing_last_verified_by,
+        existing_area,
     )) = existing
     else {
         bail!("fact_update target not found: {fact_id}");
@@ -1989,6 +1997,7 @@ fn commit_fact_update(
             existing_generated_by.as_deref(),
             existing_last_verified_at,
             existing_last_verified_by.as_deref(),
+            existing_area.as_deref(),
         ),
         ctx.now_ms,
     )?;
@@ -3778,6 +3787,73 @@ mod tests {
         assert!(matches!(outcome, FactAddOutcome::Applied));
         let entry_id = ctx.committed.last().unwrap().record_id.clone();
         assert_eq!(area_of(&conn, &entry_id), Some("deploy".to_string()));
+    }
+
+    /// Task 7 (§8.1): the payload JSON carries `area` — Some verbatim, None
+    /// as JSON null. Shape assertion lives here because the builder is
+    /// `pub(crate)` (tier-3 r2 m2).
+    #[test]
+    fn wiki_fact_outbox_payload_carries_area() {
+        let tags: Vec<String> = vec![];
+        let payload = wiki_fact_outbox_payload(
+            "fact_a", "ent_a", "Title", "Body", &tags, "inferred",
+            "librarian_inferred", None, "src", None, None, None, None, 100, 100,
+            None, Some("stable"), None, None, None, None, Some("deploy"),
+        );
+        assert_eq!(payload["area"], serde_json::json!("deploy"));
+
+        let payload = wiki_fact_outbox_payload(
+            "fact_a", "ent_a", "Title", "Body", &tags, "inferred",
+            "librarian_inferred", None, "src", None, None, None, None, 100, 100,
+            None, Some("stable"), None, None, None, None, None,
+        );
+        assert!(payload["area"].is_null(), "whole-repo area serializes null");
+    }
+
+    /// Task 7 (§8.5): the outbox ROW staged by the pub-visible fact_add path
+    /// carries the area in its payload JSON — column and payload agree.
+    #[test]
+    fn fact_add_outbox_row_payload_carries_area() {
+        let conn = open_in_memory().unwrap();
+        seed_entity(&conn, "ent-obr", "Test Entity", "summary", 100);
+        let doc_id = seed_document(&conn, "notes.md");
+        let chunk_id = seed_chunk(&conn, doc_id);
+        let content_hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let evidence = vec![StoredEvidenceChunk {
+            chunk_id: Some(chunk_id),
+            content_hash,
+            quote: "evidence".into(),
+            start_line: Some(1),
+            end_line: Some(2),
+            source_kind: None,
+        }];
+
+        let mut ctx = test_ctx("ent-obr");
+        let item = fact_add_item_with_payload("Scoped fact.", Some("deploy"), evidence);
+        let outcome = commit_fact_add(&conn, &mut ctx, &item, &item.payload).unwrap();
+        assert!(matches!(outcome, FactAddOutcome::Applied));
+        let entry_id = ctx.committed.last().unwrap().record_id.clone();
+
+        let raw: String = conn
+            .query_row(
+                "SELECT payload FROM llm_wiki_outbox
+                 WHERE table_name = 'entries' AND record_id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            payload["area"],
+            serde_json::json!("deploy"),
+            "outbox payload must carry the area, got: {payload}"
+        );
     }
 
     /// Test (c), spec §4 (write path): the fact_add INSERT stamps

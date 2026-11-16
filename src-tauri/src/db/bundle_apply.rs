@@ -536,6 +536,9 @@ pub fn apply_import(
                     fact.generated_by.as_deref(),
                     fact.last_verified_at,
                     fact.last_verified_by.as_deref(),
+                    // §8.4: bundles carry no area — every bundle-applied fact
+                    // lands whole-repo (payload NULL, like the column).
+                    None,
                 ),
                 now_ms,
             )?;
@@ -782,8 +785,19 @@ pub fn apply_import(
 
     purge_dead_edges(&tx)?;
 
+    // §8.4: ONE loud summary line per import stating the bundle area posture.
+    println!("{}", bundle_area_summary_line(result.facts_added));
+
     tx.commit()?;
     Ok(result)
+}
+
+/// §8.4: the per-import summary line. Printed EXACTLY ONCE per `apply_import`
+/// (single call site, after the entity loop) so the operator sees the bundle
+/// area posture on every import: bundles carry no area; everything lands
+/// whole-repo regardless of the source host's scoping.
+pub(crate) fn bundle_area_summary_line(facts_added: i64) -> String {
+    format!("{facts_added} facts imported; bundles carry no area; all land whole-repo")
 }
 
 fn ensure_entity(
@@ -1053,6 +1067,20 @@ mod tests {
             }],
             ..ParsedBundle::default()
         }
+    }
+
+    /// §8.4: the summary line's exact wording is a pin — the rename task (Task
+    /// 9) and log scrapers lean on it.
+    #[test]
+    fn bundle_area_summary_line_wording_is_pinned() {
+        assert_eq!(
+            bundle_area_summary_line(3),
+            "3 facts imported; bundles carry no area; all land whole-repo"
+        );
+        assert_eq!(
+            bundle_area_summary_line(0),
+            "0 facts imported; bundles carry no area; all land whole-repo"
+        );
     }
 
     #[test]

@@ -44,7 +44,7 @@ pub(crate) fn fact_row_outbox_payload(
                 COALESCE(source_ref, ''), okf_type, okf_sources, okf_verified,
                 okf_usage_window, created_at, updated_at, deleted_at,
                 lifecycle_status, stale_after, generated_by,
-                last_verified_at, last_verified_by
+                last_verified_at, last_verified_by, area
            FROM llm_wiki_entries WHERE id = ?1 AND entity_id = ?2",
         params![entry_id, entity_id],
         |r| {
@@ -66,6 +66,7 @@ pub(crate) fn fact_row_outbox_payload(
             let lifecycle_status: Option<String> = r.get(14)?;
             let generated_by: Option<String> = r.get(16)?;
             let last_verified_by: Option<String> = r.get(18)?;
+            let area: Option<String> = r.get(19)?;
             Ok(wiki_fact_outbox_payload(
                 entry_id,
                 entity_id,
@@ -88,6 +89,7 @@ pub(crate) fn fact_row_outbox_payload(
                 generated_by.as_deref(),
                 r.get(17)?,
                 last_verified_by.as_deref(),
+                area.as_deref(),
             ))
         },
     )?)
