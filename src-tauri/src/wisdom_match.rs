@@ -479,6 +479,9 @@ type CandidateRow = (
 /// merged-away ids, resolved by the caller via Task 3's resolver), the
 /// optional org group, and the optional resolved area name. `None` members
 /// OMIT their arm (§9.4) — never bind NULL.
+///
+/// Invariant: `repo_group` is NEVER empty — the resolver's survivor+cluster
+/// expansion guarantees at least one id (asserted at the predicate entry).
 pub struct BandBindings<'a> {
     pub repo_group: &'a [String],
     pub org_group: Option<&'a [String]>,
@@ -494,9 +497,11 @@ pub struct BandBindings<'a> {
 /// caller to bind in BOTH execute branches of [`gated_entries`].
 /// Post-merge errata candidate: spec §9.2 pins a bare `String` return; the
 /// named-bind return pair is the plan-rev-8 governing form.
-pub fn band_predicate_where(
-    bindings: &BandBindings,
-) -> (String, Vec<(String, rusqlite::types::Value)>) {
+pub fn band_predicate_where(bindings: &BandBindings, has_area: bool) -> (String, Vec<(String, rusqlite::types::Value)>) {
+    debug_assert!(
+        !bindings.repo_group.is_empty(),
+        "repo_group is never empty — the resolver's survivor+cluster expansion guarantees at least one id"
+    );
     if bindings.repo_group.is_empty() {
         // Degenerate guard: an empty IN () is invalid SQL; nothing is in the
         // band, so match nothing.
@@ -514,7 +519,7 @@ pub fn band_predicate_where(
         format!("e.entity_id IN ({})", names.join(", "))
     };
     // Area arm — OMITTED when no area resolved (§9.4).
-    if let Some(area) = bindings.area {
+    if let Some(area) = bindings.area.filter(|_| has_area) {
         arms.push(format!("({repo_in} AND e.area = :band_area)"));
         params.push((
             ":band_area".to_string(),
@@ -522,7 +527,20 @@ pub fn band_predicate_where(
         ));
     }
     // Repo arm: whole-repo facts only (area NULL).
-    arms.push(format!("({repo_in} AND e.area IS NULL)"));
+    //
+    // Pre-V30 degraded shape (`has_area == false`): the `area` column does
+    // not exist, so both `e.area = :band_area` and `e.area IS NULL` would
+    // fail `conn.prepare` with the opaque "no such column: area" — the
+    // forbidden outcome. Degrade, never error: matches this file's
+    // never-dark degraded-shape pattern (pre-V24/27/28). Every row is
+    // whole-repo by definition on that shape, so the IS NULL qualifiers are
+    // dropped too while the repo/org arms and their named binds keep the
+    // SCOPED scoping meaningful on a stale brain.
+    arms.push(if has_area {
+        format!("({repo_in} AND e.area IS NULL)")
+    } else {
+        format!("({repo_in})")
+    });
     // Org arm — OMITTED when no org group (same §9.4 rule).
     if let Some(org) = bindings.org_group {
         let mut names: Vec<String> = Vec::new();
@@ -531,10 +549,11 @@ pub fn band_predicate_where(
             names.push(name.clone());
             params.push((name, rusqlite::types::Value::Text(id.clone())));
         }
-        arms.push(format!(
-            "(e.entity_id IN ({}) AND e.area IS NULL)",
-            names.join(", ")
-        ));
+        arms.push(if has_area {
+            format!("(e.entity_id IN ({}) AND e.area IS NULL)", names.join(", "))
+        } else {
+            format!("(e.entity_id IN ({}))", names.join(", "))
+        });
     }
     (format!(" AND ({})", arms.join(" OR ")), params)
 }
@@ -660,7 +679,7 @@ fn gated_entries(
     // (bindings None) run today's SQL shape exactly.
     let band_params: Option<Vec<(String, rusqlite::types::Value)>> = match bindings {
         Some(b) => {
-            let (fragment, params) = band_predicate_where(b);
+            let (fragment, params) = band_predicate_where(b, temporal.has_area);
             sql.push_str(&fragment);
             Some(params)
         }
@@ -740,7 +759,16 @@ fn gated_entries(
                 (Some((_, Some(org))), eid, _) if org.contains(eid) => {
                     (Some("org".to_string()), None)
                 }
-                _ => (None, None),
+                // Unreachable under `bindings: Some` — the SQL guarantees
+                // membership in one of the band arms. The arm stays so the
+                // UNSCOPED path (band_lookup None) keeps its (None, None).
+                _ => {
+                    debug_assert!(
+                        band_lookup.is_none(),
+                        "SCOPED row fell out of every band arm — predicate/assignment drifted"
+                    );
+                    (None, None)
+                }
             };
         let (Some(title), Some(body), Some(blob)) = (title, body, blob) else {
             continue;
@@ -1815,7 +1843,7 @@ mod tests {
         let repo = strings(&["r1", "r2"]);
         let org = strings(&["o1"]);
         let b = repo_bindings(&repo, Some(&org), Some("auth"));
-        let (sql, params) = band_predicate_where(&b);
+        let (sql, params) = band_predicate_where(&b, true);
         // The fragment composes AFTER the eligibility predicate — it must
         // anchor itself for AND-composition.
         assert!(sql.starts_with(" AND ("), "fragment: {sql}");
@@ -1836,11 +1864,28 @@ mod tests {
     }
 
     #[test]
+    fn band_predicate_degraded_shape_omits_area_column_entirely() {
+        // Pre-V30 shape (`has_area == false`): no `e.area` reference of any
+        // kind may reach the SQL — the column does not exist and the opaque
+        // prepare error is the forbidden outcome. The area arm is omitted
+        // and the IS NULL qualifiers drop; the repo/org arms keep their
+        // named binds so SCOPED scoping stays meaningful.
+        let repo = strings(&["r1"]);
+        let org = strings(&["o1"]);
+        let b = repo_bindings(&repo, Some(&org), Some("auth"));
+        let (sql, params) = band_predicate_where(&b, false);
+        assert!(!sql.contains("e.area"), "degraded fragment: {sql}");
+        assert!(!param_names(&params).contains(&":band_area"));
+        assert!(sql.contains(":band_repo_0"));
+        assert!(sql.contains(":band_org_0"));
+    }
+
+    #[test]
     fn band_predicate_area_arm_omitted_when_area_none() {
         let repo = strings(&["r1"]);
         let org = strings(&["o1"]);
         let b = repo_bindings(&repo, Some(&org), None);
-        let (sql, params) = band_predicate_where(&b);
+        let (sql, params) = band_predicate_where(&b, true);
         // §9.4: no area resolved → the area arm is OMITTED, not bound to NULL.
         assert!(!sql.contains(":band_area"));
         assert!(!param_names(&params).contains(&":band_area"));
@@ -1851,7 +1896,7 @@ mod tests {
     fn band_predicate_org_arm_omitted_when_org_group_none() {
         let repo = strings(&["r1"]);
         let b = repo_bindings(&repo, None, None);
-        let (sql, params) = band_predicate_where(&b);
+        let (sql, params) = band_predicate_where(&b, true);
         // Same omission rule (§9.4) for the org arm.
         assert!(!sql.contains(":band_org"));
         assert!(!param_names(&params).iter().any(|n| n.starts_with(":band_org")));
@@ -1862,7 +1907,7 @@ mod tests {
     fn band_predicate_quote_bearing_area_name_is_bound_not_inlined() {
         let repo = strings(&["r1"]);
         let b = repo_bindings(&repo, None, Some("o'reilly"));
-        let (sql, params) = band_predicate_where(&b);
+        let (sql, params) = band_predicate_where(&b, true);
         // The id_filter inline-literal precedent does NOT transfer: an
         // inlined `o'reilly` is a SQL syntax error. The name travels as a
         // named binding.
@@ -1933,6 +1978,52 @@ mod tests {
         let bytes = serde_json::to_string(a2).unwrap();
         assert!(bytes.contains("\"band\":\"repo\""));
         assert!(!bytes.contains("\"area\""), "repo-band item: {bytes}");
+    }
+
+    #[test]
+    fn scoped_gated_entries_on_pre_v30_shape_degrades_to_whole_repo() {
+        // Pre-V30 (V29) brain: the `area` column does not exist. The SCOPED
+        // path must degrade like the file's other degraded shapes
+        // (pre-V24/27/28): the SELECT already omits `e.area` via
+        // `temporal.has_area`, so the band predicate must NOT reference the
+        // column either — the opaque "no such column: area" prepare error is
+        // the forbidden outcome. Every surviving row is whole-repo by
+        // definition on that shape, so the `e.area IS NULL` qualifiers are
+        // dropped along with the area arm; the repo/org arms and their named
+        // binds keep working.
+        let conn = open_in_memory().unwrap();
+        seed_area(&conn, "v29", "ent-repo", Some("auth"), &Q);
+        // Rewind to the V29 shape (drop-column pattern of
+        // tests/db_migration_v30_area.rs).
+        conn.execute("ALTER TABLE llm_wiki_entries DROP COLUMN area", [])
+            .unwrap();
+        let temporal = temporal_columns(&conn, Some(Scheme::Raw)).unwrap();
+        assert!(
+            !temporal.has_area,
+            "fixture must be pre-V30 (no area column)"
+        );
+        let repo = strings(&["ent-repo"]);
+        let org = strings(&["ent-org"]);
+        let b = repo_bindings(&repo, Some(&org), Some("auth"));
+        let gated = gated_entries(
+            &conn,
+            &Q,
+            Some(0.0),
+            10,
+            &HashSet::new(),
+            NOW,
+            &temporal,
+            None,
+            None,
+            Some(&b),
+        )
+        .expect("SCOPED on a pre-V30 shape must degrade, never error");
+        assert_eq!(gated.len(), 1, "the whole-repo fact must be returned");
+        assert_eq!(gated[0].id, "v29");
+        assert_eq!(gated[0].band.as_deref(), Some("repo"));
+        assert!(gated[0].area.is_none());
+        // No `band: "area"` item is possible on the degraded shape.
+        assert!(gated.iter().all(|e| e.band.as_deref() != Some("area")));
     }
 
     #[test]
@@ -2764,7 +2855,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
-        None,
+            None,
         )
         .unwrap();
         assert!(
@@ -2801,7 +2892,7 @@ mod tests {
             TS_NOW,
             "external:never-calibrated-model",
             QueryKind::Message,
-        None,
+            None,
         )
         .unwrap();
         assert!(!run.ran);
@@ -3100,7 +3191,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
-        None,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
@@ -3237,7 +3328,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
-        None,
+            None,
         )
         .unwrap();
         // Parity: v1's corrections shape == the two-stage caller's contract —
@@ -3337,7 +3428,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
-        None,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
@@ -3371,7 +3462,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
-        None,
+            None,
         )
         .unwrap();
         assert!(run.ran, "stub activity composite + full coverage ⇒ ran");
@@ -3390,7 +3481,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
-        None,
+            None,
         )
         .unwrap();
         assert_eq!(msg.result.gate, format!("{TWO_STAGE_LABEL_PREFIX}{TS_KEY}"));
@@ -3422,7 +3513,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
-        None,
+            None,
         )
         .unwrap();
         assert!(!run.ran);
@@ -3455,7 +3546,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
-        None,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
@@ -3480,7 +3571,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
-        None,
+            None,
         )
         .unwrap();
         assert_eq!(msg_outcome.rule, Some(TwoStageRule::ChunkHop));
@@ -3539,7 +3630,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
-        None,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
