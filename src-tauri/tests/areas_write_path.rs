@@ -580,8 +580,10 @@ fn measurement_attach_rate_four_buckets() {
     let (_, attached_area) = area_for("deploy-note.md");
     let attached = usize::from(attached_area.is_some());
     // Deposit 2: fixture expects hub-m — committed but NO area → MODEL MISS.
-    let (miss_committed, _) = area_for("miss-note.md");
-    let model_misses = usize::from(miss_committed);
+    // (Coderabbit follow-up: a committed fact WITH an area is neither a miss
+    // nor an attach — require committed AND area-None for the miss bucket.)
+    let (miss_committed, miss_area) = area_for("miss-note.md");
+    let model_misses = usize::from(miss_committed && miss_area.is_none());
     // Deposit 3: fixture expects the more-specific ent-over, got hub-m + area
     // → HUB-OVER-ATTACH (the rank-1 force-include pull-up §11.2 warns about).
     let (_, over_area) = area_for("over-note.md");

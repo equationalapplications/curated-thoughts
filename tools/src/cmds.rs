@@ -2104,10 +2104,13 @@ pub fn wisdom_areas_rename_cmd(hub: &str, old: &str, new: &str, yes: bool) -> Re
         // cannot be answered — bail with the actionable upgrade hint rather
         // than migrating underneath the preview.
         Err(e)
-            if !yes && format!("{e:#}").contains("no such table") => anyhow::bail!(
+            if !yes
+                && (format!("{e:#}").contains("no such table")
+                    || format!("{e:#}").contains("no such column")) =>
+            anyhow::bail!(
                 "rename preview impossible: {} schema is too old for the areas preview \
-                 (missing tables) — run `ct ingest` (or migrate) to bring brain.db up to \
-                 date, then retry",
+                 (missing tables or columns) — run `ct ingest` (or migrate) to bring brain.db \
+                 up to date, then retry",
                 paths.db_path.display()
             ),
         Err(e) => return Err(e),
@@ -2174,10 +2177,14 @@ mod tests {
         let cfg_path = tmp.path().join("config.json");
         std::fs::write(
             &cfg_path,
-            format!(
-                r#"{{"vault_path":"/tmp/nowhere-vault","wisdom":{{"areas_paths":{{"ent-hub":"{}"}}}}}}"#,
-                areas_yaml.display()
-            ),
+            // Coderabbit follow-up: serialize with serde_json — interpolating
+            // `display()` into a string literal produces invalid JSON escapes
+            // on Windows-style paths.
+            serde_json::json!({
+                "vault_path": "/tmp/nowhere-vault",
+                "wisdom": { "areas_paths": { "ent-hub": areas_yaml.to_string_lossy() } }
+            })
+            .to_string(),
         )
         .unwrap();
         let before = std::fs::read(&db).unwrap();
