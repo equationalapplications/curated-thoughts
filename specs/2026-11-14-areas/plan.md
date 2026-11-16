@@ -149,7 +149,7 @@
 **Files:**
 - Modify: `src-tauri/src/db/commit.rs:1249` (`wiki_fact_outbox_payload` gains `area: Option<&str>`) + call sites `:1740`, `:1960`
 - Modify: `src-tauri/src/db/wisdom.rs:499`, `db/drafts.rs:69`, `db/restore_sync.rs:596` (+ its SELECT `:536-541` gains `area`), `db/bundle_apply.rs:517` (pass NULL) — SIX call sites total (§8.2)
-- Modify: `src-tauri/src/db/schema_guard.rs:53-56` (`area` listed CT-local beside `tier`/`embed_scheme`)
+- ~~Modify: `src-tauri/src/db/schema_guard.rs:53-56` (`area` listed CT-local beside `tier`/`embed_scheme`)~~ — ALREADY LANDED in Task 1 (controller ruling 2026-11-15: startup guard rejects unpinned columns, forward-port was a hard dependency; commit `c781601d`) — Task 7 must NOT re-edit it.
 - Modify: `db/bundle_apply.rs` — the per-import summary line `N facts imported; bundles carry no area; all land whole-repo` (§8.4)
 - Test: `src-tauri/tests/areas_outbox.rs`
 
