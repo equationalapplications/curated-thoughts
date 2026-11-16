@@ -620,3 +620,25 @@ fn scoped_match_diagnostics_default_empty_when_healthy() {
     };
     assert!(m.diagnostics.is_empty(), "{:?}", m.diagnostics);
 }
+
+/// Gauntlet fix 1 (CodeRabbit Major): an EMPTY area name (`"": [...]`) is a
+/// PARSE error — it would otherwise flow exact-match and the commit path
+/// maps `""` to NULL, silently degrading scoped guidance to whole-repo.
+#[test]
+fn empty_area_name_is_a_parse_error() {
+    let err = parse_areas_file("areas:\n  \"\":\n    - \"**\"\n")
+        .expect_err("empty area name must be a parse error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("empty"),
+        "error must name the empty area name: {msg}"
+    );
+}
+
+/// Gauntlet fix 1: a whitespace-only area name is equally refused.
+#[test]
+fn whitespace_only_area_name_is_a_parse_error() {
+    let err = parse_areas_file("areas:\n  \"  \":\n    - \"**\"\n")
+        .expect_err("whitespace-only area name must be a parse error");
+    assert!(format!("{err:#}").contains("empty"));
+}

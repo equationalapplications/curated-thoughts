@@ -1108,7 +1108,7 @@ impl Default for ConfirmationsConfig {
 /// preserves insertion order, and the §9.3 longest-prefix resolver (Task 3)
 /// consumes it as a map keyed by brain-unique entity ids (a collision is
 /// impossible: `curated_entities.id` is a primary key).
-#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct WisdomConfig {
     /// Repo hub entity id → ABSOLUTE path of that checkout's `.ct-areas.yaml`
     /// (its parent directory IS the checkout root, §3.1).
@@ -1116,6 +1116,37 @@ pub struct WisdomConfig {
     /// The org hub's entity id (§9.3). Exactly one per brain — the
     /// single-org guard is structural.
     pub org_entity_id: Option<String>,
+}
+
+/// Gauntlet fix 2: the derived `Serialize` would emit `areas_paths` as an
+/// ARRAY OF PAIRS while `from_value` accepts only an OBJECT — a
+/// `serde_json::to_value` round-trip (config rewrite, debug dump) would
+/// produce a block the loader refuses. `areas_paths` serializes as an
+/// ordered JSON object (insertion order preserved via `serde_json::Map`
+/// iteration over the Vec), matching the on-disk grammar.
+impl serde::Serialize for WisdomConfig {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        // Serialize as the bare `wisdom` object (what `from_value` parses).
+        let mut areas = serde_json::Map::new();
+        for (id, path) in &self.areas_paths {
+            areas.insert(
+                id.clone(),
+                serde_json::Value::String(path.to_string_lossy().into_owned()),
+            );
+        }
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "areas_paths".to_string(),
+            serde_json::Value::Object(areas),
+        );
+        if let Some(org) = &self.org_entity_id {
+            map.insert(
+                "org_entity_id".to_string(),
+                serde_json::Value::String(org.clone()),
+            );
+        }
+        serde_json::Value::Object(map).serialize(s)
+    }
 }
 
 /// Marker prefix on the duplicate-checkout-root error. `from_value`'s
@@ -1269,8 +1300,26 @@ pub fn canonicalize_lenient(path: &str) -> String {
             if anc == abs.as_path() {
                 real.to_string_lossy().into_owned()
             } else {
+                // Gauntlet fix 3: normalize `.`/`..` INSIDE the appended
+                // nonexistent remainder (`.../existing/new/../f.md` must not
+                // keep the literal `new/../` — the climb leaves it because
+                // `new` does not exist). Symlink semantics are untouched:
+                // `real` is still the canonicalized existing ancestor; only
+                // the not-yet-existing tail is cleaned LEXICALLY, so a `..`
+                // here resolves against the tail, never re-targeting a
+                // symlinked prefix the way an early lexical cleanup would.
                 let remainder = abs.strip_prefix(anc).unwrap_or(abs.as_path());
-                real.join(remainder).to_string_lossy().into_owned()
+                let mut joined = real;
+                for comp in remainder.components() {
+                    match comp {
+                        std::path::Component::CurDir => {}
+                        std::path::Component::ParentDir => {
+                            joined.pop();
+                        }
+                        other => joined.push(other.as_os_str()),
+                    }
+                }
+                joined.to_string_lossy().into_owned()
             }
         }
         Err(_) => abs.to_string_lossy().into_owned(),
@@ -4587,5 +4636,54 @@ mod tests {
             .unwrap()
             .join("deep/new/.ct-areas.yaml");
         assert_eq!(got, want.to_string_lossy().into_owned());
+
+        // Gauntlet fix 3: parent components INSIDE the nonexistent remainder
+        // are normalized — `new/../` must not survive the join.
+        let dotted = existing.join("new").join("..").join("f.md");
+        let got = canonicalize_lenient(dotted.to_str().unwrap());
+        let want = std::fs::canonicalize(&existing).unwrap().join("f.md");
+        assert_eq!(
+            got,
+            want.to_string_lossy().into_owned(),
+            "`new/../` in the nonexistent tail must resolve to the parent"
+        );
+
+        // Gauntlet fix 3 (outside the checkout): the climb terminates at the
+        // first EXISTING ancestor (here `/`), and the remainder — which now
+        // starts with the nonexistent base — is still cleaned lexically.
+        let outside = "/ct-gauntlet-nonexistent-base/new/../f.md";
+        let got = canonicalize_lenient(outside);
+        assert_eq!(
+            got, "/ct-gauntlet-nonexistent-base/f.md",
+            "`..` inside a wholly-nonexistent tail resolves lexically, no literal `new/../`"
+        );
+    }
+
+    /// Gauntlet fix 2 (CodeRabbit Major): `serde_json::to_value` →
+    /// `from_value` must round-trip — the serializer emits `areas_paths` as
+    /// an OBJECT (not the derived array-of-pairs) and the loader accepts it.
+    #[test]
+    fn wisdom_config_serialize_round_trips_through_from_value() {
+        let cfg = WisdomConfig {
+            areas_paths: vec![
+                ("hub-a".to_string(), std::path::PathBuf::from("/tmp/repo-a/.ct-areas.yaml")),
+                ("hub-b".to_string(), std::path::PathBuf::from("/tmp/repo b/.ct-areas.yaml")),
+            ],
+            org_entity_id: Some("org-1".to_string()),
+        };
+        let v = serde_json::to_value(&cfg).expect("serialize");
+        let areas = v
+            .get("areas_paths")
+            .and_then(|x| x.as_object())
+            .expect("areas_paths must serialize as an object");
+        assert_eq!(areas.len(), 2);
+        assert_eq!(
+            areas.get("hub-a").and_then(|x| x.as_str()),
+            Some("/tmp/repo-a/.ct-areas.yaml")
+        );
+        let back = WisdomConfig::from_value(&v)
+            .expect("from_value must accept our own output")
+            .expect("non-empty areas_paths yields Some");
+        assert_eq!(back, cfg);
     }
 }

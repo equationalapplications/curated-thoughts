@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{Connection, OptionalExtension};
 
@@ -94,6 +94,12 @@ pub fn parse_areas_file(text: &str) -> Result<AreasFile> {
             .as_str()
             .context("area name must be a string")?
             .to_string();
+        // Gauntlet fix 1: an EMPTY (or whitespace-only) area name must be a
+        // parse error — it would otherwise flow exact-match and commit maps
+        // `""` to NULL, silently degrading scoped guidance to whole-repo.
+        if name.trim().is_empty() {
+            bail!("area name must not be empty (quoted-empty key in areas file)");
+        }
         let pats = v.as_sequence().context("area patterns must be a list")?;
         let mut ps = Vec::new();
         for p in pats {
