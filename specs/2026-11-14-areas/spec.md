@@ -188,7 +188,7 @@ The new-fact INSERT sets no `okf_type` (`db/commit.rs:1697-1702`). The budget dr
 - `db/schema_guard.rs`: the guard records `area` as a named CT-local divergence beside `tier`/`embed_scheme` (§8.3).
 - `tool_dispatch.rs`: the pin-comment update only (§10.4).
 - `config/`: the `WisdomConfig` struct and the `wisdom` object in `config.json` — `areas_paths` (repo entity id → absolute areas-file path) and `org_entity_id` (§3.3, §9.3).
-- CLI: `ct wisdom match --path=`; `ct wisdom areas rename <old> <new>` (through `push_entries_outbox`, with the §12.5 actor stamp and audit row).
+- CLI: `ct wisdom match --path=`; `ct wisdom areas rename --hub <entity id> <old> <new> [--yes]` (through `push_entries_outbox`, with the §12.5 actor stamp and `curated_agent_log` audit row; dry-run preview by default — §12.1 rev 12).
 - Tests per §7, §8.5, §9, §10, §11.
 
 ## 18. Conventions of record
