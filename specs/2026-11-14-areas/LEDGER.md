@@ -14,6 +14,7 @@ SDD ledger for the `areas` implementation (PR #352, branch `areas`). Two discipl
 | Task 6 | DONE (review REQUEST CHANGES 4M/6m → all 4 MAJORs ruled+fixed, fix round 1 checklist-verified: 1610/0 lib, 2/0 E2E, clippy 0) | add3c87b + d3031de3 + 08666f2c | write path: hub read, force-include, per-hub clause, LlmFact.area, drops; m2 drops-counter → Task 10 sweep |
 | Task 7 | DONE (review REQUEST CHANGES 2M/4m → both MAJORs ruled+fixed, fix round 1 checklist-verified: 1617/0 lib, 4/0 outbox, clippy 0) | 792218d5 + 8d95180b + d913dbc0 | outbox payload area + six call sites + §8.4 summary (post-commit, warnings-routed); schema_guard untouched |
 | Task 8 | DONE (review APPROVE WITH NITS 0M/5m → minors folded round 1, checklist-verified; controller-run gates on final head: 12/0 carrier, 1618/0 lib, clippy 0) | 712eee6f + 20f9eb75 + 91c3fa8b | repo_path carrier, hub: render, reply contract, status re-read; M1 survivor-id render kept (spec §6.8.3 errata note); status now truly read-only |
+| Task 9 | DONE (review REQUEST CHANGES 1M/5m → MAJOR ruled+fixed round 1, checklist-verified; controller-run gates on final head: 1628/0 lib, 5/0 rename CLI, pins green, clippy 0 both crates) | 9636961c + 51f4a7b9 + f51589df | ct wisdom areas rename --hub; audit = curated_agent_log row in-tx (owner rulings msg 1571895753129988189); UPDATE bound to captured ids w/ count check |
 
 ## Working notes
 
