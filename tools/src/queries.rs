@@ -905,6 +905,7 @@ pub fn wisdom_match_cmd(
                     now_ms,
                     &key,
                     wm::QueryKind::Activity,
+                    None, // UNSCOPED: SCOPED delivery binds at the CLI layer (§9.8)
                 )?;
                 if run.ran {
                     // The ACTIVE path's whole stderr: the audit line, then
@@ -1094,8 +1095,16 @@ pub fn run_message_path(
     json_mode: bool,
 ) -> Result<(wm::WisdomMatch, Option<wm::TwoStageOutcome>)> {
     if !two_stage_active {
-        let result =
-            wm::wisdom_match_in_scheme(conn, schemed_vec, key, read_scheme, max, exclude, now_ms)?;
+        let result = wm::wisdom_match_in_scheme(
+            conn,
+            schemed_vec,
+            key,
+            read_scheme,
+            max,
+            exclude,
+            now_ms,
+            None, // UNSCOPED: SCOPED delivery binds at the CLI layer (§9.8)
+        )?;
         print_gate_decision(read_scheme, &result);
         print_wisdom_match(&result, json_mode);
         return Ok((result, None));
@@ -1112,6 +1121,7 @@ pub fn run_message_path(
         now_ms,
         key,
         wm::QueryKind::Message,
+        None, // UNSCOPED: SCOPED delivery binds at the CLI layer (§9.8)
     )?;
     print_two_stage_audit(&run.outcome);
     print_gate_decision(read_scheme, &run.result);
