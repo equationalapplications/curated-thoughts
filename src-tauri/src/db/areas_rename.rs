@@ -24,7 +24,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::Connection;
 
-use crate::config::hub_resolver::{detect_collision, live_survivor, load_areas_file};
+use crate::config::hub_resolver::{configured_survivors, detect_collision, live_survivor, load_areas_file};
 use crate::config::WisdomConfig;
 use crate::db::commit::{
     log_agent_access_checked_with_summary, push_entries_outbox, wiki_fact_outbox_payload,
@@ -73,17 +73,14 @@ pub fn areas_rename(
                 .join(", ")
         };
         bail!(
-            "hub `{hub_id}` is not a configured wisdom.areas_paths key; \
+            "rename refused: hub `{hub_id}` is not a configured wisdom.areas_paths key; \
              configured keys: {keys}"
         );
     };
 
-    // §3.3: a same-survivor collision fails the whole block closed.
-    let survivors: Vec<(String, String)> = cfg
-        .areas_paths
-        .iter()
-        .filter_map(|(id, _)| live_survivor(conn, id).ok().map(|s| (id.clone(), s)))
-        .collect();
+    // §3.3: a same-survivor collision fails the whole block closed (m2: the
+    // ONE configured_survivors walk — no inline duplicate).
+    let survivors = configured_survivors(conn, cfg);
     if let Some(reason) = detect_collision(&survivors) {
         bail!("rename refused: configured hubs collide: {reason}");
     }
@@ -155,21 +152,30 @@ pub fn areas_rename(
     let now_ms = now_ms();
     let tx = conn.unchecked_transaction()?;
 
+    // REVIEW M1: the UPDATE is bound to the CAPTURED ids (single source of
+    // truth — UPDATE/outbox divergence is impossible by construction) and the
+    // changed-row count MUST equal `ids.len()`; a mismatch BAILS (refusal),
+    // never a silent partial rename.
     // §12.6: `updated_at` bumps — it is the change token the remote orders on.
-    {
+    let id_placeholders = in_placeholders(&ids);
+    let changed: usize = {
         let sql = format!(
             "UPDATE llm_wiki_entries
                 SET area = ?1, updated_at = ?2
-              WHERE area = ?3 AND entity_id IN ({placeholders})"
+              WHERE id IN ({id_placeholders})"
         );
         let mut stmt = tx.prepare(&sql)?;
-        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
-            Box::new(new.to_string()),
-            Box::new(now_ms),
-            Box::new(old.to_string()),
-        ];
-        binds.extend(repo_group.iter().cloned().map(|id| Box::new(id) as _));
-        stmt.execute(rusqlite::params_from_iter(binds.iter().map(|b| b.as_ref())))?;
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(new.to_string()), Box::new(now_ms)];
+        params.extend(ids.iter().cloned().map(|id| Box::new(id) as _));
+        stmt.execute(rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())))?
+    };
+    if changed != ids.len() {
+        bail!(
+            "rename refused: UPDATE matched {changed} of {} captured row(s) — \
+             refusing a partial rename; transaction rolled back",
+            ids.len()
+        );
     }
 
     // Full-row payloads (Task 7 shape) for exactly the renamed set.
@@ -408,7 +414,11 @@ mod tests {
         assert_eq!(v["old"], serde_json::json!("old"));
         assert_eq!(v["new"], serde_json::json!("new"));
         assert_eq!(v["rows"], serde_json::json!(1));
-        assert!(v["by"].is_string(), "summary carries the os_account() actor");
+        // m3: hermetic CI clears USER/USERNAME — `by` may legitimately be null.
+        assert!(
+            v["by"].is_string() || v["by"].is_null(),
+            "summary carries the os_account() actor"
+        );
     }
 
     /// Contract item 5: a ROLLED-BACK transaction writes NO audit row.
@@ -546,5 +556,49 @@ mod tests {
             areas_rename(&conn, &cfg, "ent-hub", "old", "new", true).unwrap_err()
         );
         assert!(err.contains("zero rows"), "{err}");
+    }
+
+    /// REVIEW M1 pin: the UPDATE is bound to the CAPTURED ids and the
+    /// changed-row count MUST equal `ids.len()` — a mismatch bails (refusal),
+    /// never a silent partial rename. Manufactured mismatch: a `RAISE(IGNORE)`
+    /// trigger silently skips one targeted row, so the UPDATE changes fewer
+    /// rows than were captured. The rollback must leave NO row renamed, NO
+    /// outbox Update, NO audit row.
+    #[test]
+    fn changed_count_mismatch_bails_and_renames_nothing() {
+        let conn = open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, _) = cfg_with_hub(dir.path(), AREAS_YAML);
+        seed_entity(&conn, "ent-hub");
+        merge(&conn, "ent-loser", "ent-hub");
+        seed_fact(&conn, "fact-a", "ent-hub", Some("old"), 100);
+        seed_fact(&conn, "fact-b", "ent-loser", Some("old"), 100);
+        conn.execute_batch(
+            "CREATE TRIGGER sabotage BEFORE UPDATE OF area ON llm_wiki_entries
+              WHEN OLD.id = 'fact-b'
+             BEGIN
+               SELECT RAISE(IGNORE);
+             END;",
+        )
+        .unwrap();
+
+        let err = format!(
+            "{}",
+            areas_rename(&conn, &cfg, "ent-hub", "old", "new", true).unwrap_err()
+        );
+        assert!(err.contains("partial"), "must refuse a partial rename: {err}");
+
+        let area_of = |id: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT area FROM llm_wiki_entries WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(area_of("fact-a"), Some("old".into()), "rollback: fact-a untouched");
+        assert_eq!(area_of("fact-b"), Some("old".into()), "rollback: fact-b untouched");
+        assert_eq!(outbox_updates(&conn).len(), 0, "rollback stages no outbox rows");
+        assert_eq!(audit_rows(&conn).len(), 0, "rollback writes no audit row");
     }
 }

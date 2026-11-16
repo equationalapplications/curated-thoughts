@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{run_ct, with_seeded_brain};
+use common::{brain_db, run_ct, with_seeded_brain};
 use rusqlite::params;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -19,13 +19,6 @@ fn stderr(out: &std::process::Output) -> String {
 
 fn stdout(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
-}
-
-/// Open the fixture brain.db directly (with_seeded_brain pointed
-/// CURATED_BRAIN_DIR at it).
-fn brain_db() -> rusqlite::Connection {
-    let dir = std::env::var("CURATED_BRAIN_DIR").expect("with_seeded_brain sets it");
-    rusqlite::Connection::open(std::path::Path::new(&dir).join("brain.db")).unwrap()
 }
 
 /// Fixture: config.json carries `wisdom.areas_paths` mapping `ent-hub` to a
@@ -186,7 +179,8 @@ fn yes_executes_the_rename_through_the_outbox() {
         assert_eq!(v["old"], serde_json::json!("old"));
         assert_eq!(v["new"], serde_json::json!("new"));
         assert_eq!(v["rows"], serde_json::json!(2));
-        assert!(v["by"].is_string());
+        // m3: hermetic CI clears USER/USERNAME — `by` may legitimately be null.
+        assert!(v["by"].is_string() || v["by"].is_null());
     });
 }
 
