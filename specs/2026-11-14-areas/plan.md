@@ -204,7 +204,7 @@
 
 - [ ] **Step 1: Run the attach-rate measurement** on the fixture; record the four bucket counts in the LEDGER (working copy, deleted in Task 11) AND the PR body (THE durable home — tier-3 r2 GLM m4).
 - [ ] **Step 2: Run the §11.3 backlog count** on a scratch brain; disclose in the PR body.
-- [ ] **Step 3: Full verification sweep** — both suites green (real output read); clippy base-vs-branch: no NEW findings; the four activity pins + message byte pin green; `git status --short` clean.
+- [ ] **Step 3: Full verification sweep** — both suites green (real output read); clippy base-vs-branch: no NEW findings; the four activity pins + message byte pin green; `git status --short` clean. **Deferred Task-1 review minors, fixed in this sweep:** (m1) `tests/db_migration_v30_area.rs:127` — `migrate_open_db(&conn, tmp.path().parent())` passes the system temp root as `db_dir`; change to `Some(tmp.path())` (matches `AppDb::open_with_config` `connection.rs:1641`), re-run the migration test; (m3, optional consistency) V30 column probe uses raw `pragma_table_info` where `ddl_compat::existing_columns` is the shared convention (`ddl_compat.rs:123-125`) — V29 has the same drift, fix only if trivially safe.
 - [ ] **Step 4: Commit** `test(areas): attach-rate measurement + backlog count`
 
 ### Task 11: Independent review → same-PR cleanup → ready (SOP steps 8–11)

@@ -6,7 +6,8 @@ SDD ledger for the `areas` implementation (PR #352, branch `areas`). Two discipl
 
 | Task | Status | SHA | Notes |
 |---|---|---|---|
-| Task 1 | dispatched 2026-11-15 (post plan approval) | pending | V30 migration + INSERT area bind |
+| Task 1 | DONE (review APPROVE WITH NITS 0/0/3m, minors deferred→Task 10 sweep) | c781601d | V30 migration + INSERT area bind; schema_guard forward-port ruled in (see plan Task 7) |
+| Task 2 | dispatched 2026-11-15 | pending | WisdomConfig (wisdom.areas_paths + org_entity_id) |
 
 ## Working notes
 
