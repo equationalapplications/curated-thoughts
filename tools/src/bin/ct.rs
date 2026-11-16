@@ -851,8 +851,11 @@ fn run(cmd: Cmd) -> Result<i32> {
                 }
                 // Map the activity kinds to their bare target (passed
                 // through VERBATIM — no normalization, no quoting repair).
-                let (kind, target) = if let Some(t) = path {
-                    (tauri_app_lib::wisdom_match::QueryKind::Activity, t)
+                // the SCOPED resolver consumes `--path=` verbatim, so the
+                // activity-kind match borrows it and the call hands the
+                // owned value over afterwards.
+                let (kind, target) = if let Some(t) = path.as_deref() {
+                    (tauri_app_lib::wisdom_match::QueryKind::Activity, t.to_owned())
                 } else if let Some(t) = command {
                     (tauri_app_lib::wisdom_match::QueryKind::Activity, t)
                 } else if let Some(t) = pattern {
@@ -863,7 +866,7 @@ fn run(cmd: Cmd) -> Result<i32> {
                         text.join(" "),
                     )
                 };
-                cli_common::wisdom_match_cmd(&target, kind, max, &exclude, json, mode)
+                cli_common::wisdom_match_cmd(&target, kind, max, &exclude, json, mode, path.as_deref())
             }
             WisdomCmd::Scheme { cmd } => match cmd {
                 SchemeCmd::Status { json } => cli_common::wisdom_scheme_status_cmd(json),

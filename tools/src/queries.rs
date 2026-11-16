@@ -828,6 +828,7 @@ pub fn wisdom_match_cmd(
     exclude: &[String],
     json_mode: bool,
     stage_mode: WisdomStageMode,
+    path: Option<&str>,
 ) -> Result<i32> {
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
@@ -859,6 +860,49 @@ pub fn wisdom_match_cmd(
     // this query with the other scheme's floor or rows.
     let key = wm::gate_model_key(&profile, stub.as_deref());
     let kill = tauri_app_lib::embedder::single_stage_env_kill();
+
+    // ---- The §9.3 SCOPED resolution (--path= only; CLI-ONLY surface — no
+    // sidecar SCOPED entry point exists, §9.3). The Task 3 resolver returns
+    // the THREE-WAY ScopedResolution:
+    //   * `NoPrefix` → the §9.8 byte-identical UNSCOPED call (no
+    //     diagnostic);
+    //   * `Bound(m)` → `BandBindings` (borrowing the match, which stays in
+    //     scope for the whole call) → the SCOPED call;
+    //   * `Unresolved(reason)` → the reason PRINTED LOUDLY in the
+    //     `print_gate_decision` house form, then the BYTE-IDENTICAL
+    //     UNSCOPED call (query bytes unchanged — §3.3 "loudly" is the
+    //     printed reason, not a different query).
+    // The resolver's relative-path rule resolves `--path=` against the
+    // cwd; the target itself is passed VERBATIM (§9.3: no normalization,
+    // no quoting repair). Diagnostics are DATA in the lib; the CLI prints
+    // them (tier-3 r3 MAJOR-3).
+    let resolution = path.filter(|p| !p.trim().is_empty()).and_then(|p| {
+        tauri_app_lib::config::BrainConfig::load_lenient(&brain.paths)
+            .ok()
+            .and_then(|report| report.config.wisdom)
+            .map(|cfg| tauri_app_lib::config::hub_resolver::resolve_scoped(&conn, &cfg, p))
+    });
+    use tauri_app_lib::config::hub_resolver::ScopedResolution;
+    if let Some(r) = &resolution {
+        match r {
+            ScopedResolution::Unresolved(reason) => print_scoped_diagnostic(reason),
+            ScopedResolution::Bound(m) => {
+                for d in &m.diagnostics {
+                    print_scoped_diagnostic(d);
+                }
+            }
+            ScopedResolution::NoPrefix => {}
+        }
+    }
+    let bindings = resolution.as_ref().and_then(|r| match r {
+        ScopedResolution::Bound(m) => Some(wm::BandBindings {
+            repo_group: &m.repo_group,
+            org_group: m.org_group.as_deref(),
+            area: m.area.as_deref(),
+        }),
+        ScopedResolution::NoPrefix | ScopedResolution::Unresolved(_) => None,
+    });
+    let bindings = bindings.as_ref();
 
     // ---- The ACTIVITY path (issue #282): active ONLY on the fully healthy
     // two-stage cell (cell 4 — spec §3.3); EVERY other state is the
@@ -905,7 +949,7 @@ pub fn wisdom_match_cmd(
                     now_ms,
                     &key,
                     wm::QueryKind::Activity,
-                    None, // UNSCOPED: SCOPED delivery binds at the CLI layer (§9.8)
+                    bindings,
                 )?;
                 if run.ran {
                     // The ACTIVE path's whole stderr: the audit line, then
@@ -932,6 +976,7 @@ pub fn wisdom_match_cmd(
                     now_ms,
                     matches!(stage_mode, WisdomStageMode::TwoStage),
                     json_mode,
+                    bindings,
                 )?;
                 emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &fallback_result);
                 return Ok(0);
@@ -1013,6 +1058,7 @@ pub fn wisdom_match_cmd(
         now_ms,
         two_stage_active,
         json_mode,
+        bindings,
     )?;
     emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &message_result);
     Ok(0)
@@ -1050,6 +1096,16 @@ fn emit_wisdom_unverified(
         source_type: c.provenance.as_deref(),
     }));
     emit_unverified_matches(Some(root), conn, &hits, query, "wisdom_match");
+}
+
+/// The SCOPED diagnostic line (spec 2026-11-14-areas §9.3/§3.3, tier-3 r3
+/// MAJOR-3): diagnostics are DATA in the lib; the CLI prints them at match
+/// start in the `print_gate_decision` house form — ONE tab-separated stderr
+/// line per reason, `wisdom_scoped_diagnostic` token + the reason as the
+/// single field. The pinned `wisdom_gate_decision` line's four-field shape
+/// is tripwire-cron contract and gains NO fields.
+fn print_scoped_diagnostic(reason: &str) {
+    eprintln!("wisdom_scoped_diagnostic\t{reason}");
 }
 
 /// The pinned gate-decision stderr line (four fields — spec §3.1: it carries
@@ -1093,6 +1149,7 @@ pub fn run_message_path(
     now_ms: i64,
     two_stage_active: bool,
     json_mode: bool,
+    bindings: Option<&wm::BandBindings>,
 ) -> Result<(wm::WisdomMatch, Option<wm::TwoStageOutcome>)> {
     if !two_stage_active {
         let result = wm::wisdom_match_in_scheme(
@@ -1103,7 +1160,7 @@ pub fn run_message_path(
             max,
             exclude,
             now_ms,
-            None, // UNSCOPED: SCOPED delivery binds at the CLI layer (§9.8)
+            bindings,
         )?;
         print_gate_decision(read_scheme, &result);
         print_wisdom_match(&result, json_mode);
@@ -1121,7 +1178,7 @@ pub fn run_message_path(
         now_ms,
         key,
         wm::QueryKind::Message,
-        None, // UNSCOPED: SCOPED delivery binds at the CLI layer (§9.8)
+        bindings,
     )?;
     print_two_stage_audit(&run.outcome);
     print_gate_decision(read_scheme, &run.result);
