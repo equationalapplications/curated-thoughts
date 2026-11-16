@@ -2650,6 +2650,7 @@ mod tests {
     #[test]
     fn redact_home_collapses_exact_match() {
         let home = "/Users/example-home";
+        let _home_guard = HOME_LOCK.lock().unwrap();
         temp_env::with_var("HOME", Some(home), || {
             assert_eq!(redact_home(home), "~");
         });
@@ -2658,6 +2659,7 @@ mod tests {
     /// A path outside the home directory is left verbatim.
     #[test]
     fn redact_home_leaves_non_home_paths_untouched() {
+        let _home_guard = HOME_LOCK.lock().unwrap();
         temp_env::with_var("HOME", Some("/Users/example-home"), || {
             let outside = "/var/tmp/repo-docs";
             assert_eq!(redact_home(outside), outside);
@@ -2675,6 +2677,7 @@ mod tests {
     fn redact_home_redacts_child_path_using_platform_separator() {
         let sep = std::path::MAIN_SEPARATOR;
         let home = format!("{sep}Users{sep}example-home");
+        let _home_guard = HOME_LOCK.lock().unwrap();
         temp_env::with_var("HOME", Some(home.as_str()), || {
             let target = format!("{home}{sep}.ssh{sep}id_ed25519");
             assert_eq!(redact_home(&target), format!("~{sep}.ssh{sep}id_ed25519"));
@@ -2686,6 +2689,7 @@ mod tests {
     /// component-wise comparison must not treat it as "inside home".
     #[test]
     fn redact_home_does_not_match_a_string_prefix_sibling() {
+        let _home_guard = HOME_LOCK.lock().unwrap();
         temp_env::with_var("HOME", Some("/Users/example-home"), || {
             let sibling = "/Users/example-home-secrets/file.txt";
             assert_eq!(redact_home(sibling), sibling);
@@ -2726,6 +2730,13 @@ mod tests {
         ));
     }
 
+    // Task 11 review fix: process-wide `$HOME` reads and writes must not
+    // overlap across parallel tests — `temp-env`'s internal lock serializes
+    // `with_var` CALLS against each other but does NOT cover a plain
+    // `dirs::home_dir()` read (the redact_home canonicalize test), which
+    // then saw a sibling's temporary HOME and returned an unredacted path.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// End-to-end over *actual* `canonicalize` output for the real home dir,
     /// rather than a hand-written string: on Windows this is the
     /// `\\?\`-prefixed form, which must still collapse to `~`.
@@ -2737,6 +2748,11 @@ mod tests {
     /// site by canonicalizing `vault_root`, not here).
     #[test]
     fn redact_home_collapses_actual_canonicalize_output_for_home() {
+        // Hold the HOME lock for the WHOLE read→assert window: redact_home
+        // re-reads `$HOME` internally, so a sibling test's temporary
+        // with_var("HOME") inside the window redacted against the wrong
+        // prefix and the assertion failed spuriously (full-suite-only flake).
+        let _home_guard = HOME_LOCK.lock().unwrap();
         let Some(home) = dirs::home_dir() else {
             return;
         };
