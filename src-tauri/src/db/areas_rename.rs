@@ -113,23 +113,37 @@ pub fn areas_rename(
 
     // The affected set, captured BEFORE the update so the payload re-SELECT
     // iterates exactly the same rows.
+    //
+    // Gauntlet fix 4: on execute=true the WRITE transaction (BEGIN IMMEDIATE
+    // via `unchecked_transaction`) is opened BEFORE this capture and the
+    // capture SELECT runs INSIDE it — capture + UPDATE(by captured ids) +
+    // count check + outbox + audit all share one transaction, so no
+    // concurrent writer can slip rows in between capture and rename. A
+    // dry run keeps the read-only autocommit path (no lock, nothing written).
     let placeholders = in_placeholders(&repo_group);
-    let ids: Vec<String> = {
+    let capture = |c: &Connection| -> Result<Vec<String>> {
         let sql = format!(
             "SELECT id FROM llm_wiki_entries
               WHERE area = ?1 AND entity_id IN ({placeholders})"
         );
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = c.prepare(&sql)?;
         let params: Vec<&str> = std::iter::once(old)
             .chain(repo_group.iter().map(String::as_str))
             .collect();
         let rows: Vec<String> = stmt
             .query_map(rusqlite::params_from_iter(params), |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+        Ok(rows)
+    };
+    let tx = if execute { Some(conn.unchecked_transaction()?) } else { None };
+    let ids = match tx.as_ref() {
+        Some(t) => capture(t)?,
+        None => capture(conn)?,
     };
 
     // Documented choice: zero matching rows is a REFUSAL, not a success.
+    // (On execute=true the just-opened transaction drops here and rolls
+    // back — nothing was written inside it.)
     if ids.is_empty() {
         bail!(
             "rename refused: area `{old}` matches zero rows across hub {hub_id}'s \
@@ -145,12 +159,26 @@ pub fn areas_rename(
         rows: ids.len(),
         executed: execute,
     };
-    if !execute {
+    let Some(tx) = tx else {
         return Ok(report);
-    }
+    };
 
-    let now_ms = now_ms();
-    let tx = conn.unchecked_transaction()?;
+    // Gauntlet fix 5: skew-safe ordering token (§12.6). `updated_at` is the
+    // change token the REMOTE orders on — a skewed-back local clock must
+    // never LOWER it, so the bump is max(local clock, one millisecond past
+    // the affected rows' max stored updated_at).
+    let now_ms = {
+        let max_stored: i64 = tx.query_row(
+            &format!(
+                "SELECT COALESCE(MAX(updated_at), 0) FROM llm_wiki_entries
+                  WHERE id IN ({})",
+                in_placeholders(&ids)
+            ),
+            rusqlite::params_from_iter(ids.iter()),
+            |r| r.get(0),
+        )?;
+        std::cmp::max(now_ms(), max_stored.saturating_add(1))
+    };
 
     // REVIEW M1: the UPDATE is bound to the CAPTURED ids (single source of
     // truth — UPDATE/outbox divergence is impossible by construction) and the
@@ -556,6 +584,49 @@ mod tests {
             areas_rename(&conn, &cfg, "ent-hub", "old", "new", true).unwrap_err()
         );
         assert!(err.contains("zero rows"), "{err}");
+    }
+
+    /// Gauntlet fix 5: a skewed-back local clock must never LOWER the
+    /// remote-ordering token — the bump is max(local, stored_max + 1ms).
+    /// The seed's `updated_at` (4_102_444_800_000 ≈ year 2100) is far in the
+    /// future of any test-run clock, so a plain `now_ms()` would go backwards.
+    #[test]
+    fn updated_at_never_regresses_past_stored_max() {
+        let conn = open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, _) = cfg_with_hub(dir.path(), AREAS_YAML);
+        seed_entity(&conn, "ent-hub");
+        let far_future = 4_102_444_800_000i64;
+        seed_fact(&conn, "fact-a", "ent-hub", Some("old"), far_future);
+        seed_fact(&conn, "fact-b", "ent-hub", Some("old"), far_future - 5);
+
+        areas_rename(&conn, &cfg, "ent-hub", "old", "new", true).unwrap();
+        let (ua_a, ua_b): (i64, i64) = conn
+            .query_row(
+                "SELECT MAX(updated_at), MIN(updated_at) FROM llm_wiki_entries
+                  WHERE id IN ('fact-a','fact-b')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            ua_a > far_future && ua_b > far_future,
+            "every renamed row's updated_at must exceed the stored max \
+             (skew-safe ordering token): a={ua_a} b={ua_b} stored_max={far_future}"
+        );
+        assert_eq!(ua_a, ua_b, "both renamed rows share one bump value");
+        // The outbox Update carries the same monotone token.
+        let outbox_ms: Vec<i64> = conn
+            .prepare("SELECT created_at FROM llm_wiki_outbox WHERE operation = 'UPDATE'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            outbox_ms.iter().all(|&ms| ms > far_future),
+            "outbox rows carry the skew-safe token too: {outbox_ms:?}"
+        );
     }
 
     /// REVIEW M1 pin: the UPDATE is bound to the CAPTURED ids and the
