@@ -1,0 +1,457 @@
+//! Integration tests for the shared hub resolver (spec 2026-11-14-areas
+//! §9.3 core + §6.8.2, task-3 brief). Fixtures build a migrated in-memory
+//! brain, seed entities/redirects, and exercise longest-prefix hub
+//! resolution, redirect-chain + live resolution, merge-group expansion,
+//! globset area matching, and the mtime-gated areas-file cache.
+
+use rusqlite::Connection;
+use tauri_app_lib::config::hub_resolver::{
+    load_areas_file, resolve_deposit_hub, resolve_hub_id, resolve_scoped, AreasFile, DepositHub,
+    ScopedMatch,
+};
+use tauri_app_lib::config::WisdomConfig;
+use tauri_app_lib::db::connection::open_in_memory;
+use tempfile::TempDir;
+
+fn db() -> Connection {
+    open_in_memory().unwrap()
+}
+
+fn add_entity(conn: &Connection, id: &str) {
+    conn.execute(
+        "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+         VALUES (?1, ?1, 'concept', 'Summary', 100, 100)",
+        [id],
+    )
+    .unwrap();
+}
+
+fn add_redirect(conn: &Connection, from: &str, to: &str) {
+    conn.execute(
+        "INSERT INTO entity_redirects (entity_id, merged_into, created_at) VALUES (?1, ?2, 100)",
+        [from, to],
+    )
+    .unwrap();
+}
+
+/// Config with one repo hub (checkout root = `root`) and org hub `org-1`.
+fn cfg_one(root: &std::path::Path, hub: &str) -> WisdomConfig {
+    WisdomConfig {
+        areas_paths: vec![(hub.to_string(), root.join(".ct-areas.yaml"))],
+        org_entity_id: Some("org-1".to_string()),
+    }
+}
+
+fn write_areas_file(root: &std::path::Path, yaml: &str) {
+    std::fs::write(root.join(".ct-areas.yaml"), yaml).unwrap();
+}
+
+// ---- resolve_deposit_hub -------------------------------------------------
+
+#[test]
+fn no_config_is_unconfigured() {
+    let conn = db();
+    assert_eq!(
+        resolve_deposit_hub(&conn, None, "/anywhere/repo"),
+        DepositHub::Unconfigured
+    );
+}
+
+#[test]
+fn path_outside_every_root_is_no_prefix() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    let cfg = cfg_one(&root, "hub-a");
+    assert_eq!(
+        resolve_deposit_hub(&conn, Some(&cfg), &tmp.path().join("other").join("f.rs").to_string_lossy()),
+        DepositHub::NoPrefix
+    );
+}
+
+#[test]
+fn innermost_checkout_nesting_wins() {
+    let tmp = TempDir::new().unwrap();
+    let outer = tmp.path().join("outer");
+    let inner = outer.join("inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-outer");
+    add_entity(&conn, "hub-inner");
+    let cfg = WisdomConfig {
+        areas_paths: vec![
+            ("hub-outer".to_string(), outer.join(".ct-areas.yaml")),
+            ("hub-inner".to_string(), inner.join(".ct-areas.yaml")),
+        ],
+        org_entity_id: Some("org-1".to_string()),
+    };
+    let path = inner.join("src").join("f.rs").to_string_lossy().into_owned();
+    assert_eq!(
+        resolve_deposit_hub(&conn, Some(&cfg), &path),
+        DepositHub::Hub("hub-inner".to_string())
+    );
+}
+
+#[test]
+fn symlinked_root_canonicalizes_to_the_same_hub() {
+    let tmp = TempDir::new().unwrap();
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, tmp.path().join("link")).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    let cfg = cfg_one(&real, "hub-a");
+    #[cfg(unix)]
+    {
+        let path = tmp
+            .path()
+            .join("link")
+            .join("f.rs")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            resolve_deposit_hub(&conn, Some(&cfg), &path),
+            DepositHub::Hub("hub-a".to_string())
+        );
+    }
+}
+
+#[test]
+fn non_existent_path_under_root_still_resolves_ancestor_plus_remainder() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join("planned").join("deep")).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    let cfg = cfg_one(&root, "hub-a");
+    let path = root.join("planned").join("deep").join("new.md");
+    assert_eq!(
+        resolve_deposit_hub(&conn, Some(&cfg), &path.to_string_lossy()),
+        DepositHub::Hub("hub-a".to_string())
+    );
+}
+
+#[test]
+fn redirect_chain_merged_away_configured_key_still_binds() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "hub-b");
+    add_redirect(&conn, "hub-a", "hub-b");
+    let cfg = cfg_one(&root, "hub-a");
+    let path = root.join("f.rs").to_string_lossy().into_owned();
+    assert_eq!(
+        resolve_deposit_hub(&conn, Some(&cfg), &path),
+        DepositHub::Hub("hub-b".to_string())
+    );
+}
+
+#[test]
+fn redirect_cycle_is_unresolved() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "hub-b");
+    add_redirect(&conn, "hub-a", "hub-b");
+    add_redirect(&conn, "hub-b", "hub-a");
+    let cfg = cfg_one(&root, "hub-a");
+    let path = root.join("f.rs").to_string_lossy().into_owned();
+    match resolve_deposit_hub(&conn, Some(&cfg), &path) {
+        DepositHub::Unresolved(reason) => assert!(reason.contains("unresolved"), "{reason}"),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn dead_survivor_is_unresolved() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    add_redirect(&conn, "hub-a", "hub-gone");
+    let cfg = cfg_one(&root, "hub-a");
+    let path = root.join("f.rs").to_string_lossy().into_owned();
+    match resolve_deposit_hub(&conn, Some(&cfg), &path) {
+        DepositHub::Unresolved(reason) => assert!(reason.contains("unresolved"), "{reason}"),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn same_survivor_collision_is_unresolved_with_carried_reason() {
+    let tmp = TempDir::new().unwrap();
+    let r1 = tmp.path().join("repo1");
+    let r2 = tmp.path().join("repo2");
+    std::fs::create_dir_all(&r1).unwrap();
+    std::fs::create_dir_all(&r2).unwrap();
+    let conn = db();
+    add_entity(&conn, "key-1");
+    add_entity(&conn, "key-2");
+    add_entity(&conn, "survivor");
+    add_redirect(&conn, "key-1", "survivor");
+    add_redirect(&conn, "key-2", "survivor");
+    let cfg = WisdomConfig {
+        areas_paths: vec![
+            ("key-1".to_string(), r1.join(".ct-areas.yaml")),
+            ("key-2".to_string(), r2.join(".ct-areas.yaml")),
+        ],
+        org_entity_id: Some("org-1".to_string()),
+    };
+    let path = r1.join("f.rs").to_string_lossy().into_owned();
+    match resolve_deposit_hub(&conn, Some(&cfg), &path) {
+        DepositHub::Unresolved(reason) => assert!(reason.contains("collision"), "{reason}"),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+// ---- resolve_scoped ------------------------------------------------------
+
+#[test]
+fn scoped_none_when_no_root_prefixes() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "org-1");
+    let cfg = cfg_one(&root, "hub-a");
+    assert!(resolve_scoped(&conn, &cfg, &tmp.path().join("elsewhere").to_string_lossy()).is_none());
+}
+
+#[test]
+fn scoped_glob_matches_only_relative_to_root() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join("infra")).unwrap();
+    write_areas_file(&root, "areas:\n  deploy:\n    - infra/**\n");
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "org-1");
+    let cfg = cfg_one(&root, "hub-a");
+
+    // Inside the repo, infra/** matches.
+    let m = resolve_scoped(
+        &conn,
+        &cfg,
+        &root.join("infra").join("x.yml").to_string_lossy(),
+    )
+    .unwrap();
+    assert_eq!(m.area.as_deref(), Some("deploy"));
+    assert_eq!(m.repo_group, vec!["hub-a".to_string()]);
+    assert_eq!(m.org_group, Some(vec!["org-1".to_string()]));
+
+    // Same shape outside the checkout root: no area match, still repo band.
+    let m = resolve_scoped(
+        &conn,
+        &cfg,
+        &tmp.path().join("other").join("infra").join("x.yml").to_string_lossy(),
+    );
+    assert!(m.is_none());
+
+    // Inside the repo but outside the pattern: repo band only, no area.
+    let m = resolve_scoped(&conn, &cfg, &root.join("src").join("a.rs").to_string_lossy()).unwrap();
+    assert_eq!(m.area, None);
+}
+
+#[test]
+fn scoped_resolve_then_expand_includes_survivor_and_losers() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    write_areas_file(&root, "areas:\n  deploy:\n    - infra/**\n");
+    let conn = db();
+    for id in ["hub-a", "hub-b", "org-1"] {
+        add_entity(&conn, id);
+    }
+    add_redirect(&conn, "hub-a", "hub-b");
+    let cfg = cfg_one(&root, "hub-a");
+    let m = resolve_scoped(&conn, &cfg, &root.join("infra").join("x.yml").to_string_lossy())
+        .unwrap();
+    let mut group = m.repo_group.clone();
+    group.sort();
+    assert_eq!(group, vec!["hub-a".to_string(), "hub-b".to_string()]);
+}
+
+#[test]
+fn scoped_org_unresolvable_omits_org_arm_with_diagnostic() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    write_areas_file(&root, "areas:\n  deploy:\n    - infra/**\n");
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    // org-1 configured but NOT present as a live entity.
+    let cfg = cfg_one(&root, "hub-a");
+    let m = resolve_scoped(&conn, &cfg, &root.join("infra").join("x.yml").to_string_lossy())
+        .unwrap();
+    assert_eq!(m.org_group, None);
+    assert!(
+        m.diagnostics.iter().any(|d| d.contains("org-1")),
+        "diagnostics must name the omitted org hub: {:?}",
+        m.diagnostics
+    );
+}
+
+#[test]
+fn scoped_org_redirect_resolves_to_survivor() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    write_areas_file(&root, "areas:\n  deploy:\n    - infra/**\n");
+    let conn = db();
+    for id in ["hub-a", "org-old", "org-new"] {
+        add_entity(&conn, id);
+    }
+    add_redirect(&conn, "org-old", "org-new");
+    let cfg = cfg_one(&root, "hub-a");
+    let cfg = WisdomConfig {
+        org_entity_id: Some("org-old".to_string()),
+        ..cfg
+    };
+    let m = resolve_scoped(&conn, &cfg, &root.join("infra").join("x.yml").to_string_lossy())
+        .unwrap();
+    let mut org = m.org_group.unwrap();
+    org.sort();
+    assert_eq!(org, vec!["org-new".to_string(), "org-old".to_string()]);
+}
+
+// ---- resolve_hub_id (§6.8.4, Librarian read side) ------------------------
+
+#[test]
+fn hub_id_accepts_a_configured_key_itself() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "org-1");
+    let cfg = cfg_one(&root, "hub-a");
+    assert_eq!(
+        resolve_hub_id(&conn, &cfg, "hub-a"),
+        DepositHub::Hub("hub-a".to_string())
+    );
+}
+
+#[test]
+fn hub_id_accepts_only_configured_survivors() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let conn = db();
+    for id in ["hub-a", "hub-b", "stranger"] {
+        add_entity(&conn, id);
+    }
+    add_redirect(&conn, "hub-a", "hub-b");
+    let cfg = cfg_one(&root, "hub-a");
+    // The merged-away key's survivor IS a configured key's survivor.
+    assert_eq!(
+        resolve_hub_id(&conn, &cfg, "hub-a"),
+        DepositHub::Hub("hub-b".to_string())
+    );
+    // A live non-hub entity never binds.
+    match resolve_hub_id(&conn, &cfg, "stranger") {
+        DepositHub::Unresolved(reason) => assert!(reason.contains("unresolved"), "{reason}"),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn hub_id_cycle_and_dead_are_unresolved() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let conn = db();
+    for id in ["hub-a", "hub-b", "c1", "c2"] {
+        add_entity(&conn, id);
+    }
+    add_redirect(&conn, "hub-a", "hub-b");
+    add_redirect(&conn, "hub-b", "hub-gone");
+    add_redirect(&conn, "c1", "c2");
+    add_redirect(&conn, "c2", "c1");
+    let cfg = cfg_one(&root, "hub-a");
+    match resolve_hub_id(&conn, &cfg, "hub-a") {
+        DepositHub::Unresolved(reason) => assert!(reason.contains("unresolved"), "{reason}"),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+    match resolve_hub_id(&conn, &cfg, "c1") {
+        DepositHub::Unresolved(reason) => assert!(reason.contains("unresolved"), "{reason}"),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+// ---- areas-file loader + mtime cache (§3.1–§3.5) -------------------------
+
+#[test]
+fn loader_parses_valid_file_in_order() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join(".ct-areas.yaml");
+    std::fs::write(
+        &path,
+        "areas:\n  deploy:\n    - infra/**\n    - amplify.yml\n  keys:\n    - src/kms/**\n",
+    )
+    .unwrap();
+    let f = load_areas_file(&path).unwrap();
+    assert_eq!(
+        f,
+        AreasFile {
+            areas: vec![
+                (
+                    "deploy".to_string(),
+                    vec!["infra/**".to_string(), "amplify.yml".to_string()]
+                ),
+                ("keys".to_string(), vec!["src/kms/**".to_string()]),
+            ],
+        }
+    );
+}
+
+#[test]
+fn loader_malformed_file_is_an_error_with_no_partial_state() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join(".ct-areas.yaml");
+    std::fs::write(&path, "areas: [broken").unwrap();
+    assert!(load_areas_file(&path).is_err());
+    // A second read of the SAME malformed file must still be an error —
+    // the failed parse must not poison or cache partial state.
+    assert!(load_areas_file(&path).is_err());
+}
+
+#[test]
+fn loader_rereads_when_mtime_changes() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join(".ct-areas.yaml");
+    std::fs::write(&path, "areas:\n  deploy:\n    - infra/**\n").unwrap();
+    let f1 = load_areas_file(&path).unwrap();
+    assert_eq!(f1.areas.len(), 1);
+    // Rewrite with different content; wait so the mtime provably moves.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(&path, "areas:\n  deploy:\n    - infra/**\n  keys:\n    - src/kms/**\n")
+        .unwrap();
+    let f2 = load_areas_file(&path).unwrap();
+    assert_eq!(f2.areas.len(), 2, "mtime change must force a re-read");
+}
+
+// ---- shape pins ----------------------------------------------------------
+
+#[test]
+fn scoped_match_diagnostics_default_empty_when_healthy() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    write_areas_file(&root, "areas:\n  deploy:\n    - infra/**\n");
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "org-1");
+    let cfg = cfg_one(&root, "hub-a");
+    let m: ScopedMatch = resolve_scoped(&conn, &cfg, &root.join("infra").join("y.yml").to_string_lossy())
+        .unwrap();
+    assert!(m.diagnostics.is_empty(), "{:?}", m.diagnostics);
+}

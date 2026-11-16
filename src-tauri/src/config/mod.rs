@@ -11,6 +11,8 @@ use std::io::Write;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod hub_resolver;
+
 /// Fatal errors from `BrainConfig::load_lenient`.
 ///
 /// Malformed top-level JSON, non-object roots, and present-but-non-string
