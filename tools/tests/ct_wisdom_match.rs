@@ -534,8 +534,8 @@ fn activity_delivery_emits_nothing_when_disabled() {
 
 /// Scoped-match stderr diagnostics use the `print_gate_decision` house form:
 /// ONE tab-separated line per diagnostic, `wisdom_scoped_diagnostic` token,
-/// reason as the single field (the pinned 5-field `wisdom_gate_decision`
-/// line's field count is tripwire-cron contract and must NOT grow).
+/// reason as the single field (the pinned `wisdom_gate_decision` line's
+/// token + four fields shape is tripwire-cron contract and must NOT grow).
 fn scoped_diagnostic_lines(out: &std::process::Output) -> Vec<String> {
     let stderr = String::from_utf8_lossy(&out.stderr);
     stderr
@@ -597,14 +597,10 @@ fn seed_entity(id: &str) {
 fn with_scoped_brain<F: FnOnce(&std::path::Path)>(org: Option<&str>, f: F) {
     with_seeded_brain(|| {
         let brain_dir = std::env::var("CURATED_BRAIN_DIR").unwrap();
-        let checkout = std::env::temp_dir().join(format!(
-            "ct-scoped-fixture-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        // tempdir(): the fixture checkout drops with the closure (m1 — no
+        // `ct-scoped-fixture-*` leakage under the system temp dir).
+        let checkout_tmp = tempfile::tempdir().unwrap();
+        let checkout = checkout_tmp.path();
         std::fs::create_dir_all(checkout.join("src/auth")).unwrap();
         std::fs::create_dir_all(checkout.join("docs")).unwrap();
         std::fs::write(
@@ -620,22 +616,33 @@ fn with_scoped_brain<F: FnOnce(&std::path::Path)>(org: Option<&str>, f: F) {
         seeded_fact_with_entity("fact_area", "hub-1", Some("auth"));
         seeded_fact_with_entity("fact_repo", "hub-1", None);
         seeded_fact_with_entity("fact_foreign", "other-1", None);
-        let org_field = match org {
-            Some(id) => format!(r#","org_entity_id":"{id}""#),
-            None => String::new(),
-        };
         let areas_file = checkout.join(".ct-areas.yaml");
-        let config = format!(
-            r#"{{"wisdom":{{"areas_paths":{{"hub-1":"{af}"}}{org}}}}}"#,
-            af = areas_file.display(),
-            org = org_field
+        // json!-built config (m2): entity-id keys are literals, paths are
+        // VALUES — no display()-splicing quoting/backslash hazards.
+        let mut areas_paths = serde_json::Map::new();
+        areas_paths.insert(
+            "hub-1".to_string(),
+            serde_json::Value::String(areas_file.display().to_string()),
         );
+        let mut wisdom = serde_json::Map::new();
+        wisdom.insert(
+            "areas_paths".to_string(),
+            serde_json::Value::Object(areas_paths),
+        );
+        if let Some(id) = org {
+            wisdom.insert(
+                "org_entity_id".to_string(),
+                serde_json::Value::String(id.to_string()),
+            );
+        }
+        let config =
+            serde_json::json!({ "wisdom": serde_json::Value::Object(wisdom) }).to_string();
         std::fs::write(
             std::path::Path::new(&brain_dir).join("config.json"),
             config,
         )
         .unwrap();
-        f(&checkout);
+        f(checkout);
     });
 }
 
@@ -779,23 +786,23 @@ fn collision_unresolved_reason_is_printed_loudly_and_query_stays_unscoped() {
                 [],
             )
             .unwrap();
-        let checkout2 = std::env::temp_dir().join(format!(
-            "ct-scoped-fixture-2-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&checkout2).unwrap();
+        // tempdir(): the collision fixture checkout drops with the closure
+        // (m1 — no `ct-scoped-fixture-*` leakage under the system temp dir).
+        let checkout2_tmp = tempfile::tempdir().unwrap();
+        let checkout2 = checkout2_tmp.path();
         let af2 = checkout2.join(".ct-areas.yaml");
         std::fs::write(&af2, "areas:\n  deploy:\n    - \"infra/**\"\n").unwrap();
         let af = checkout.join(".ct-areas.yaml");
-        let config = format!(
-            r#"{{"wisdom":{{"areas_paths":{{"hub-1":"{af}","hub-2":"{af2}"}}}}}}"#,
-            af = af.display(),
-            af2 = af2.display()
-        );
+        // json!-built config (m2): no display()-splicing quoting hazards.
+        let config = serde_json::json!({
+            "wisdom": {
+                "areas_paths": {
+                    "hub-1": af.display().to_string(),
+                    "hub-2": af2.display().to_string()
+                }
+            }
+        })
+        .to_string();
         std::fs::write(
             std::path::Path::new(&brain_dir).join("config.json"),
             config,
@@ -833,6 +840,71 @@ fn collision_unresolved_reason_is_printed_loudly_and_query_stays_unscoped() {
                 "fact_repo".to_string()
             ],
             "Unresolved → byte-identical UNSCOPED call: {v}"
+        );
+    });
+}
+
+/// Fix-round-1 MAJOR-1 (controller ruling): the load-side duplicate-directory
+/// drop fails the WHOLE wisdom block closed at config-parse time — the
+/// resolver never sees it, so the CLI must print the load report's
+/// diagnostics ITSELF. TWO configured keys on the SAME areas file trip the
+/// drop (config/mod.rs duplicate-directory guard); the spawned `ct` call
+/// with `--path=` inside the checkout must print EXACTLY ONE diagnostic
+/// line naming the drop, and the query must stay BYTE-IDENTICAL UNSCOPED
+/// (all facts deliver).
+#[test]
+fn load_time_duplicate_directory_drop_is_printed_loudly_and_query_stays_unscoped() {
+    with_scoped_brain(None, |checkout| {
+        // Rewrite the brain's config.json with BOTH keys on the SAME areas
+        // file (json!-built: no display()-splicing quoting hazards).
+        let brain_dir = std::env::var("CURATED_BRAIN_DIR").unwrap();
+        let af = checkout.join(".ct-areas.yaml");
+        let config = serde_json::json!({
+            "wisdom": {
+                "areas_paths": {
+                    "hub-1": af.display().to_string(),
+                    "hub-2": af.display().to_string()
+                }
+            }
+        })
+        .to_string();
+        std::fs::write(
+            std::path::Path::new(&brain_dir).join("config.json"),
+            config,
+        )
+        .unwrap();
+        let p = checkout.join("src/auth/login.rs");
+        let out = run_ct(&[
+            "wisdom",
+            "match",
+            "--json",
+            "--max",
+            "10",
+            &format!("--path={}", p.display()),
+        ]);
+        let v = json_of(&out);
+        let lines = scoped_diagnostic_lines(&out);
+        assert_eq!(
+            lines.len(),
+            1,
+            "exactly ONE load-side diagnostic; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            lines[0].contains("duplicate areas-file directory"),
+            "reason must name the duplicate-directory drop: {lines:?}"
+        );
+        // Query bytes unchanged: the call proceeds UNSCOPED.
+        let mut ids = entry_ids(&v);
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "fact_area".to_string(),
+                "fact_foreign".to_string(),
+                "fact_repo".to_string()
+            ],
+            "fail-closed drop → byte-identical UNSCOPED call: {v}"
         );
     });
 }

@@ -876,11 +876,30 @@ pub fn wisdom_match_cmd(
     // cwd; the target itself is passed VERBATIM (§9.3: no normalization,
     // no quoting repair). Diagnostics are DATA in the lib; the CLI prints
     // them (tier-3 r3 MAJOR-3).
+    // Fix-round-1 MAJOR-1 (controller ruling): the load result is KEPT, not
+    // discarded — when `load_lenient` produced diagnostics (e.g. the
+    // fail-closed duplicate-directory or relative-path wisdom-block drops)
+    // or returned `Err`, EVERY line is printed through the SAME
+    // `print_scoped_diagnostic` channel BEFORE the resolution/fallback
+    // logic, so a `--path=` call whose wisdom block was dropped is LOUD on
+    // stderr while the query stays byte-identical UNSCOPED. A clean load
+    // (no diagnostics, no Err) prints nothing.
     let resolution = path.filter(|p| !p.trim().is_empty()).and_then(|p| {
-        tauri_app_lib::config::BrainConfig::load_lenient(&brain.paths)
-            .ok()
-            .and_then(|report| report.config.wisdom)
-            .map(|cfg| tauri_app_lib::config::hub_resolver::resolve_scoped(&conn, &cfg, p))
+        match tauri_app_lib::config::BrainConfig::load_lenient(&brain.paths) {
+            Ok(report) => {
+                for d in &report.diagnostics {
+                    print_scoped_diagnostic(d);
+                }
+                report
+                    .config
+                    .wisdom
+                    .map(|cfg| tauri_app_lib::config::hub_resolver::resolve_scoped(&conn, &cfg, p))
+            }
+            Err(e) => {
+                print_scoped_diagnostic(&format!("brain config load failed: {e}"));
+                None
+            }
+        }
     });
     use tauri_app_lib::config::hub_resolver::ScopedResolution;
     if let Some(r) = &resolution {
@@ -952,8 +971,10 @@ pub fn wisdom_match_cmd(
                     bindings,
                 )?;
                 if run.ran {
-                    // The ACTIVE path's whole stderr: the audit line, then
-                    // the pinned gate-decision line — nothing else
+                    // The ACTIVE path's whole stderr: any scoped-diagnostic
+                    // lines (if the load or resolution produced them) come
+                    // first, then the audit line and the pinned
+                    // gate-decision line
                     // (rev-4 B1′ audit suppression).
                     print_two_stage_audit(&run.outcome);
                     print_gate_decision(read_scheme, &run.result);
