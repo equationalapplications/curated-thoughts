@@ -15,11 +15,11 @@ use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use globset::{Glob, GlobSetBuilder};
-use rusqlite::{OptionalExtension, Connection};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use rusqlite::{Connection, OptionalExtension};
 
 use super::WisdomConfig;
-use crate::db::merge_duplicates::{resolve_redirect_chain, ChainResolution};
+use crate::db::merge_duplicates::{ChainResolution, resolve_redirect_chain};
 
 /// The outcome of resolving a deposit target (or an entity id) to its
 /// wisdom repo hub (spec §6.8.2). `Unresolved` CARRIES the reason string
@@ -38,6 +38,24 @@ pub enum DepositHub {
     Unresolved(String),
     /// The entity id of the surviving repo hub.
     Hub(String),
+}
+
+/// The three-way outcome of the CLI scoped resolution (FIX 2, MAJOR-2,
+/// controller ruling): `NoPrefix` keeps the §9.8 byte-identical UNSCOPED
+/// semantics; `Bound` is a successful match; `Unresolved` carries the
+/// reason string for every former silent-`None`-with-a-matched-root case
+/// (same-survivor collision, redirect cycle, dead survivor, symlink tie,
+/// unloadable areas file) — never silent, never stderr.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedResolution {
+    /// No configured root prefixes the path — the query stays
+    /// BYTE-IDENTICAL (§9.8 UNSCOPED fence).
+    NoPrefix,
+    /// A successful scoped match.
+    Bound(ScopedMatch),
+    /// The path matched a root but the block cannot bind; the reason is
+    /// data for the CLI to print (tier-3 r3 MAJOR-3).
+    Unresolved(String),
 }
 
 /// A successful scoped match for the CLI `--path=` side (spec §9.2/§9.3).
@@ -62,7 +80,9 @@ pub struct ScopedMatch {
 pub fn parse_areas_file(text: &str) -> Result<AreasFile> {
     let v: serde_yaml::Value =
         serde_yaml::from_str(text).context("areas file is not valid YAML")?;
-    let root = v.as_mapping().context("areas file must be a YAML mapping")?;
+    let root = v
+        .as_mapping()
+        .context("areas file must be a YAML mapping")?;
     let key = serde_yaml::Value::String("areas".into());
     let areas = root
         .get(&key)
@@ -77,7 +97,15 @@ pub fn parse_areas_file(text: &str) -> Result<AreasFile> {
         let pats = v.as_sequence().context("area patterns must be a list")?;
         let mut ps = Vec::new();
         for p in pats {
-            ps.push(p.as_str().context("area pattern must be a string")?.to_string());
+            let pat = p
+                .as_str()
+                .context("area pattern must be a string")?
+                .to_string();
+            // FIX 3a: a bad glob pattern is a PARSE error — malformed file,
+            // no partial state (consistent with the loader rule).
+            Glob::new(&pat)
+                .with_context(|| format!("invalid glob pattern `{pat}` in areas file"))?;
+            ps.push(pat);
         }
         out.push((name, ps));
     }
@@ -94,6 +122,9 @@ pub struct AreasFile {
 struct CacheEntry {
     mtime: SystemTime,
     file: AreasFile,
+    /// FIX 3c (minor-4): each area's GlobSet compiled ONCE at cache-insert
+    /// time — no per-call rebuild.
+    sets: Vec<(String, GlobSet)>,
 }
 
 /// Process-wide mtime-gated areas-file cache (tier-3 r1 MAJOR-2 / r2 m4):
@@ -113,7 +144,7 @@ fn areas_cache() -> &'static AreasCache {
 }
 
 impl AreasCache {
-    fn load(&self, path: &Path) -> Result<AreasFile> {
+    fn load(&self, path: &Path) -> Result<(AreasFile, Vec<(String, GlobSet)>)> {
         let mtime = std::fs::metadata(path)
             .context("areas file not found")?
             .modified()
@@ -121,13 +152,32 @@ impl AreasCache {
         let mut entries = self.entries.lock().expect("areas cache lock");
         if let Some(hit) = entries.get(path) {
             if hit.mtime == mtime {
-                return Ok(hit.file.clone());
+                return Ok((hit.file.clone(), hit.sets.clone()));
             }
         }
         let text = std::fs::read_to_string(path).context("areas file unreadable")?;
         let file = parse_areas_file(&text)?;
-        entries.insert(path.to_path_buf(), CacheEntry { mtime, file: file.clone() });
-        Ok(file)
+        let mut builder_sets = Vec::new();
+        for (name, patterns) in &file.areas {
+            let mut builder = GlobSetBuilder::new();
+            for p in patterns {
+                // Patterns were validated at parse time (FIX 3a); a build
+                // failure here is unreachable and loud if it ever happens.
+                let g = Glob::new(p).expect("pattern validated at parse time");
+                builder.add(g);
+            }
+            let set = builder.build().context("globset build failed")?;
+            builder_sets.push((name.clone(), set));
+        }
+        entries.insert(
+            path.to_path_buf(),
+            CacheEntry {
+                mtime,
+                file: file.clone(),
+                sets: builder_sets.clone(),
+            },
+        );
+        Ok((file, builder_sets))
     }
 }
 
@@ -135,13 +185,16 @@ impl AreasCache {
 /// re-read ONLY when the file's mtime changed. Malformed file → error, no
 /// partial state (a failed parse is never cached).
 pub fn load_areas_file(path: &Path) -> Result<AreasFile> {
-    areas_cache().load(path)
+    areas_cache().load(path).map(|(file, _)| file)
 }
 
 /// The checkout root of a configured key is the parent directory of its
 /// areas-file path (§3.1).
 fn checkout_root(areas_file: &Path) -> PathBuf {
-    areas_file.parent().map(Path::to_path_buf).unwrap_or_default()
+    areas_file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
 }
 
 /// Component-wise prefix test on canonical paths: `root` prefixes `path`
@@ -164,13 +217,15 @@ fn is_canonical_prefix(root: &str, path: &str) -> bool {
 }
 
 /// Resolve `id` through the redirect chain to its live survivor.
-/// `None` = unresolvable (cycle, or survivor not live).
-fn live_survivor(conn: &Connection, id: &str) -> Option<String> {
+/// `Err` = unresolvable, CARRYING the descriptive reason (m3: never the
+/// bare string "unresolved") — cycle or dead survivor.
+fn live_survivor(conn: &Connection, id: &str) -> std::result::Result<String, String> {
     match resolve_redirect_chain(conn, id) {
-        Ok(ChainResolution::Cycle(_)) => None,
-        Ok(ChainResolution::None) if is_live(conn, id) => Some(id.to_string()),
-        Ok(ChainResolution::Survivor(s)) if is_live(conn, &s) => Some(s),
-        _ => None,
+        Ok(ChainResolution::Cycle(at)) => Err(format!("redirect cycle at {at}")),
+        Ok(ChainResolution::None) if is_live(conn, id) => Ok(id.to_string()),
+        Ok(ChainResolution::Survivor(s)) if is_live(conn, &s) => Ok(s),
+        Ok(ChainResolution::Survivor(s)) => Err(format!("survivor {s} not live")),
+        _ => Err(format!("survivor {id} not live")),
     }
 }
 
@@ -191,7 +246,9 @@ fn is_live(conn: &Connection, id: &str) -> bool {
 fn configured_survivors(conn: &Connection, cfg: &WisdomConfig) -> Vec<(String, String)> {
     cfg.areas_paths
         .iter()
-        .filter_map(|(id, _)| live_survivor(conn, id).map(|s| (id.clone(), s)))
+        // Cycle keys are skipped here — they cannot silently win (§3.3);
+        // their failure surfaces only if they MATCH as the hub.
+        .filter_map(|(id, _)| live_survivor(conn, id).ok().map(|s| (id.clone(), s)))
         .collect()
 }
 
@@ -213,10 +270,20 @@ fn detect_collision(pairs: &[(String, String)]) -> Option<String> {
 
 /// The §9.3 longest-prefix match over canonicalized checkout roots: the
 /// longest canonicalized root (component-boundary) that prefixes the
-/// canonicalized path wins; ties are impossible by the load-time
-/// duplicate-directory guard. Returns the matched CONFIGURED key id.
-fn longest_prefix_match(cfg: &WisdomConfig, canonical_path: &str) -> Option<String> {
+/// canonicalized path wins. FIX 1 (MAJOR-1): an equal-length match by a
+/// DIFFERENT configured key (e.g. `/repos/a` and a symlink `/links/a`) is
+/// a TIE — returned explicitly, never a silent first-pick (§3.3).
+enum PrefixMatch {
+    None,
+    Hub(String),
+    /// Two DIFFERENT configured keys tie at the same (longest) canonical
+    /// root length; carries both ids for the Unresolved reason.
+    Tie(String, String),
+}
+
+fn longest_prefix_match(cfg: &WisdomConfig, canonical_path: &str) -> PrefixMatch {
     let mut best: Option<(usize, String)> = None;
+    let mut tie: Option<(String, String)> = None;
     for (id, areas_path) in &cfg.areas_paths {
         let root = checkout_root(areas_path);
         // A not-yet-existing root "can prefix nothing" (§9.3): skip it
@@ -225,14 +292,30 @@ fn longest_prefix_match(cfg: &WisdomConfig, canonical_path: &str) -> Option<Stri
             continue;
         }
         let canonical_root = super::canonicalize_lenient(&root.to_string_lossy());
-        if is_canonical_prefix(&canonical_root, canonical_path) {
-            let len = canonical_root.len();
-            if best.as_ref().is_none_or(|(bl, _)| len > *bl) {
+        if !is_canonical_prefix(&canonical_root, canonical_path) {
+            continue;
+        }
+        let len = canonical_root.len();
+        match &best {
+            None => best = Some((len, id.clone())),
+            Some((bl, _)) if len > *bl => {
+                // A longer root retires any shorter-length tie.
                 best = Some((len, id.clone()));
+                tie = None;
             }
+            Some((bl, bid)) if len == *bl && bid != id => {
+                tie = Some((bid.clone(), id.clone()));
+            }
+            _ => {}
         }
     }
-    best.map(|(_, id)| id)
+    if let Some((a, b)) = tie {
+        return PrefixMatch::Tie(a, b);
+    }
+    match best {
+        Some((_, id)) => PrefixMatch::Hub(id),
+        None => PrefixMatch::None,
+    }
 }
 
 /// Deposit-time hub resolution (§6.8.2). `repo_path` is the ABSOLUTE path
@@ -258,36 +341,61 @@ pub fn resolve_deposit_hub(
         return DepositHub::Unresolved(reason);
     }
     let canonical_path = super::canonicalize_lenient(repo_path);
-    let Some(id) = longest_prefix_match(cfg, &canonical_path) else {
-        return DepositHub::NoPrefix;
-    };
-    match live_survivor(conn, &id) {
-        Some(s) => DepositHub::Hub(s),
-        None => DepositHub::Unresolved("unresolved".to_string()),
+    match longest_prefix_match(cfg, &canonical_path) {
+        PrefixMatch::None => DepositHub::NoPrefix,
+        PrefixMatch::Tie(a, b) => DepositHub::Unresolved(format!(
+            "unresolved: symlink/canonical tie between configured keys {a} and {b} (identical canonical checkout root)"
+        )),
+        PrefixMatch::Hub(id) => match live_survivor(conn, &id) {
+            Ok(s) => DepositHub::Hub(s),
+            Err(reason) => DepositHub::Unresolved(reason),
+        },
     }
 }
 
 /// CLI `--path=` scoped match (spec §9.2/§9.3): resolve the matched hub
 /// to its survivor FIRST, then expand the merge group (`cluster_ids`).
-/// `resolved_path` is the canonical path. `None` when no configured root
-/// prefixes (the query stays BYTE-IDENTICAL, §9.8 UNSCOPED fence) or when
-/// the matched hub / the block cannot bind (collision, cycle, dead
-/// survivor).
+/// FIX 2 (MAJOR-2, controller ruling): returns a three-way
+/// [`ScopedResolution`]. `NoPrefix` when no configured root prefixes (the
+/// query stays BYTE-IDENTICAL, §9.8 UNSCOPED fence); `Bound` on success;
+/// `Unresolved(reason)` for every former silent-`None`-with-a-matched-root
+/// case (collision, cycle, dead survivor, symlink tie, unloadable areas
+/// file). The input path is canonicalized here (m1, idempotent).
 pub fn resolve_scoped(
     conn: &Connection,
     cfg: &WisdomConfig,
     resolved_path: &str,
-) -> Option<ScopedMatch> {
+) -> ScopedResolution {
     if cfg.areas_paths.is_empty() {
-        return None;
+        return ScopedResolution::NoPrefix;
     }
+    // §3.3: a same-survivor collision fails the WHOLE block closed.
     let survivors = configured_survivors(conn, cfg);
-    if detect_collision(&survivors).is_some() {
-        return None;
+    if let Some(reason) = detect_collision(&survivors) {
+        return ScopedResolution::Unresolved(reason);
     }
-    let hub_id = longest_prefix_match(cfg, resolved_path)?;
-    let hub_survivor = live_survivor(conn, &hub_id)?;
-    let repo_group = crate::db::entities::cluster_ids(conn, &hub_survivor).ok()?;
+    let canonical_path = super::canonicalize_lenient(resolved_path);
+    let hub_id = match longest_prefix_match(cfg, &canonical_path) {
+        PrefixMatch::None => return ScopedResolution::NoPrefix,
+        PrefixMatch::Tie(a, b) => {
+            return ScopedResolution::Unresolved(format!(
+                "unresolved: symlink/canonical tie between configured keys {a} and {b} (identical canonical checkout root)"
+            ));
+        }
+        PrefixMatch::Hub(id) => id,
+    };
+    let hub_survivor = match live_survivor(conn, &hub_id) {
+        Ok(s) => s,
+        Err(reason) => return ScopedResolution::Unresolved(reason),
+    };
+    let repo_group = match crate::db::entities::cluster_ids(conn, &hub_survivor) {
+        Ok(group) => group,
+        Err(e) => {
+            return ScopedResolution::Unresolved(format!(
+                "hub {hub_id} merge group unavailable: {e:#}"
+            ));
+        }
+    };
 
     // Area: globset match on the path RELATIVE to the checkout root (§3.2).
     let areas_path = cfg
@@ -295,28 +403,38 @@ pub fn resolve_scoped(
         .iter()
         .find(|(id, _)| *id == hub_id)
         .map(|(_, p)| p.clone());
-    let area = areas_path.and_then(|p| match_area(&p, resolved_path));
+    // FIX 3b: an unloadable/unusable areas file at scoped time is a LOUD
+    // Unresolved — never a silent area-less match.
+    let area = match areas_path.map(|p| match_area(&p, &canonical_path)) {
+        Some(Ok(a)) => a,
+        Some(Err(e)) => {
+            return ScopedResolution::Unresolved(format!(
+                "areas file for hub {hub_id} unusable: {e:#}"
+            ));
+        }
+        None => None,
+    };
 
     // Org band: resolve the configured org hub to its survivor, live-check,
     // then expand; unresolvable → arm omitted + diagnostic line.
     let (org_group, diagnostics) = match cfg.org_entity_id.as_deref() {
         None => (None, Vec::new()),
         Some(org_id) => match live_survivor(conn, org_id) {
-            Some(sur) => match crate::db::entities::cluster_ids(conn, &sur) {
+            Ok(sur) => match crate::db::entities::cluster_ids(conn, &sur) {
                 Ok(group) => (Some(group), Vec::new()),
                 Err(_) => (
                     None,
                     vec![format!("org hub {org_id} unresolvable; org band omitted")],
                 ),
             },
-            None => (
+            Err(_) => (
                 None,
                 vec![format!("org hub {org_id} unresolvable; org band omitted")],
             ),
         },
     };
 
-    Some(ScopedMatch {
+    ScopedResolution::Bound(ScopedMatch {
         repo_group,
         org_group,
         area,
@@ -326,36 +444,22 @@ pub fn resolve_scoped(
 
 /// First area (in file order, §3.2) whose GlobSet matches the path
 /// relative to the checkout root; `None` when no pattern matches.
-fn match_area(areas_path: &Path, resolved_path: &str) -> Option<String> {
-    let file = load_areas_file(areas_path).ok()?;
+/// FIX 3b/3c: the file loads through the cache WITH its pre-compiled
+/// GlobSets; any load failure is an ERROR (loud upstream), and globset
+/// compilation happens ONCE at cache-insert time.
+fn match_area(areas_path: &Path, resolved_path: &str) -> Result<Option<String>> {
+    let (_, sets) = areas_cache().load(areas_path)?;
     let root = super::canonicalize_lenient(&checkout_root(areas_path).to_string_lossy());
     let rel = Path::new(resolved_path)
         .strip_prefix(&root)
-        .ok()?
+        .context("resolved path is not under the checkout root")?
         .to_path_buf();
-    for (name, patterns) in &file.areas {
-        let mut builder = GlobSetBuilder::new();
-        let mut ok = true;
-        for p in patterns {
-            match Glob::new(p) {
-                Ok(g) => {
-                    builder.add(g);
-                }
-                Err(_) => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if !ok {
-            continue;
-        }
-        let set = builder.build().ok()?;
+    for (name, set) in &sets {
         if set.is_match(&rel) {
-            return Some(name.clone());
+            return Ok(Some(name.clone()));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Librarian read-side ID-based rule (spec §6.8.4): resolve `id` through
@@ -370,12 +474,15 @@ pub fn resolve_hub_id(conn: &Connection, cfg: &WisdomConfig, id: &str) -> Deposi
     if let Some(reason) = detect_collision(&survivors) {
         return DepositHub::Unresolved(reason);
     }
-    let Some(sur) = live_survivor(conn, id) else {
-        return DepositHub::Unresolved("unresolved".to_string());
+    let sur = match live_survivor(conn, id) {
+        Ok(sur) => sur,
+        Err(reason) => return DepositHub::Unresolved(reason),
     };
     if survivors.iter().any(|(_, s)| *s == sur) {
         DepositHub::Hub(sur)
     } else {
-        DepositHub::Unresolved("unresolved".to_string())
+        DepositHub::Unresolved(format!(
+            "unresolved: survivor {sur} is not a configured wisdom repo hub"
+        ))
     }
 }

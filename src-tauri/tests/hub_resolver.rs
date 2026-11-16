@@ -5,11 +5,11 @@
 //! globset area matching, and the mtime-gated areas-file cache.
 
 use rusqlite::Connection;
-use tauri_app_lib::config::hub_resolver::{
-    load_areas_file, resolve_deposit_hub, resolve_hub_id, resolve_scoped, AreasFile, DepositHub,
-    ScopedMatch,
-};
 use tauri_app_lib::config::WisdomConfig;
+use tauri_app_lib::config::hub_resolver::{
+    AreasFile, DepositHub, ScopedMatch, ScopedResolution, load_areas_file, parse_areas_file,
+    resolve_deposit_hub, resolve_hub_id, resolve_scoped,
+};
 use tauri_app_lib::db::connection::open_in_memory;
 use tempfile::TempDir;
 
@@ -66,7 +66,11 @@ fn path_outside_every_root_is_no_prefix() {
     add_entity(&conn, "hub-a");
     let cfg = cfg_one(&root, "hub-a");
     assert_eq!(
-        resolve_deposit_hub(&conn, Some(&cfg), &tmp.path().join("other").join("f.rs").to_string_lossy()),
+        resolve_deposit_hub(
+            &conn,
+            Some(&cfg),
+            &tmp.path().join("other").join("f.rs").to_string_lossy()
+        ),
         DepositHub::NoPrefix
     );
 }
@@ -87,7 +91,11 @@ fn innermost_checkout_nesting_wins() {
         ],
         org_entity_id: Some("org-1".to_string()),
     };
-    let path = inner.join("src").join("f.rs").to_string_lossy().into_owned();
+    let path = inner
+        .join("src")
+        .join("f.rs")
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
         resolve_deposit_hub(&conn, Some(&cfg), &path),
         DepositHub::Hub("hub-inner".to_string())
@@ -116,6 +124,50 @@ fn symlinked_root_canonicalizes_to_the_same_hub() {
             resolve_deposit_hub(&conn, Some(&cfg), &path),
             DepositHub::Hub("hub-a".to_string())
         );
+    }
+}
+
+/// FIX 1 (MAJOR-1): two configured keys whose canonical roots are equal —
+/// one behind a symlink — is a TIE at scoped/deposit time; it must never
+/// silently pick the first. Unresolved, naming BOTH ids.
+#[test]
+#[cfg(unix)]
+fn symlink_tie_between_two_configured_roots_is_unresolved_naming_both() {
+    let tmp = TempDir::new().unwrap();
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, tmp.path().join("link")).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "hub-b");
+    let cfg = WisdomConfig {
+        areas_paths: vec![
+            ("hub-a".to_string(), real.join(".ct-areas.yaml")),
+            (
+                "hub-b".to_string(),
+                tmp.path().join("link").join(".ct-areas.yaml"),
+            ),
+        ],
+        org_entity_id: Some("org-1".to_string()),
+    };
+    let path = real.join("f.rs").to_string_lossy().into_owned();
+    match resolve_deposit_hub(&conn, Some(&cfg), &path) {
+        DepositHub::Unresolved(reason) => {
+            assert!(
+                reason.contains("hub-a") && reason.contains("hub-b"),
+                "tie reason must name BOTH ids: {reason}"
+            );
+        }
+        other => panic!("expected Unresolved tie, got {other:?}"),
+    }
+    match resolve_scoped(&conn, &cfg, &path) {
+        ScopedResolution::Unresolved(reason) => {
+            assert!(
+                reason.contains("hub-a") && reason.contains("hub-b"),
+                "tie reason must name BOTH ids: {reason}"
+            );
+        }
+        other => panic!("expected Unresolved tie, got {other:?}"),
     }
 }
 
@@ -164,7 +216,7 @@ fn redirect_cycle_is_unresolved() {
     let cfg = cfg_one(&root, "hub-a");
     let path = root.join("f.rs").to_string_lossy().into_owned();
     match resolve_deposit_hub(&conn, Some(&cfg), &path) {
-        DepositHub::Unresolved(reason) => assert!(reason.contains("unresolved"), "{reason}"),
+        DepositHub::Unresolved(reason) => assert!(reason.contains("redirect cycle"), "{reason}"),
         other => panic!("expected Unresolved, got {other:?}"),
     }
 }
@@ -180,7 +232,7 @@ fn dead_survivor_is_unresolved() {
     let cfg = cfg_one(&root, "hub-a");
     let path = root.join("f.rs").to_string_lossy().into_owned();
     match resolve_deposit_hub(&conn, Some(&cfg), &path) {
-        DepositHub::Unresolved(reason) => assert!(reason.contains("unresolved"), "{reason}"),
+        DepositHub::Unresolved(reason) => assert!(reason.contains("not live"), "{reason}"),
         other => panic!("expected Unresolved, got {other:?}"),
     }
 }
@@ -215,7 +267,7 @@ fn same_survivor_collision_is_unresolved_with_carried_reason() {
 // ---- resolve_scoped ------------------------------------------------------
 
 #[test]
-fn scoped_none_when_no_root_prefixes() {
+fn scoped_no_prefix_when_no_root_prefixes() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("repo");
     std::fs::create_dir_all(&root).unwrap();
@@ -223,7 +275,73 @@ fn scoped_none_when_no_root_prefixes() {
     add_entity(&conn, "hub-a");
     add_entity(&conn, "org-1");
     let cfg = cfg_one(&root, "hub-a");
-    assert!(resolve_scoped(&conn, &cfg, &tmp.path().join("elsewhere").to_string_lossy()).is_none());
+    assert_eq!(
+        resolve_scoped(&conn, &cfg, &tmp.path().join("elsewhere").to_string_lossy()),
+        ScopedResolution::NoPrefix
+    );
+}
+
+/// FIX 2 (MAJOR-2): a redirect cycle at the matched hub is NOT a silent
+/// `NoPrefix` — it is a loud `Unresolved` carrying a descriptive reason.
+#[test]
+fn scoped_redirect_cycle_is_unresolved_not_no_prefix() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    write_areas_file(&root, "areas:\n  deploy:\n    - infra/**\n");
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "hub-b");
+    add_redirect(&conn, "hub-a", "hub-b");
+    add_redirect(&conn, "hub-b", "hub-a");
+    let cfg = cfg_one(&root, "hub-a");
+    match resolve_scoped(
+        &conn,
+        &cfg,
+        &root.join("infra").join("x.yml").to_string_lossy(),
+    ) {
+        ScopedResolution::Unresolved(reason) => {
+            assert!(reason.contains("redirect cycle"), "{reason}");
+        }
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+/// FIX 3b (MAJOR-3): the matched hub's areas file cannot be LOADED at
+/// scoped time → loud `Unresolved`, never a silent area-less match.
+#[test]
+fn scoped_unloadable_areas_file_is_unresolved() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    // No .ct-areas.yaml written: the matched hub's areas file is missing.
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "org-1");
+    let cfg = cfg_one(&root, "hub-a");
+    match resolve_scoped(
+        &conn,
+        &cfg,
+        &root.join("infra").join("x.yml").to_string_lossy(),
+    ) {
+        ScopedResolution::Unresolved(reason) => {
+            assert!(reason.contains("areas file"), "{reason}");
+        }
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+/// FIX 3a (MAJOR-3a): a bad glob pattern is a PARSE error of the areas
+/// file — malformed file, no partial state (loader rule).
+#[test]
+fn bad_glob_pattern_is_a_parse_error() {
+    let err = parse_areas_file("areas:\n  deploy:\n    - \"[\"\n")
+        .expect_err("bad glob pattern must be a parse error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("invalid glob pattern"),
+        "error must name the bad pattern as a glob problem: {msg}"
+    );
 }
 
 #[test]
@@ -238,26 +356,39 @@ fn scoped_glob_matches_only_relative_to_root() {
     let cfg = cfg_one(&root, "hub-a");
 
     // Inside the repo, infra/** matches.
-    let m = resolve_scoped(
+    let m = match resolve_scoped(
         &conn,
         &cfg,
         &root.join("infra").join("x.yml").to_string_lossy(),
-    )
-    .unwrap();
+    ) {
+        ScopedResolution::Bound(m) => m,
+        other => panic!("expected Bound, got {other:?}"),
+    };
     assert_eq!(m.area.as_deref(), Some("deploy"));
     assert_eq!(m.repo_group, vec!["hub-a".to_string()]);
     assert_eq!(m.org_group, Some(vec!["org-1".to_string()]));
 
-    // Same shape outside the checkout root: no area match, still repo band.
-    let m = resolve_scoped(
+    // Same shape outside the checkout root: NoPrefix (UNSCOPED fence, §9.8).
+    let r = resolve_scoped(
         &conn,
         &cfg,
-        &tmp.path().join("other").join("infra").join("x.yml").to_string_lossy(),
+        &tmp.path()
+            .join("other")
+            .join("infra")
+            .join("x.yml")
+            .to_string_lossy(),
     );
-    assert!(m.is_none());
+    assert_eq!(r, ScopedResolution::NoPrefix);
 
     // Inside the repo but outside the pattern: repo band only, no area.
-    let m = resolve_scoped(&conn, &cfg, &root.join("src").join("a.rs").to_string_lossy()).unwrap();
+    let m = match resolve_scoped(
+        &conn,
+        &cfg,
+        &root.join("src").join("a.rs").to_string_lossy(),
+    ) {
+        ScopedResolution::Bound(m) => m,
+        other => panic!("expected Bound, got {other:?}"),
+    };
     assert_eq!(m.area, None);
 }
 
@@ -273,8 +404,14 @@ fn scoped_resolve_then_expand_includes_survivor_and_losers() {
     }
     add_redirect(&conn, "hub-a", "hub-b");
     let cfg = cfg_one(&root, "hub-a");
-    let m = resolve_scoped(&conn, &cfg, &root.join("infra").join("x.yml").to_string_lossy())
-        .unwrap();
+    let m = match resolve_scoped(
+        &conn,
+        &cfg,
+        &root.join("infra").join("x.yml").to_string_lossy(),
+    ) {
+        ScopedResolution::Bound(m) => m,
+        other => panic!("expected Bound, got {other:?}"),
+    };
     let mut group = m.repo_group.clone();
     group.sort();
     assert_eq!(group, vec!["hub-a".to_string(), "hub-b".to_string()]);
@@ -290,8 +427,14 @@ fn scoped_org_unresolvable_omits_org_arm_with_diagnostic() {
     add_entity(&conn, "hub-a");
     // org-1 configured but NOT present as a live entity.
     let cfg = cfg_one(&root, "hub-a");
-    let m = resolve_scoped(&conn, &cfg, &root.join("infra").join("x.yml").to_string_lossy())
-        .unwrap();
+    let m = match resolve_scoped(
+        &conn,
+        &cfg,
+        &root.join("infra").join("x.yml").to_string_lossy(),
+    ) {
+        ScopedResolution::Bound(m) => m,
+        other => panic!("expected Bound, got {other:?}"),
+    };
     assert_eq!(m.org_group, None);
     assert!(
         m.diagnostics.iter().any(|d| d.contains("org-1")),
@@ -316,8 +459,14 @@ fn scoped_org_redirect_resolves_to_survivor() {
         org_entity_id: Some("org-old".to_string()),
         ..cfg
     };
-    let m = resolve_scoped(&conn, &cfg, &root.join("infra").join("x.yml").to_string_lossy())
-        .unwrap();
+    let m = match resolve_scoped(
+        &conn,
+        &cfg,
+        &root.join("infra").join("x.yml").to_string_lossy(),
+    ) {
+        ScopedResolution::Bound(m) => m,
+        other => panic!("expected Bound, got {other:?}"),
+    };
     let mut org = m.org_group.unwrap();
     org.sort();
     assert_eq!(org, vec!["org-new".to_string(), "org-old".to_string()]);
@@ -358,7 +507,9 @@ fn hub_id_accepts_only_configured_survivors() {
     );
     // A live non-hub entity never binds.
     match resolve_hub_id(&conn, &cfg, "stranger") {
-        DepositHub::Unresolved(reason) => assert!(reason.contains("unresolved"), "{reason}"),
+        DepositHub::Unresolved(reason) => {
+            assert!(reason.contains("not a configured"), "{reason}")
+        }
         other => panic!("expected Unresolved, got {other:?}"),
     }
 }
@@ -378,11 +529,11 @@ fn hub_id_cycle_and_dead_are_unresolved() {
     add_redirect(&conn, "c2", "c1");
     let cfg = cfg_one(&root, "hub-a");
     match resolve_hub_id(&conn, &cfg, "hub-a") {
-        DepositHub::Unresolved(reason) => assert!(reason.contains("unresolved"), "{reason}"),
+        DepositHub::Unresolved(reason) => assert!(reason.contains("not live"), "{reason}"),
         other => panic!("expected Unresolved, got {other:?}"),
     }
     match resolve_hub_id(&conn, &cfg, "c1") {
-        DepositHub::Unresolved(reason) => assert!(reason.contains("unresolved"), "{reason}"),
+        DepositHub::Unresolved(reason) => assert!(reason.contains("redirect cycle"), "{reason}"),
         other => panic!("expected Unresolved, got {other:?}"),
     }
 }
@@ -431,10 +582,18 @@ fn loader_rereads_when_mtime_changes() {
     std::fs::write(&path, "areas:\n  deploy:\n    - infra/**\n").unwrap();
     let f1 = load_areas_file(&path).unwrap();
     assert_eq!(f1.areas.len(), 1);
-    // Rewrite with different content; wait so the mtime provably moves.
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    std::fs::write(&path, "areas:\n  deploy:\n    - infra/**\n  keys:\n    - src/kms/**\n")
-        .unwrap();
+    // Rewrite with different content and force a DISTINCT mtime explicitly
+    // (File::set_modified) — no wall-clock sleep flakiness.
+    std::fs::write(
+        &path,
+        "areas:\n  deploy:\n    - infra/**\n  keys:\n    - src/kms/**\n",
+    )
+    .unwrap();
+    let new_mtime = std::fs::metadata(&path).unwrap().modified().unwrap()
+        + std::time::Duration::from_secs(3600);
+    let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    f.set_modified(new_mtime).unwrap();
+    drop(f);
     let f2 = load_areas_file(&path).unwrap();
     assert_eq!(f2.areas.len(), 2, "mtime change must force a re-read");
 }
@@ -451,7 +610,13 @@ fn scoped_match_diagnostics_default_empty_when_healthy() {
     add_entity(&conn, "hub-a");
     add_entity(&conn, "org-1");
     let cfg = cfg_one(&root, "hub-a");
-    let m: ScopedMatch = resolve_scoped(&conn, &cfg, &root.join("infra").join("y.yml").to_string_lossy())
-        .unwrap();
+    let m: ScopedMatch = match resolve_scoped(
+        &conn,
+        &cfg,
+        &root.join("infra").join("y.yml").to_string_lossy(),
+    ) {
+        ScopedResolution::Bound(m) => m,
+        other => panic!("expected Bound, got {other:?}"),
+    };
     assert!(m.diagnostics.is_empty(), "{:?}", m.diagnostics);
 }
