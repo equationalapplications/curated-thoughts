@@ -1694,12 +1694,17 @@ fn commit_fact_add(
     // heuristics for.
     let tier = deposit_origin_tier(conn, &item.evidence, &ctx.deposit_default_tier)?;
 
+    // V30 (PR #352 Task 1, spec 2026-11-14-areas §5): the INSERT carries the
+    // `area` scope column, bound NULL (whole-repo) — Task 6 replaces this
+    // local bind with the payload read `payload.get("area").and_then(|v|
+    // v.as_str())`.
+    let area: Option<&str> = None;
     conn.execute(
         "INSERT INTO llm_wiki_entries (
             id, entity_id, title, body, tags, confidence, source_type,
             source_hash, source_ref, created_at, updated_at, last_accessed_at,
-            access_count, deleted_at, embedding_blob, embed_scheme, embedding, tier
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9, NULL, 0, NULL, ?10, ?11, NULL, ?12)",
+            access_count, deleted_at, embedding_blob, embed_scheme, embedding, tier, area
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?9, NULL, 0, NULL, ?10, ?11, NULL, ?12, ?13)",
         params![
             fact_id,
             ctx.entity_id,
@@ -1713,6 +1718,7 @@ fn commit_fact_add(
             embedding_blob,
             crate::embed_scheme::WRITE_SCHEME,
             tier,
+            area,
         ],
     )?;
 

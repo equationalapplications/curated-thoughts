@@ -855,6 +855,12 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // gate. Here the ladder has settled, so a fresh brain leaves its FIRST
     // open at 29.
     stamp_v29(conn)?;
+    // V30 (PR #352 Task 1, spec 2026-11-14-areas §5): add
+    // `llm_wiki_entries.area TEXT NULL` beside the settled ladder. The
+    // embed_scheme precedent (V27): ungated PRAGMA-guarded column-add on
+    // every open, stamp last gated on V22. NULL means whole-repo; legacy
+    // rows keep NULL (no backfill).
+    apply_v30_area_column(conn)?;
 
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
     // rev 4.1 §1/D4): the deposit file's frontmatter is authoritative; this
@@ -1327,6 +1333,74 @@ pub(crate) fn stamp_v29(conn: &Connection) -> Result<()> {
     if stamped_now >= 22 {
         conn.execute(
             "INSERT OR IGNORE INTO schema_version (version) VALUES (29)",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// V30 body (PR #352 Task 1, spec 2026-11-14-areas §5): add
+/// `llm_wiki_entries.area TEXT NULL` — the area scope of a fact (NULL =
+/// whole-repo; §2 Q9: legacy rows keep NULL, there is no backfill). Called
+/// AFTER `stamp_v29` so the ladder is settled. The V27 embed_scheme
+/// precedent: lock-free PRAGMA pre-check keeps the steady state (column
+/// present) from taking the write lock; the BEGIN IMMEDIATE is entered only
+/// when the column is actually missing, and the column is re-checked UNDER
+/// the lock (the concurrent desktop/`--mcp` open race). The stamp is gated
+/// on V22 like every stamp since V23.
+fn apply_v30_area_column(conn: &Connection) -> Result<()> {
+    // Lock-free pre-check keeps the steady state (column present) from
+    // taking the write lock on every open.
+    let has_column: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('llm_wiki_entries')
+          WHERE name = 'area'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_column == 0 {
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let applied = (|| -> Result<()> {
+            // Re-inspect UNDER the write lock: a concurrent desktop/`--mcp`
+            // open may have added the column between the snapshot and the
+            // lock (the V27 sequence).
+            let has_column: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('llm_wiki_entries')
+                  WHERE name = 'area'",
+                [],
+                |r| r.get(0),
+            )?;
+            if has_column == 0 {
+                conn.execute(
+                    "ALTER TABLE llm_wiki_entries ADD COLUMN area TEXT NULL",
+                    [],
+                )?;
+            }
+            Ok(())
+        })();
+        match applied {
+            Ok(()) => conn.execute_batch("COMMIT;")?,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+    }
+    // The stamp is NOT behind the column-add branch: the column-add can run
+    // ungated on a rootless open (version still below the V22 gate — V29's
+    // early column-add site, connection.rs:498, for the same reason), and an
+    // early return there would leave the stamp unwritten forever once the
+    // ladder settles. Stamp every open instead: INSERT OR IGNORE makes it
+    // free, and the V22 gate keeps a rootless open from masking a deferred
+    // V22. (V27's stamp reads MAX(version) on every open for the identical
+    // reason — its column-add txn and stamp are sequential, not exclusive.)
+    let stamped_now: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped_now >= 22 {
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (30)",
             [],
         )?;
     }
@@ -2245,7 +2319,7 @@ mod tests {
         let v: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 29);
+        assert_eq!(v, 30);
 
         // One-shot backfill semantics: an indexed row was backfilled from `hash`;
         // embed_key got NO migration backfill (NULL until a writer stamps it).
@@ -4282,9 +4356,9 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 29,
+            version, 30,
             "V22 then V23 then V24 then V25 then V26 then V27 then V28 then V29 \
-             must be stamped when the migration runs"
+             then V30 must be stamped when the migration runs"
         );
 
         let rewritten_path: String = conn
@@ -4328,9 +4402,10 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 29,
+            version, 30,
             "rooted open stamps 26 (ontology gate wave), 27 (embed scheme), \
-             28 (two-stage columns) and 29 (adjudication hold); MAX must be 29",
+             28 (two-stage columns), 29 (adjudication hold) and 30 (area); \
+             MAX must be 30",
         );
 
         let agents: String = conn
@@ -4601,8 +4676,8 @@ mod tests {
         );
         assert_eq!(
             max_version(&conn),
-            29,
-            "rooted open stamps 22..28 then V29 (the latter gated on V22)"
+            30,
+            "rooted open stamps 22..29 then V30 (the latter gated on V22)"
         );
     }
 

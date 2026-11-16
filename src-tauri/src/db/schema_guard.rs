@@ -54,6 +54,8 @@ const LLM_WIKI_TABLES: &[TableExpectation] = &[
             // V27 (issue #265): per-row embed-scheme stamp, CT-local (not in
             // the upstream package schema).
             "embed_scheme",
+            // V30 (PR #352 Task 1): area scope, CT-local; NULL = whole-repo.
+            "area",
         ],
     },
     TableExpectation {
