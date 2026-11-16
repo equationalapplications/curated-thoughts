@@ -7,7 +7,8 @@ SDD ledger for the `areas` implementation (PR #352, branch `areas`). Two discipl
 | Task | Status | SHA | Notes |
 |---|---|---|---|
 | Task 1 | DONE (review APPROVE WITH NITS 0/0/3m, minors deferred→Task 10 sweep) | c781601d | V30 migration + INSERT area bind; schema_guard forward-port ruled in (see plan Task 7) |
-| Task 2 | dispatched 2026-11-15 | pending | WisdomConfig (wisdom.areas_paths + org_entity_id) |
+| Task 2 | DONE (review REQUEST CHANGES → fix round 1 clean: clippy exit 0; minors → Task 10 sweep) | 26e0bdb5 + 8392d6b8 | WisdomConfig + duplicate-dir drop + relative-path refusal (controller ruling) |
+| Task 3 | dispatched 2026-11-15 | pending | Shared hub resolver (DepositHub, resolve_scoped, globset, AreasFile cache) |
 
 ## Working notes
 
