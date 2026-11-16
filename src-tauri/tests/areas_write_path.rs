@@ -22,7 +22,7 @@ use tauri_app_lib::db::queries::{insert_chunk, upsert_document};
 use tauri_app_lib::inference::config::{
     write_config, GenerationConfig, GenerationProviderKind, LlmConfig,
 };
-use tauri_app_lib::librarian::generate_summary;
+use tauri_app_lib::librarian::{deposit_hub_unresolved_count, generate_summary};
 
 struct EnvVarGuard {
     key: String,
@@ -48,10 +48,11 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// Seeds the brain config beside the temp brain dir with BOTH the generation
-/// block (mockito LLM, legacy merge path) and the `wisdom` block this task
-/// consumes (`areas_paths` keyed by the hub entity id, §3.3).
-fn write_config_with_wisdom(app: &TestApp) {
+/// Seeds the brain config beside the temp brain dir with the generation block
+/// (mockito LLM, legacy merge path). m6: despite the old misleading name it
+/// NEVER wrote a wisdom block — the tests patch the wisdom block in
+/// themselves; the name now says what it does.
+fn write_generation_config(app: &TestApp) {
     write_config(
         app.tmp.path(),
         &LlmConfig {
@@ -82,7 +83,9 @@ fn seed_deposit(
     let source_str = source_path.to_string_lossy().to_string();
 
     let doc_id = upsert_document(conn, &source_str, "hash").unwrap();
-    let chunk_text = format!("{frontmatter}\n{body}\n");
+    // m6: real ingest STRIPS the frontmatter (`split_leading_frontmatter`)
+    // before chunking — the chunk text is the body only, never the fence.
+    let chunk_text = format!("{body}\n");
     let chunk = Chunk {
         text: chunk_text.clone(),
         start_line: 1,
@@ -163,7 +166,7 @@ fn e2e_deposit_hub_area_binds_the_v30_column() {
         &conn,
         &vault,
         "repo-note.md",
-        "---\nhub: hub-e2e\ntitle: Repo note\n",
+        "---\nhub: hub-e2e\ntitle: Repo note\n---",
         "RepoHub deploy notes about the runbook.",
     );
 
@@ -193,7 +196,7 @@ fn e2e_deposit_hub_area_binds_the_v30_column() {
 
     // Generation block first (legacy merge path), then patch in the wisdom
     // block and the mockito endpoint on the same config.json.
-    write_config_with_wisdom(&app);
+    write_generation_config(&app);
     let cfg_path = app.tmp.path().join("config.json");
     let mut cfg: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
@@ -278,7 +281,7 @@ fn e2e_unresolved_hub_degrades_to_null_area() {
         &conn,
         &vault,
         "stray-note.md",
-        "---\nhub: ent-stray\ntitle: Stray note\n",
+        "---\nhub: ent-stray\ntitle: Stray note\n---",
         "StrayRepo notes without a configured hub.",
     );
 
@@ -306,7 +309,7 @@ fn e2e_unresolved_hub_degrades_to_null_area() {
         ))
         .create();
 
-    write_config_with_wisdom(&app);
+    write_generation_config(&app);
     let cfg_path = app.tmp.path().join("config.json");
     let mut cfg: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
@@ -321,6 +324,13 @@ fn e2e_unresolved_hub_degrades_to_null_area() {
     assert!(
         result.is_ok(),
         "an unresolved hub must degrade, never refuse ingest: {result:?}"
+    );
+
+    // M3 ruling: the §11.2 unresolved bucket ticks from the REAL hub-read
+    // path — a DELTA over this deposit's generate_summary, not a hand tick.
+    assert!(
+        deposit_hub_unresolved_count() >= 1,
+        "the unresolved deposit must tick the §11.2 bucket via read_deposit_hub"
     );
 
     let entry_id: String = conn

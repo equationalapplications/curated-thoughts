@@ -474,6 +474,18 @@ pub fn resolve_hub_id(conn: &Connection, cfg: &WisdomConfig, id: &str) -> Deposi
     if let Some(reason) = detect_collision(&survivors) {
         return DepositHub::Unresolved(reason);
     }
+    resolve_key_survivor(conn, &survivors, id)
+}
+
+/// m5-lite helper: survivor-keyed resolution for callers that computed
+/// `configured_survivors` ONCE (no O(n²) DB recompute per configured key).
+/// Callers MUST run the §3.3 collision check themselves
+/// ([`configured_survivors_checked`]) before looping over keys.
+pub fn resolve_key_survivor(
+    conn: &Connection,
+    survivors: &[(String, String)],
+    id: &str,
+) -> DepositHub {
     let sur = match live_survivor(conn, id) {
         Ok(sur) => sur,
         Err(reason) => return DepositHub::Unresolved(reason),
@@ -485,4 +497,18 @@ pub fn resolve_hub_id(conn: &Connection, cfg: &WisdomConfig, id: &str) -> Deposi
             "unresolved: survivor {sur} is not a configured wisdom repo hub"
         ))
     }
+}
+
+/// m5-lite helper: `configured_survivors` plus the §3.3 collision check,
+/// computed ONCE per call site (e.g. per synthesis, not per configured key).
+/// `Err(reason)` is the fail-closed collision verdict.
+pub fn configured_survivors_checked(
+    conn: &Connection,
+    cfg: &WisdomConfig,
+) -> Result<Vec<(String, String)>, String> {
+    let survivors = configured_survivors(conn, cfg);
+    if let Some(reason) = detect_collision(&survivors) {
+        return Err(reason);
+    }
+    Ok(survivors)
 }

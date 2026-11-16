@@ -319,8 +319,11 @@ fn generate_summary_inner(
     // F4 per-note override: `wisdom: false` in the note's frontmatter
     // suppresses extraction for THIS document regardless of folder tier.
     // Read failures degrade to "extractable" (fail toward current behavior).
-    if let Ok(content) = std::fs::read_to_string(source_path) {
-        if note_declares_no_wisdom(&content) {
+    // m5-lite: the content is read ONCE and reused by the hub read below —
+    // no second disk read of the same file per synthesis leg.
+    let note_content = std::fs::read_to_string(source_path).ok();
+    if let Some(content) = &note_content {
+        if note_declares_no_wisdom(content) {
             return Ok(());
         }
     }
@@ -335,7 +338,7 @@ fn generate_summary_inner(
     // ANY problem — unreadable file, no wisdom block, unresolved hub —
     // degrades to `absent` (the `note_declares_no_wisdom` reader precedent):
     // UNSCOPED synthesis, never an ingest refusal.
-    let deposit_hub = read_deposit_hub(conn, source_path);
+    let deposit_hub = read_deposit_hub_content(conn, source_path, note_content.as_deref());
     let areas = load_areas_vocab(conn);
 
     let chunks: Vec<ChunkRow> = {
@@ -450,15 +453,52 @@ fn generate_summary_inner(
 pub(crate) static DEPOSIT_HUB_UNRESOLVED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-// Non-test callers arrive with the Task 10 measurement fixture; the allow
-// keeps the -D-warnings gate clean until then.
+/// §6.8.5's DISTINCT no-owner bucket: the deposit could not be scoped because
+/// the machine has NO wisdom block (or it was dropped fail-closed) — never
+/// conflated with `DEPOSIT_HUB_UNRESOLVED` (review m1).
+pub(crate) static DEPOSIT_HUB_WISDOM_UNCONFIGURED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// §11.2 buckets are counted ONCE PER DEPOSIT even though both synthesis legs
+/// (ingest + librarian kick) re-run `generate_summary_inner` and each re-reads
+/// the hub (review m1). Keyed by (bucket, deposit path) for the process's
+/// lifetime; a different deposit is a fresh tick.
+fn note_deposit_hub_bucket(
+    bucket: &'static std::sync::atomic::AtomicUsize,
+    deposit_path: &str,
+) -> bool {
+    static COUNTED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+        std::sync::Mutex::new(None);
+    let key = format!("{bucket:p}|{deposit_path}");
+    let inserted = {
+        let mut guard = COUNTED.lock().expect("counted-deposits lock poisoned");
+        guard
+            .get_or_insert_with(std::collections::HashSet::new)
+            .insert(key)
+    };
+    if inserted {
+        bucket.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    inserted
+}
+
+// Task 10 reads these buckets from the measurement fixture.
 #[allow(dead_code)]
-pub(crate) fn deposit_hub_unresolved_count() -> usize {
+pub fn deposit_hub_unresolved_count() -> usize {
     DEPOSIT_HUB_UNRESOLVED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-pub(crate) fn note_deposit_hub_unresolved() -> usize {
-    DEPOSIT_HUB_UNRESOLVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+#[allow(dead_code)]
+pub fn wisdom_hub_unconfigured_count() -> usize {
+    DEPOSIT_HUB_WISDOM_UNCONFIGURED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn note_deposit_hub_unresolved(deposit_path: &str) {
+    note_deposit_hub_bucket(&DEPOSIT_HUB_UNRESOLVED, deposit_path);
+}
+
+pub(crate) fn note_deposit_hub_wisdom_unconfigured(deposit_path: &str) {
+    note_deposit_hub_bucket(&DEPOSIT_HUB_WISDOM_UNCONFIGURED, deposit_path);
 }
 
 /// The raw `hub:` frontmatter key of a deposit note (§6.8.4 — HAND-WRITTEN
@@ -475,12 +515,16 @@ pub(crate) fn deposit_hub_from_content(content: &str) -> Option<String> {
     }
 }
 
-/// The brain config's `wisdom` block for THIS connection: the config.json
-/// beside the brain.db on the connection's own path; pathless connections
-/// (tests) fall back to the process brain dir (`CURATED_BRAIN_DIR`-aware,
-/// same family as [`crate::config::ingest_policy_for_db`]). Any load problem
-/// degrades to None — UNSCOPED, never an error.
-fn wisdom_config_for_conn(conn: &Connection) -> Option<crate::config::WisdomConfig> {
+/// The brain config's `wisdom` block for THIS connection, plus every
+/// diagnostics line the lenient load produced (M4 ruling: the load report is
+/// NEVER discarded — Task 5 ruling 0dc079b7). The config.json beside the
+/// brain.db on the connection's own path; pathless connections (tests) fall
+/// back to the process brain dir (`CURATED_BRAIN_DIR`-aware, same family as
+/// [`crate::config::ingest_policy_for_db`]). Any load failure degrades to
+/// (None, reason) — UNSCOPED, never an error.
+fn wisdom_config_for_conn_reporting(
+    conn: &Connection,
+) -> (Option<crate::config::WisdomConfig>, Vec<String>) {
     let brain_dir = conn
         .path()
         .filter(|p| !p.is_empty())
@@ -488,29 +532,60 @@ fn wisdom_config_for_conn(conn: &Connection) -> Option<crate::config::WisdomConf
         .map(|dir| dir.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from(crate::get_brain_dir_inner()));
     let paths = crate::retrieval::brain_paths_for(&brain_dir);
-    let text = std::fs::read_to_string(&paths.config_path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    crate::config::WisdomConfig::from_value(v.get("wisdom").unwrap_or(&serde_json::Value::Null))
-        .ok()
-        .flatten()
+    match crate::config::BrainConfig::load_lenient(&paths) {
+        Ok(report) => {
+            // M4: diagnostics (duplicate-directory drop, relative paths, an
+            // unparseable wisdom block) are surfaced as data for the caller
+            // to print loudly — never swallowed.
+            (report.config.wisdom, report.diagnostics)
+        }
+        Err(e) => (
+            None,
+            vec![format!(
+                "config.json unreadable; degrading to UNSCOPED (no wisdom block): {e:#}"
+            )],
+        ),
+    }
+}
+
+fn wisdom_config_for_conn(conn: &Connection) -> Option<crate::config::WisdomConfig> {
+    let (cfg, diagnostics) = wisdom_config_for_conn_reporting(conn);
+    for line in &diagnostics {
+        // The lib-internal caller convention: load-side diagnostics print
+        // LOUDLY to stderr — a silent UNSCOPED degradation is forbidden.
+        eprintln!("[librarian] config diagnostic: {line}");
+    }
+    cfg
 }
 
 /// Read + resolve the deposit's `hub:` key (§6.8.4). Returns the RESOLVED
 /// surviving hub entity id on success; None (absent) on unreadable file,
-/// missing key, no wisdom block, or an unresolved hub (§11.2 bucket tick).
-pub(crate) fn read_deposit_hub(conn: &Connection, source_path: &str) -> Option<String> {
-    let Ok(content) = std::fs::read_to_string(source_path) else {
-        return None;
+/// missing key, no wisdom block, or an unresolved hub (§11.2 bucket tick —
+/// `wisdom_unconfigured` for the no-wisdom-block case, m1). m5-lite: callers
+/// that already hold the file content pass it via
+/// [`read_deposit_hub_content`] instead of forcing a second disk read.
+pub(crate) fn read_deposit_hub_content(
+    conn: &Connection,
+    source_path: &str,
+    content: Option<&str>,
+) -> Option<String> {
+    let content = match content {
+        Some(c) => c,
+        None => &std::fs::read_to_string(source_path).ok()?,
     };
-    let hub_id = deposit_hub_from_content(&content)?;
+    let hub_id = deposit_hub_from_content(content)?;
     let Some(cfg) = wisdom_config_for_conn(conn) else {
-        note_deposit_hub_unresolved();
+        note_deposit_hub_wisdom_unconfigured(source_path);
         return None;
     };
     match crate::config::hub_resolver::resolve_hub_id(conn, &cfg, &hub_id) {
         crate::config::hub_resolver::DepositHub::Hub(survivor) => Some(survivor),
+        crate::config::hub_resolver::DepositHub::Unconfigured => {
+            note_deposit_hub_wisdom_unconfigured(source_path);
+            None
+        }
         _ => {
-            note_deposit_hub_unresolved();
+            note_deposit_hub_unresolved(source_path);
             None
         }
     }
@@ -526,8 +601,15 @@ pub(crate) fn load_areas_vocab(conn: &Connection) -> AreasVocab {
         return AreasVocab::new();
     };
     let mut out = AreasVocab::new();
+    // m5-lite: §3.3 survivors computed ONCE per synthesis (not per key).
+    let survivors = match crate::config::hub_resolver::configured_survivors_checked(conn, &cfg) {
+        Ok(s) => s,
+        // Fail-closed collision: the block contributes no vocabulary at all.
+        Err(_) => return out,
+    };
     for (id, path) in &cfg.areas_paths {
-        let survivor = match crate::config::hub_resolver::resolve_hub_id(conn, &cfg, id) {
+        let survivor = match crate::config::hub_resolver::resolve_key_survivor(conn, &survivors, id)
+        {
             crate::config::hub_resolver::DepositHub::Hub(s) => s,
             _ => continue,
         };
@@ -853,5 +935,127 @@ mod tests {
         ));
         // Default full + no override → extract.
         assert!(!cfg.ingest_tier_for("wiki/a.md").skips_fact_extraction());
+    }
+
+    // ---- Task 6 fix round 1 (review rulings; spec §6.7/§6.8.5/§11.2) ----
+
+    /// Like `with_brain` but hands the closure the brain temp dir, so a test
+    /// can write deposit files beside the config it just installed.
+    fn with_brain_dir(config: &str, f: impl FnOnce(&std::path::Path, &mut Connection)) {
+        let brain = tempfile::TempDir::new().unwrap();
+        let brain_str = brain.path().to_string_lossy().into_owned();
+        std::fs::write(brain.path().join("config.json"), config).unwrap();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain_str.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                let mut conn =
+                    crate::db::connection::open_app_db(&brain.path().join("brain.db"), None)
+                        .unwrap();
+                f(brain.path(), &mut conn);
+            },
+        );
+    }
+
+    /// M4 ruling (task6-review-fable MAJOR-4; Task 5 ruling 0dc079b7): the
+    /// librarian's config read routes through `BrainConfig::load_lenient` and
+    /// surfaces EVERY diagnostic line as data — a duplicate-directory wisdom
+    /// block degrades to UNCONFIGURED with the diagnostic carried, never
+    /// silently discarded.
+    #[test]
+    fn wisdom_config_duplicate_directory_degrades_with_diagnostic() {
+        let config = r#"{"vault_path":"/vault","wisdom":{"areas_paths":{
+            "hub-a":"/repo/a/.ct-areas.yaml","hub-b":"/repo/a/./.ct-areas.yaml"}}}"#;
+        with_brain_dir(config, |_brain, conn| {
+            let (cfg, diagnostics) = super::wisdom_config_for_conn_reporting(conn);
+            assert!(
+                cfg.is_none(),
+                "duplicate-directory wisdom block must degrade to unconfigured: {cfg:?}"
+            );
+            let dup: Vec<&String> = diagnostics
+                .iter()
+                .filter(|d| d.contains("hub-a") && d.contains("hub-b"))
+                .collect();
+            assert_eq!(
+                dup.len(),
+                1,
+                "the drop diagnostic must be surfaced, naming both ids: {diagnostics:?}"
+            );
+        });
+    }
+
+    /// m1 ruling (task6-review-fable MINOR-1, §6.8.5): a deposit on a machine
+    /// with NO wisdom block ticks the DISTINCT `wisdom_unconfigured` bucket —
+    /// never the unresolved bucket — and ONE deposit ticks ONCE even when the
+    /// two synthesis legs both read the hub (per-deposit dedupe).
+    #[test]
+    fn deposit_hub_unconfigured_bucket_is_distinct_and_deduped_per_deposit() {
+        with_brain_dir(r#"{"vault_path":"/vault"}"#, |brain, conn| {
+            let note = brain.join("documents");
+            std::fs::create_dir_all(&note).unwrap();
+            let a = note.join("a.md");
+            let b = note.join("b.md");
+            let frontmatter = "---\nhub: ent-x\ntitle: t\n---\n";
+            std::fs::write(&a, format!("{frontmatter}body\n")).unwrap();
+            std::fs::write(&b, format!("{frontmatter}body\n")).unwrap();
+            let a_str = a.to_string_lossy().into_owned();
+            let b_str = b.to_string_lossy().into_owned();
+            let unres_before = super::deposit_hub_unresolved_count();
+            let unconf_before = super::wisdom_hub_unconfigured_count();
+            assert!(super::read_deposit_hub_content(conn, &a_str, None).is_none());
+            assert_eq!(
+                super::wisdom_hub_unconfigured_count(),
+                unconf_before + 1,
+                "no wisdom block → wisdom_unconfigured, NOT unresolved"
+            );
+            assert_eq!(
+                super::deposit_hub_unresolved_count(),
+                unres_before,
+                "the unresolved bucket must stay untouched"
+            );
+            // Second synthesis leg on the SAME deposit: still ONE tick.
+            assert!(super::read_deposit_hub_content(conn, &a_str, None).is_none());
+            assert_eq!(
+                super::wisdom_hub_unconfigured_count(),
+                unconf_before + 1,
+                "one deposit ticks the bucket once, not per synthesis leg"
+            );
+            // A different deposit is a fresh tick.
+            assert!(super::read_deposit_hub_content(conn, &b_str, None).is_none());
+            assert_eq!(super::wisdom_hub_unconfigured_count(), unconf_before + 2);
+        });
+    }
+
+    /// m1: a genuinely UNRESOLVED hub (live non-configured entity) ticks the
+    /// unresolved bucket — the two buckets never cross-contaminate.
+    #[test]
+    fn deposit_hub_unresolved_bucket_stays_distinct_from_unconfigured() {
+        let config = r#"{"vault_path":"/vault","wisdom":{"areas_paths":{
+            "ent-hub":"/tmp/nowhere/.ct-areas.yaml"}}}"#;
+        with_brain_dir(config, |brain, conn| {
+            conn.execute(
+                "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                 VALUES ('ent-stray', 'Stray', 'concept', 's', 100, 100)",
+                [],
+            )
+            .unwrap();
+            let note = brain.join("documents");
+            std::fs::create_dir_all(&note).unwrap();
+            let a = note.join("stray.md");
+            std::fs::write(&a, "---\nhub: ent-stray\ntitle: t\n---\nbody\n").unwrap();
+            let a_str = a.to_string_lossy().into_owned();
+            let unres_before = super::deposit_hub_unresolved_count();
+            let unconf_before = super::wisdom_hub_unconfigured_count();
+            assert!(super::read_deposit_hub_content(conn, &a_str, None).is_none());
+            assert_eq!(super::deposit_hub_unresolved_count(), unres_before + 1);
+            assert_eq!(
+                super::wisdom_hub_unconfigured_count(),
+                unconf_before,
+                "an unresolved hub must NOT tick wisdom_unconfigured"
+            );
+        });
     }
 }

@@ -753,7 +753,9 @@ fn build_system_prompt(
              list of area names for that hub. For a fact whose target is one of \
              those hubs, add an \"area\" field whose value is copied EXACTLY from \
              that hub's list; omit the \"area\" field for every other target. A \
-             value outside the target hub's list is rejected.",
+             value outside the target hub's list is rejected. Area membership is \
+             expressed ONLY through the fact \"area\" field — never through an \
+             edge item. A statement attaches through the thing it concerns.",
         );
         for (hub, names) in areas_by_hub {
             prompt.push_str(&format!("\nFor {hub}: areas = {}.", names.join(", ")));
@@ -1018,17 +1020,26 @@ fn validate_llm_output(
                 let validated_area: Option<&String> = match &fact.area {
                     None => None,
                     Some(area) => {
-                        let allowed = match (&llm_prop.target, entity_id.as_deref()) {
-                            (_, Some(id)) => areas.get(id).map(|v| v.as_slice()),
-                            (_, None) => None,
-                        };
-                        match allowed {
-                            Some(names) if names.iter().any(|n| n == area) => Some(area),
-                            _ => {
-                                dropped.push(format!(
-                                    "fact_add dropped: area \"{area}\" is not in the target's areas vocabulary (§6.6)"
-                                ));
-                                continue;
+                        // §6.7 (M1 ruling): where NO areas are configured the
+                        // machine stamps NULL and keeps the fact — the §6.6
+                        // drop exists only where areas ARE configured.
+                        if areas.is_empty() {
+                            None
+                        } else {
+                            let allowed = entity_id
+                                .as_deref()
+                                .and_then(|id| areas.get(id).map(|v| v.as_slice()));
+                            match allowed {
+                                Some(names) if names.iter().any(|n| n == area) => Some(area),
+                                _ => {
+                                    // m4: the label names the ACTUAL op — the
+                                    // dropped item may be an update/archive too.
+                                    dropped.push(format!(
+                                        "fact_{} dropped: area \"{area}\" is not in the target's areas vocabulary (§6.6)",
+                                        fact.op
+                                    ));
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -1101,16 +1112,21 @@ fn validate_llm_output(
                 // §6.5: a new_name endpoint NOCASE-equal to ANY configured
                 // area name is dropped WITH a reason — such an entity would
                 // shadow the area namespace. Near-duplicates that merely
-                // extend the name are untouched.
-                let new_name = endpoint_new_name(&edge.source)
-                    .or_else(|| endpoint_new_name(&edge.target));
-                if let Some(name) = new_name {
-                    if area_names_lower.iter().any(|n| *n == name.to_lowercase()) {
-                        dropped.push(format!(
-                            "edge_add dropped: new_name \"{name}\" collides (NOCASE) with a configured area name (§6.5)"
-                        ));
-                        continue;
-                    }
+                // extend the name are untouched. M2 ruling: EACH endpoint is
+                // checked independently — a collision on EITHER (source OR
+                // target) drops the edge.
+                let colliding = [&edge.source, &edge.target].into_iter().find_map(|endpoint| {
+                    let name = endpoint_new_name(endpoint)?;
+                    area_names_lower
+                        .iter()
+                        .any(|n| *n == name.to_lowercase())
+                        .then_some(name)
+                });
+                if let Some(name) = colliding {
+                    dropped.push(format!(
+                        "edge_add dropped: new_name \"{name}\" collides (NOCASE) with a configured area name (§6.5)"
+                    ));
+                    continue;
                 }
                 items.push(NewProposalItem {
                     id: generate_id("item_"),
@@ -3519,7 +3535,9 @@ mod tests {
     // itself is loaded through the Task 3 cached loader in production and the
     // E2E test.
 
-    type AreasVocab = BTreeMap<String, Vec<String>>;
+    // m6: no local `type AreasVocab` here — the module-level
+    // `pub(crate) type AreasVocab` (via `use super::*`) is THE definition;
+    // a re-declaration shadowed it for every fixture below.
 
     fn areas_vocab(entries: &[(&str, &[&str])]) -> AreasVocab {
         entries
@@ -3929,6 +3947,135 @@ mod tests {
         );
     }
 
+    /// M1 ruling (task6-review-fable MAJOR-1, §6.7): on a machine with NO
+    /// configured areas (empty vocab) a fact carrying `area` is NOT dropped —
+    /// the area is stripped (NULL stamp) and the fact survives whole, with no
+    /// §6.6 report line (the drop exists only where areas ARE configured).
+    #[test]
+    fn areas_write_path_unconfigured_machine_stamps_null_and_keeps_fact() {
+        let candidates = vec![CandidateEntity {
+            id: "ent-hub".into(),
+            name: "RepoHub".into(),
+            entity_type: "concept".into(),
+            summary_snippet: "hub".into(),
+            facts: vec![],
+        }];
+        let areas = AreasVocab::new();
+        let raw = LlmSynthesisOutput {
+            proposals: vec![LlmProposal {
+                target: LlmTarget::Existing {
+                    existing_id: "ent-hub".into(),
+                },
+                reasoning: "Because".into(),
+                summary_update: None,
+                facts: vec![LlmFact {
+                    op: "add".into(),
+                    target_id: None,
+                    body: Some("Unconfigured machine fact.".into()),
+                    tags: vec![],
+                    confidence: None,
+                    evidence: vec![],
+                    area: Some("deploy".into()),
+                }],
+                edges: vec![],
+                tasks: vec![],
+            }],
+        };
+        let (validated, dropped) =
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+                .unwrap();
+        let fact = validated[0]
+            .items
+            .iter()
+            .find(|i| i.item_type == "fact_add")
+            .expect("the fact must SURVIVE on an unconfigured machine (§6.7 stamp-NULL)");
+        assert!(
+            fact.payload.get("area").is_none(),
+            "the area must be stripped to the NULL stamp: {:?}",
+            fact.payload
+        );
+        assert!(
+            dropped.is_empty(),
+            "no §6.6 report line on an unconfigured machine: {dropped:?}"
+        );
+    }
+
+    /// M2 ruling (task6-review-fable MAJOR-2, §6.5): EACH endpoint's
+    /// `new_name` is checked independently — a collision on the TARGET alone
+    /// (source carries its own new_name) still drops the edge.
+    #[test]
+    fn areas_write_path_new_name_collision_checked_on_both_endpoints() {
+        let candidates = vec![CandidateEntity {
+            id: "ent-hub".into(),
+            name: "RepoHub".into(),
+            entity_type: "concept".into(),
+            summary_snippet: "hub".into(),
+            facts: vec![],
+        }];
+        let areas = areas_vocab(&[("ent-hub", &["deploy"])]);
+        let raw = LlmSynthesisOutput {
+            proposals: vec![LlmProposal {
+                target: LlmTarget::Existing {
+                    existing_id: "ent-hub".into(),
+                },
+                reasoning: "Because".into(),
+                summary_update: None,
+                facts: vec![],
+                edges: vec![LlmEdge {
+                    source: serde_json::json!({ "new_name": "Foo" }),
+                    target: serde_json::json!({ "new_name": "deploy" }),
+                    edge_type: "related_to".into(),
+                }],
+                tasks: vec![],
+            }],
+        };
+        let (validated, dropped) =
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+                .unwrap();
+        // The collided edge was the proposal's only item, so the whole
+        // proposal is skipped; assert through a flat scan either way.
+        let edge_items: Vec<_> = validated
+            .iter()
+            .flat_map(|p| p.items.iter())
+            .filter(|i| i.item_type == "edge_add")
+            .collect();
+        assert!(
+            edge_items.is_empty(),
+            "a target-only §6.5 collision must drop the edge: {edge_items:?}"
+        );
+        assert_eq!(dropped.len(), 1, "the drop must carry a reason: {dropped:?}");
+        assert!(
+            dropped[0].contains("deploy"),
+            "the reason names the colliding new_name: {dropped:?}"
+        );
+    }
+
+    /// m3 (task6-review-fable MINOR-3, §6.4 + §11.1): the areas clause must
+    /// carry BOTH mandated sentences — membership only via the fact field
+    /// (never an edge item) and the attach-through-what-it-concerns rule.
+    #[test]
+    fn areas_write_path_clause_carries_membership_and_attach_sentences() {
+        let areas_by_hub: AreasVocab =
+            [("ent-hub".to_string(), vec!["deploy".to_string()])].into_iter().collect();
+        let prompt = build_system_prompt(
+            SynthesisMode::Synthesize,
+            &[],
+            &BTreeMap::new(),
+            &[],
+            &areas_by_hub,
+        );
+        assert!(
+            prompt.to_lowercase().contains("only through the fact"),
+            "§6.4 membership-only-via-fact-field sentence missing:\n{prompt}"
+        );
+        assert!(
+            prompt
+                .to_lowercase()
+                .contains("attaches through the thing it concerns"),
+            "§11.1 attach sentence missing:\n{prompt}"
+        );
+    }
+
     /// §6.3(c): a proposal whose target names a CONFIGURED hub id (or carries
     /// area) yet is not in the candidate set is REPORTED (still uncommitted);
     /// a plain unknown target stays on the legacy silent drop.
@@ -4021,7 +4168,7 @@ mod tests {
         );
         // And the unresolved bucket ticked.
         let before = crate::librarian::deposit_hub_unresolved_count();
-        let _ = crate::librarian::note_deposit_hub_unresolved();
+        crate::librarian::note_deposit_hub_unresolved("test-unresolved-deposit.md");
         assert_eq!(
             crate::librarian::deposit_hub_unresolved_count(),
             before + 1,
