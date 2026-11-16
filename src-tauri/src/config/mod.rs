@@ -1106,7 +1106,7 @@ impl Default for ConfirmationsConfig {
 /// preserves insertion order, and the §9.3 longest-prefix resolver (Task 3)
 /// consumes it as a map keyed by brain-unique entity ids (a collision is
 /// impossible: `curated_entities.id` is a primary key).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct WisdomConfig {
     /// Repo hub entity id → ABSOLUTE path of that checkout's `.ct-areas.yaml`
     /// (its parent directory IS the checkout root, §3.1).
@@ -1116,21 +1116,19 @@ pub struct WisdomConfig {
     pub org_entity_id: Option<String>,
 }
 
-impl Default for WisdomConfig {
-    fn default() -> Self {
-        Self {
-            areas_paths: Vec::new(),
-            org_entity_id: None,
-        }
-    }
-}
-
 /// Marker prefix on the duplicate-checkout-root error. `from_value`'s
 /// `Result<Option<WisdomConfig>>` cannot carry a LoadReport diagnostic
 /// (tier-3 r6 NIT-2), so it signals the fail-closed drop with this message
 /// and `load_lenient_from_object` records it verbatim as the ONE
 /// diagnostics line naming both ids.
 const WISDOM_DUP_DROP_PREFIX: &str = "wisdom block dropped: duplicate areas-file directory";
+
+/// Marker prefix on the relative-areas-path error (controller ruling, fix
+/// round 1): a RELATIVE path would resolve against the loading process's
+/// cwd — binding a hub in `ct` but not the sidecar — so it refuses the WHOLE
+/// block FAIL CLOSED, same drop-path semantics as the duplicate-directory
+/// drop, with ONE diagnostics line naming the offending entity id.
+const WISDOM_REL_DROP_PREFIX: &str = "wisdom block dropped: relative areas-file path";
 
 /// `std::path::absolute`-NORMALIZED form of `path` (lexical `.`/`..`
 /// cleanup, cwd-relative resolution). This is the LOAD-time comparison form
@@ -1177,6 +1175,11 @@ impl WisdomConfig {
             let s = p
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("wisdom.areas_paths[{id}] must be a string path"))?;
+            if !std::path::Path::new(s).is_absolute() {
+                bail!(
+                    "{WISDOM_REL_DROP_PREFIX} {id} ({s}); failing closed to UNSCOPED"
+                );
+            }
             areas_paths.push((id.clone(), std::path::PathBuf::from(s)));
         }
         // Duplicate checkout roots (§3.1): two hubs claiming one directory.
@@ -1194,7 +1197,7 @@ impl WisdomConfig {
             .map(|(dir, ids)| (dir.to_string_lossy().into_owned(), ids))
             .collect();
         dupes.sort();
-        for (dir, mut ids) in dupes {
+        if let Some((dir, mut ids)) = dupes.into_iter().next() {
             ids.sort();
             bail!(
                 "{WISDOM_DUP_DROP_PREFIX} {dir} (ids: {}); failing closed to UNSCOPED",
@@ -1264,7 +1267,7 @@ pub fn canonicalize_lenient(path: &str) -> String {
             if anc == abs.as_path() {
                 real.to_string_lossy().into_owned()
             } else {
-                let remainder = abs.strip_prefix(anc).unwrap_or_else(|_| abs.as_path());
+                let remainder = abs.strip_prefix(anc).unwrap_or(abs.as_path());
                 real.join(remainder).to_string_lossy().into_owned()
             }
         }
@@ -4488,6 +4491,34 @@ mod tests {
             dup_lines.len(),
             1,
             "one diagnostic naming both ids: {:?}",
+            report.diagnostics
+        );
+    }
+
+    /// A RELATIVE `areas_paths` value would resolve against the loading
+    /// process's cwd — binding a hub in `ct` but not the sidecar — so it is
+    /// REFUSED at load: the WHOLE `wisdom` block drops FAIL CLOSED with ONE
+    /// diagnostic naming the offending id (same drop-path semantics as the
+    /// duplicate-directory drop). Tested under `load_lenient_from_str`.
+    #[test]
+    fn wisdom_config_relative_path_dropped_by_lenient_load() {
+        let text = wisdom_config_fixture_json(
+            r#"{"areas_paths":{"hub-a":"repo/a/.ct-areas.yaml","hub-b":"/repo/b/.ct-areas.yaml"}}"#,
+        );
+        let report = BrainConfig::load_lenient_from_str(&text).unwrap();
+        assert!(
+            report.config.wisdom.is_none(),
+            "relative areas path must drop the whole wisdom block"
+        );
+        let rel_lines: Vec<&String> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.contains("hub-a"))
+            .collect();
+        assert_eq!(
+            rel_lines.len(),
+            1,
+            "one diagnostic naming the offending id: {:?}",
             report.diagnostics
         );
     }

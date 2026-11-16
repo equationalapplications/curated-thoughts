@@ -19,7 +19,8 @@ fn rooted_fresh_brain(tmp: &TempDir) -> Connection {
         format!(r#"{{"vault_path":"{}"}}"#, vault.to_str().unwrap()),
     )
     .unwrap();
-    let db = AppDb::open_with_config(&tmp.path().join("brain.db"), &tmp.path().join("config.json"))
+    let db_path = tmp.path().join("brain.db");
+    let db = AppDb::open_with_config(&db_path, tmp.path().join("config.json"))
         .expect("writable brain db open");
     db.0
 }
