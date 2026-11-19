@@ -1038,6 +1038,12 @@ fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<St
     std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
     let dest = dest_dir.join("brain.db.bak");
     let tmp = dest_dir.join("brain.db.bak.tmp");
+    // Unlink any stale entry at the temp path first. `remove_file` does not
+    // follow symlinks, so a leftover `tmp -> brain.db.bak` symlink (crash
+    // debris or tampering) cannot route the new backup through the link and
+    // overwrite the snapshot it is supposed to replace. The helper owns
+    // this temp name — removing a leftover entry loses no data.
+    let _ = std::fs::remove_file(&tmp);
 
     if let Err(e) = conn.backup(rusqlite::DatabaseName::Main, &tmp, None) {
         let _ = std::fs::remove_file(&tmp);
@@ -1140,7 +1146,13 @@ mod backup_snapshot_tests {
         conn.execute("CREATE TABLE t (v TEXT)", []).unwrap();
         let result = backup_db_snapshot(&conn, &dest_dir);
 
-        assert!(result.is_err(), "expected the install rename to fail");
+        // Branch-specific: a plain is_err() could pass via the copy-failure
+        // arm without exercising the install rename at all.
+        let err = result.err().expect("expected the install rename to fail");
+        assert!(
+            err.contains("installing backup snapshot failed"),
+            "wrong error arm: {err}"
+        );
         assert!(
             !dest_dir.join("brain.db.bak.tmp").exists(),
             "failed install must clean the temp file"
