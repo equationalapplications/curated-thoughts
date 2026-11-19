@@ -1023,17 +1023,90 @@ fn backup_vault_db(
     }
 
     let dest_dir = vault_root.join(".brain");
-    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
-    let dest = dest_dir.join("brain.db.bak");
-    let _ = std::fs::remove_file(&dest);
-
     let guard = db_state.0.lock().unwrap();
-    guard
-        .0
-        .backup(rusqlite::DatabaseName::Main, &dest, None)
-        .map_err(|e| e.to_string())?;
+    backup_db_snapshot(&guard.0, &dest_dir)
+}
+
+/// Snapshot the brain database into `dest_dir/brain.db.bak`, atomically.
+///
+/// INTENT rule 11: a recovery snapshot is replaced, never destroyed. The
+/// copy is written to a `.tmp` sibling and renamed over the previous
+/// snapshot only after the backup succeeds, so a failed backup (disk-full,
+/// lock, IO error) leaves the previous `brain.db.bak` intact and cleans up
+/// the temp file. Returns the final snapshot path.
+fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<String, String> {
+    std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+    let dest = dest_dir.join("brain.db.bak");
+    let tmp = dest_dir.join("brain.db.bak.tmp");
+
+    if let Err(e) = conn.backup(rusqlite::DatabaseName::Main, &tmp, None) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("installing backup snapshot failed: {e}"));
+    }
 
     Ok(dest.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod backup_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn happy_path_replaces_previous_snapshot_atomically() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest_dir = dir.path().join(".brain");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        // A previous snapshot exists; the new backup must replace it via
+        // rename (never remove-then-write) and leave no `.tmp` behind.
+        std::fs::write(dest_dir.join("brain.db.bak"), b"stale snapshot").unwrap();
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (v TEXT)", []).unwrap();
+        conn.execute("INSERT INTO t VALUES ('row-from-backup')", [])
+            .unwrap();
+
+        let reported = backup_db_snapshot(&conn, &dest_dir).unwrap();
+        assert_eq!(
+            reported,
+            dest_dir.join("brain.db.bak").to_string_lossy().into_owned()
+        );
+
+        // The installed snapshot is a real database carrying the backed-up
+        // rows — proof the sentinel was replaced, not kept.
+        let restored = rusqlite::Connection::open(dest_dir.join("brain.db.bak")).unwrap();
+        let v: String = restored
+            .query_row("SELECT v FROM t LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, "row-from-backup");
+        assert!(!dest_dir.join("brain.db.bak.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_backup_leaves_previous_snapshot_intact_and_cleans_tmp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest_dir = dir.path().join(".brain");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("brain.db.bak");
+        std::fs::write(&dest, b"previous snapshot").unwrap();
+
+        // Injection: an unwritable destination dir makes the backup copy
+        // fail before anything destructive can happen. The previous
+        // snapshot must survive untouched and no temp file may remain.
+        std::fs::set_permissions(&dest_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let result = backup_db_snapshot(&conn, &dest_dir);
+        std::fs::set_permissions(&dest_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err(), "expected the backup to fail: {result:?}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous snapshot");
+        assert!(!dest_dir.join("brain.db.bak.tmp").exists());
+    }
 }
 
 /// Remove SQLite `-wal` / `-shm` siblings so a restored or reused `brain.db` is not paired with stale journals.

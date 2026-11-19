@@ -227,7 +227,8 @@ fn choose_sidecar_model_name(llm_config: &LlmConfig, fallback_model: &str) -> St
 /// exactly as `build_llm_completer` resolves it. The caller's fallback
 /// (historically the local-Ollama RAM recommendation) applies only when the
 /// active config names no model — call sites that reach the LLM with an
-/// Unconfigured provider fail earlier with "LLM provider not configured", so
+/// Unconfigured provider fail earlier with "LLM provider not configured
+/// (or blocked by strict privacy mode)", so
 /// the fallback here is a label of last resort, not the model that runs.
 pub fn active_generation_model(fallback_model: &str) -> String {
     let brain_dir_str = crate::get_brain_dir_inner();
@@ -299,6 +300,14 @@ fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
             })
         }
         GenerationProviderKind::External => {
+            // INTENT rule 11: strict privacy mode cuts all networking. The
+            // External branch is the only networked arm here (Sidecar is
+            // loopback), so gate it on the effective privacy mode; Strict
+            // behaves like an unconfigured provider downstream.
+            let mode = crate::privacy::effective_mode(&report.config.privacy);
+            if !crate::privacy::allows_external_generation(mode) {
+                return Ok(None);
+            }
             let base = llm_config
                 .generation
                 .external_url
@@ -1168,7 +1177,8 @@ pub fn run_synthesis(
     vault_root: Option<&Path>,
     force: bool,
 ) -> Result<()> {
-    let completer = build_llm_completer(model)?.context("LLM provider not configured")?;
+    let completer = build_llm_completer(model)?
+        .context("LLM provider not configured (or blocked by strict privacy mode)")?;
     // Record the CONFIGURED model (the one that will actually serve the call),
     // not the caller's fallback recommendation.
     let watermark_model = active_generation_model(model);
@@ -3307,6 +3317,82 @@ mod tests {
         assert!(
             !beta_clause.contains("alpha_only_rel") && !beta_clause.contains("depends_on"),
             "ent-beta's clause leaked ent-alpha's vocabulary: {beta_clause}"
+        );
+    }
+}
+
+/// INTENT rule 11 gate (CodeRabbit round-1 on PR #360): the External
+/// (networked) completer arm must build nothing in Strict privacy mode and
+/// still build in Ephemeral/Connected. The Sidecar (loopback) arm is
+/// intentionally untouched.
+#[cfg(test)]
+mod completer_privacy_tests {
+    use super::build_llm_completer;
+
+    /// Point the brain dir at a temp config with an External generation
+    /// provider and the given privacy mode, then run `f` under temp_env's
+    /// shared serialization (issue-#178 guard: never touch the live
+    /// `~/.brain` from tests).
+    fn with_external_provider(
+        mode: &str,
+        f: impl FnOnce(anyhow::Result<Option<Box<dyn super::LlmCompleter>>>),
+    ) {
+        let brain = tempfile::TempDir::new().unwrap();
+        let brain_str = brain.path().to_string_lossy().into_owned();
+        let config = format!(
+            r#"{{"vault_path":"/v","generation":{{"provider":"external","external_url":"http://unit.test/v1","api_key":"k","model_name":"m"}},"privacy":{{"mode":"{mode}","chosen":true}}}}"#
+        );
+        std::fs::write(brain.path().join("config.json"), config).unwrap();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain_str.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                let result = build_llm_completer("llama3.2:3b");
+                f(result);
+            },
+        );
+    }
+
+    #[test]
+    fn strict_mode_builds_no_external_completer() {
+        with_external_provider("strict", |result| {
+            let built = matches!(result, Ok(Some(_)));
+            assert!(!built, "Strict must not build an External completer");
+        });
+    }
+
+    #[test]
+    fn ephemeral_and_connected_still_build_external_completer() {
+        for mode in ["ephemeral", "connected"] {
+            with_external_provider(mode, |result| {
+                let built = matches!(result, Ok(Some(_)));
+                assert!(built, "{mode} must still build an External completer");
+            });
+        }
+    }
+
+    #[test]
+    fn sidecar_completer_still_builds_in_strict_mode() {
+        // Loopback: local generation is expected to work in all modes, so
+        // the Strict cut must not touch the Sidecar arm.
+        let brain = tempfile::TempDir::new().unwrap();
+        let brain_str = brain.path().to_string_lossy().into_owned();
+        let config = r#"{"vault_path":"/v","generation":{"provider":"sidecar"},"privacy":{"mode":"strict","chosen":true}}"#;
+        std::fs::write(brain.path().join("config.json"), config).unwrap();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain_str.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                let result = build_llm_completer("llama3.2:3b");
+                let built = matches!(result, Ok(Some(_)));
+                assert!(built, "Sidecar must still build in Strict mode");
+            },
         );
     }
 }

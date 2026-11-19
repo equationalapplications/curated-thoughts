@@ -469,7 +469,8 @@ mod tests {
     /// Run `f` against a file-backed brain db in a redirected brain dir whose
     /// config.json is `config` (issue #178 guard). The config carries no
     /// `generation` block, so any path that gets PAST the F4 gates reaches
-    /// `run_synthesis` and fails with "LLM provider not configured" — which
+    /// `run_synthesis` and fails with "LLM provider not configured (or
+    /// blocked by strict privacy mode)" — which
     /// makes `generate_summary(..).is_ok()` a real witness that a gate fired
     /// (a seeded chunk rules out the empty-chunks early return).
     fn with_brain(config: &str, f: impl FnOnce(&mut Connection)) {
