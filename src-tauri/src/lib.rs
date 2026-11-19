@@ -1148,7 +1148,7 @@ mod backup_snapshot_tests {
 
         // Branch-specific: a plain is_err() could pass via the copy-failure
         // arm without exercising the install rename at all.
-        let err = result.err().expect("expected the install rename to fail");
+        let err = result.expect_err("expected the install rename to fail");
         assert!(
             err.contains("installing backup snapshot failed"),
             "wrong error arm: {err}"
