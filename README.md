@@ -24,7 +24,7 @@ Curated Thoughts models AI memory biologically, moving information from raw inpu
 2. **Episodic Memory (The RAG Layer):** Raw recall. When you drop supported files into the vault, the watcher chunks them and embeds them with your configured embedding profile — a local Ollama model by default — into `brain.db` (SQLite) in your brain directory. This allows the LLM to semantically search exact quotes and track raw facts before deep synthesis occurs.
 3. **Semantic Memory (The LLM Wiki):** The long-term truth. The system actively condenses raw facts into a curated, interlinked web of concepts and entities. This acts as a semantic wiki stored natively in SQLite, with wiki notes readable and writable as real `.md` files in your vault's `wiki/` folder, allowing the LLM to naturally read, link, and traverse relationships.
 
-The librarian's wiki proposals reach the long-term wiki only through the **human-verification gate**: they land in a review queue, and only your explicit approval commits them (see [Human-in-the-Loop Verification](#human-in-the-loop-verification)). The exception is direct agent wisdom: the MCP wisdom write tools record your agent's entries straight into the wiki as user-stated, confirmed facts, without the proposal gate (see [MCP Agent Server](#-mcp-agent-server)).
+The librarian's wiki proposals reach the long-term wiki only through the **human-verification gate**: they land in a review queue, and only your explicit approval commits them (see [Human-in-the-Loop Verification](#human-in-the-loop-verification)).
 
 ---
 

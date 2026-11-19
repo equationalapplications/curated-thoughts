@@ -133,6 +133,8 @@ An agent retires a fact only by depositing a supersession file
 (`wisdom_propose_supersession`). If the old and new facts are both agent
 tier, the Librarian applies it automatically. If the old fact is human
 tier, it becomes a proposal that only a person can accept, in the app.
+Superseded means the engine's `supersede`/`expire`; it never means
+`deleted_at`, which is the engine's forgotten state.
 
 *Why:* history is kept, and an agent can never overwrite something a
 person stands behind.
@@ -207,6 +209,26 @@ an agent's recall, the app may offer the person a confirmation prompt. The
 Quality comes from the pipeline. Corrections and supersession are the
 safety net.
 
+### 11. Copies of memory outside the brain
+
+Erase writes a report — runtime, whether the overwrite-on-delete setting
+was on, every step's outcome, verified
+or not — outside the brain. The `.bak` next to `brain.db` is a recovery
+snapshot: the app never destroys or rewrites it to chase erasure; the next
+snapshot replaces it, and the app's documentation states that window. OKF exports
+and OS backups are the user's own files; the app does not police them.
+Strict privacy mode cuts all networking.
+
+*Why:* the engine guarantees the store file; copies the app keeps are named,
+not chased — and a recovery snapshot the user might need is never destroyed
+to honor a promise nobody is waiting on.
+
+### 12. The Rust side follows the engine's words
+
+The Rust side may write the engine's tables directly for now, using the
+engine's states and verbs exactly. Once the native engine can make those
+changes itself, Rust goes through it instead.
+
 ## Who verifies: users and scope
 
 CT scopes by VAULT, not by user account. One brain per vault (issue
@@ -252,8 +274,6 @@ nearest-neighbor search (ANN) can wait until about 100,000.
 
 - Making the agent tools general-purpose for non-software work. The app
   covers that.
-- Running agent recall through the TypeScript wiki engine. Port what's
-  needed into the Rust recall instead.
 - Following graph links during session-start injection (v1). Graph
   traversal stays in on-demand tools like `wiki_context`.
 - Reading un-ingested files in injection or recall (see rule 3 for the
