@@ -3363,8 +3363,10 @@ mod completer_privacy_tests {
     #[test]
     fn strict_mode_builds_no_external_completer() {
         with_external_provider("strict", |result| {
-            let built = matches!(result, Ok(Some(_)));
-            assert!(!built, "Strict must not build an External completer");
+            // Exactly Ok(None): an Err (config-load failure) would also fail
+            // the loose !Ok(Some) form without proving the gate fired.
+            let gated = matches!(result, Ok(None));
+            assert!(gated, "Strict must return Ok(None) from the privacy gate");
         });
     }
 
