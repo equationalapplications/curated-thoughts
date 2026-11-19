@@ -1038,6 +1038,18 @@ fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<St
     std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
     let dest = dest_dir.join("brain.db.bak");
     let tmp = dest_dir.join("brain.db.bak.tmp");
+    // SQLite may leave `-journal`/`-wal`/`-shm` siblings beside the temp
+    // path when a backup is interrupted; sweep them wherever the temp entry
+    // itself is cleaned so crash debris cannot pile up. Best-effort: the
+    // backup overwrites every page, so stale sidecars never corrupt it.
+    fn remove_snapshot_sidecars(tmp: &Path) -> std::io::Result<()> {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let mut name = tmp.as_os_str().to_owned();
+            name.push(suffix);
+            std::fs::remove_file(Path::new(&name))?;
+        }
+        Ok(())
+    }
     // Unlink any stale entry at the temp path first. `remove_file` does not
     // follow symlinks, so a leftover `tmp -> brain.db.bak` symlink (crash
     // debris or tampering) cannot route the new backup through the link and
@@ -1046,6 +1058,7 @@ fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<St
     // failure other than "not there" aborts the backup BEFORE the copy: a
     // surviving entry could be that stale symlink, and writing through it
     // is the hazard this unlink exists to prevent. Missing = success.
+    let _ = remove_snapshot_sidecars(&tmp);
     if let Err(e) = std::fs::remove_file(&tmp) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return Err(format!("clearing stale backup temp entry failed: {e}"));
@@ -1053,17 +1066,30 @@ fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<St
     }
 
     if let Err(e) = conn.backup(rusqlite::DatabaseName::Main, &tmp, None) {
+        let _ = remove_snapshot_sidecars(&tmp);
         let _ = std::fs::remove_file(&tmp);
         return Err(e.to_string());
     }
     // Durability before the install rename: a power loss could otherwise
     // persist the rename while the .tmp data never reached disk, leaving a
-    // truncated snapshot — exactly the destruction rule 11 forbids.
-    if let Err(e) = std::fs::File::open(&tmp).and_then(|f| f.sync_all()) {
+    // truncated snapshot — exactly the destruction rule 11 forbids. The
+    // handle must carry WRITE access: on Windows `sync_all` routes to
+    // `FlushFileBuffers`, which requires GENERIC_WRITE and fails with
+    // ERROR_ACCESS_DENIED on a read-only handle.
+    if let Err(e) = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp)
+        .and_then(|f| f.sync_all())
+    {
+        let _ = remove_snapshot_sidecars(&tmp);
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("syncing backup snapshot failed: {e}"));
     }
+    // Sweep any sidecars SQLite created beside the temp path before the
+    // install rename, so a successful backup leaves no debris behind.
+    let _ = remove_snapshot_sidecars(&tmp);
     if let Err(e) = std::fs::rename(&tmp, &dest) {
+        let _ = remove_snapshot_sidecars(&tmp);
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("installing backup snapshot failed: {e}"));
     }
@@ -1087,6 +1113,9 @@ mod backup_snapshot_tests {
         // A previous snapshot exists; the new backup must replace it via
         // rename (never remove-then-write) and leave no `.tmp` behind.
         std::fs::write(dest_dir.join("brain.db.bak"), b"stale snapshot").unwrap();
+        // Stale crash debris beside the temp path must also be swept.
+        std::fs::write(dest_dir.join("brain.db.bak.tmp-journal"), b"stale journal").unwrap();
+        std::fs::write(dest_dir.join("brain.db.bak.tmp-wal"), b"stale wal").unwrap();
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (v TEXT)", []).unwrap();
@@ -1107,6 +1136,8 @@ mod backup_snapshot_tests {
             .unwrap();
         assert_eq!(v, "row-from-backup");
         assert!(!dest_dir.join("brain.db.bak.tmp").exists());
+        assert!(!dest_dir.join("brain.db.bak.tmp-journal").exists());
+        assert!(!dest_dir.join("brain.db.bak.tmp-wal").exists());
     }
 
     #[cfg(unix)]
