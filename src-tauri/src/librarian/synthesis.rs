@@ -304,6 +304,13 @@ fn build_llm_completer(model: &str) -> Result<Option<Box<dyn LlmCompleter>>> {
             // External branch is the only networked arm here (Sidecar is
             // loopback), so gate it on the effective privacy mode; Strict
             // behaves like an unconfigured provider downstream.
+            //
+            // NOTE: this reads the RAW configured mode, deliberately
+            // fail-closed. `resolve_privacy_state` can auto-upgrade an
+            // unchosen config to Connected (e.g. a pairing token), so the
+            // two can transiently disagree — this gate errs toward
+            // blocking. Other gates (`inference/mod.rs`, `classifier`)
+            // resolve the same raw-config way; keep them aligned.
             let mode = crate::privacy::effective_mode(&report.config.privacy);
             if !crate::privacy::allows_external_generation(mode) {
                 return Ok(None);

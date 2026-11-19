@@ -1042,13 +1042,15 @@ fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<St
     // path when a backup is interrupted; sweep them wherever the temp entry
     // itself is cleaned so crash debris cannot pile up. Best-effort: the
     // backup overwrites every page, so stale sidecars never corrupt it.
-    fn remove_snapshot_sidecars(tmp: &Path) -> std::io::Result<()> {
+    fn remove_snapshot_sidecars(tmp: &Path) {
+        // Best-effort per sibling: a missing suffix must not stop the rest
+        // of the sweep, so errors are ignored one file at a time (an `?`
+        // form would abort at the first absent `-journal`).
         for suffix in ["-journal", "-wal", "-shm"] {
             let mut name = tmp.as_os_str().to_owned();
             name.push(suffix);
-            std::fs::remove_file(Path::new(&name))?;
+            let _ = std::fs::remove_file(Path::new(&name));
         }
-        Ok(())
     }
     // Unlink any stale entry at the temp path first. `remove_file` does not
     // follow symlinks, so a leftover `tmp -> brain.db.bak` symlink (crash
@@ -1058,7 +1060,7 @@ fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<St
     // failure other than "not there" aborts the backup BEFORE the copy: a
     // surviving entry could be that stale symlink, and writing through it
     // is the hazard this unlink exists to prevent. Missing = success.
-    let _ = remove_snapshot_sidecars(&tmp);
+    remove_snapshot_sidecars(&tmp);
     if let Err(e) = std::fs::remove_file(&tmp) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return Err(format!("clearing stale backup temp entry failed: {e}"));
@@ -1066,7 +1068,7 @@ fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<St
     }
 
     if let Err(e) = conn.backup(rusqlite::DatabaseName::Main, &tmp, None) {
-        let _ = remove_snapshot_sidecars(&tmp);
+        remove_snapshot_sidecars(&tmp);
         let _ = std::fs::remove_file(&tmp);
         return Err(e.to_string());
     }
@@ -1081,19 +1083,24 @@ fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<St
         .open(&tmp)
         .and_then(|f| f.sync_all())
     {
-        let _ = remove_snapshot_sidecars(&tmp);
+        remove_snapshot_sidecars(&tmp);
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("syncing backup snapshot failed: {e}"));
     }
     // Sweep any sidecars SQLite created beside the temp path before the
     // install rename, so a successful backup leaves no debris behind.
-    let _ = remove_snapshot_sidecars(&tmp);
+    remove_snapshot_sidecars(&tmp);
     if let Err(e) = std::fs::rename(&tmp, &dest) {
-        let _ = remove_snapshot_sidecars(&tmp);
+        remove_snapshot_sidecars(&tmp);
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("installing backup snapshot failed: {e}"));
     }
     // Best-effort directory fsync so the rename itself survives power loss.
+    // Accepted window: if this fsync is lost, a post-crash mount can revert
+    // to the previous COMPLETE snapshot (the old `brain.db.bak`) — rule 11
+    // holds either way, so the failure is deliberately non-fatal. On
+    // Windows, opening a directory for fsync is unsupported by std::fs,
+    // which makes this sweep a no-op there (`let _` swallows the error).
     if let Ok(dir) = std::fs::File::open(dest_dir) {
         let _ = dir.sync_all();
     }
@@ -1138,6 +1145,32 @@ mod backup_snapshot_tests {
         assert!(!dest_dir.join("brain.db.bak.tmp").exists());
         assert!(!dest_dir.join("brain.db.bak.tmp-journal").exists());
         assert!(!dest_dir.join("brain.db.bak.tmp-wal").exists());
+    }
+
+    // Rename-not-copy proof: a copy-install truncates and rewrites the
+    // EXISTING dest file (inode preserved); a rename install swaps in the
+    // tmp file's inode. Recorded while dest is still the stale snapshot.
+    #[cfg(unix)]
+    #[test]
+    fn install_is_rename_not_copy_via_inode_swap() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest_dir = dir.path().join(".brain");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("brain.db.bak");
+        std::fs::write(&dest, b"stale snapshot").unwrap();
+        let old_ino = std::fs::metadata(&dest).unwrap().ino();
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (v TEXT)", []).unwrap();
+
+        backup_db_snapshot(&conn, &dest_dir).unwrap();
+        let new_ino = std::fs::metadata(&dest).unwrap().ino();
+        assert_ne!(
+            old_ino, new_ino,
+            "dest inode must change: install is a rename of the .tmp, not a copy over dest"
+        );
     }
 
     #[cfg(unix)]
