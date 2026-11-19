@@ -179,6 +179,11 @@ fn synthesis_writes_tokens_and_anchored_evidence() {
     )
     .unwrap();
 
+    // The External provider is networked, so the strict-by-default privacy
+    // gate (INTENT rule 11) blocks it unless a mode was chosen — mirror a
+    // real configured user by granting Connected before generating.
+    helpers::grant_connected_privacy(app.tmp.path());
+
     // Drive the real synthesis persistence path.
     let result = generate_summary(&mut conn, &source_str, "test-model", false);
     assert!(result.is_ok(), "generate_summary failed: {:?}", result);

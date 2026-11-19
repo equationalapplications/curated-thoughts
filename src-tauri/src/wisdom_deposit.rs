@@ -812,6 +812,12 @@ async fn audit_and_seed_kick(
 
 /// The initial ledger state recorded before the kick spawns (D3): a crash
 /// between the ledger commit and the spawn leaves an honest trace.
+///
+/// `no_ingest_host` means "no USABLE generation host under the current
+/// config AND privacy mode" — a Strict-mode External provider lands here
+/// too (see `llm_generation_configured`), not only a truly unconfigured
+/// one. There is no automatic re-drive when privacy mode changes; the
+/// deposit re-kicks on the next deposit/supersession of that path.
 fn initial_kick_state(generation_configured: bool) -> &'static str {
     if generation_configured {
         "pending"

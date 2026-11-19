@@ -85,3 +85,17 @@ impl TestApp {
         }
     }
 }
+
+/// Flip the test instance's privacy mode to Connected (chosen). Tests that
+/// exercise the networked External generation provider must call this after
+/// `write_config`: the strict-by-default privacy gate (INTENT rule 11)
+/// blocks unchosen providers, and a real configured user would have picked
+/// a mode in onboarding.
+#[allow(dead_code)]
+pub fn grant_connected_privacy(brain_dir: &std::path::Path) {
+    let cfg_path = brain_dir.join("config.json");
+    let mut cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    cfg["privacy"] = serde_json::json!({ "mode": "connected", "chosen": true });
+    std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+}

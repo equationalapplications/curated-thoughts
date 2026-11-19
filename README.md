@@ -51,6 +51,8 @@ An optional **Jev classifier** — a dedicated fact-typing model, served by Clou
 - Blocked in Strict privacy mode.
 - Sends fact titles and bodies to the endpoint you configure.
 
+**Strict privacy mode also cuts librarian synthesis generation**: an External (OpenAI-compatible) generation provider is refused while Strict is active unless a privacy mode has been chosen — a local sidecar keeps working in every mode. Existing setups configured for an External provider before choosing a privacy mode must pick one in Settings (default is Strict).
+
 ### Human-in-the-Loop Verification
 Proposals are gated, not automatic. Approve or reject wiki changes from the UI Review desk or interactively with `ct proposals review` — every decision is stamped with who reviewed it. Agents cannot approve: the review command is gated to interactive terminals and no MCP approval tool exists. Librarian evidence that no longer anchors to a source chunk is re-graded (exported, then purged) by a one-time migration; `ct evidence regrade --yes` re-runs that pass on demand.
 
