@@ -1,3 +1,18 @@
+## [3.13.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.13.0...v3.13.1) (2026-11-19)
+
+### Bug Fixes
+
+* abort backup when stale temp-entry unlink fails (CodeRabbit fold) ([5ee1e5f](https://github.com/equationalapplications/curated-thoughts/commit/5ee1e5f7e82154d01fe8e2ce0f87f8d08d2745cc))
+* atomic brain.db.bak backup + strict-mode External completer gate ([8176dce](https://github.com/equationalapplications/curated-thoughts/commit/8176dceabfe5594972d6f499acbe8579fdb8e302)), closes [#360](https://github.com/equationalapplications/curated-thoughts/issues/360) [#360](https://github.com/equationalapplications/curated-thoughts/issues/360)
+* fsync snapshot before install rename; drop stale PR citation in test doc ([f0d3cdf](https://github.com/equationalapplications/curated-thoughts/commit/f0d3cdf6dbcec01cdd1c6f89fb04313e95ed930c)), closes [#361](https://github.com/equationalapplications/curated-thoughts/issues/361)
+* **test,docs:** T4 Fable nitpick folds — sweep robustness, rename proof, docs ([f40d5f0](https://github.com/equationalapplications/curated-thoughts/commit/f40d5f02dad0c8342083876ac4b08353ffda1d9e)), closes [#363](https://github.com/equationalapplications/curated-thoughts/issues/363)
+* **test:** expect_err per clippy (err_expect, -D warnings) ([7d823c3](https://github.com/equationalapplications/curated-thoughts/commit/7d823c3a262efebea97970ad1de53f52bf1486a0))
+* **test:** grant Connected privacy in folder_rules External-provider tests ([cdec0ea](https://github.com/equationalapplications/curated-thoughts/commit/cdec0ead4b380ed989d4a42052c312e2bb2b9f71))
+* **test:** grant Connected privacy in librarian_evidence_e2e External test ([cc53b64](https://github.com/equationalapplications/curated-thoughts/commit/cc53b6431e01959e9e5caf81a2bcd1f1c9f1676b))
+* unlink stale tmp entry before backup; branch-specific rename-arm assertion ([39161e9](https://github.com/equationalapplications/curated-thoughts/commit/39161e9d2c01e998fed132699efa85d290866fa7)), closes [#361](https://github.com/equationalapplications/curated-thoughts/issues/361)
+* use expect_err per clippy (CI rust-ubuntu Clippy step, -D warnings) ([8694163](https://github.com/equationalapplications/curated-thoughts/commit/8694163123856ee17c3ec6bfb1f38870c51371a2))
+* write-access fsync handles + snapshot sidecar sweep (T3 Opus fold) ([8e79e2a](https://github.com/equationalapplications/curated-thoughts/commit/8e79e2a38a4dbf09b1de7487e08e60f93a55b6ed)), closes [#362](https://github.com/equationalapplications/curated-thoughts/issues/362)
+
 ## [3.13.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.12.0...v3.13.0) (2026-11-14)
 
 ### Features
