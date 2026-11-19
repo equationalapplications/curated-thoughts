@@ -1043,9 +1043,20 @@ fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<St
         let _ = std::fs::remove_file(&tmp);
         return Err(e.to_string());
     }
+    // Durability before the install rename: a power loss could otherwise
+    // persist the rename while the .tmp data never reached disk, leaving a
+    // truncated snapshot — exactly the destruction rule 11 forbids.
+    if let Err(e) = std::fs::File::open(&tmp).and_then(|f| f.sync_all()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("syncing backup snapshot failed: {e}"));
+    }
     if let Err(e) = std::fs::rename(&tmp, &dest) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("installing backup snapshot failed: {e}"));
+    }
+    // Best-effort directory fsync so the rename itself survives power loss.
+    if let Ok(dir) = std::fs::File::open(dest_dir) {
+        let _ = dir.sync_all();
     }
 
     Ok(dest.to_string_lossy().into_owned())

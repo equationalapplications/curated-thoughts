@@ -3325,10 +3325,10 @@ mod tests {
     }
 }
 
-/// INTENT rule 11 gate (CodeRabbit round-1 on PR #360): the External
-/// (networked) completer arm must build nothing in Strict privacy mode and
-/// still build in Ephemeral/Connected. The Sidecar (loopback) arm is
-/// intentionally untouched.
+/// INTENT rule 11 gate (Tier 1.5 review follow-up): the External (networked)
+/// completer arm must build nothing in Strict privacy mode and still build
+/// in Ephemeral/Connected. The Sidecar (loopback) arm is intentionally
+/// untouched.
 #[cfg(test)]
 mod completer_privacy_tests {
     use super::build_llm_completer;
