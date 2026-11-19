@@ -199,6 +199,11 @@ fn auto_approve_commits_proposal_via_resolve_path() {
     )
     .unwrap();
 
+    // The External provider is networked, so the strict-by-default privacy
+    // gate (INTENT rule 11) blocks it unless a mode was chosen — mirror a
+    // real configured user by granting Connected before generating.
+    helpers::grant_connected_privacy(app.tmp.path());
+
     let mut conn = db_conn;
     let result = generate_summary(&mut conn, &source_str, "test-model", false);
     assert!(result.is_ok(), "generate_summary failed: {:?}", result);
@@ -315,6 +320,11 @@ fn no_auto_approve_leaves_proposal_pending_with_zero_entries() {
         },
     )
     .unwrap();
+
+    // The External provider is networked, so the strict-by-default privacy
+    // gate (INTENT rule 11) blocks it unless a mode was chosen — mirror a
+    // real configured user by granting Connected before generating.
+    helpers::grant_connected_privacy(app.tmp.path());
 
     let mut conn = db_conn;
     let result = generate_summary(&mut conn, &source_str, "test-model", false);
