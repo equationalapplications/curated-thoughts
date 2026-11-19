@@ -212,10 +212,11 @@ safety net.
 ### 11. Copies of memory outside the brain
 
 Erase writes a report — runtime, whether the overwrite-on-delete setting
-was on, every step's outcome, verified or not — outside the brain. The `.bak` next to `brain.db` is a recovery
-snapshot: the app never destroys or rewrites it to chase erasure; the next
-snapshot replaces it, and the app's documentation states that window. OKF exports
-and OS backups are the user's own files; the app does not police them.
+was on, every step's outcome, verified or not — outside the brain. The
+`.bak` next to `brain.db` is a recovery snapshot: the app never destroys
+or rewrites it to chase erasure; the next snapshot replaces it, and the
+app's documentation states that window. OKF exports and OS backups are
+the user's own files; the app does not police them.
 Strict privacy mode cuts all networking.
 
 *Why:* the engine guarantees the store file; copies the app keeps are named,
