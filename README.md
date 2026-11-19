@@ -24,7 +24,7 @@ Curated Thoughts models AI memory biologically, moving information from raw inpu
 2. **Episodic Memory (The RAG Layer):** Raw recall. When you drop supported files into the vault, the watcher chunks them and embeds them with your configured embedding profile — a local Ollama model by default — into `brain.db` (SQLite) in your brain directory. This allows the LLM to semantically search exact quotes and track raw facts before deep synthesis occurs.
 3. **Semantic Memory (The LLM Wiki):** The long-term truth. The system actively condenses raw facts into a curated, interlinked web of concepts and entities. This acts as a semantic wiki stored natively in SQLite, with wiki notes readable and writable as real `.md` files in your vault's `wiki/` folder, allowing the LLM to naturally read, link, and traverse relationships.
 
-The librarian's wiki proposals reach the long-term wiki only through the **human-verification gate**: they land in a review queue, and only your explicit approval commits them (see [Human-in-the-Loop Verification](#human-in-the-loop-verification)). The exception is direct agent wisdom: the MCP wisdom write tools record your agent's entries straight into the wiki as user-stated, confirmed facts, without the proposal gate (see [MCP Agent Server](#-mcp-agent-server)).
+The librarian's wiki proposals reach the long-term wiki only through the **human-verification gate**: they land in a review queue, and only your explicit approval commits them (see [Human-in-the-Loop Verification](#human-in-the-loop-verification)).
 
 ---
 
@@ -64,9 +64,10 @@ Proposals are gated, not automatic. Approve or reject wiki changes from the UI R
 ### Backup, Restore & Vault Switching
 - **Restore is crash-safe.** The knowledge replica's pending changes are captured before `brain.db` is replaced and re-synced afterward; if the app is interrupted mid-restore, it finishes or rolls back the install on the next launch.
 - **Switching vaults discards the knowledge layer built from the current vault** — the wiki, agent memories, and manual edits are per-vault. The app offers to back the current brain up first, and asks for explicit confirmation before a switch that would destroy it.
+- **The `brain.db.bak` recovery snapshot.** A backup writes a fresh snapshot of `brain.db` to `brain.db.bak` in the vault's `.brain/` folder, replacing the previous one. It holds the brain as of that backup: later changes are not in it until the next backup replaces it.
 
 ### Unified MCP Agent Server
-Curated Thoughts isn't just a standalone desktop app; it acts as a system-wide brain. The app binary doubles as a standard **stdio Model Context Protocol (MCP) server** (`--mcp`). Hook it into any MCP-compliant client — Claude Desktop, Cursor, or your IDE's agent — and the agent sees your vault as native tools: read tools for recall, search and graph traversal, plus write tools for vault notes, agent wisdom entries and proposal decisions. A separate read-only server can be built for development (see [MCP Agent Server](#-mcp-agent-server)).
+Curated Thoughts isn't just a standalone desktop app; it acts as a system-wide brain. The app binary doubles as a standard **stdio Model Context Protocol (MCP) server** (`--mcp`). Hook it into any MCP-compliant client — Claude Desktop, Cursor, or your IDE's agent — and the agent sees your vault as native tools: read tools for recall, search and graph traversal, plus write tools for vault notes and agent wisdom deposits; proposal decisions are human-only, in the app and `ct proposals review`. A separate read-only server can be built for development (see [MCP Agent Server](#-mcp-agent-server)).
 
 ### Offline-First & Privacy Native
 Parsing, chunking, and SQLite storage run entirely on your machine, and so do embeddings by default: the vault pipeline embeds with a local Ollama model, and the UI initializes a local Fastembed model for wiki-side embeddings. External endpoints are used only where you configure them (see [BYOI](#bring-your-own-inference-byoi)).
@@ -200,7 +201,7 @@ For the read-only dev server, use `target/debug/curated-thoughts-mcp` as the `co
 
 ### Security Note
 
-This is a **local stdio** server: any client you attach can invoke tools that return **indexed chunk text and metadata** from your brain database, and the full server's write tools can change vault notes, wisdom entries and proposal decisions. Treat the MCP process and its environment as part of your **trust boundary**; do not point it at sensitive data you would not show to the agent.
+This is a **local stdio** server: any client you attach can invoke tools that return **indexed chunk text and metadata** from your brain database, and the full server's write tools can change vault notes and deposit agent wisdom entries; proposal decisions are human-only. Treat the MCP process and its environment as part of your **trust boundary**; do not point it at sensitive data you would not show to the agent.
 
 ### Connecting release builds
 
