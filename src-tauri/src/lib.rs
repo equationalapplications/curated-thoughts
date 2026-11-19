@@ -1088,24 +1088,53 @@ mod backup_snapshot_tests {
     #[cfg(unix)]
     #[test]
     fn failed_backup_leaves_previous_snapshot_intact_and_cleans_tmp() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::TempDir::new().unwrap();
         let dest_dir = dir.path().join(".brain");
         std::fs::create_dir_all(&dest_dir).unwrap();
         let dest = dest_dir.join("brain.db.bak");
         std::fs::write(&dest, b"previous snapshot").unwrap();
 
-        // Injection: an unwritable destination dir makes the backup copy
-        // fail before anything destructive can happen. The previous
-        // snapshot must survive untouched and no temp file may remain.
-        std::fs::set_permissions(&dest_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Injection: a DIRECTORY parked at the temp path makes the backup
+        // copy fail regardless of uid (root ignores directory write bits,
+        // so a chmod-based injection would silently succeed as root). The
+        // previous snapshot must survive untouched and the temp path must
+        // be cleaned — but cleanup must remove a FILE, so the directory
+        // sentinel itself is expected to survive.
+        std::fs::create_dir(dest_dir.join("brain.db.bak.tmp")).unwrap();
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let result = backup_db_snapshot(&conn, &dest_dir);
-        std::fs::set_permissions(&dest_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(result.is_err(), "expected the backup to fail: {result:?}");
         assert_eq!(std::fs::read(&dest).unwrap(), b"previous snapshot");
-        assert!(!dest_dir.join("brain.db.bak.tmp").exists());
+        // The temp FILE cleanup cannot remove a directory sentinel; its
+        // survival is the witness that the failure happened at the copy.
+        assert!(dest_dir.join("brain.db.bak.tmp").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_install_rename_cleans_tmp_and_keeps_previous_snapshot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest_dir = dir.path().join(".brain");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("brain.db.bak");
+        // Injection: a non-empty DIRECTORY at the final snapshot path makes
+        // the install rename fail (ENOTEMPTY) AFTER the copy succeeded —
+        // the second error arm. The temp file must be cleaned and whatever
+        // occupied the snapshot path must survive byte-identical.
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(dest.join("occupied"), b"x").unwrap();
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (v TEXT)", []).unwrap();
+        let result = backup_db_snapshot(&conn, &dest_dir);
+
+        assert!(result.is_err(), "expected the install rename to fail");
+        assert!(
+            !dest_dir.join("brain.db.bak.tmp").exists(),
+            "failed install must clean the temp file"
+        );
+        assert!(dest.join("occupied").exists(), "previous snapshot survived");
     }
 }
 

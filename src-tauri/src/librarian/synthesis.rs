@@ -228,8 +228,8 @@ fn choose_sidecar_model_name(llm_config: &LlmConfig, fallback_model: &str) -> St
 /// (historically the local-Ollama RAM recommendation) applies only when the
 /// active config names no model — call sites that reach the LLM with an
 /// Unconfigured provider fail earlier with "LLM provider not configured
-/// (or blocked by strict privacy mode)", so
-/// the fallback here is a label of last resort, not the model that runs.
+/// (or blocked by strict privacy mode)", so the fallback here is a label
+/// of last resort, not the model that runs.
 pub fn active_generation_model(fallback_model: &str) -> String {
     let brain_dir_str = crate::get_brain_dir_inner();
     let brain_path = Path::new(&brain_dir_str);
@@ -1210,6 +1210,10 @@ fn write_synth_watermark(conn: &Connection, doc_id: i64, model: &str) -> Result<
 }
 
 pub(crate) fn llm_generation_configured() -> bool {
+    // "Usable NOW" semantics: true only when a completer can actually be
+    // built under the current config AND privacy mode. A Strict-mode
+    // External provider reports false — callers (kick ledger, audit rows)
+    // want what can run now, not what is merely configured.
     matches!(
         build_llm_completer(&active_generation_model("llama3.2:3b")),
         Ok(Some(_))
