@@ -225,9 +225,9 @@ to honor a promise nobody is waiting on.
 
 ### 12. The Rust side follows the engine's words
 
-The Rust side may write the engine's tables directly for now, using the
-engine's states and verbs exactly. Once the native engine can make those
-changes itself, Rust goes through it instead.
+The Rust side writes the engine's tables only with the engine's own
+states and verbs, and goes through the engine wherever the engine
+exposes the operation.
 
 ## Who verifies: users and scope
 
