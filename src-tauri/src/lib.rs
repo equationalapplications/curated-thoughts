@@ -1118,20 +1118,28 @@ mod backup_snapshot_tests {
         let dest = dest_dir.join("brain.db.bak");
         std::fs::write(&dest, b"previous snapshot").unwrap();
 
-        // Injection: a DIRECTORY parked at the temp path makes the backup
-        // copy fail regardless of uid (root ignores directory write bits,
-        // so a chmod-based injection would silently succeed as root). The
-        // previous snapshot must survive untouched and the temp path must
-        // be cleaned — but cleanup must remove a FILE, so the directory
-        // sentinel itself is expected to survive.
+        // Injection: a DIRECTORY parked at the temp path makes the stale
+        // temp-entry unlink fail regardless of uid (root ignores directory
+        // write bits, so a chmod-based injection would silently succeed as
+        // root) — which hits the early abort BEFORE the backup copy runs.
+        // The previous snapshot must survive untouched and the temp path
+        // must be cleaned — but cleanup must remove a FILE, so the
+        // directory sentinel itself is expected to survive.
         std::fs::create_dir(dest_dir.join("brain.db.bak.tmp")).unwrap();
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let result = backup_db_snapshot(&conn, &dest_dir);
 
-        assert!(result.is_err(), "expected the backup to fail: {result:?}");
+        // Assert the early-abort arm specifically: a plain Err would also
+        // pass with the guard reverted (the copy would fail on the same
+        // sentinel), proving nothing about the unlink strictness.
+        let err = result.err().expect("expected the backup to fail");
+        assert!(
+            err.starts_with("clearing stale backup temp entry failed:"),
+            "expected the stale-entry unlink abort, got: {err}"
+        );
         assert_eq!(std::fs::read(&dest).unwrap(), b"previous snapshot");
         // The temp FILE cleanup cannot remove a directory sentinel; its
-        // survival is the witness that the failure happened at the copy.
+        // survival is the witness that the failure happened at the unlink.
         assert!(dest_dir.join("brain.db.bak.tmp").is_dir());
     }
 
