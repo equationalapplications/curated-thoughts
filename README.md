@@ -64,6 +64,7 @@ Proposals are gated, not automatic. Approve or reject wiki changes from the UI R
 ### Backup, Restore & Vault Switching
 - **Restore is crash-safe.** The knowledge replica's pending changes are captured before `brain.db` is replaced and re-synced afterward; if the app is interrupted mid-restore, it finishes or rolls back the install on the next launch.
 - **Switching vaults discards the knowledge layer built from the current vault** — the wiki, agent memories, and manual edits are per-vault. The app offers to back the current brain up first, and asks for explicit confirmation before a switch that would destroy it.
+- **The `brain.db.bak` recovery snapshot.** A backup writes a fresh snapshot of `brain.db` to `brain.db.bak`, replacing the previous one — it always reflects the most recent backup, so it covers changes since that backup and no earlier. The app never destroys or rewrites this file to chase an erasure; the next backup replaces it naturally.
 
 ### Unified MCP Agent Server
 Curated Thoughts isn't just a standalone desktop app; it acts as a system-wide brain. The app binary doubles as a standard **stdio Model Context Protocol (MCP) server** (`--mcp`). Hook it into any MCP-compliant client — Claude Desktop, Cursor, or your IDE's agent — and the agent sees your vault as native tools: read tools for recall, search and graph traversal, plus write tools for vault notes, agent wisdom entries and proposal decisions. A separate read-only server can be built for development (see [MCP Agent Server](#-mcp-agent-server)).
