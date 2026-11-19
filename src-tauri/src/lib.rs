@@ -1132,7 +1132,7 @@ mod backup_snapshot_tests {
         // Assert the early-abort arm specifically: a plain Err would also
         // pass with the guard reverted (the copy would fail on the same
         // sentinel), proving nothing about the unlink strictness.
-        let err = result.err().expect("expected the backup to fail");
+        let err = result.expect_err("expected the backup to fail");
         assert!(
             err.starts_with("clearing stale backup temp entry failed:"),
             "expected the stale-entry unlink abort, got: {err}"
