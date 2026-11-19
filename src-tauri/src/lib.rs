@@ -1042,8 +1042,15 @@ fn backup_db_snapshot(conn: &rusqlite::Connection, dest_dir: &Path) -> Result<St
     // follow symlinks, so a leftover `tmp -> brain.db.bak` symlink (crash
     // debris or tampering) cannot route the new backup through the link and
     // overwrite the snapshot it is supposed to replace. The helper owns
-    // this temp name — removing a leftover entry loses no data.
-    let _ = std::fs::remove_file(&tmp);
+    // this temp name — removing a leftover entry loses no data. Any removal
+    // failure other than "not there" aborts the backup BEFORE the copy: a
+    // surviving entry could be that stale symlink, and writing through it
+    // is the hazard this unlink exists to prevent. Missing = success.
+    if let Err(e) = std::fs::remove_file(&tmp) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("clearing stale backup temp entry failed: {e}"));
+        }
+    }
 
     if let Err(e) = conn.backup(rusqlite::DatabaseName::Main, &tmp, None) {
         let _ = std::fs::remove_file(&tmp);
