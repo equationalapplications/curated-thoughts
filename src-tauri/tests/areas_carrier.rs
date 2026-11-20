@@ -305,9 +305,31 @@ fn e2e_hub_only_render_reparses_and_librarian_resolves() {
                         .unwrap_or_else(|_| ("<no ledger row>".into(), String::new()))
                     };
                     let (state, error) = kick;
+                    // Config-load forensics: llm_generation_configured() reads
+                    // the brain config through resolve_brain_paths(); dump its
+                    // exact inputs and result so a CI-only failure names
+                    // itself.
+                    let brain_env = std::env::var("CURATED_BRAIN_DIR").unwrap_or_else(|_| "<unset>".into());
+                    let home = std::env::var("HOME").unwrap_or_else(|_| "<unset>".into());
+                    let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+                    let cfg_exists = paths.config_path.exists();
+                    let load = match tauri_app_lib::config::BrainConfig::load_lenient(&paths) {
+                        Ok(report) => format!(
+                            "Ok(provider_external={} external_url_set={} model_name={:?})",
+                            matches!(
+                                report.config.generation.provider,
+                                tauri_app_lib::inference::config::GenerationProviderKind::External
+                            ),
+                            report.config.generation.external_url.is_some(),
+                            report.config.generation.model_name,
+                        ),
+                        Err(e) => format!("Err({e:#})"),
+                    };
                     panic!(
                         "deposit documents row never landed within 10s — kick ledger state: \
-                         {state}: {error}"
+                         {state}: {error} || brain forensics: CURATED_BRAIN_DIR={brain_env} \
+                         HOME={home} config_path={} exists={cfg_exists} load_lenient={load}",
+                        paths.config_path.display()
                     );
                 }
             }
