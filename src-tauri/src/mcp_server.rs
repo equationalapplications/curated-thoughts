@@ -254,7 +254,7 @@ impl VaultMcpServer {
 
     #[tool(
         name = "wisdom_deposit",
-        description = "Append-only deposit of a fact file under immutable-source-files/agents/. Writes the file with agent provenance, kicks the per-document ingest+librarian pipeline (vault-lock serialized), and reports honest pending state. The Active Librarian is the sole writer of brain facts (INTENT rule 1); corrections go through wisdom_propose_supersession. Paths outside the agents lane (including agents/supersessions/) are refused; an existing path is refused (append-only, INTENT rule 9)."
+        description = "Append-only deposit of a fact file under immutable-source-files/agents/. Writes the file with agent provenance, kicks the per-document ingest+librarian pipeline (vault-lock serialized), and reports honest pending state. An optional ABSOLUTE `repo_path` (the checkout the deposit concerns) is resolved at deposit time against the configured wisdom.areas_paths checkout roots and rendered as a `hub:` frontmatter key; a relative repo_path is refused, and the reply carries `hub` plus `hub_reason` (absent | wisdom_unconfigured | no_prefix | unresolved). The Active Librarian is the sole writer of brain facts (INTENT rule 1); corrections go through wisdom_propose_supersession. Paths outside the agents lane (including agents/supersessions/) are refused; an existing path is refused (append-only, INTENT rule 9)."
     )]
     async fn wisdom_deposit(
         &self,

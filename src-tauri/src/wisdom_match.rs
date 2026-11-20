@@ -140,6 +140,13 @@ pub struct WisdomItem {
     pub score: Option<f32>,
     pub supersedes: Vec<String>,
     pub provenance: Option<String>,
+    /// SCOPED delivery only (spec §10): `"area"`, `"repo"` or `"org"`;
+    /// absent in UNSCOPED mode and on corrections items.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub band: Option<String>,
+    /// The area name for area-band items only; absent otherwise (§10.2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub area: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -286,6 +293,10 @@ pub(crate) struct Temporal {
 // of re-probing. `scheme` stays private — delivery-only concern.
 pub(crate) has_superseded_by: bool,
 pub(crate) has_valid_to: bool,
+    /// V30 area column present (PR #352 Task 1). The gated SELECT reads
+    /// `e.area` ONLY when this holds — pre-V30 degraded shapes keep today's
+    /// column list exactly.
+    pub(crate) has_area: bool,
     /// Read scheme for the SELECT filter — `None` on the pre-V27 shape (no
     /// `embed_scheme` column). Resolved once per call, next to the column
     /// probes, so every scheme-derived tuple member of the call path (floor,
@@ -308,6 +319,7 @@ pub(crate) fn temporal_columns(conn: &Connection, declared: Option<Scheme>) -> R
     Ok(Temporal {
         has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
         has_valid_to: cols.iter().any(|c| c == "valid_to"),
+        has_area: cols.iter().any(|c| c == "area"),
         scheme,
     })
 }
@@ -324,7 +336,7 @@ pub fn wisdom_match(
     now_ms: i64,
 ) -> Result<WisdomMatch> {
     let temporal = temporal_columns(conn, None)?;
-    match_with_resolved_floor(conn, query_vec, gate_key, max, exclude, now_ms, temporal)
+    match_with_resolved_floor(conn, query_vec, gate_key, max, exclude, now_ms, temporal, None)
 }
 
 /// [`wisdom_match`] under a scheme the CALLER resolved — the one it derived
@@ -333,6 +345,7 @@ pub fn wisdom_match(
 /// between the caller's resolution and this call can never pair the query
 /// embedded under one scheme with another scheme's rows or floor. `scheme`
 /// comes from `embed_scheme::read_scheme_for_reader` (raw on pre-V27).
+#[allow(clippy::too_many_arguments)] // matches the file's existing plumbing signature
 pub fn wisdom_match_in_scheme(
     conn: &Connection,
     query_vec: &[f32],
@@ -341,15 +354,19 @@ pub fn wisdom_match_in_scheme(
     max: usize,
     exclude: &[String],
     now_ms: i64,
+    bindings: Option<&BandBindings>,
 ) -> Result<WisdomMatch> {
     let temporal = temporal_columns(conn, Some(scheme))?;
-    match_with_resolved_floor(conn, query_vec, gate_key, max, exclude, now_ms, temporal)
+    match_with_resolved_floor(
+        conn, query_vec, gate_key, max, exclude, now_ms, temporal, bindings,
+    )
 }
 
 /// ONE `Temporal` for the whole call: its single scheme drives BOTH the floor
 /// (here) and the SELECT filter (inside `wisdom_match_impl`). The pre-V27
 /// shape (scheme None) keeps the unsuffixed raw key and the filter omitted;
 /// an unregistered (model, scheme) key means abstain (floor None).
+#[allow(clippy::too_many_arguments)] // matches the file's existing plumbing signature
 fn match_with_resolved_floor(
     conn: &Connection,
     query_vec: &[f32],
@@ -358,13 +375,14 @@ fn match_with_resolved_floor(
     exclude: &[String],
     now_ms: i64,
     temporal: Temporal,
+    bindings: Option<&BandBindings>,
 ) -> Result<WisdomMatch> {
     let floor = match temporal.scheme {
         Some(scheme) => gate_floor(&floor_key_for(gate_key, scheme)),
         None => gate_floor(gate_key),
     };
     wisdom_match_impl(
-        conn, query_vec, gate_key, floor, max, exclude, now_ms, temporal,
+        conn, query_vec, gate_key, floor, max, exclude, now_ms, temporal, bindings,
     )
 }
 
@@ -386,8 +404,11 @@ pub fn wisdom_match_with_floor(
     now_ms: i64,
 ) -> Result<WisdomMatch> {
     let temporal = temporal_columns(conn, Some(scheme))?;
+    // SIGNATURE UNTOUCHED by Task 4 (the pin call site tool_dispatch.rs must
+    // see it unchanged): this funnel passes NO bindings — UNSCOPED callers
+    // never enter the band predicate.
     wisdom_match_impl(
-        conn, query_vec, gate_key, floor, max, exclude, now_ms, temporal,
+        conn, query_vec, gate_key, floor, max, exclude, now_ms, temporal, None,
     )
 }
 
@@ -404,6 +425,7 @@ fn wisdom_match_impl(
     exclude: &[String],
     now_ms: i64,
     temporal: Temporal,
+    bindings: Option<&BandBindings>,
 ) -> Result<WisdomMatch> {
     let max = max.min(MAX_ENTRIES);
     let corrections = if temporal.has_superseded_by {
@@ -430,6 +452,7 @@ fn wisdom_match_impl(
                 &temporal,
                 None,
                 None,
+                bindings,
             )?
         }
         _ => Vec::new(),
@@ -449,7 +472,91 @@ type CandidateRow = (
     Option<String>,
     Option<String>,
     Option<Vec<u8>>,
+    Option<String>,
 );
+
+/// The SCOPED delivery bindings (spec §9.2): the repo group (survivor +
+/// merged-away ids, resolved by the caller via Task 3's resolver), the
+/// optional org group, and the optional resolved area name. `None` members
+/// OMIT their arm (§9.4) — never bind NULL.
+///
+/// Invariant: `repo_group` is NEVER empty — the resolver's survivor+cluster
+/// expansion guarantees at least one id (asserted at the predicate entry).
+pub struct BandBindings<'a> {
+    pub repo_group: &'a [String],
+    pub org_group: Option<&'a [String]>,
+    pub area: Option<&'a str>,
+}
+
+/// The three delivery arms (spec §9.2) — the ONLY home of this fragment.
+/// Composed AFTER `entry_eligibility_where` (temporal first, band second).
+/// Area names and entity ids come from the owner's config, so NOTHING here
+/// is inlined: the `id_filter` inline-literal precedent does NOT transfer
+/// (an inlined `o'reilly` would be a SQL syntax error) — every value travels
+/// as a named `:band_N` binding, returned alongside the fragment for the
+/// caller to bind in BOTH execute branches of [`gated_entries`].
+/// Post-merge errata candidate: spec §9.2 pins a bare `String` return; the
+/// named-bind return pair is the plan-rev-8 governing form.
+pub fn band_predicate_where(bindings: &BandBindings, has_area: bool) -> (String, Vec<(String, rusqlite::types::Value)>) {
+    debug_assert!(
+        !bindings.repo_group.is_empty(),
+        "repo_group is never empty — the resolver's survivor+cluster expansion guarantees at least one id"
+    );
+    if bindings.repo_group.is_empty() {
+        // Degenerate guard: an empty IN () is invalid SQL; nothing is in the
+        // band, so match nothing.
+        return (" AND 1=0".to_string(), Vec::new());
+    }
+    let mut params: Vec<(String, rusqlite::types::Value)> = Vec::new();
+    let mut arms: Vec<String> = Vec::new();
+    let repo_in = {
+        let mut names: Vec<String> = Vec::new();
+        for (i, id) in bindings.repo_group.iter().enumerate() {
+            let name = format!(":band_repo_{i}");
+            names.push(name.clone());
+            params.push((name, rusqlite::types::Value::Text(id.clone())));
+        }
+        format!("e.entity_id IN ({})", names.join(", "))
+    };
+    // Area arm — OMITTED when no area resolved (§9.4).
+    if let Some(area) = bindings.area.filter(|_| has_area) {
+        arms.push(format!("({repo_in} AND e.area = :band_area)"));
+        params.push((
+            ":band_area".to_string(),
+            rusqlite::types::Value::Text(area.to_string()),
+        ));
+    }
+    // Repo arm: whole-repo facts only (area NULL).
+    //
+    // Pre-V30 degraded shape (`has_area == false`): the `area` column does
+    // not exist, so both `e.area = :band_area` and `e.area IS NULL` would
+    // fail `conn.prepare` with the opaque "no such column: area" — the
+    // forbidden outcome. Degrade, never error: matches this file's
+    // never-dark degraded-shape pattern (pre-V24/27/28). Every row is
+    // whole-repo by definition on that shape, so the IS NULL qualifiers are
+    // dropped too while the repo/org arms and their named binds keep the
+    // SCOPED scoping meaningful on a stale brain.
+    arms.push(if has_area {
+        format!("({repo_in} AND e.area IS NULL)")
+    } else {
+        format!("({repo_in})")
+    });
+    // Org arm — OMITTED when no org group (same §9.4 rule).
+    if let Some(org) = bindings.org_group {
+        let mut names: Vec<String> = Vec::new();
+        for (i, id) in org.iter().enumerate() {
+            let name = format!(":band_org_{i}");
+            names.push(name.clone());
+            params.push((name, rusqlite::types::Value::Text(id.clone())));
+        }
+        arms.push(if has_area {
+            format!("(e.entity_id IN ({}) AND e.area IS NULL)", names.join(", "))
+        } else {
+            format!("(e.entity_id IN ({}))", names.join(", "))
+        });
+    }
+    (format!(" AND ({})", arms.join(" OR ")), params)
+}
 
 /// THE shared eligibility predicate (spec §3.2): ONE WHERE fragment consumed
 /// by `gated_entries` AND the stage-1 candidate/complement queries in
@@ -527,6 +634,7 @@ fn gated_entries(
     temporal: &Temporal,
     id_filter: Option<&[String]>,
     provenance_filter: Option<&[&str]>,
+    bindings: Option<&BandBindings>,
 ) -> Result<Vec<WisdomItem>> {
     // THE shared eligibility predicate (spec §3.2) — the same fragment
     // `eligible_entry_ids` (and Task 3's stage-1 SQL) consumes, so the v1
@@ -544,6 +652,13 @@ fn gated_entries(
         " WHERE {scheme_filter}",
     );
     let sql = sql.replacen("{scheme_filter}", "", 1);
+    // V30 (PR #352 Task 1): the area column rides on the SELECT only when
+    // the table carries it — pre-V30 degraded shapes keep today's SQL.
+    let sql = if temporal.has_area {
+        sql.replacen("e.embedding_blob", "e.embedding_blob, e.area", 1)
+    } else {
+        sql
+    };
     let mut sql = format!("{sql}{}", entry_eligibility_where(temporal));
     if let Some(ids) = id_filter {
         if ids.is_empty() {
@@ -559,8 +674,24 @@ fn gated_entries(
             .join(",");
         sql.push_str(&format!(" AND e.id IN ({list})"));
     }
+    // The band predicate composes AFTER the temporal eligibility fragment
+    // (§9.2 accepted composition order) — SCOPED calls only; UNSCOPED calls
+    // (bindings None) run today's SQL shape exactly.
+    let band_params: Option<Vec<(String, rusqlite::types::Value)>> = match bindings {
+        Some(b) => {
+            let (fragment, params) = band_predicate_where(b, temporal.has_area);
+            sql.push_str(&fragment);
+            Some(params)
+        }
+        None => None,
+    };
     let mut stmt = conn.prepare(&sql)?;
     let mapper = |r: &rusqlite::Row<'_>| -> rusqlite::Result<CandidateRow> {
+        let area = if temporal.has_area {
+            r.get(6)?
+        } else {
+            None
+        };
         Ok((
             r.get(0)?,
             r.get(1)?,
@@ -568,22 +699,44 @@ fn gated_entries(
             r.get(3)?,
             r.get(4)?,
             r.get(5)?,
+            area,
         ))
     };
-    let rows: Vec<rusqlite::Result<CandidateRow>> =
-        if temporal.has_superseded_by || temporal.has_valid_to {
-            // The shared fragment's temporal arms reference :now (possibly
-            // twice in the SQL — one named binding covers both occurrences).
-            stmt.query_map(rusqlite::named_params! { ":now": now_ms }, mapper)?
-                .collect()
-        } else {
-            stmt.query_map([], mapper)?.collect()
-        };
+    // The named `:band_N` bindings must be bound in BOTH execute branches:
+    // a bare `?` bound in one branch only is a runtime parameter-count error
+    // on the SCOPED call, invisible to every byte pin (tier-3 r5 M1).
+    let mut named_params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+    if temporal.has_superseded_by || temporal.has_valid_to {
+        named_params.push((":now", &now_ms));
+    }
+    if let Some(bp) = &band_params {
+        for (name, value) in bp {
+            named_params.push((name.as_str(), value));
+        }
+    }
+    let rows: Vec<rusqlite::Result<CandidateRow>> = if !named_params.is_empty() {
+        stmt.query_map(&named_params[..], mapper)?.collect()
+    } else {
+        stmt.query_map([], mapper)?.collect()
+    };
 
     let dim = query_vec.len();
     let mut scored: Vec<(f32, WisdomItem)> = Vec::new();
+    // Band-membership sets, built once per call (§17 gate-5 m3: the band is
+    // the bound group the row's entity_id falls in). Corrections are NOT
+    // banded — they never pass through this loop.
+    let band_lookup: Option<(
+        HashSet<&str>,
+        Option<HashSet<&str>>,
+    )> = bindings.map(|b| {
+        (
+            b.repo_group.iter().map(String::as_str).collect(),
+            b.org_group
+                .map(|g| g.iter().map(String::as_str).collect()),
+        )
+    });
     for row in rows {
-        let (id, entity_id, title, body, source_type, blob) = match row {
+        let (id, entity_id, title, body, source_type, blob, row_area) = match row {
             Ok(row) => row,
             Err(e) => {
                 // One malformed row never fails the call (rank_wiki_entries rule).
@@ -594,6 +747,29 @@ fn gated_entries(
         if skip.contains(&id) {
             continue;
         }
+        let (band, area_out): (Option<String>, Option<String>) =
+            match (&band_lookup, entity_id.as_str(), row_area.as_deref()) {
+                // Matched-area row → area band carrying the name (§10.3).
+                (Some((repo, _)), eid, Some(a)) if repo.contains(eid) => {
+                    (Some("area".to_string()), Some(a.to_string()))
+                }
+                // Whole-repo row → repo band, no area.
+                (Some((repo, _)), eid, _) if repo.contains(eid) => (Some("repo".to_string()), None),
+                // Org row → org band, no area.
+                (Some((_, Some(org))), eid, _) if org.contains(eid) => {
+                    (Some("org".to_string()), None)
+                }
+                // Unreachable under `bindings: Some` — the SQL guarantees
+                // membership in one of the band arms. The arm stays so the
+                // UNSCOPED path (band_lookup None) keeps its (None, None).
+                _ => {
+                    debug_assert!(
+                        band_lookup.is_none(),
+                        "SCOPED row fell out of every band arm — predicate/assignment drifted"
+                    );
+                    (None, None)
+                }
+            };
         let (Some(title), Some(body), Some(blob)) = (title, body, blob) else {
             continue;
         };
@@ -626,6 +802,8 @@ fn gated_entries(
                 score: Some(raw),
                 supersedes: Vec::new(),
                 provenance: provenance_for(source_type.as_deref()),
+                band,
+                area: area_out,
             },
         ));
     }
@@ -757,6 +935,7 @@ pub fn two_stage_entries(
     now_ms: i64,
     profile_key: &str,
     kind: QueryKind,
+    bindings: Option<&BandBindings>,
 ) -> Result<TwoStageResult> {
     let max = max.min(MAX_ENTRIES);
     let k = two_stage_k(profile_key);
@@ -912,6 +1091,7 @@ pub fn two_stage_entries(
                 &temporal,
                 Some(&restricted),
                 provenance_filter,
+                bindings,
             )?;
             let best = scored
                 .iter()
@@ -956,6 +1136,7 @@ pub fn two_stage_entries(
                         &temporal,
                         Some(&ids),
                         provenance_filter,
+                        bindings,
                     )?;
                     (scored, Some(best_member.score))
                 }
@@ -980,6 +1161,7 @@ pub fn two_stage_entries(
             &temporal,
             Some(&complement),
             provenance_filter,
+            bindings,
         )?;
         // Counts complement rows ABOVE the v1 floor BEFORE the final
         // truncate(max) — i.e. the raw merge yield, not the shipped count.
@@ -1235,6 +1417,7 @@ pub fn wisdom_match_two_stage_with_v1(
     now_ms: i64,
     profile_key: &str,
     kind: QueryKind,
+    bindings: Option<&BandBindings>,
 ) -> Result<TwoStageRun> {
     // Site 3 of the resolution chain (spec rev-8 M1 — the OPPOSITE of moot):
     // the base key carries the kind's `:activity` suffix, which (a) makes
@@ -1301,6 +1484,7 @@ pub fn wisdom_match_two_stage_with_v1(
         now_ms,
         profile_key,
         kind,
+        bindings,
     )?;
     let ran = outcome.rule.is_some();
     debug_assert!(
@@ -1326,6 +1510,7 @@ pub fn wisdom_match_two_stage_with_v1(
             max,
             exclude,
             now_ms,
+            bindings,
         )?;
         return Ok(TwoStageRun {
             result: v1_result,
@@ -1471,6 +1656,8 @@ fn load_item(conn: &Connection, id: &str) -> Result<Option<WisdomItem>> {
             score: None,
             supersedes: Vec::new(),
             provenance: provenance_for(source_type.as_deref()),
+            band: None,
+            area: None,
         })
     }))
 }
@@ -1607,6 +1794,367 @@ mod tests {
     fn run(conn: &Connection, floor: Option<f32>, max: usize, exclude: &[&str]) -> WisdomMatch {
         let exclude: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
         wisdom_match_with_floor(conn, &Q, KEY, Scheme::Raw, floor, max, &exclude, NOW).unwrap()
+    }
+
+    // ===================== Task 4: band predicate (§9/§10) =====================
+
+    fn seed_area(conn: &Connection, id: &str, entity_id: &str, area: Option<&str>, v: &[f32]) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, area, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES (?1, ?2, ?3, ?4, ?5, '[]', 'inferred', 'librarian_inferred',
+                       NULL, NULL, 100, 100, NULL, 0, NULL, ?6, NULL)",
+            params![
+                id,
+                entity_id,
+                area,
+                format!("T {id}"),
+                format!("B {id}"),
+                blob(v)
+            ],
+        )
+        .unwrap();
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn repo_bindings<'a>(
+        repo: &'a [String],
+        org: Option<&'a [String]>,
+        area: Option<&'a str>,
+    ) -> BandBindings<'a> {
+        BandBindings {
+            repo_group: repo,
+            org_group: org,
+            area,
+        }
+    }
+
+    fn param_names(p: &[(String, rusqlite::types::Value)]) -> Vec<&str> {
+        p.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    #[test]
+    fn band_predicate_where_binds_all_three_arms() {
+        let repo = strings(&["r1", "r2"]);
+        let org = strings(&["o1"]);
+        let b = repo_bindings(&repo, Some(&org), Some("auth"));
+        let (sql, params) = band_predicate_where(&b, true);
+        // The fragment composes AFTER the eligibility predicate — it must
+        // anchor itself for AND-composition.
+        assert!(sql.starts_with(" AND ("), "fragment: {sql}");
+        assert_eq!(sql.matches("e.area IS NULL").count(), 2);
+        assert!(sql.contains("e.area = :band_area"));
+        assert!(sql.contains(":band_repo_0"));
+        assert!(sql.contains(":band_org_0"));
+        let names = param_names(&params);
+        assert!(names.contains(&":band_area"));
+        assert!(names.contains(&":band_repo_0"));
+        assert!(names.contains(&":band_repo_1"));
+        assert!(names.contains(&":band_org_0"));
+        for (n, v) in &params {
+            if n == ":band_area" {
+                assert_eq!(*v, rusqlite::types::Value::Text("auth".into()));
+            }
+        }
+    }
+
+    #[test]
+    fn band_predicate_degraded_shape_omits_area_column_entirely() {
+        // Pre-V30 shape (`has_area == false`): no `e.area` reference of any
+        // kind may reach the SQL — the column does not exist and the opaque
+        // prepare error is the forbidden outcome. The area arm is omitted
+        // and the IS NULL qualifiers drop; the repo/org arms keep their
+        // named binds so SCOPED scoping stays meaningful.
+        let repo = strings(&["r1"]);
+        let org = strings(&["o1"]);
+        let b = repo_bindings(&repo, Some(&org), Some("auth"));
+        let (sql, params) = band_predicate_where(&b, false);
+        assert!(!sql.contains("e.area"), "degraded fragment: {sql}");
+        assert!(!param_names(&params).contains(&":band_area"));
+        assert!(sql.contains(":band_repo_0"));
+        assert!(sql.contains(":band_org_0"));
+    }
+
+    #[test]
+    fn band_predicate_area_arm_omitted_when_area_none() {
+        let repo = strings(&["r1"]);
+        let org = strings(&["o1"]);
+        let b = repo_bindings(&repo, Some(&org), None);
+        let (sql, params) = band_predicate_where(&b, true);
+        // §9.4: no area resolved → the area arm is OMITTED, not bound to NULL.
+        assert!(!sql.contains(":band_area"));
+        assert!(!param_names(&params).contains(&":band_area"));
+        assert_eq!(sql.matches("e.area IS NULL").count(), 2);
+    }
+
+    #[test]
+    fn band_predicate_org_arm_omitted_when_org_group_none() {
+        let repo = strings(&["r1"]);
+        let b = repo_bindings(&repo, None, None);
+        let (sql, params) = band_predicate_where(&b, true);
+        // Same omission rule (§9.4) for the org arm.
+        assert!(!sql.contains(":band_org"));
+        assert!(!param_names(&params).iter().any(|n| n.starts_with(":band_org")));
+        assert_eq!(sql.matches("e.area IS NULL").count(), 1);
+    }
+
+    #[test]
+    fn band_predicate_quote_bearing_area_name_is_bound_not_inlined() {
+        let repo = strings(&["r1"]);
+        let b = repo_bindings(&repo, None, Some("o'reilly"));
+        let (sql, params) = band_predicate_where(&b, true);
+        // The id_filter inline-literal precedent does NOT transfer: an
+        // inlined `o'reilly` is a SQL syntax error. The name travels as a
+        // named binding.
+        assert!(!sql.contains("o'reilly"), "name must never be inlined: {sql}");
+        assert!(sql.contains("= :band_area"));
+        assert!(params.iter().any(|(n, v)| n == ":band_area"
+            && *v == rusqlite::types::Value::Text("o'reilly".into())));
+        // Behavioral: the quote-bearing name matches through a real query.
+        let conn = open_in_memory().unwrap();
+        seed_area(&conn, "q1", "r1", Some("o'reilly"), &Q);
+        let temporal = temporal_columns(&conn, Some(Scheme::Raw)).unwrap();
+        let gated = gated_entries(
+            &conn,
+            &Q,
+            Some(0.0),
+            10,
+            &HashSet::new(),
+            NOW,
+            &temporal,
+            None,
+            None,
+            Some(&b),
+        )
+        .unwrap();
+        assert_eq!(gated.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["q1"]);
+    }
+
+    #[test]
+    fn scoped_gated_entries_three_arms_and_band_values() {
+        let conn = open_in_memory().unwrap();
+        // Area-band row (repo entity, matched area), repo-band row (repo
+        // entity, area NULL), org-band row, and a foreign-repo row that must
+        // be excluded by the hub binding (§9.1).
+        seed_area(&conn, "a1", "ent-repo", Some("auth"), &Q);
+        seed_area(&conn, "a2", "ent-repo", None, &Q);
+        seed_area(&conn, "a3", "ent-org", None, &Q);
+        seed_area(&conn, "a4", "ent-other", Some("auth"), &Q);
+        let repo = strings(&["ent-repo"]);
+        let org = strings(&["ent-org"]);
+        let b = repo_bindings(&repo, Some(&org), Some("auth"));
+        let temporal = temporal_columns(&conn, Some(Scheme::Raw)).unwrap();
+        let gated = gated_entries(
+            &conn,
+            &Q,
+            Some(0.0),
+            10,
+            &HashSet::new(),
+            NOW,
+            &temporal,
+            None,
+            None,
+            Some(&b),
+        )
+        .unwrap();
+        let by_id: std::collections::HashMap<String, &WisdomItem> =
+            gated.iter().map(|e| (e.id.clone(), e)).collect();
+        assert_eq!(by_id.len(), 3, "the foreign-repo row must not match");
+        let a1 = by_id.get("a1").unwrap();
+        assert_eq!(a1.band.as_deref(), Some("area"));
+        assert_eq!(a1.area.as_deref(), Some("auth"));
+        let a2 = by_id.get("a2").unwrap();
+        assert_eq!(a2.band.as_deref(), Some("repo"));
+        assert!(a2.area.is_none());
+        let a3 = by_id.get("a3").unwrap();
+        assert_eq!(a3.band.as_deref(), Some("org"));
+        assert!(a3.area.is_none());
+        // §10.2: `area` is absent (skip_serializing_if) on non-area bands.
+        let bytes = serde_json::to_string(a2).unwrap();
+        assert!(bytes.contains("\"band\":\"repo\""));
+        assert!(!bytes.contains("\"area\""), "repo-band item: {bytes}");
+    }
+
+    #[test]
+    fn scoped_gated_entries_on_pre_v30_shape_degrades_to_whole_repo() {
+        // Pre-V30 (V29) brain: the `area` column does not exist. The SCOPED
+        // path must degrade like the file's other degraded shapes
+        // (pre-V24/27/28): the SELECT already omits `e.area` via
+        // `temporal.has_area`, so the band predicate must NOT reference the
+        // column either — the opaque "no such column: area" prepare error is
+        // the forbidden outcome. Every surviving row is whole-repo by
+        // definition on that shape, so the `e.area IS NULL` qualifiers are
+        // dropped along with the area arm; the repo/org arms and their named
+        // binds keep working.
+        let conn = open_in_memory().unwrap();
+        seed_area(&conn, "v29", "ent-repo", Some("auth"), &Q);
+        // Rewind to the V29 shape (drop-column pattern of
+        // tests/db_migration_v30_area.rs).
+        conn.execute("ALTER TABLE llm_wiki_entries DROP COLUMN area", [])
+            .unwrap();
+        let temporal = temporal_columns(&conn, Some(Scheme::Raw)).unwrap();
+        assert!(
+            !temporal.has_area,
+            "fixture must be pre-V30 (no area column)"
+        );
+        let repo = strings(&["ent-repo"]);
+        let org = strings(&["ent-org"]);
+        let b = repo_bindings(&repo, Some(&org), Some("auth"));
+        let gated = gated_entries(
+            &conn,
+            &Q,
+            Some(0.0),
+            10,
+            &HashSet::new(),
+            NOW,
+            &temporal,
+            None,
+            None,
+            Some(&b),
+        )
+        .expect("SCOPED on a pre-V30 shape must degrade, never error");
+        assert_eq!(gated.len(), 1, "the whole-repo fact must be returned");
+        assert_eq!(gated[0].id, "v29");
+        assert_eq!(gated[0].band.as_deref(), Some("repo"));
+        assert!(gated[0].area.is_none());
+        // No `band: "area"` item is possible on the degraded shape.
+        assert!(gated.iter().all(|e| e.band.as_deref() != Some("area")));
+    }
+
+    #[test]
+    fn scoped_cross_repo_same_name_areas_do_not_cross_match() {
+        // §9.1: an area name is only a label inside its repo group — the same
+        // name on another repo's entity must never match.
+        let conn = open_in_memory().unwrap();
+        seed_area(&conn, "mine", "ent-repo", Some("auth"), &Q);
+        seed_area(&conn, "theirs", "ent-B", Some("auth"), &Q);
+        let repo = strings(&["ent-repo"]);
+        let b = repo_bindings(&repo, None, Some("auth"));
+        let temporal = temporal_columns(&conn, Some(Scheme::Raw)).unwrap();
+        let gated = gated_entries(
+            &conn,
+            &Q,
+            Some(0.0),
+            10,
+            &HashSet::new(),
+            NOW,
+            &temporal,
+            None,
+            None,
+            Some(&b),
+        )
+        .unwrap();
+        assert_eq!(gated.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["mine"]);
+    }
+
+    #[test]
+    fn scoped_merge_group_membership_survivor_and_loser_both_match() {
+        // §9.2 merge-group binding: a cluster holds facts on BOTH ids (merges
+        // never move facts), so the bound group is survivor + merged-away ids.
+        let conn = open_in_memory().unwrap();
+        seed_area(&conn, "on-survivor", "survivor", None, &Q);
+        seed_area(&conn, "on-loser", "loser", None, &Q);
+        let repo = strings(&["survivor", "loser"]);
+        let b = repo_bindings(&repo, None, None);
+        let temporal = temporal_columns(&conn, Some(Scheme::Raw)).unwrap();
+        let gated = gated_entries(
+            &conn,
+            &Q,
+            Some(0.0),
+            10,
+            &HashSet::new(),
+            NOW,
+            &temporal,
+            None,
+            None,
+            Some(&b),
+        )
+        .unwrap();
+        let mut ids: Vec<&str> = gated.iter().map(|e| e.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["on-loser", "on-survivor"]);
+        assert!(gated.iter().all(|e| e.band.as_deref() == Some("repo")));
+    }
+
+    #[test]
+    fn scoped_corrections_are_band_independent() {
+        // §9.6: corrections flow from `find_corrections` (exclude-driven),
+        // never through the band predicate — with bindings present the
+        // superseded fact's replacement is still delivered, band-less.
+        let conn = open_in_memory().unwrap();
+        seed_area(&conn, "old", "ent-repo", Some("auth"), &at(0.9));
+        seed_area(&conn, "live", "ent-repo", Some("auth"), &Q);
+        supersede(&conn, "old", "live");
+        let repo = strings(&["ent-repo"]);
+        let b = repo_bindings(&repo, None, Some("auth"));
+        // The qwen key carries a RAW floor (0.70): the Q-aligned blob's
+        // cosine 1.0 clears it, so the entries side actually scans — and the
+        // band predicate still sees the excluded superseded fact's head.
+        let m = wisdom_match_in_scheme(
+            &conn,
+            &Q,
+            KEY_EXT,
+            Scheme::Raw,
+            10,
+            &["old".to_string()],
+            NOW,
+            Some(&b),
+        )
+        .unwrap();
+        assert_eq!(
+            m.corrections.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["live"]
+        );
+        for c in &m.corrections {
+            assert!(c.band.is_none() && c.area.is_none(), "§10.3: corrections carry neither");
+            let bytes = serde_json::to_string(c).unwrap();
+            assert!(!bytes.contains("\"band\"") && !bytes.contains("\"area\""), "{bytes}");
+        }
+        // The entries side still respects the band predicate AND "one id,
+        // one list": the correction head `live` is skipped from entries —
+        // it is delivered ONLY as a correction (§9.6 band-independence),
+        // and the excluded `old` never enters either list.
+        assert!(m.entries.is_empty(), "entries: {:?}", m.entries);
+    }
+
+    #[test]
+    fn scoped_predicate_is_provenance_blind() {
+        // §9.7: two fixtures differing ONLY in `source_type` produce
+        // identical SCOPED output (CT#344).
+        let scoped = |source_type: &str| {
+            let conn = open_in_memory().unwrap();
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, area, title, body, tags, confidence, source_type,
+                    created_at, updated_at, embedding_blob
+                 ) VALUES ('p1', 'ent-repo', 'auth', 'T', 'B', '[]', 'inferred', ?1,
+                           100, 100, ?2)",
+                params![source_type, blob(&Q)],
+            )
+            .unwrap();
+            let repo = strings(&["ent-repo"]);
+            let b = repo_bindings(&repo, None, Some("auth"));
+            let m = wisdom_match_in_scheme(
+                &conn,
+                &Q,
+                KEY,
+                Scheme::Raw,
+                10,
+                &[],
+                NOW,
+                Some(&b),
+            )
+            .unwrap();
+            serde_json::to_string(&m).unwrap()
+        };
+        let a = scoped("librarian_inferred");
+        let b = scoped("user_stated");
+        assert_eq!(a, b);
     }
 
     fn ids(items: &[WisdomItem]) -> Vec<&str> {
@@ -2015,7 +2563,8 @@ mod tests {
         .unwrap();
         // The caller resolved raw; the meta has since flipped to instr1.
         set_active_scheme(&conn, "instr1");
-        let m = wisdom_match_in_scheme(&conn, &Q, KEY_EXT, Scheme::Raw, 5, &[], NOW).unwrap();
+        let m =
+            wisdom_match_in_scheme(&conn, &Q, KEY_EXT, Scheme::Raw, 5, &[], NOW, None).unwrap();
         assert_eq!(ids(&m.entries), vec!["raw_row"]);
         assert_eq!(m.gate, format!("semantic-v1:{KEY_EXT}"));
         let m =
@@ -2116,6 +2665,7 @@ mod tests {
             &temporal,
             None,
             None,
+            None,
         )
         .unwrap();
         let gated_ids: HashSet<String> = gated.iter().map(|e| e.id.clone()).collect();
@@ -2158,7 +2708,8 @@ mod tests {
         assert_eq!(after_skip, vec!["b".to_string()]);
         // v1 path with the same oversize skip set:
         let gated =
-            gated_entries(&conn, &Q, Some(0.0), 10, &skip, NOW, &temporal, None, None).unwrap();
+            gated_entries(&conn, &Q, Some(0.0), 10, &skip, NOW, &temporal, None, None, None)
+            .unwrap();
         assert_eq!(
             gated.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
             vec!["b".to_string()]
@@ -2207,6 +2758,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
+            None,
         )
         .unwrap()
     }
@@ -2303,6 +2855,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
+            None,
         )
         .unwrap();
         assert!(
@@ -2339,6 +2892,7 @@ mod tests {
             TS_NOW,
             "external:never-calibrated-model",
             QueryKind::Message,
+            None,
         )
         .unwrap();
         assert!(!run.ran);
@@ -2379,6 +2933,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
+            None,
         )
         .unwrap();
         assert!(
@@ -2636,6 +3191,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
@@ -2772,6 +3328,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
+            None,
         )
         .unwrap();
         // Parity: v1's corrections shape == the two-stage caller's contract —
@@ -2871,6 +3428,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
@@ -2904,6 +3462,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
+            None,
         )
         .unwrap();
         assert!(run.ran, "stub activity composite + full coverage ⇒ ran");
@@ -2922,6 +3481,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
+            None,
         )
         .unwrap();
         assert_eq!(msg.result.gate, format!("{TWO_STAGE_LABEL_PREFIX}{TS_KEY}"));
@@ -2953,6 +3513,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
+            None,
         )
         .unwrap();
         assert!(!run.ran);
@@ -2985,6 +3546,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
@@ -3009,6 +3571,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Message,
+            None,
         )
         .unwrap();
         assert_eq!(msg_outcome.rule, Some(TwoStageRule::ChunkHop));
@@ -3067,6 +3630,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.rule, Some(TwoStageRule::ChunkHop));
@@ -3127,6 +3691,7 @@ mod tests {
             TS_NOW,
             TS_KEY,
             QueryKind::Activity,
+            None,
         )
         .unwrap()
         .result;

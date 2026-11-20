@@ -15,8 +15,32 @@ impl Drop for StubUnset {
 }
 
 fn run_pipeline_job(tmp: &TempDir, jobs: Vec<PipelineJob>) {
+    run_pipeline_job_with_count_file(tmp, jobs, None)
+}
+
+/// The embed-count file env is set ONLY while the stub guard is held: the
+/// env var is process-wide, so a sibling test running in parallel would
+/// otherwise append ITS embed calls to the caller's count file between the
+/// two pipeline legs (pre-existing flake: `n_after` read 4/5 vs `n_seed` 3
+/// with default test parallelism; reproduced on origin/main at 35a51810).
+fn run_pipeline_job_with_count_file(
+    tmp: &TempDir,
+    jobs: Vec<PipelineJob>,
+    count_file: Option<&std::path::Path>,
+) {
     let _stub_lock = PIPELINE_STUB_GUARD.lock().unwrap();
     std::env::set_var("CURATED_EMBED_STUB", "constant8");
+    struct CountFileUnset;
+    impl Drop for CountFileUnset {
+        fn drop(&mut self) {
+            std::env::remove_var("CURATED_EMBED_COUNT_FILE");
+        }
+    }
+    match count_file {
+        Some(p) => std::env::set_var("CURATED_EMBED_COUNT_FILE", p.to_string_lossy().as_ref()),
+        None => std::env::remove_var("CURATED_EMBED_COUNT_FILE"),
+    }
+    let _count_file_cleanup = CountFileUnset;
     let _stub_cleanup = StubUnset;
 
     // make_test_app opens the DB (running migrations), then drops it immediately.
@@ -310,18 +334,16 @@ fn unforced_edit_that_only_removes_chunks_skips_the_embed_round_trip() {
     std::fs::write(&doc, two_fns).unwrap();
     let path = doc.to_string_lossy().to_string();
 
-    // SAFETY: single-threaded stub section (PIPELINE_STUB_GUARD held inside
-    // run_pipeline_job per call); the count file is unique to this test.
-    std::env::set_var("CURATED_EMBED_COUNT_FILE", counts.to_str().unwrap());
-    struct CountUnset;
-    impl Drop for CountUnset {
-        fn drop(&mut self) {
-            std::env::remove_var("CURATED_EMBED_COUNT_FILE");
-        }
-    }
-    let _count_cleanup = CountUnset;
-
-    run_pipeline_job(&tmp, vec![PipelineJob::ingest(path.clone())]);
+    // Task 11 review fix: the count-file env is set INSIDE the stub guard
+    // (run_pipeline_job_with_count_file) — process-wide env set across the
+    // whole test body let a parallel sibling's embed calls append extra
+    // lines between the two legs (flake: n_after 4/5 vs n_seed 3).
+    let counts_path = counts.clone();
+    run_pipeline_job_with_count_file(
+        &tmp,
+        vec![PipelineJob::ingest(path.clone())],
+        Some(&counts_path),
+    );
     let n_seed = std::fs::read_to_string(&counts)
         .unwrap_or_default()
         .lines()
@@ -336,7 +358,11 @@ fn unforced_edit_that_only_removes_chunks_skips_the_embed_round_trip() {
     // Remove beta (and its call-site ref chunk); alpha is byte-identical ⇒
     // every surviving chunk is KEPT ⇒ need_embed is empty.
     std::fs::write(&doc, one_fn).unwrap();
-    run_pipeline_job(&tmp, vec![PipelineJob::ingest(path.clone())]);
+    run_pipeline_job_with_count_file(
+        &tmp,
+        vec![PipelineJob::ingest(path.clone())],
+        Some(&counts_path),
+    );
 
     let n_after = std::fs::read_to_string(&counts)
         .unwrap_or_default()

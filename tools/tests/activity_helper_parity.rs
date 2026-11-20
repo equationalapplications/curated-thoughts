@@ -65,12 +65,13 @@ fn helper_v1_arm_equals_the_direct_call_on_identical_inputs() {
             now,
             false, // v1 arm
             true,  // json (printing goes to test stdout; the return is the contract)
+            None,  // UNSCOPED (the parity contract pins the UNSCOPED bytes)
         )
         .unwrap();
         assert!(outcome.is_none(), "v1 arm carries no two-stage outcome");
 
         let direct =
-            wm::wisdom_match_in_scheme(&conn, &schemed, &key, read_scheme, 2, &[], now).unwrap();
+            wm::wisdom_match_in_scheme(&conn, &schemed, &key, read_scheme, 2, &[], now, None).unwrap();
         assert_eq!(
             helper, direct,
             "the helper's returned match must equal the direct call on the same inputs"
@@ -108,6 +109,7 @@ fn helper_two_stage_arm_equals_the_direct_call_on_identical_inputs() {
             now,
             true,
             true,
+            None, // UNSCOPED (the parity contract pins the UNSCOPED bytes)
         )
         .unwrap();
 
@@ -121,6 +123,7 @@ fn helper_two_stage_arm_equals_the_direct_call_on_identical_inputs() {
             now,
             &key,
             wm::QueryKind::Message,
+            None,
         )
         .unwrap();
         assert_eq!(helper, direct.result);

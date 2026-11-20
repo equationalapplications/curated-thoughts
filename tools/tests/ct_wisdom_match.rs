@@ -525,3 +525,419 @@ fn activity_delivery_emits_nothing_when_disabled() {
         );
     });
 }
+
+// ── SCOPED CLI wiring (spec 2026-11-14-areas §9.3 remainder, plan Task 5)
+// ──────────────────────────────────────────────────────────────────────────
+// Every assertion here runs against a SPAWNED `ct` binary: diagnostics are
+// DATA in the lib; the CLI prints them on stderr, and stderr assertions need
+// a real process (tier-3 r3 MAJOR-3).
+
+/// Scoped-match stderr diagnostics use the `print_gate_decision` house form:
+/// ONE tab-separated line per diagnostic, `wisdom_scoped_diagnostic` token,
+/// reason as the single field (the pinned `wisdom_gate_decision` line's
+/// token + four fields shape is tripwire-cron contract and must NOT grow).
+fn scoped_diagnostic_lines(out: &std::process::Output) -> Vec<String> {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("wisdom_scoped_diagnostic\t"))
+        .map(|l| l.split('\t').skip(1).collect::<Vec<_>>().join("\t"))
+        .collect()
+}
+
+fn entry_ids(v: &serde_json::Value) -> Vec<String> {
+    v["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn seeded_fact_with_entity(id: &str, entity_id: &str, area: Option<&str>) {
+    let mut v = [0f32; 8];
+    v[0] = 1.0;
+    let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+    brain_db()
+        .execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, area, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding
+             ) VALUES (?1, ?2, ?3, ?4, ?5, '[]', 'inferred', 'librarian_inferred',
+                       NULL, NULL, 100, 100, NULL, 0, NULL, ?6, NULL)",
+            params![
+                id,
+                entity_id,
+                area,
+                format!("Title {id}"),
+                format!("Body {id}"),
+                blob
+            ],
+        )
+        .unwrap();
+}
+
+fn seed_entity(id: &str) {
+    brain_db()
+        .execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1, ?1, 'repo', '', 100, 100)",
+            params![id],
+        )
+        .unwrap();
+}
+
+/// The scoped fixture: a real checkout dir with `.ct-areas.yaml`
+/// (`auth: ["src/auth/**"]`), live `hub-1` + `other-1` entities, facts in
+/// the auth area / whole-repo / foreign repo — and the brain's config.json
+/// rewritten with the `wisdom` block pointing at the areas file.
+/// `org` chooses the configured `org_entity_id` (live `org-1`, a dead id,
+/// or absent → no org band configured).
+fn with_scoped_brain<F: FnOnce(&std::path::Path)>(org: Option<&str>, f: F) {
+    with_seeded_brain(|| {
+        let brain_dir = std::env::var("CURATED_BRAIN_DIR").unwrap();
+        // tempdir(): the fixture checkout drops with the closure (m1 — no
+        // `ct-scoped-fixture-*` leakage under the system temp dir).
+        let checkout_tmp = tempfile::tempdir().unwrap();
+        let checkout = checkout_tmp.path();
+        std::fs::create_dir_all(checkout.join("src/auth")).unwrap();
+        std::fs::create_dir_all(checkout.join("docs")).unwrap();
+        std::fs::write(
+            checkout.join(".ct-areas.yaml"),
+            "areas:\n  auth:\n    - \"src/auth/**\"\n",
+        )
+        .unwrap();
+        seed_entity("hub-1");
+        seed_entity("other-1");
+        if org == Some("org-1") {
+            seed_entity("org-1");
+        }
+        seeded_fact_with_entity("fact_area", "hub-1", Some("auth"));
+        seeded_fact_with_entity("fact_repo", "hub-1", None);
+        seeded_fact_with_entity("fact_foreign", "other-1", None);
+        let areas_file = checkout.join(".ct-areas.yaml");
+        // json!-built config (m2): entity-id keys are literals, paths are
+        // VALUES — no display()-splicing quoting/backslash hazards.
+        let mut areas_paths = serde_json::Map::new();
+        areas_paths.insert(
+            "hub-1".to_string(),
+            serde_json::Value::String(areas_file.display().to_string()),
+        );
+        let mut wisdom = serde_json::Map::new();
+        wisdom.insert(
+            "areas_paths".to_string(),
+            serde_json::Value::Object(areas_paths),
+        );
+        if let Some(id) = org {
+            wisdom.insert(
+                "org_entity_id".to_string(),
+                serde_json::Value::String(id.to_string()),
+            );
+        }
+        let config =
+            serde_json::json!({ "wisdom": serde_json::Value::Object(wisdom) }).to_string();
+        std::fs::write(
+            std::path::Path::new(&brain_dir).join("config.json"),
+            config,
+        )
+        .unwrap();
+        f(checkout);
+    });
+}
+
+/// The §9.3 SCOPED hit: a `--path=` under the configured checkout matching a
+/// glob returns ONLY the matching-area + whole-repo facts of the bound group
+/// — the foreign repo's fact is band-excluded, the area-band item carries
+/// `band:"area"` + the area name, the whole-repo item `band:"repo"`.
+#[test]
+fn scoped_query_returns_only_matching_area_and_whole_repo_facts() {
+    with_scoped_brain(Some("org-1"), |checkout| {
+        let p = checkout.join("src/auth/login.rs");
+        let out = run_ct(&[
+            "wisdom",
+            "match",
+            "--json",
+            "--max",
+            "10",
+            &format!("--path={}", p.display()),
+        ]);
+        let v = json_of(&out);
+        let mut ids = entry_ids(&v);
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["fact_area".to_string(), "fact_repo".to_string()],
+            "scoped band: {v}"
+        );
+        let entries = v["entries"].as_array().unwrap();
+        let area_item = entries.iter().find(|e| e["id"] == "fact_area").unwrap();
+        assert_eq!(area_item["band"], "area");
+        assert_eq!(area_item["area"], "auth");
+        let repo_item = entries.iter().find(|e| e["id"] == "fact_repo").unwrap();
+        assert_eq!(repo_item["band"], "repo");
+        // Healthy resolution: NO diagnostic lines on stderr.
+        assert!(
+            scoped_diagnostic_lines(&out).is_empty(),
+            "stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    });
+}
+
+/// No `--path=` → UNSCOPED bytes: even with the wisdom block configured, the
+/// message call returns the foreign repo's facts too (no band predicate).
+#[test]
+fn no_path_stays_byte_identical_unscoped_with_configured_block() {
+    with_scoped_brain(Some("org-1"), |checkout| {
+        let _ = checkout;
+        let v = json_of(&run_ct(&["wisdom", "match", "--json", "--max", "10", "--", "how do I deploy"]));
+        let mut ids = entry_ids(&v);
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "fact_area".to_string(),
+                "fact_foreign".to_string(),
+                "fact_repo".to_string()
+            ],
+            "no --path must never band-filter: {v}"
+        );
+    });
+}
+
+/// §9.8 UNSCOPED fence (the NEW pin): `--path=` OUTSIDE every configured
+/// checkout → the query stays BYTE-IDENTICAL UNSCOPED — foreign facts
+/// deliver, no scoped diagnostic, exit 0.
+#[test]
+fn path_outside_every_checkout_stays_unscoped() {
+    with_scoped_brain(Some("org-1"), |_checkout| {
+        let outside = std::env::temp_dir().join("ct-not-a-checkout/src/main.rs");
+        let out = run_ct(&[
+            "wisdom",
+            "match",
+            "--json",
+            "--max",
+            "10",
+            &format!("--path={}", outside.display()),
+        ]);
+        let v = json_of(&out);
+        let mut ids = entry_ids(&v);
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "fact_area".to_string(),
+                "fact_foreign".to_string(),
+                "fact_repo".to_string()
+            ],
+            "§9.8: no prefix → byte-identical UNSCOPED: {v}"
+        );
+        assert!(scoped_diagnostic_lines(&out).is_empty());
+    });
+}
+
+/// §4.4 no-pattern case (tier-3 r2 n2): `--path=` INSIDE the configured
+/// checkout matching NO glob → area `None`, the area arm is OMITTED — only
+/// the whole-repo band matches (repo+org bands only). The auth-area fact
+/// does NOT cross-match; the foreign repo stays excluded.
+#[test]
+fn path_with_no_matching_glob_omits_the_area_arm() {
+    with_scoped_brain(Some("org-1"), |checkout| {
+        let p = checkout.join("docs/readme.md");
+        let v = json_of(&run_ct(&[
+            "wisdom",
+            "match",
+            "--json",
+            "--max",
+            "10",
+            &format!("--path={}", p.display()),
+        ]));
+        assert_eq!(
+            entry_ids(&v),
+            vec!["fact_repo".to_string()],
+            "area None → area facts excluded, whole-repo only: {v}"
+        );
+        assert_eq!(v["entries"][0]["band"], "repo");
+        assert!(
+            v["entries"][0].get("area").is_none(),
+            "§10.2: area field absent when no area resolved"
+        );
+    });
+}
+
+/// Tier-3 r3 MAJOR-3 (Unresolved print path): a same-survivor collision
+/// between two configured keys → the resolver's reason is PRINTED LOUDLY on
+/// stderr in the house form, and the query proceeds BYTE-IDENTICAL UNSCOPED
+/// (all facts deliver — §3.3 "loudly" is the printed reason, not a
+/// different query).
+#[test]
+fn collision_unresolved_reason_is_printed_loudly_and_query_stays_unscoped() {
+    with_scoped_brain(None, |checkout| {
+        // §3.3 same-survivor collision: a SECOND key in a DIFFERENT
+        // directory (two keys on one file would trip Task 2's load-time
+        // duplicate-directory drop instead) whose entity is MERGED into
+        // hub-1 — both configured keys chain-resolve to survivor hub-1.
+        let brain_dir = std::env::var("CURATED_BRAIN_DIR").unwrap();
+        seed_entity("hub-2");
+        brain_db()
+            .execute(
+                "INSERT INTO entity_redirects (entity_id, merged_into, created_at) VALUES ('hub-2', 'hub-1', '100')",
+                [],
+            )
+            .unwrap();
+        // tempdir(): the collision fixture checkout drops with the closure
+        // (m1 — no `ct-scoped-fixture-*` leakage under the system temp dir).
+        let checkout2_tmp = tempfile::tempdir().unwrap();
+        let checkout2 = checkout2_tmp.path();
+        let af2 = checkout2.join(".ct-areas.yaml");
+        std::fs::write(&af2, "areas:\n  deploy:\n    - \"infra/**\"\n").unwrap();
+        let af = checkout.join(".ct-areas.yaml");
+        // json!-built config (m2): no display()-splicing quoting hazards.
+        let config = serde_json::json!({
+            "wisdom": {
+                "areas_paths": {
+                    "hub-1": af.display().to_string(),
+                    "hub-2": af2.display().to_string()
+                }
+            }
+        })
+        .to_string();
+        std::fs::write(
+            std::path::Path::new(&brain_dir).join("config.json"),
+            config,
+        )
+        .unwrap();
+        let p = checkout.join("src/auth/login.rs");
+        let out = run_ct(&[
+            "wisdom",
+            "match",
+            "--json",
+            "--max",
+            "10",
+            &format!("--path={}", p.display()),
+        ]);
+        let v = json_of(&out);
+        let lines = scoped_diagnostic_lines(&out);
+        assert_eq!(
+            lines.len(),
+            1,
+            "exactly one loud diagnostic; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            lines[0].contains("same-survivor collision") && lines[0].contains("hub-1") && lines[0].contains("hub-2"),
+            "reason must name the collision: {lines:?}"
+        );
+        // Query bytes unchanged: the call proceeds UNSCOPED.
+        let mut ids = entry_ids(&v);
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "fact_area".to_string(),
+                "fact_foreign".to_string(),
+                "fact_repo".to_string()
+            ],
+            "Unresolved → byte-identical UNSCOPED call: {v}"
+        );
+    });
+}
+
+/// Fix-round-1 MAJOR-1 (controller ruling): the load-side duplicate-directory
+/// drop fails the WHOLE wisdom block closed at config-parse time — the
+/// resolver never sees it, so the CLI must print the load report's
+/// diagnostics ITSELF. TWO configured keys on the SAME areas file trip the
+/// drop (config/mod.rs duplicate-directory guard); the spawned `ct` call
+/// with `--path=` inside the checkout must print EXACTLY ONE diagnostic
+/// line naming the drop, and the query must stay BYTE-IDENTICAL UNSCOPED
+/// (all facts deliver).
+#[test]
+fn load_time_duplicate_directory_drop_is_printed_loudly_and_query_stays_unscoped() {
+    with_scoped_brain(None, |checkout| {
+        // Rewrite the brain's config.json with BOTH keys on the SAME areas
+        // file (json!-built: no display()-splicing quoting hazards).
+        let brain_dir = std::env::var("CURATED_BRAIN_DIR").unwrap();
+        let af = checkout.join(".ct-areas.yaml");
+        let config = serde_json::json!({
+            "wisdom": {
+                "areas_paths": {
+                    "hub-1": af.display().to_string(),
+                    "hub-2": af.display().to_string()
+                }
+            }
+        })
+        .to_string();
+        std::fs::write(
+            std::path::Path::new(&brain_dir).join("config.json"),
+            config,
+        )
+        .unwrap();
+        let p = checkout.join("src/auth/login.rs");
+        let out = run_ct(&[
+            "wisdom",
+            "match",
+            "--json",
+            "--max",
+            "10",
+            &format!("--path={}", p.display()),
+        ]);
+        let v = json_of(&out);
+        let lines = scoped_diagnostic_lines(&out);
+        assert_eq!(
+            lines.len(),
+            1,
+            "exactly ONE load-side diagnostic; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            lines[0].contains("duplicate areas-file directory"),
+            "reason must name the duplicate-directory drop: {lines:?}"
+        );
+        // Query bytes unchanged: the call proceeds UNSCOPED.
+        let mut ids = entry_ids(&v);
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "fact_area".to_string(),
+                "fact_foreign".to_string(),
+                "fact_repo".to_string()
+            ],
+            "fail-closed drop → byte-identical UNSCOPED call: {v}"
+        );
+    });
+}
+
+/// Org-omission diagnostic (tier-3 r3 MAJOR-3): `org_entity_id` configured
+/// but dead → the org arm is omitted AND its diagnostic line is printed;
+/// the SCOPED results still deliver.
+#[test]
+fn org_omission_diagnostic_is_printed_and_scoped_results_deliver() {
+    with_scoped_brain(Some("org-dead"), |checkout| {
+        let p = checkout.join("src/auth/login.rs");
+        let out = run_ct(&[
+            "wisdom",
+            "match",
+            "--json",
+            "--max",
+            "10",
+            &format!("--path={}", p.display()),
+        ]);
+        let v = json_of(&out);
+        let lines = scoped_diagnostic_lines(&out);
+        assert_eq!(
+            lines.len(),
+            1,
+            "org-omission must print one diagnostic; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            lines[0].contains("org hub org-dead unresolvable; org band omitted"),
+            "{lines:?}"
+        );
+        let mut ids = entry_ids(&v);
+        ids.sort();
+        assert_eq!(ids, vec!["fact_area".to_string(), "fact_repo".to_string()]);
+    });
+}

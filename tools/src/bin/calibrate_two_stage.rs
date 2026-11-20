@@ -1250,6 +1250,8 @@ pub fn score_entries(
                 score: Some(raw),
                 supersedes: Vec::new(),
                 provenance: provenance_for(source_type.as_deref()),
+                band: None,
+                area: None,
             },
         ));
     }
@@ -1659,6 +1661,7 @@ fn main() -> Result<()> {
             HIT_K,
             &[],
             now,
+            None,
         )?;
         ss_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         let open = !ss.entries.is_empty();
@@ -1686,6 +1689,7 @@ fn main() -> Result<()> {
                     now,
                     &profile_key,
                     kind,
+                    None,
                 )?;
                 (
                     entries,

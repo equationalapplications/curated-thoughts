@@ -393,6 +393,11 @@ enum WisdomCmd {
         /// Optional tags (repeatable).
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// Optional ABSOLUTE path of the checkout this deposit concerns;
+        /// resolved against the configured wisdom.areas_paths roots and
+        /// rendered as a `hub:` frontmatter key. Relative paths are refused.
+        #[arg(long = "repo-path")]
+        repo_path: Option<String>,
         /// Confirm the write.
         #[arg(long)]
         yes: bool,
@@ -476,6 +481,31 @@ enum WisdomCmd {
     Scheme {
         #[command(subcommand)]
         cmd: SchemeCmd,
+    },
+    /// Areas administration (spec 2026-11-14-areas §12): rename.
+    Areas {
+        #[command(subcommand)]
+        cmd: AreasCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AreasCmd {
+    /// Rename an area across the hub's merge group, through the commit/outbox
+    /// path (spec §12). Dry-run preview by default; `--yes` executes.
+    Rename {
+        /// The hub's entity id, named DIRECTLY by its configured
+        /// `wisdom.areas_paths` key (owner ruling 2026-11-16). No --path
+        /// resolution on a write.
+        #[arg(long)]
+        hub: String,
+        /// The area name to rename FROM.
+        old: String,
+        /// The area name to rename TO — must be defined by the hub's areas file.
+        new: String,
+        /// Execute the rename. Without it: read-only preview.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -582,12 +612,20 @@ fn wisdom_deposit_cmd(
     title: &str,
     body: &str,
     tags: &[String],
+    repo_path: Option<&str>,
     yes: bool,
 ) -> Result<i32> {
     use tauri_app_lib::wisdom_deposit::{
         dispatch_wisdom_deposit_awaiting_kick, WisdomDepositParams,
     };
     require_yes(yes, "wisdom deposit")?;
+    // §6.8.2: absolutize a given --repo-path against the cwd (pure string
+    // operation); there is NO cwd default — the param either comes or it
+    // doesn't, and the door maps a missing param to `hub_reason: "absent"`.
+    let repo_path = repo_path
+        .map(std::path::absolute)
+        .transpose()?
+        .map(|p| p.to_string_lossy().into_owned());
     let (ctx, _paths) = wisdom_ctx()?;
     let v = block_on(dispatch_wisdom_deposit_awaiting_kick(
         &ctx,
@@ -597,6 +635,7 @@ fn wisdom_deposit_cmd(
             body: body.to_string(),
             tags: (!tags.is_empty()).then(|| tags.to_vec()),
             attribution: None,
+            repo_path,
         },
     ))?;
     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
@@ -792,8 +831,9 @@ fn run(cmd: Cmd) -> Result<i32> {
                 title,
                 body,
                 tags,
+                repo_path,
                 yes,
-            } => wisdom_deposit_cmd(&path, &title, &body, &tags, yes),
+            } => wisdom_deposit_cmd(&path, &title, &body, &tags, repo_path.as_deref(), yes),
             WisdomCmd::Status { path, json } => wisdom_status_cmd(&path, json),
             WisdomCmd::ProposeSupersession {
                 target_ref,
@@ -851,8 +891,11 @@ fn run(cmd: Cmd) -> Result<i32> {
                 }
                 // Map the activity kinds to their bare target (passed
                 // through VERBATIM — no normalization, no quoting repair).
-                let (kind, target) = if let Some(t) = path {
-                    (tauri_app_lib::wisdom_match::QueryKind::Activity, t)
+                // the SCOPED resolver consumes `--path=` verbatim, so the
+                // activity-kind match borrows it and the call hands the
+                // owned value over afterwards.
+                let (kind, target) = if let Some(t) = path.as_deref() {
+                    (tauri_app_lib::wisdom_match::QueryKind::Activity, t.to_owned())
                 } else if let Some(t) = command {
                     (tauri_app_lib::wisdom_match::QueryKind::Activity, t)
                 } else if let Some(t) = pattern {
@@ -863,7 +906,7 @@ fn run(cmd: Cmd) -> Result<i32> {
                         text.join(" "),
                     )
                 };
-                cli_common::wisdom_match_cmd(&target, kind, max, &exclude, json, mode)
+                cli_common::wisdom_match_cmd(&target, kind, max, &exclude, json, mode, path.as_deref())
             }
             WisdomCmd::Scheme { cmd } => match cmd {
                 SchemeCmd::Status { json } => cli_common::wisdom_scheme_status_cmd(json),
@@ -872,6 +915,9 @@ fn run(cmd: Cmd) -> Result<i32> {
                 }
                 SchemeCmd::Activate { target } => cli_common::wisdom_scheme_activate_cmd(&target),
             },
+            WisdomCmd::Areas {
+                cmd: AreasCmd::Rename { hub, old, new, yes },
+            } => curated_thoughts_tools::cmds::wisdom_areas_rename_cmd(&hub, &old, &new, yes),
         },
         Cmd::Drift { json } => curated_thoughts_tools::drift::drift_cmd(json),
         Cmd::Reindex { cmd } => match cmd {

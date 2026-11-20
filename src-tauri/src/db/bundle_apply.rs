@@ -536,6 +536,9 @@ pub fn apply_import(
                     fact.generated_by.as_deref(),
                     fact.last_verified_at,
                     fact.last_verified_by.as_deref(),
+                    // §8.4: bundles carry no area — every bundle-applied fact
+                    // lands whole-repo (payload NULL, like the column).
+                    None,
                 ),
                 now_ms,
             )?;
@@ -783,7 +786,39 @@ pub fn apply_import(
     purge_dead_edges(&tx)?;
 
     tx.commit()?;
+
+    // §8.4: ONE loud summary line per import stating the bundle area posture.
+    // Emitted AFTER `tx.commit()?` (review round 1 M1): a failed commit rolls
+    // the import back and the operator must never read "N facts imported" for
+    // rows that do not exist. Routed through the db/ warn channel pattern
+    // (eprintln! non-feature + tracing under `mcp-server`, review round 1 m1)
+    // AND surfaced in `ImportResult.warnings` — GUI operators never see
+    // stdout, and JSON-RPC adjacency makes bare stdout writes hazardous.
+    let line = bundle_area_summary_line(result.facts_added);
+    emit_bundle_area_summary(&line);
+    result.warnings.push(line);
     Ok(result)
+}
+
+/// §8.4: the per-import summary line. Printed EXACTLY ONCE per `apply_import`
+/// (single call site, after the entity loop) so the operator sees the bundle
+/// area posture on every import: bundles carry no area; everything lands
+/// whole-repo regardless of the source host's scoping.
+pub(crate) fn bundle_area_summary_line(facts_added: i64) -> String {
+    format!("{facts_added} facts imported; bundles carry no area; all land whole-repo")
+}
+
+/// The db/ channel pattern (see `commit.rs::warn_source_ref_parse_error`):
+/// a `tracing` event under `mcp-server` (where a subscriber exists) and
+/// `eprintln!` in the Tauri build, which has none.
+#[cfg(feature = "mcp-server")]
+fn emit_bundle_area_summary(line: &str) {
+    tracing::info!(target: "ct::bundle_apply", "{line}");
+}
+
+#[cfg(not(feature = "mcp-server"))]
+fn emit_bundle_area_summary(line: &str) {
+    eprintln!("{line}");
 }
 
 fn ensure_entity(
@@ -1055,6 +1090,20 @@ mod tests {
         }
     }
 
+    /// §8.4: the summary line's exact wording is a pin — the rename task (Task
+    /// 9) and log scrapers lean on it.
+    #[test]
+    fn bundle_area_summary_line_wording_is_pinned() {
+        assert_eq!(
+            bundle_area_summary_line(3),
+            "3 facts imported; bundles carry no area; all land whole-repo"
+        );
+        assert_eq!(
+            bundle_area_summary_line(0),
+            "0 facts imported; bundles carry no area; all land whole-repo"
+        );
+    }
+
     #[test]
     fn merge_creates_entity_and_inserts_new_rows() {
         let mut conn = open_in_memory().unwrap();
@@ -1096,7 +1145,18 @@ mod tests {
         let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
 
         assert_eq!(result.edges_added, 1, "a live-to-live edge must be written");
-        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        // Review round 1 m1: the §8.4 summary line now rides `warnings`
+        // (exactly-once asserted in areas_outbox.rs); no OTHER warning here.
+        assert_eq!(
+            result.warnings.len(),
+            1,
+            "only the summary line expected: {:?}",
+            result.warnings
+        );
+        assert_eq!(
+            result.warnings[0],
+            bundle_area_summary_line(result.facts_added)
+        );
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM llm_wiki_edges
@@ -1593,9 +1653,10 @@ mod tests {
             crate::db::commit::librarian_source_ref_token("fact_1"),
             "an uppercase pseudo-token must be normalized, not stored verbatim"
         );
-        // The uppercase ref is not JSON, so nothing was salvageable — the
-        // drop must be surfaced as a warning, not silence.
-        assert_eq!(result.warnings.len(), 1);
+        // The uppercase ref is not JSON, so nothing was salvageable — the drop
+        // must be surfaced as a warning, not silence. (Plus the §8.4 summary
+        // line, which now rides warnings — review round 1 m1.)
+        assert_eq!(result.warnings.len(), 2);
     }
 
     #[test]
@@ -1615,7 +1676,7 @@ mod tests {
         assert_eq!(result.facts_added, 1);
         assert_eq!(
             result.warnings.len(),
-            1,
+            2, // the dropped-provenance warning + the §8.4 summary line (r1 m1)
             "the dropped provenance must be surfaced, not silently destroyed"
         );
         assert!(
@@ -1649,7 +1710,7 @@ mod tests {
 
         assert_eq!(
             result.warnings.len(),
-            1,
+            2, // the unsalvageable-null warning + the §8.4 summary line (r1 m1)
             "a JSON-null proposal_id is not salvageable"
         );
         let empty_pid_rows: i64 = conn

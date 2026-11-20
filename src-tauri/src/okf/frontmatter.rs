@@ -285,6 +285,26 @@ fn parse_scalar_value(raw: &str) -> OkfFrontmatterValue {
     OkfFrontmatterValue::String(trimmed.to_string())
 }
 
+/// Whether `raw`, rendered UNQUOTED as a frontmatter scalar value, parses
+/// back as a String (task-8 review quoting nit): `null`/bool literals and
+/// number-like values would be misread as non-string scalars, and a
+/// `: `-bearing value breaks single-key line parsing. Renderers MUST quote
+/// or refuse such values.
+pub(crate) fn renders_as_string_scalar(raw: &str) -> bool {
+    !raw.contains(": ")
+        // Gauntlet fix 7: a quote character would either terminate/shift the
+        // unquoted scalar (misparse) or leak into the emitted line; ANY
+        // whitespace (space, tab, newline) breaks the one-scalar-per-line
+        // invariant — the value would split the line or carry a stray
+        // newline into the file. Such values must be quoted or refused.
+        && !raw.contains(['\'', '"'])
+        && !raw.chars().any(char::is_whitespace)
+        && matches!(
+            parse_scalar_value(raw),
+            OkfFrontmatterValue::String(_)
+        )
+}
+
 /// Parse a single-level flow mapping `{ k: v, k2: v2 }` into a `String` holding the
 /// verbatim text (anchor/alias-safe). Returns `None` for malformed input.
 ///
@@ -550,6 +570,21 @@ pub fn parse_frontmatter(content: &str) -> (OkfFrontmatter, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Gauntlet fix 7: quote-bearing or whitespace-bearing values must NOT
+    /// count as unquoted-string-safe — they misparse or split the line.
+    #[test]
+    fn renders_as_string_scalar_rejects_quotes_and_whitespace() {
+        assert!(!renders_as_string_scalar("it's quoted"));
+        assert!(!renders_as_string_scalar("say \"hi\""));
+        assert!(!renders_as_string_scalar("has space"));
+        assert!(!renders_as_string_scalar("tab\there"));
+        assert!(!renders_as_string_scalar("line\nbreak"));
+        assert!(!renders_as_string_scalar(" trailing"));
+        // Plain tokens still pass.
+        assert!(renders_as_string_scalar("ent-hub-42"));
+        assert!(renders_as_string_scalar("under_score.dot"));
+    }
 
     #[test]
     fn round_trips_scalar_fields() {

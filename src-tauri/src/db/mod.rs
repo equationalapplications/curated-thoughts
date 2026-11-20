@@ -1,3 +1,4 @@
+pub mod areas_rename;
 pub mod breaker;
 pub mod bundle_apply;
 pub mod bundle_io;
