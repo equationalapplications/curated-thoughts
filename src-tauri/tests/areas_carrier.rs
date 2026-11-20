@@ -274,11 +274,42 @@ fn e2e_hub_only_render_reparses_and_librarian_resolves() {
             match landed {
                 Some(id) => break id,
                 None if std::time::Instant::now() < deadline => {
+                    // Surface the kick ledger: if the kick already FAILED, do
+                    // not burn the deadline — fail with the recorded error.
+                    let kick = {
+                        let conn = ctx.conn.lock().unwrap();
+                        conn.query_row(
+                            "SELECT state, COALESCE(error, '') FROM deposit_kick_state \
+                              WHERE path = 'immutable-source-files/agents/hub_only.md'",
+                            [],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                        )
+                        .ok()
+                    };
+                    if let Some((state, error)) = kick {
+                        if state == "failed" {
+                            panic!("kick failed before the documents row landed: {error}");
+                        }
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                None => panic!(
-                    "deposit documents row never landed within 10s — kick ingest did not commit"
-                ),
+                None => {
+                    let kick = {
+                        let conn = ctx.conn.lock().unwrap();
+                        conn.query_row(
+                            "SELECT state, COALESCE(error, '') FROM deposit_kick_state \
+                              WHERE path = 'immutable-source-files/agents/hub_only.md'",
+                            [],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                        )
+                        .unwrap_or_else(|_| ("<no ledger row>".into(), String::new()))
+                    };
+                    let (state, error) = kick;
+                    panic!(
+                        "deposit documents row never landed within 10s — kick ledger state: \
+                         {state}: {error}"
+                    );
+                }
             }
         };
         // The row and its chunks commit together (one ingest transaction), so
