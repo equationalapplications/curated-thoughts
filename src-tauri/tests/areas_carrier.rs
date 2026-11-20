@@ -239,6 +239,35 @@ fn e2e_hub_only_render_reparses_and_librarian_resolves() {
         .unwrap();
         assert_eq!(v["hub"], "hub-a", "resolved survivor id in the reply");
 
+        // Dispatch-time forensics: llm_generation_configured() was evaluated
+        // inside the dispatch above and (on CI) came back false even though
+        // the same load succeeds seconds later. Print the state as seen at
+        // dispatch RETURN so the transient is pinned to a moment.
+        {
+            let brain_env =
+                std::env::var("CURATED_BRAIN_DIR").unwrap_or_else(|_| "<unset>".into());
+            let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+            let cfg_exists = paths.config_path.exists();
+            let load = match tauri_app_lib::config::BrainConfig::load_lenient(&paths) {
+                Ok(report) => format!(
+                    "Ok(provider_external={} external_url_set={} model_name={:?})",
+                    matches!(
+                        report.config.generation.provider,
+                        tauri_app_lib::inference::config::GenerationProviderKind::External
+                    ),
+                    report.config.generation.external_url.is_some(),
+                    report.config.generation.model_name,
+                ),
+                Err(e) => format!("Err({e:#})"),
+            };
+            println!(
+                "[forensics@dispatch-return] reply.kick={} CURATED_BRAIN_DIR={brain_env} \
+                 config_path={} exists={cfg_exists} load_lenient={load}",
+                v["kick"],
+                paths.config_path.display()
+            );
+        }
+
         let content = read_deposit_file(&vault, rel);
         assert!(
             content.starts_with(HUB_ONLY_PREFIX),
