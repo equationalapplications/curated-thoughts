@@ -31,6 +31,16 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
 
+    # Code signing (see docs/release-signing.md). Each switch is "true" only
+    # when its secrets are configured, so builds stay green (unsigned) until
+    # the Apple / Azure accounts exist. Signing runs only on tag builds.
+    # Each gate requires EVERY secret/variable its signing step consumes, so a
+    # partially configured repo degrades to a green unsigned build instead of
+    # failing a tag release mid-run (docs/release-signing.md promise).
+    env:
+      MAC_SIGNING: ${{ github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_PRIVATE_KEY != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER != '' }}
+      WIN_SIGNING: ${{ github.ref_type == 'tag' && secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_CLIENT_SECRET != '' && secrets.AZURE_TENANT_ID != '' && vars.AZURE_SIGNING_ENDPOINT != '' && vars.AZURE_SIGNING_ACCOUNT != '' && vars.AZURE_SIGNING_PROFILE != '' }}
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,6 +80,71 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: ". -> target"
+
+      # Imports the Developer ID Application cert into a throwaway keychain
+      # and exports APPLE_SIGNING_IDENTITY + the notarytool API key for both
+      # the ct CLI step and the Tauri bundler (which signs the app, the MCP
+      # sidecar, notarizes and staples). APPLE_CERTIFICATE is deliberately
+      # NOT passed to tauri-action, so there is exactly one keychain import.
+      - name: Import Apple signing certificate (macOS)
+        if: matrix.platform == 'macos-latest' && env.MAC_SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          CERT="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERT"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$CERT"
+          # `|| true` so a no-identity keychain reaches the explicit check
+          # below instead of set -e aborting first (xhigh finding).
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')" || true
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::no 'Developer ID Application' identity in APPLE_CERTIFICATE" >&2
+            exit 1
+          fi
+          KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$KEY_PATH"
+          {
+            echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+            echo "APPLE_API_KEY=$APPLE_API_KEY_ID"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+            echo "APPLE_API_KEY_PATH=$KEY_PATH"
+          } >> "$GITHUB_ENV"
+
+      # Installs the Azure Artifact Signing client and writes
+      # src-tauri/tauri.windows.conf.json, which Tauri merges automatically on
+      # Windows builds. The file exists only on signed CI runs, so unsigned and
+      # local builds never see a signCommand. Account/profile/endpoint are
+      # repository *variables* (not secret); credentials are secrets.
+      - name: Set up Windows code signing
+        if: matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true'
+        shell: bash
+        env:
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        run: |
+          set -euo pipefail
+          cargo install artifact-signing-cli --locked --version 0.12.0
+          jq -n \
+            --arg e "$AZURE_SIGNING_ENDPOINT" \
+            --arg a "$AZURE_SIGNING_ACCOUNT" \
+            --arg c "$AZURE_SIGNING_PROFILE" \
+            '{bundle: {windows: {signCommand: {cmd: "artifact-signing-cli", args: ["-e", $e, "-a", $a, "-c", $c, "-d", "Curated Thoughts", "%1"]}}}}' \
+            > src-tauri/tauri.windows.conf.json
+          cat src-tauri/tauri.windows.conf.json
 
       - name: Build MCP sidecar
         if: matrix.platform != 'macos-latest'
@@ -160,6 +235,11 @@ jobs:
         if: matrix.platform != 'macos-latest'
         id: ctbuild
         shell: bash
+        env:
+          # NOTE (xhigh): no signing secrets here — the ct step runs a cargo
+          # build whose build.rs scripts must never see AZURE_CLIENT_SECRET.
+          # Signing lives in the dedicated "Sign Windows ct CLI + MCP sidecar"
+          # step below.
         run: |
           set -euo pipefail
           cargo build --release -p curated-thoughts-tools --bin ct
@@ -174,7 +254,11 @@ jobs:
           # Spec :38-41 — every archive carries a short README alongside the binary.
           printf 'ct: the Curated Thoughts headless CLI. See the repo README for usage.\n' > README.txt
           if [ "${EXT}" = "zip" ]; then
-            pwsh -NoProfile -Command "Compress-Archive -Path '${TARGET_DIR}/release/ct.exe','README.txt' -DestinationPath '${ASSET}'"
+            # NO archive here (sonnet-high BLOCKER): ct.exe is signed by the
+            # NEXT step, and the zip must carry the SIGNED binary — packaging
+            # happens in "Package Windows ct CLI" after signing. Stage the
+            # README next to the exe for that step.
+            cp README.txt "${TARGET_DIR}/release/README.txt"
           else
             # Copy next to the binary so tar needs a single -C (OLDPWD is
             # unset under `set -u` when bash never cd'd — unbound-variable
@@ -182,6 +266,43 @@ jobs:
             cp README.txt "${TARGET_DIR}/release/README.txt"
             tar czf "${ASSET}" -C "${TARGET_DIR}/release" ct README.txt
           fi
+
+      - name: Sign Windows ct CLI + MCP sidecar
+        # Dedicated step so AZURE_CLIENT_SECRET exists only where signing
+        # happens (xhigh finding) — never in the cargo-build env above.
+        # The MCP sidecar is signed here, before Tauri bundles it, rather than
+        # relying on the bundler to sign externalBin entries.
+        if: matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true'
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        run: |
+          set -euo pipefail
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          artifact-signing-cli -e "$AZURE_SIGNING_ENDPOINT" -a "$AZURE_SIGNING_ACCOUNT" -c "$AZURE_SIGNING_PROFILE" \
+            -d "Curated Thoughts CLI" "${TARGET_DIR}/release/ct.exe"
+          artifact-signing-cli -e "$AZURE_SIGNING_ENDPOINT" -a "$AZURE_SIGNING_ACCOUNT" -c "$AZURE_SIGNING_PROFILE" \
+            -d "Curated Thoughts MCP server" \
+            src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe
+
+      - name: Package Windows ct CLI
+        # AFTER signing, so the zip carries the SIGNED ct.exe (sonnet-high
+        # BLOCKER: the old zip was built before the sign step and shipped the
+        # unsigned binary while the on-disk verify checked the signed one).
+        # Runs on unsigned runs too — packaging is not a signing concern.
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          ASSET="ct_${{ steps.ctver.outputs.version }}_windows_amd64.zip"
+          test -f "${TARGET_DIR}/release/README.txt"
+          pwsh -NoProfile -Command "Compress-Archive -Path '${TARGET_DIR}/release/ct.exe','${TARGET_DIR}/release/README.txt' -DestinationPath '${ASSET}'"
 
       - name: Build ct CLI (macOS universal)
         if: matrix.platform == 'macos-latest'
@@ -200,6 +321,17 @@ jobs:
           # Stage under the user-facing name so the archive unpacks to `ct`,
           # not `ct-universal` (spec: each archive holds the binary + README).
           cp "${TARGET_DIR}/ct-universal" "${TARGET_DIR}/ct"
+          if [ "${MAC_SIGNING}" = "true" ]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "${TARGET_DIR}/ct"
+            codesign --verify --strict --verbose=2 "${TARGET_DIR}/ct"
+            # A bare Mach-O cannot be stapled; notarizing it registers the
+            # ticket with Apple so Gatekeeper accepts it online.
+            ditto -c -k --keepParent "${TARGET_DIR}/ct" "${RUNNER_TEMP}/ct-notarize.zip"
+            xcrun notarytool submit "${RUNNER_TEMP}/ct-notarize.zip" \
+              --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" \
+              --issuer "$APPLE_API_ISSUER" --wait
+          fi
           ASSET="ct_${{ steps.ctver.outputs.version }}_macos_universal.tar.gz"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
           printf 'ct: the Curated Thoughts headless CLI. See the repo README for usage.\n' > "${TARGET_DIR}/README.txt"
@@ -220,14 +352,75 @@ jobs:
         if: github.ref_type == 'tag'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Used by signCommand on signed Windows runs only (see setup step);
+          # gated to the Windows leg (least privilege).
+          AZURE_CLIENT_ID: ${{ matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true' && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true' && secrets.AZURE_CLIENT_SECRET || '' }}
+          AZURE_TENANT_ID: ${{ matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true' && secrets.AZURE_TENANT_ID || '' }}
         with:
           tauriScript: pnpm tauri
           tagName: v__VERSION__
           releaseName: "Curated Thoughts v__VERSION__"
           releaseBody: "See the assets below to download and install this version."
-          releaseDraft: false
+          # Draft first: the release goes public only via the publish-release
+          # job AFTER every matrix leg built, verified, and uploaded — so a
+          # silently unsigned/invalid artifact fails the build and the release
+          # never goes public (docs/release-signing.md gate promise).
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Verify macOS signature and notarization
+        if: matrix.platform == 'macos-latest' && env.MAC_SIGNING == 'true'
+        run: |
+          set -euo pipefail
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          APP="$(find "$TARGET_DIR/universal-apple-darwin/release/bundle/macos" -maxdepth 1 -name '*.app' | head -1)"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          sidecar_info="$(codesign -dv "$APP/Contents/MacOS/curated-thoughts-mcp" 2>&1)"
+          grep -q 'Developer ID Application' <<<"$sidecar_info"
+          spctl --assess --type execute --verbose=2 "$APP"
+          xcrun stapler validate "$APP"
+          # The .dmg and the ct CLI are signed+notarized artifacts too
+          # (docs/release-signing.md table) — verify them, don't trust.
+          DMG="$(find "$TARGET_DIR/universal-apple-darwin/release/bundle/dmg" -maxdepth 1 -name '*.dmg' | head -1)"
+          test -n "$DMG"
+          # The bundler CODESIGNS the dmg but never staples it (tauri v2.12.5
+          # dmg/mod.rs) — the stapled ticket rides on the .app inside, which IS
+          # stapled before dmg creation (app.rs notarize()). `stapler validate`
+          # on the dmg would fail every signed release; verify sig+authority.
+          dmg_info="$(codesign -dv "$DMG" 2>&1)"
+          grep -q 'Developer ID Application' <<<"$dmg_info"
+          codesign --verify --strict --verbose=2 "$DMG"
+          # Bare Mach-O can never hold a staple — `stapler validate` would
+          # always fail (the ct build step notarizes via `notarytool submit
+          # --wait`, which IS the gate). Verify the signature + authority.
+          ct_info="$(codesign -dv "${TARGET_DIR}/ct" 2>&1)"
+          grep -q 'Developer ID Application' <<<"$ct_info"
+          codesign --verify --strict --verbose=2 "${TARGET_DIR}/ct"
+
+      - name: Verify Windows signatures
+        if: matrix.platform == 'windows-latest' && env.WIN_SIGNING == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $targetDir = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+          # Assert each expected artifact class actually exists — a wildcard
+          # with zero matches would otherwise check nothing and pass (xhigh).
+          $msi = Get-ChildItem "$targetDir/release/bundle/msi/*.msi"
+          if (-not $msi) { throw 'no MSI produced' }
+          $nsis = Get-ChildItem "$targetDir/release/bundle/nsis/*.exe"
+          if (-not $nsis) { throw 'no NSIS installer produced' }
+          $files = @($msi) + @($nsis) + @(Get-ChildItem "$targetDir/release/curated-thoughts.exe", "$targetDir/release/ct.exe", "src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe")
+          $bad = $files | Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' }
+          $files | ForEach-Object { "{0}: {1}" -f $_.Name, (Get-AuthenticodeSignature $_.FullName).Status }
+          if ($bad) { throw "Unsigned or invalid: $($bad.Name -join ', ')" }
+
+      - name: Cleanup signing material (macOS)
+        if: always() && matrix.platform == 'macos-latest'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/cert.p12"
 
       - name: Upload ct release asset
         if: github.ref_type == 'tag'
@@ -245,3 +438,22 @@ jobs:
           else
             gh release upload "$GITHUB_REF_NAME" "${{ steps.ctbuildmac.outputs.asset }}" --clobber
           fi
+
+  publish-release:
+    # The release is created as a DRAFT — by semantic-release (`draftRelease:
+    # true` in .releaserc.json) on the main release path, or by tauri-action
+    # (releaseDraft: true above) on a human-pushed tag — and flips to public
+    # only after EVERY matrix leg built, verified, and uploaded. A silently
+    # unsigned/invalid artifact fails its leg and the release stays draft
+    # (docs/release-signing.md gate promise). GITHUB_REF_NAME is the tag on
+    # this trigger, which is also the release tag.
+    needs: publish-tauri
+    if: github.ref_type == 'tag' && success()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
