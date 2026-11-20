@@ -252,14 +252,38 @@ fn e2e_hub_only_render_reparses_and_librarian_resolves() {
         // is bound to hub-a (resolved from the file's `hub:` line). The kick
         // stages the row under the canonical/virtual root key form (B1), so
         // match on the deposit file's name under the lane.
+        //
+        // The row materializes on the kick's own task, which is OBSERVED but
+        // not owned by this test — under CI runner load it can commit a beat
+        // after the await returns (CI 2026-11-20 rust-ubuntu+rust-macos:
+        // QueryReturnedNoRows here while the reply contract and file render
+        // above both passed; green in isolation locally every run). Poll the
+        // asserted condition with a bounded deadline instead of racing it;
+        // the test still fails hard if the row never lands.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let doc_id: i64 = loop {
+            let landed = {
+                let conn = ctx.conn.lock().unwrap();
+                conn.query_row(
+                    "SELECT id FROM documents WHERE path LIKE '%/immutable-source-files/agents/hub_only.md'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .ok()
+            };
+            match landed {
+                Some(id) => break id,
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                None => panic!(
+                    "deposit documents row never landed within 10s — kick ingest did not commit"
+                ),
+            }
+        };
+        // The row and its chunks commit together (one ingest transaction), so
+        // a fresh lock after the poll suffices for the chunk/entry reads.
         let conn = ctx.conn.lock().unwrap();
-        let doc_id: i64 = conn
-            .query_row(
-                "SELECT id FROM documents WHERE path LIKE '%/immutable-source-files/agents/hub_only.md'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("deposit documents row must exist");
         let chunk_texts: Vec<String> = {
             let mut stmt = conn
                 .prepare("SELECT chunk_text FROM chunks WHERE doc_id = ?1")
