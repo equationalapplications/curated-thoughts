@@ -1356,10 +1356,19 @@ fn write_synth_watermark(conn: &Connection, doc_id: i64, model: &str) -> Result<
 }
 
 pub(crate) fn llm_generation_configured() -> bool {
-    matches!(
-        build_llm_completer(&active_generation_model("llama3.2:3b")),
-        Ok(Some(_))
-    )
+    // The Err arm here is otherwise SILENT: active_generation_model prints
+    // its own load diagnostics, but a completer-build failure on the SECOND
+    // load would flip generation_configured to false with no trace at all
+    // (observed on CI 2026-11-20: deposits landed "no_ingest_host" while an
+    // identical load seconds later succeeded). Surface it.
+    match build_llm_completer(&active_generation_model("llama3.2:3b")) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(e) => {
+            eprintln!("[llm_generation_configured] completer build failed: {e:#}");
+            false
+        }
+    }
 }
 
 /// UNSCOPED completer seam: pre-areas signature, byte-identical behavior.
