@@ -942,7 +942,8 @@ fn resolve_repo_hub(
         if !crate::okf::frontmatter::renders_as_string_scalar(id) {
             bail!(
                 "hub id {id:?} cannot be rendered as an unquoted frontmatter scalar \
-                 (number-like, null/bool, or ': '-bearing) — refused at the door"
+                 (number-like, null/bool, ': '-bearing, quote-bearing, or \
+                 whitespace-bearing incl. line breaks) — refused at the door"
             );
         }
     }

@@ -22,7 +22,7 @@
 //! row describing nothing and could mask a wrong hub selection).
 
 use anyhow::{anyhow, bail, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::config::hub_resolver::{configured_survivors, detect_collision, live_survivor, load_areas_file};
 use crate::config::WisdomConfig;
@@ -48,6 +48,22 @@ pub struct AreasRenameReport {
 
 const AUDIT_CLIENT: &str = "ct-cli";
 const AUDIT_TOOL: &str = "wisdom_areas_rename";
+
+/// The rename's transaction discipline (coderabbit round-1 finding on the
+/// capture/update race): `execute=true` opens a BEGIN IMMEDIATE transaction —
+/// the write lock is taken at BEGIN, before ANY read, so the whole command
+/// (group resolution, capture, UPDATE, outbox, audit) runs under one
+/// transaction and concurrent writers serialize. `unchecked_transaction()`
+/// would NOT do this: it takes the connection's default behavior (DEFERRED),
+/// which holds the write lock only from the first write, leaving the read
+/// window unprotected. `execute=false` (dry run) opens nothing.
+fn open_write_tx(conn: &Connection, execute: bool) -> Result<Option<Transaction<'_>>> {
+    Ok(if execute {
+        Some(Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?)
+    } else {
+        None
+    })
+}
 
 /// Rename `old` → `new` across `hub_id`'s merge group. With `execute =
 /// false` this is a DRY RUN (§12.1 default): the preview is returned and
@@ -78,19 +94,33 @@ pub fn areas_rename(
         );
     };
 
+    // Coderabbit round-1 finding (areas_rename thread): on execute=true the
+    // WRITE transaction is opened BEFORE the merge-group resolution reads and
+    // stays open for the whole command — group reads + capture SELECT +
+    // UPDATE(by captured ids) + count check + outbox + audit all share ONE
+    // transaction, so a concurrent rename serializes at BEGIN IMMEDIATE and
+    // no rows can slip in between capture and rename. The transaction is
+    // BEGIN IMMEDIATE via `Transaction::new_unchecked` (NOT
+    // `unchecked_transaction`, which takes the connection's DEFAULT behavior
+    // — DEFERRED — and would hold the write lock only from the first write,
+    // leaving the read window unprotected). A dry run keeps the read-only
+    // autocommit path (no lock, nothing written).
+    let tx = open_write_tx(conn, execute)?;
+    let db: &Connection = tx.as_deref().unwrap_or(conn);
+
     // §3.3: a same-survivor collision fails the whole block closed (m2: the
     // ONE configured_survivors walk — no inline duplicate).
-    let survivors = configured_survivors(conn, cfg);
+    let survivors = configured_survivors(db, cfg);
     if let Some(reason) = detect_collision(&survivors) {
         bail!("rename refused: configured hubs collide: {reason}");
     }
 
     // Dead/unresolvable hub refuses (chain walk + liveness).
-    let hub_survivor = live_survivor(conn, hub_id)
+    let hub_survivor = live_survivor(db, hub_id)
         .map_err(|reason| anyhow!("rename refused: hub {hub_id} unresolvable: {reason}"))?;
 
     // The merge-group expansion (§12.2, gate-5 MAJOR-1).
-    let repo_group = cluster_ids(conn, &hub_survivor)?;
+    let repo_group = cluster_ids(db, &hub_survivor)?;
 
     // `new` must be defined by THIS hub's areas file (§12.1).
     let file = load_areas_file(areas_path)
@@ -111,15 +141,9 @@ pub fn areas_rename(
         );
     }
 
-    // The affected set, captured BEFORE the update so the payload re-SELECT
+    // The affected set, captured INSIDE the write transaction (execute) or on
+    // the read-only autocommit path (dry run) so the payload re-SELECT
     // iterates exactly the same rows.
-    //
-    // Gauntlet fix 4: on execute=true the WRITE transaction (BEGIN IMMEDIATE
-    // via `unchecked_transaction`) is opened BEFORE this capture and the
-    // capture SELECT runs INSIDE it — capture + UPDATE(by captured ids) +
-    // count check + outbox + audit all share one transaction, so no
-    // concurrent writer can slip rows in between capture and rename. A
-    // dry run keeps the read-only autocommit path (no lock, nothing written).
     let placeholders = in_placeholders(&repo_group);
     let capture = |c: &Connection| -> Result<Vec<String>> {
         let sql = format!(
@@ -135,11 +159,7 @@ pub fn areas_rename(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     };
-    let tx = if execute { Some(conn.unchecked_transaction()?) } else { None };
-    let ids = match tx.as_ref() {
-        Some(t) => capture(t)?,
-        None => capture(conn)?,
-    };
+    let ids = capture(db)?;
 
     // Documented choice: zero matching rows is a REFUSAL, not a success.
     // (On execute=true the just-opened transaction drops here and rolls
@@ -671,5 +691,47 @@ mod tests {
         assert_eq!(area_of("fact-b"), Some("old".into()), "rollback: fact-b untouched");
         assert_eq!(outbox_updates(&conn).len(), 0, "rollback stages no outbox rows");
         assert_eq!(audit_rows(&conn).len(), 0, "rollback writes no audit row");
+    }
+
+    /// Coderabbit round-1 finding mechanism pin: the execute path's
+    /// transaction is BEGIN IMMEDIATE — the write lock is held from BEGIN,
+    /// BEFORE any read — while the dry-run path takes no lock at all. While
+    /// the execute transaction is open, a second connection's write must
+    /// BUSY-timeout; with `execute=false` (or after commit) it must proceed.
+    #[test]
+    fn execute_holds_write_lock_from_begin_dry_run_takes_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("brain.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        conn.execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
+        let second = || {
+            let c = Connection::open(&db_path).unwrap();
+            c.busy_timeout(std::time::Duration::from_millis(50)).unwrap();
+            c
+        };
+
+        // Execute discipline: write lock held at BEGIN.
+        let tx = open_write_tx(&conn, true).unwrap().expect("execute opens a tx");
+        let err = second()
+            .execute("INSERT INTO t VALUES (1)", [])
+            .expect_err("second writer must BUSY while the IMMEDIATE tx is open");
+        assert!(
+            matches!(
+                &err,
+                rusqlite::Error::SqliteFailure(e, _)
+                    if e.code == rusqlite::ErrorCode::DatabaseBusy
+            ),
+            "expected DatabaseBusy, got: {err}"
+        );
+        tx.commit().unwrap();
+        second().execute("INSERT INTO t VALUES (2)", []).unwrap();
+
+        // Dry-run discipline: NO transaction, NO lock.
+        assert!(
+            open_write_tx(&conn, false).unwrap().is_none(),
+            "dry run must not open a transaction"
+        );
+        second().execute("INSERT INTO t VALUES (3)", []).unwrap();
     }
 }
