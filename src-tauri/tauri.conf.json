@@ -25,6 +25,8 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Equational Applications LLC",
+    "copyright": "Copyright © Equational Applications LLC",
     "externalBin": [
       "binaries/curated-thoughts-mcp"
     ],
