@@ -660,6 +660,18 @@ enum AdmitInternal {
     Held,
 }
 
+/// Test seam (plan Task 5 alias test): the type a proposed label lands as
+/// through the admit ladder against `vocab` (`None` = held).
+#[cfg(test)]
+pub(crate) fn admit_label_landing(vocab: &NodeVocabulary, label: &str) -> Option<String> {
+    match run_admit_ladder(vocab, Some(label)) {
+        AdmitInternal::Declared(t) => Some(t),
+        AdmitInternal::Aliased { landed_as, .. }
+        | AdmitInternal::DegradedToFallback { landed_as, .. } => Some(landed_as),
+        AdmitInternal::Held => None,
+    }
+}
+
 impl std::fmt::Debug for AdmitInternal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

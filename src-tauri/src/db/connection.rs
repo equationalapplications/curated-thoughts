@@ -861,10 +861,11 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // every open, stamp last gated on V22. NULL means whole-repo; legacy
     // rows keep NULL (no backfill).
     apply_v30_area_column(conn)?;
-    // sso9 migration step 1 (engine-9x PR-A plan Task 4): MERGE-refresh the
-    // stored 8.x EA manifests. Backed up, gated on V22 + exact stamp
-    // membership; skipped (unstamped) on in-memory opens.
-    apply_sso9_manifest_refresh(conn)?;
+    // sso9 migration steps 1+2 (engine-9x PR-A plan Tasks 4+5): MERGE-refresh
+    // the stored 8.x EA manifests, then re-type okf_type/edges. One backup,
+    // gated on V22 + exact stamp membership; skipped (unstamped) on in-memory
+    // opens.
+    apply_sso9_migrations(conn)?;
 
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
     // rev 4.1 §1/D4): the deposit file's frontmatter is authoritative; this
@@ -1417,8 +1418,35 @@ fn apply_v30_area_column(conn: &Connection) -> Result<()> {
 /// consts (V27 renumber precedent above).
 pub(crate) const SSO9_REFRESH_VERSION: i64 = 31;
 /// Slot of the sso9 okf_type/edge re-type step (plan Task 5).
-#[allow(dead_code)]
 pub(crate) const SSO9_RETYPE_VERSION: i64 = SSO9_REFRESH_VERSION + 1;
+
+/// The two slugs 9.x dropped, with the type each re-types to (spec §3).
+const SSO9_RETYPE_MAP: [(&str, &str); 2] = [("handoff", "decision"), ("session_recap", "lesson")];
+
+#[cfg(test)]
+thread_local! {
+    /// Captured `[ct::migrate]` log lines (census-log / backup-reuse tests).
+    static SSO9_LOG: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Test hook: runs after step 1's COMMIT, before the shape check.
+    static SSO9_AFTER_REFRESH_COMMIT: std::cell::RefCell<Option<Box<dyn Fn(&Connection)>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Test hook: runs after step 2's COMMIT, before post-commit verification.
+    static SSO9_AFTER_RETYPE_COMMIT: std::cell::RefCell<Option<Box<dyn Fn(&Connection)>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Test hook: replaces the backup-file deletion (deletion-failure test).
+    static SSO9_DELETE_OVERRIDE: std::cell::Cell<Option<fn(&Path) -> std::io::Result<()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Migration log line: stderr always; captured per-thread under `cfg(test)`.
+macro_rules! sso9_log {
+    ($($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        eprintln!("{line}");
+        #[cfg(test)]
+        SSO9_LOG.with(|l| l.borrow_mut().push(line));
+    }};
+}
 /// Free-space margin required on top of db + wal size before the backup (S2).
 const SSO9_BACKUP_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
 /// Tables whose row counts are compared source-vs-backup (S3 sanity check).
@@ -1497,7 +1525,7 @@ fn sso9_backup_before_migration(conn: &Connection, db_path: &Path) -> Result<std
     })();
     match result {
         Ok(summary) => {
-            eprintln!(
+            sso9_log!(
                 "[ct::migrate] sso9 backup ok: path={} sanity(source/backup) {summary}",
                 backup.display()
             );
@@ -1532,7 +1560,7 @@ fn sso9_census(conn: &Connection) -> Result<()> {
             RefreshPlan::Malformed(_) => malformed += 1,
         }
     }
-    eprintln!(
+    sso9_log!(
         "[ct::migrate] sso9 manifest census (dry pass, slot {SSO9_REFRESH_VERSION}): \
          total={total} eligible={eligible} foreign_or_untouched={untouched} malformed={malformed}"
     );
@@ -1543,11 +1571,11 @@ fn sso9_census(conn: &Connection) -> Result<()> {
 /// under the lock; MERGE-refresh every eligible manifest with a compare-and-
 /// swap UPDATE; stamp; `COMMIT` (any error → `ROLLBACK`). Idempotent: a
 /// refreshed manifest no longer passes the old-17 eligibility, so a re-run
-/// changes nothing. Returns the refreshed entity ids.
-fn run_sso9_refresh_txn(conn: &Connection) -> Result<Vec<String>> {
+/// changes nothing. Returns `(entity_id, new_json)` per refreshed manifest.
+fn run_sso9_refresh_txn(conn: &Connection) -> Result<Vec<(String, String)>> {
     use crate::db::entity_gate::{plan_sso9_manifest_refresh, RefreshPlan};
     conn.execute_batch("BEGIN IMMEDIATE;")?;
-    let applied = (|| -> Result<Vec<String>> {
+    let applied = (|| -> Result<Vec<(String, String)>> {
         if sso9_version_stamped(conn, SSO9_REFRESH_VERSION)? {
             return Ok(Vec::new());
         }
@@ -1564,7 +1592,7 @@ fn run_sso9_refresh_txn(conn: &Connection) -> Result<Vec<String>> {
                         "sso9 refresh: compare-and-swap changed {changed} rows for {entity_id}"
                     );
                 }
-                refreshed.push(entity_id);
+                refreshed.push((entity_id, new_json));
             }
         }
         conn.execute(
@@ -1585,24 +1613,497 @@ fn run_sso9_refresh_txn(conn: &Connection) -> Result<Vec<String>> {
     }
 }
 
-/// sso9 migration step 1 (plan Task 4): see the plan's §4b gate shape and §4c
-/// safety requirements S1–S7.
-fn apply_sso9_manifest_refresh(conn: &Connection) -> Result<()> {
+/// One edge row as the re-type step sees it.
+#[derive(Debug, Clone)]
+struct Sso9Edge {
+    id: String,
+    entity_id: String,
+    source_id: String,
+    target_id: String,
+    edge_type: String,
+}
+
+/// Every edge disposition, computed BEFORE any write (plan Task 5 §5b order
+/// rule: the Q4 resolver reads the OLD `entity_type`/`okf_type`).
+#[derive(Debug, Default)]
+struct Sso9EdgePlan {
+    /// Step 2: `handoffFor` → `about` (source in the snapshot, target type
+    /// `software_application` or `statement`).
+    remap: Vec<Sso9Edge>,
+    /// Step 3: `handoffFor` with a `service` target.
+    service_drop: Vec<Sso9Edge>,
+    /// Step 4: parent-family edges touching a re-typed row with an
+    /// undeclared re-typed shape.
+    parent_drop: Vec<Sso9Edge>,
+    /// Keep set: `about` → `organization` from a re-typed source.
+    kept_about_org: usize,
+    /// Step 5 / Q5: outside the spec's keep/drop lists — untouched, counted.
+    undispositioned: usize,
+    /// Census inputs.
+    handoff_for_by_target: std::collections::BTreeMap<String, usize>,
+    touching_by_type: std::collections::BTreeMap<String, usize>,
+}
+
+/// Step-2/3/4 dispositioned edges, captured by a pre-write SELECT, for the
+/// post-commit verification (c).
+#[derive(Debug, Default, Clone)]
+struct Sso9Dispositions {
+    /// Step 2: the (edge id, entity_id, source_id, target_id) tuple.
+    remapped: Vec<(String, String, String, String)>,
+    /// Steps 3 + 4: dropped edge ids.
+    dropped: Vec<String>,
+}
+
+fn sso9_in_slugs_sql() -> String {
+    let list: Vec<String> = SSO9_RETYPE_MAP.iter().map(|(f, _)| format!("'{f}'")).collect();
+    list.join(",")
+}
+
+/// Step 1 of the writes: the re-typed id set — entry ids AND curated-entity
+/// ids carrying a dropped slug (tombstones included in both).
+fn sso9_snapshot_ids(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let slugs = sso9_in_slugs_sql();
+    let sql = format!(
+        "SELECT id FROM llm_wiki_entries WHERE okf_type IN ({slugs})
+         UNION SELECT id FROM curated_entities WHERE entity_type IN ({slugs})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+    Ok(ids)
+}
+
+/// Q4 resolver: `llm_wiki_entries.okf_type` when the id names an entry, else
+/// `curated_entities.entity_type`, else unresolved (`None`). Lower-cased.
+fn sso9_resolve_type(
+    conn: &Connection,
+    cache: &mut std::collections::HashMap<String, Option<String>>,
+    id: &str,
+) -> Result<Option<String>> {
+    if let Some(hit) = cache.get(id) {
+        return Ok(hit.clone());
+    }
+    let entry: Option<Option<String>> = conn
+        .query_row(
+            "SELECT okf_type FROM llm_wiki_entries WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let resolved = match entry {
+        Some(t) => t,
+        None => conn
+            .query_row(
+                "SELECT entity_type FROM curated_entities WHERE id = ?1",
+                [id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten(),
+    }
+    .map(|t| t.trim().to_lowercase());
+    cache.insert(id.to_string(), resolved.clone());
+    Ok(resolved)
+}
+
+/// Classify every relevant edge (read-only). The captured sets ARE this
+/// pre-write SELECT's result (plan S2).
+fn sso9_plan_edges(
+    conn: &Connection,
+    snapshot: &std::collections::HashSet<String>,
+) -> Result<Sso9EdgePlan> {
+    let mut plan = Sso9EdgePlan::default();
+    let mut cache = std::collections::HashMap::new();
+    let mut stmt = conn
+        .prepare("SELECT id, entity_id, source_id, target_id, edge_type FROM llm_wiki_edges ORDER BY id")?;
+    let edges = stmt
+        .query_map([], |r| {
+            Ok(Sso9Edge {
+                id: r.get(0)?,
+                entity_id: r.get(1)?,
+                source_id: r.get(2)?,
+                target_id: r.get(3)?,
+                edge_type: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for e in edges {
+        let src_in = snapshot.contains(&e.source_id);
+        let touches = src_in || snapshot.contains(&e.target_id);
+        if touches {
+            *plan.touching_by_type.entry(e.edge_type.clone()).or_default() += 1;
+        }
+        if e.edge_type == "handoffFor" {
+            let tt = sso9_resolve_type(conn, &mut cache, &e.target_id)?;
+            *plan
+                .handoff_for_by_target
+                .entry(tt.clone().unwrap_or_else(|| "unresolved".into()))
+                .or_default() += 1;
+            match tt.as_deref() {
+                Some("service") => plan.service_drop.push(e),
+                Some("software_application") | Some("statement") if src_in => plan.remap.push(e),
+                _ => plan.undispositioned += 1,
+            }
+        } else if touches {
+            match e.edge_type.as_str() {
+                "author" | "publisher" | "supersedes" => plan.parent_drop.push(e),
+                "about" if src_in => {
+                    let tt = sso9_resolve_type(conn, &mut cache, &e.target_id)?;
+                    match tt.as_deref() {
+                        Some("person") | Some("place") | Some("event") => plan.parent_drop.push(e),
+                        Some("organization") => plan.kept_about_org += 1,
+                        _ => plan.undispositioned += 1,
+                    }
+                }
+                _ => plan.undispositioned += 1,
+            }
+        }
+    }
+    Ok(plan)
+}
+
+fn sso9_fmt_map(m: &std::collections::BTreeMap<String, usize>) -> String {
+    let parts: Vec<String> = m.iter().map(|(k, v)| format!("{k}:{v}")).collect();
+    format!("[{}]", parts.join(","))
+}
+
+/// S5 dry pass for step 2: every census count, one log line, no writes.
+fn sso9_retype_census(conn: &Connection) -> Result<()> {
+    let slugs = sso9_in_slugs_sql();
+    let mut parts: Vec<String> = Vec::new();
+    for (table, col, label) in [
+        ("llm_wiki_entries", "okf_type", "entries"),
+        ("llm_wiki_tasks", "okf_type", "tasks"),
+    ] {
+        for (slug, _) in SSO9_RETYPE_MAP {
+            for (state, pred) in [("live", "deleted_at IS NULL"), ("tombstoned", "deleted_at IS NOT NULL")] {
+                let n: i64 = conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1 AND {pred}"),
+                    [slug],
+                    |r| r.get(0),
+                )?;
+                parts.push(format!("{label}_{slug}_{state}={n}"));
+            }
+        }
+        let n: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {table}
+                  WHERE lower(trim({col})) IN ({slugs}) AND {col} NOT IN ({slugs})"
+            ),
+            [],
+            |r| r.get(0),
+        )?;
+        parts.push(format!("case_variant_{label}={n}"));
+    }
+    let n: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM curated_entities
+              WHERE lower(trim(entity_type)) IN ({slugs}) AND entity_type NOT IN ({slugs})"
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    parts.push(format!("case_variant_entities={n}"));
+    for (slug, _) in SSO9_RETYPE_MAP {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM curated_entities WHERE entity_type = ?1",
+            [slug],
+            |r| r.get(0),
+        )?;
+        parts.push(format!("entities_{slug}={n}"));
+    }
+    let snapshot = sso9_snapshot_ids(conn)?;
+    let plan = sso9_plan_edges(conn, &snapshot)?;
+    parts.push(format!("handoffFor_by_target={}", sso9_fmt_map(&plan.handoff_for_by_target)));
+    parts.push(format!("edges_touching_by_type={}", sso9_fmt_map(&plan.touching_by_type)));
+    parts.push(format!(
+        "planned_remap={} planned_service_drop={} planned_parent_family_drop={} \
+         kept_about_organization={} undispositioned={}",
+        plan.remap.len(),
+        plan.service_drop.len(),
+        plan.parent_drop.len(),
+        plan.kept_about_org,
+        plan.undispositioned
+    ));
+    let pending_types: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM curated_proposal_items
+          WHERE status = 'pending'
+            AND (payload LIKE '%\"handoff\"%' OR payload LIKE '%\"session_recap\"%')",
+        [],
+        |r| r.get(0),
+    )?;
+    let pending_edges: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM curated_proposal_items
+          WHERE status = 'pending' AND payload LIKE '%handoffFor%'",
+        [],
+        |r| r.get(0),
+    )?;
+    parts.push(format!(
+        "pending_proposal_items_with_dropped_types={pending_types} \
+         pending_proposal_items_with_handoffFor={pending_edges}"
+    ));
+    sso9_log!(
+        "[ct::migrate] sso9 retype census (dry pass, slot {SSO9_RETYPE_VERSION}): {}",
+        parts.join(" ")
+    );
+    Ok(())
+}
+
+/// Step 2 body (plan Task 5 §5b). One `BEGIN IMMEDIATE`; stamps N+1 only
+/// after N is stamped (re-checked under the lock). Returns `None` when it
+/// did not run (already stamped, or N unstamped), else the captured edge
+/// dispositions for the post-commit verification.
+fn run_sso9_retype_txn(conn: &Connection) -> Result<Option<Sso9Dispositions>> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let applied = (|| -> Result<Option<Sso9Dispositions>> {
+        if sso9_version_stamped(conn, SSO9_RETYPE_VERSION)? {
+            return Ok(None);
+        }
+        if !sso9_version_stamped(conn, SSO9_REFRESH_VERSION)? {
+            sso9_log!(
+                "[ct::migrate] sso9 retype (slot {SSO9_RETYPE_VERSION}) not run: \
+                 refresh slot {SSO9_REFRESH_VERSION} is not stamped"
+            );
+            return Ok(None);
+        }
+        // 1. snapshot + every disposition, BEFORE any rewrite.
+        let snapshot = sso9_snapshot_ids(conn)?;
+        let plan = sso9_plan_edges(conn, &snapshot)?;
+        let disp = Sso9Dispositions {
+            remapped: plan
+                .remap
+                .iter()
+                .map(|e| (e.id.clone(), e.entity_id.clone(), e.source_id.clone(), e.target_id.clone()))
+                .collect(),
+            dropped: plan
+                .service_drop
+                .iter()
+                .chain(plan.parent_drop.iter())
+                .map(|e| e.id.clone())
+                .collect(),
+        };
+        // 2. handoffFor → about (UPDATE OR IGNORE), then dedupe the losers
+        //    with the same per-id predicate.
+        let (mut remapped, mut deduped) = (0usize, 0usize);
+        for e in &plan.remap {
+            remapped += conn.execute(
+                "UPDATE OR IGNORE llm_wiki_edges SET edge_type = 'about'
+                  WHERE id = ?1 AND edge_type = 'handoffFor'",
+                [&e.id],
+            )?;
+            deduped += conn.execute(
+                "DELETE FROM llm_wiki_edges WHERE id = ?1 AND edge_type = 'handoffFor'",
+                [&e.id],
+            )?;
+        }
+        sso9_log!(
+            "[ct::migrate] sso9 retype: handoffFor->about remapped={remapped} \
+             deduped={deduped} (pre-existing about rows kept)"
+        );
+        // 3. service targets: drop.
+        let mut service_dropped = 0usize;
+        for e in &plan.service_drop {
+            service_dropped +=
+                conn.execute("DELETE FROM llm_wiki_edges WHERE id = ?1", [&e.id])?;
+        }
+        sso9_log!("[ct::migrate] sso9 retype: handoffFor->service dropped={service_dropped}");
+        // 4. parent-family edges with an undeclared re-typed shape: drop.
+        let mut by_type: std::collections::BTreeMap<String, usize> = Default::default();
+        for e in &plan.parent_drop {
+            let n = conn.execute("DELETE FROM llm_wiki_edges WHERE id = ?1", [&e.id])?;
+            *by_type.entry(e.edge_type.clone()).or_default() += n;
+        }
+        sso9_log!(
+            "[ct::migrate] sso9 retype: parent-family edges dropped by type={} \
+             (about->organization kept={})",
+            sso9_fmt_map(&by_type),
+            plan.kept_about_org
+        );
+        // 5. everything else: untouched, counted.
+        sso9_log!(
+            "[ct::migrate] sso9 retype: undispositioned={} (left untouched)",
+            plan.undispositioned
+        );
+        // 6-8. the type rewrites, tombstones included, AFTER the edge steps.
+        for (from, to) in SSO9_RETYPE_MAP {
+            let e = conn.execute(
+                "UPDATE llm_wiki_entries SET okf_type = ?2 WHERE okf_type = ?1",
+                [from, to],
+            )?;
+            let t = conn.execute(
+                "UPDATE llm_wiki_tasks SET okf_type = ?2 WHERE okf_type = ?1",
+                [from, to],
+            )?;
+            let c = conn.execute(
+                "UPDATE curated_entities SET entity_type = ?2 WHERE entity_type = ?1",
+                [from, to],
+            )?;
+            sso9_log!(
+                "[ct::migrate] sso9 retype: {from}->{to} entries={e} tasks={t} curated_entities={c}"
+            );
+        }
+        // 9. stamp.
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (?1)",
+            [SSO9_RETYPE_VERSION],
+        )?;
+        Ok(Some(disp))
+    })();
+    match applied {
+        Ok(d) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(d)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// R1 shape check: one refreshed row's stored manifest equals the planner's
+/// captured `new_json` (parsed-Value compare, F6). `None` = passes (also
+/// vacuously when nothing was refreshed). `Some(why)` = failed.
+fn sso9_shape_check(conn: &Connection, refreshed: &[(String, String)]) -> Option<String> {
+    let (entity_id, new_json) = refreshed.first()?;
+    let stored: rusqlite::Result<String> = conn.query_row(
+        "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
+        [entity_id],
+        |r| r.get(0),
+    );
+    let stored = match stored {
+        Ok(s) => s,
+        Err(e) => return Some(format!("shape check: cannot read {entity_id}: {e}")),
+    };
+    let a = serde_json::from_str::<serde_json::Value>(&stored);
+    let b = serde_json::from_str::<serde_json::Value>(new_json);
+    match (a, b) {
+        (Ok(a), Ok(b)) if a == b => None,
+        _ => Some(format!(
+            "shape check: stored manifest for {entity_id} differs from the planned refresh"
+        )),
+    }
+}
+
+/// Post-commit verification (plan Task 5 step 10): returns the failed checks.
+/// (a) stamps, (b) no stale slugs, (c) per-class dispositioned-edge outcomes.
+fn sso9_verify(
+    conn: &Connection,
+    shape_failure: Option<String>,
+    disp: Option<&Sso9Dispositions>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    if let Some(f) = shape_failure {
+        failures.push(f);
+    }
+    let q = |sql: &str, p: &[&dyn rusqlite::ToSql]| -> rusqlite::Result<bool> {
+        conn.query_row(sql, p, |_| Ok(())).optional().map(|o| o.is_some())
+    };
+    // (a) STAMPS
+    for v in [SSO9_REFRESH_VERSION, SSO9_RETYPE_VERSION] {
+        match sso9_version_stamped(conn, v) {
+            Ok(true) => {}
+            Ok(false) => failures.push(format!("(a) stamps: slot {v} is not stamped")),
+            Err(e) => failures.push(format!("(a) stamps: query failed: {e}")),
+        }
+    }
+    // (b) NO STALE SLUGS (exact match; case variants deliberately left alone)
+    let slugs = sso9_in_slugs_sql();
+    for (table, col) in [
+        ("llm_wiki_entries", "okf_type"),
+        ("llm_wiki_tasks", "okf_type"),
+        ("curated_entities", "entity_type"),
+    ] {
+        match conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {col} IN ({slugs})"),
+            [],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(0) => {}
+            Ok(n) => failures.push(format!("(b) stale slugs: {n} row(s) in {table}")),
+            Err(e) => failures.push(format!("(b) stale slugs: query on {table} failed: {e}")),
+        }
+    }
+    // (c) DISPOSITIONED-EDGE OUTCOMES
+    if let Some(d) = disp {
+        for (id, entity, src, tgt) in &d.remapped {
+            let ty: rusqlite::Result<Option<String>> = conn
+                .query_row(
+                    "SELECT edge_type FROM llm_wiki_edges WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional();
+            let ok = match ty {
+                Ok(Some(t)) => t == "about",
+                Ok(None) => q(
+                    "SELECT 1 FROM llm_wiki_edges
+                      WHERE entity_id = ?1 AND source_id = ?2 AND target_id = ?3
+                        AND edge_type = 'about'",
+                    &[entity, src, tgt],
+                )
+                .unwrap_or(false),
+                Err(_) => false,
+            };
+            if !ok {
+                failures.push(format!(
+                    "(c) step-2 re-mapped edge {id} is neither `about` nor gone with an `about` \
+                     on ({entity}, {src}, {tgt})"
+                ));
+            }
+        }
+        for id in &d.dropped {
+            if q("SELECT 1 FROM llm_wiki_edges WHERE id = ?1", &[id]).unwrap_or(true) {
+                failures.push(format!("(c) dropped edge {id} is still present"));
+            }
+        }
+    }
+    failures
+}
+
+fn sso9_delete_backup(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(f) = SSO9_DELETE_OVERRIDE.with(|c| c.get()) {
+        return f(path);
+    }
+    std::fs::remove_file(path)
+}
+
+#[cfg(test)]
+fn sso9_run_hook(
+    slot: &'static std::thread::LocalKey<std::cell::RefCell<Option<Box<dyn Fn(&Connection)>>>>,
+    conn: &Connection,
+) {
+    slot.with(|h| {
+        if let Some(f) = h.borrow().as_ref() {
+            f(conn);
+        }
+    });
+}
+
+/// sso9 migration steps 1 + 2 (plan Tasks 4 + 5): one backup per call when
+/// either slot is unstamped; step 1 (manifest MERGE refresh) then step 2
+/// (okf_type + edge re-type); post-commit verification; backup deletion when
+/// no unstamped step remains and every check passed.
+fn apply_sso9_migrations(conn: &Connection) -> Result<()> {
     let stamped_max: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_version",
         [],
         |r| r.get(0),
     )?;
     if stamped_max < 22 {
-        eprintln!(
-            "[ct::migrate] sso9 manifest refresh (slot {SSO9_REFRESH_VERSION}) skipped: \
-             V22 not stamped (deferred open)"
+        sso9_log!(
+            "[ct::migrate] sso9 migration (slots {SSO9_REFRESH_VERSION}/{SSO9_RETYPE_VERSION}) \
+             skipped: V22 not stamped (deferred open)"
         );
         return Ok(());
     }
     // Exact membership, never MAX-based (a later slot landing first must not
-    // skip this step forever).
-    if sso9_version_stamped(conn, SSO9_REFRESH_VERSION)? {
+    // skip these steps forever).
+    let refresh_pending = !sso9_version_stamped(conn, SSO9_REFRESH_VERSION)?;
+    let retype_pending = !sso9_version_stamped(conn, SSO9_RETYPE_VERSION)?;
+    if !refresh_pending && !retype_pending {
         return Ok(());
     }
     // S1: path probe. In-memory / unknown → WARN, skip backup AND migration,
@@ -1610,34 +2111,73 @@ fn apply_sso9_manifest_refresh(conn: &Connection) -> Result<()> {
     let db_path = match conn.path() {
         Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
         _ => {
-            eprintln!(
-                "[ct::migrate WARN] sso9 manifest refresh (slot {SSO9_REFRESH_VERSION}) \
-                 skipped: database path unavailable (in-memory or unknown); \
-                 the step does not run unbacked and is not stamped"
+            sso9_log!(
+                "[ct::migrate WARN] sso9 migration (slots {SSO9_REFRESH_VERSION}/\
+                 {SSO9_RETYPE_VERSION}) skipped: database path unavailable (in-memory or \
+                 unknown); the steps do not run unbacked and are not stamped"
             );
             return Ok(());
         }
     };
-    // S2 + S3 + S4: a backup failure propagates and aborts the open.
-    sso9_backup_before_migration(conn, &db_path)?;
-    // S5: dry pass.
-    sso9_census(conn)?;
-    // S6/S7: the transactional body.
-    let refreshed = run_sso9_refresh_txn(conn)?;
-    eprintln!(
-        "[ct::migrate] sso9 manifest refresh committed (slot {SSO9_REFRESH_VERSION}): \
-         refreshed={} entities",
-        refreshed.len()
-    );
-    // HOOK (plan Task 5 step 10): the shape check runs HERE — after COMMIT,
-    // before the ensure loop. Do not move the ensure above it.
-    for entity_id in &refreshed {
-        // The ensure opens its own transaction, so it runs only after COMMIT.
-        // Best-effort by design: a per-row failure is logged, never fatal.
-        match crate::db::entity_gate::ensure_manifest_vocabulary(conn, entity_id) {
-            Ok(outcome) => eprintln!("[ct::migrate] sso9 ensure {entity_id}: {outcome:?}"),
-            Err(e) => eprintln!("[ct::migrate WARN] sso9 ensure {entity_id} failed: {e:#}"),
+    // S2 + S3 + S4: ONE backup per call; a failure propagates and aborts.
+    let backup = sso9_backup_before_migration(conn, &db_path)?;
+
+    let mut shape_failure = None;
+    if refresh_pending {
+        // S5: dry pass, then S6/S7: the transactional body.
+        sso9_census(conn)?;
+        let refreshed = run_sso9_refresh_txn(conn)?;
+        sso9_log!(
+            "[ct::migrate] sso9 manifest refresh committed (slot {SSO9_REFRESH_VERSION}): \
+             refreshed={} entities",
+            refreshed.len()
+        );
+        #[cfg(test)]
+        sso9_run_hook(&SSO9_AFTER_REFRESH_COMMIT, conn);
+        // R1: the shape check sits BETWEEN the COMMIT and the ensure loop.
+        shape_failure = sso9_shape_check(conn, &refreshed);
+        for (entity_id, _) in &refreshed {
+            // The ensure opens its own transaction, so it runs only after
+            // COMMIT. Best-effort: a per-row failure is logged, never fatal.
+            match crate::db::entity_gate::ensure_manifest_vocabulary(conn, entity_id) {
+                Ok(outcome) => sso9_log!("[ct::migrate] sso9 ensure {entity_id}: {outcome:?}"),
+                Err(e) => sso9_log!("[ct::migrate WARN] sso9 ensure {entity_id} failed: {e:#}"),
+            }
         }
+    }
+
+    let mut dispositions = None;
+    if retype_pending && sso9_version_stamped(conn, SSO9_REFRESH_VERSION)? {
+        sso9_retype_census(conn)?;
+        dispositions = run_sso9_retype_txn(conn)?;
+        sso9_log!(
+            "[ct::migrate] sso9 retype committed (slot {SSO9_RETYPE_VERSION}): ran={}",
+            dispositions.is_some()
+        );
+        #[cfg(test)]
+        sso9_run_hook(&SSO9_AFTER_RETYPE_COMMIT, conn);
+    }
+
+    let failures = sso9_verify(conn, shape_failure, dispositions.as_ref());
+    if failures.is_empty() {
+        match sso9_delete_backup(&backup) {
+            Ok(()) => sso9_log!(
+                "[ct::migrate] sso9 verification passed; backup deleted: path={}",
+                backup.display()
+            ),
+            Err(e) => sso9_log!(
+                "[ct::migrate WARN] sso9 verification passed but the backup could not be \
+                 deleted (kept): path={} error={e}",
+                backup.display()
+            ),
+        }
+    } else {
+        sso9_log!(
+            "[ct::migrate CRITICAL] sso9 post-commit verification FAILED; backup KEPT at {}; \
+             failed checks: {}",
+            backup.display(),
+            failures.join(" | ")
+        );
     }
     Ok(())
 }
@@ -5073,6 +5613,30 @@ mod tests {
         sso9_version_stamped(conn, SSO9_REFRESH_VERSION).unwrap()
     }
 
+    fn sso9_clear_log() {
+        SSO9_LOG.with(|l| l.borrow_mut().clear());
+    }
+
+    fn sso9_log_lines() -> Vec<String> {
+        SSO9_LOG.with(|l| l.borrow().clone())
+    }
+
+    /// `(table, source, backup)` parsed from the `sso9 backup ok` log line.
+    fn sso9_backup_log_counts() -> Vec<(String, String, String)> {
+        let line = sso9_log_lines()
+            .into_iter()
+            .find(|l| l.contains("sso9 backup ok:"))
+            .expect("backup log line");
+        let tail = line.split("sanity(source/backup)").nth(1).unwrap().to_string();
+        tail.split_whitespace()
+            .map(|tok| {
+                let (t, c) = tok.split_once('=').unwrap();
+                let (a, b) = c.split_once('/').unwrap();
+                (t.to_string(), a.to_string(), b.to_string())
+            })
+            .collect()
+    }
+
     fn sso9_snapshot(conn: &Connection) -> (Vec<(String, String)>, Vec<i64>, Vec<(String, String)>) {
         let manifests = {
             let mut s = conn
@@ -5174,33 +5738,18 @@ mod tests {
     #[test]
     fn sso9_refresh_merges_8x_manifests_stamps_and_backs_up() {
         let (tmp, conn) = sso9_rewound_brain();
+        sso9_clear_log();
         sso9_migrate(&conn, tmp.path()).unwrap();
         assert!(sso9_stamped(&conn));
-        // Backup exists and opens with matching row counts (deletion arrives
-        // with Task 5 step 10 — not asserted here).
-        let backups = sso9_backups(tmp.path());
-        assert_eq!(backups.len(), 1, "one backup per migrate()");
-        let bk = Connection::open_with_flags(&backups[0], rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        for t in SSO9_SANITY_TABLES {
-            let sql = format!("SELECT COUNT(*) FROM {t}");
-            let (a, b): (i64, i64) = (
-                conn.query_row(&sql, [], |r| r.get(0)).unwrap(),
-                bk.query_row(&sql, [], |r| r.get(0)).unwrap(),
-            );
-            assert_eq!(a, b, "{t} row counts match");
+        // P1/step 11: on the success path the backup is deleted (Task 5 step 10);
+        // its row counts are proven from the migration log line, and its
+        // existence is asserted only on the verification-failure path (5c).
+        assert!(sso9_backups(tmp.path()).is_empty(), "backup deleted after a verified pair");
+        let counts = sso9_backup_log_counts();
+        assert_eq!(counts.len(), SSO9_SANITY_TABLES.len());
+        for (t, a, b) in &counts {
+            assert_eq!(a, b, "{t} source/backup row counts match in the log line");
         }
-        // The backup holds the PRE-refresh manifest.
-        let pre: String = bk
-            .query_row(
-                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&pre).unwrap(),
-            serde_json::from_str::<serde_json::Value>(SSO8_MANIFEST).unwrap()
-        );
         // tier_fact (incl.) refreshed AND ensured: 9.x types + document/process + fallback.
         let tf = manifest_value(&conn, "tier_fact");
         let keys = type_keys(&tf);
@@ -5238,7 +5787,7 @@ mod tests {
         )
         .unwrap();
         let before = sso9_snapshot(&conn);
-        apply_sso9_manifest_refresh(&conn).unwrap();
+        apply_sso9_migrations(&conn).unwrap();
         assert!(!sso9_stamped(&conn));
         assert_eq!(sso9_snapshot(&conn), before);
     }
@@ -5275,9 +5824,14 @@ mod tests {
         let (tmp, conn) = sso9_rewound_brain();
         sso9_migrate(&conn, tmp.path()).unwrap();
         let first = sso9_snapshot(&conn);
+        sso9_clear_log();
         sso9_migrate(&conn, tmp.path()).unwrap();
         assert_eq!(sso9_snapshot(&conn), first);
-        assert_eq!(sso9_backups(tmp.path()).len(), 1, "stamped slot takes no new backup");
+        assert_eq!(sso9_backups(tmp.path()).len(), 0, "no backup left; stamped slots take none");
+        assert!(
+            sso9_log_lines().iter().all(|l| !l.contains("sso9 backup ok")),
+            "a fully stamped pair takes no new backup"
+        );
     }
 
     #[test]
@@ -5303,5 +5857,552 @@ mod tests {
         let before = sso9_snapshot(&conn);
         sso9_census(&conn).unwrap();
         assert_eq!(sso9_snapshot(&conn), before, "dry pass must not write");
+    }
+
+    // ---- sso9 re-type + edge dispositions (engine-9x PR-A plan Task 5c) ----
+    //
+    // F11/N4 trigger-coverage evidence (core-llm-wiki 8.0.2 `setupDatabase`):
+    // the only triggers are the three FTS triggers on `llm_wiki_entries`
+    // (`entries_ai` AFTER INSERT, `entries_au` AFTER UPDATE OF id, entity_id,
+    // title, body, tags, deleted_at, `entries_ad` AFTER DELETE). None fire on
+    // `okf_type`; there are NO triggers on `llm_wiki_edges`, `llm_wiki_tasks`
+    // or `curated_entities`. `sso9_retype_has_no_triggers_on_retyped_columns`
+    // re-checks this against the live Rust fixture.
+
+    const SSO9_SEED: &str = r#"
+        INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at, okf_type, deleted_at, ontology_checked_at, heal_checked_at) VALUES
+          ('h1','ent1','t','b',1,77,'handoff',NULL,88,99),
+          ('h_tomb','ent1','t','b',1,77,'handoff',5,88,99),
+          ('s1','ent1','t','b',1,77,'session_recap',NULL,88,99),
+          ('s_tomb','ent1','t','b',1,77,'session_recap',5,88,99),
+          ('hv','ent1','t','b',1,77,'Handoff',NULL,88,99),
+          ('sw1','ent1','t','b',1,77,'software_application',NULL,88,99),
+          ('svc1','ent1','t','b',1,77,'service',NULL,88,99),
+          ('org1','ent1','t','b',1,77,'organization',NULL,88,99),
+          ('per1','ent1','t','b',1,77,'person',NULL,88,99),
+          ('pl1','ent1','t','b',1,77,'place',NULL,88,99),
+          ('ev1','ent1','t','b',1,77,'event',NULL,88,99),
+          ('w1','ent1','t','b',1,77,'creativework',NULL,88,99);
+        INSERT INTO llm_wiki_tasks (id, entity_id, description, created_at, updated_at, okf_type, deleted_at) VALUES
+          ('t_h','ent1','d',1,77,'handoff',NULL),
+          ('t_s','ent1','d',1,77,'session_recap',5),
+          ('t_c','ent1','d',1,77,'Session_Recap',NULL);
+        INSERT INTO curated_entities (id, name, entity_type, created_at, updated_at, deleted_at) VALUES
+          ('ce_h','n','handoff',1,77,NULL),
+          ('ce_s','n','session_recap',1,77,5),
+          ('ce_cv','n','HANDOFF',1,77,NULL),
+          ('ce_concept','n','concept',1,77,NULL),
+          ('ce_process','n','process',1,77,NULL),
+          ('ce_repo','n','repository',1,77,NULL),
+          ('ce_job','n','job',1,77,NULL),
+          ('ce_sw','n','software_application',1,77,NULL);
+        INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at) VALUES
+          ('e_coll_hf','ent1','h1','sw1','handoffFor',1),
+          ('e_coll_ab','ent1','h1','sw1','about',1),
+          ('e_remap','ent1','s1','sw1','handoffFor',1),
+          ('e_svc','ent1','h1','svc1','handoffFor',1),
+          ('e_ce_src','ent1','ce_h','ce_sw','handoffFor',1),
+          ('e_author','ent1','h1','per1','author',1),
+          ('e_publisher','ent1','s1','org1','publisher',1),
+          ('e_about_person','ent1','h1','per1','about',1),
+          ('e_about_place','ent1','h1','pl1','about',1),
+          ('e_about_event','ent1','s1','ev1','about',1),
+          ('e_supersedes','ent1','h_tomb','h1','supersedes',1),
+          ('e_about_org','ent1','s1','org1','about',1),
+          ('e_author_ce_tgt','ent1','w1','ce_h','author',1),
+          ('e_undisp','ent1','h1','org1','handoffFor',1),
+          ('e_related','ent1','h1','sw1','relatedTo',1),
+          ('e_unrelated','ent1','sw1','org1','knows',1);
+        INSERT INTO llm_wiki_outbox (id, entity_id, table_name, record_id, operation, payload, created_at)
+          VALUES ('ob1','ent1','llm_wiki_entries','h1','upsert','{"okf_type":"handoff"}',3);
+        INSERT INTO curated_proposals (id, kind, model, status, created_at)
+          VALUES ('p1','new_entity','m','pending',1);
+        INSERT INTO curated_proposal_items (id, proposal_id, item_type, payload, status) VALUES
+          ('pi1','p1','fact_add','{"type":"handoff"}','pending'),
+          ('pi2','p1','edge_add','{"edge_type":"handoffFor"}','pending');
+    "#;
+
+    /// A tempfile brain at the 8.0.2-era state: BOTH sso9 slots unstamped,
+    /// the 8.x manifests planted, and the Task 5 data seeded.
+    fn sso9_retype_brain() -> (tempfile::TempDir, Connection) {
+        let (tmp, conn) = sso9_rewound_brain();
+        conn.execute(
+            "DELETE FROM schema_version WHERE version = ?1",
+            [SSO9_RETYPE_VERSION],
+        )
+        .unwrap();
+        conn.execute_batch(SSO9_SEED).unwrap();
+        (tmp, conn)
+    }
+
+    /// Seed + migrate, returning the captured log.
+    fn sso9_run_retype() -> (tempfile::TempDir, Connection, Vec<String>) {
+        let (tmp, conn) = sso9_retype_brain();
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        let log = sso9_log_lines();
+        (tmp, conn, log)
+    }
+
+    fn q_str(conn: &Connection, sql: &str, id: &str) -> Option<String> {
+        conn.query_row(sql, [id], |r| r.get::<_, Option<String>>(0))
+            .optional()
+            .unwrap()
+            .flatten()
+    }
+
+    fn okf(conn: &Connection, table: &str, id: &str) -> Option<String> {
+        q_str(conn, &format!("SELECT okf_type FROM {table} WHERE id = ?1"), id)
+    }
+
+    fn etype(conn: &Connection, id: &str) -> Option<String> {
+        q_str(conn, "SELECT edge_type FROM llm_wiki_edges WHERE id = ?1", id)
+    }
+
+    fn ce_type(conn: &Connection, id: &str) -> Option<String> {
+        q_str(conn, "SELECT entity_type FROM curated_entities WHERE id = ?1", id)
+    }
+
+    /// Every column the step may or may not change, for idempotency checks.
+    fn sso9_data_snapshot(conn: &Connection) -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        for sql in [
+            "SELECT id, ifnull(okf_type,''), ifnull(deleted_at,''), updated_at, ifnull(ontology_checked_at,''), ifnull(heal_checked_at,'') FROM llm_wiki_entries ORDER BY id",
+            "SELECT id, ifnull(okf_type,''), ifnull(deleted_at,''), updated_at, '', '' FROM llm_wiki_tasks ORDER BY id",
+            "SELECT id, entity_type, ifnull(deleted_at,''), updated_at, '', '' FROM curated_entities ORDER BY id",
+            "SELECT id, entity_id, source_id, target_id, edge_type, created_at FROM llm_wiki_edges ORDER BY id",
+            "SELECT id, entity_id, table_name, record_id, payload, created_at FROM llm_wiki_outbox ORDER BY id",
+            "SELECT id, proposal_id, item_type, payload, status, '' FROM curated_proposal_items ORDER BY id",
+        ] {
+            let mut stmt = conn.prepare(sql).unwrap();
+            let rows = stmt
+                .query_map([], |r| {
+                    (0..6)
+                        .map(|i| r.get::<_, rusqlite::types::Value>(i).map(|v| format!("{v:?}")))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap();
+            out.extend(rows.map(|r| r.unwrap()));
+        }
+        out
+    }
+
+    #[test]
+    fn sso9_retype_rewrites_entries_and_maps_handoff_for_to_about() {
+        let (_tmp, conn, _log) = sso9_run_retype();
+        assert_eq!(okf(&conn, "llm_wiki_entries", "h1").as_deref(), Some("decision"));
+        assert_eq!(okf(&conn, "llm_wiki_entries", "s1").as_deref(), Some("lesson"));
+        assert_eq!(etype(&conn, "e_remap").as_deref(), Some("about"));
+        assert_eq!(etype(&conn, "e_ce_src").as_deref(), Some("about"));
+        // Case variants are counted, never rewritten.
+        assert_eq!(okf(&conn, "llm_wiki_entries", "hv").as_deref(), Some("Handoff"));
+        assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
+    }
+
+    #[test]
+    fn sso9_retype_rewrites_tombstoned_entries() {
+        let (_tmp, conn, _log) = sso9_run_retype();
+        assert_eq!(okf(&conn, "llm_wiki_entries", "h_tomb").as_deref(), Some("decision"));
+        assert_eq!(okf(&conn, "llm_wiki_entries", "s_tomb").as_deref(), Some("lesson"));
+    }
+
+    #[test]
+    fn sso9_retype_rewrites_tasks_tombstones_included() {
+        let (_tmp, conn, _log) = sso9_run_retype();
+        assert_eq!(okf(&conn, "llm_wiki_tasks", "t_h").as_deref(), Some("decision"));
+        assert_eq!(okf(&conn, "llm_wiki_tasks", "t_s").as_deref(), Some("lesson"));
+        assert_eq!(okf(&conn, "llm_wiki_tasks", "t_c").as_deref(), Some("Session_Recap"));
+    }
+
+    #[test]
+    fn sso9_retype_collision_keeps_the_existing_about_and_logs_the_dedupe() {
+        let (_tmp, conn, log) = sso9_run_retype();
+        assert_eq!(etype(&conn, "e_coll_ab").as_deref(), Some("about"), "pre-existing about survives");
+        assert_eq!(etype(&conn, "e_coll_hf"), None, "the handoffFor loser is gone");
+        assert!(
+            log.iter().any(|l| l.contains("remapped=2") && l.contains("deduped=1")),
+            "dedupe count logged: {log:#?}"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_drops_service_targets_with_a_count() {
+        let (_tmp, conn, log) = sso9_run_retype();
+        assert_eq!(etype(&conn, "e_svc"), None);
+        assert!(log.iter().any(|l| l.contains("handoffFor->service dropped=1")), "{log:#?}");
+    }
+
+    #[test]
+    fn sso9_retype_drops_each_parent_family_class_and_keeps_about_organization() {
+        let (_tmp, conn, log) = sso9_run_retype();
+        for id in [
+            "e_author",
+            "e_publisher",
+            "e_about_person",
+            "e_about_place",
+            "e_about_event",
+            "e_supersedes",
+        ] {
+            assert_eq!(etype(&conn, id), None, "{id} must be dropped");
+        }
+        assert_eq!(etype(&conn, "e_about_org").as_deref(), Some("about"), "about->organization kept");
+        assert!(
+            log.iter().any(|l| l.contains("dropped by type=[about:3,author:2,publisher:1,supersedes:1]")),
+            "per-type counts logged: {log:#?}"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_curated_entity_source_endpoint_becomes_about() {
+        let (_tmp, conn, _log) = sso9_run_retype();
+        // F1/N3: handoffFor from a curated_entities row typed `handoff` to a
+        // `software_application` target -> `about` (single expected result).
+        assert_eq!(etype(&conn, "e_ce_src").as_deref(), Some("about"));
+        assert_eq!(ce_type(&conn, "ce_h").as_deref(), Some("decision"));
+    }
+
+    #[test]
+    fn sso9_retype_curated_entity_target_parent_family_edge_is_dropped() {
+        let (_tmp, conn, _log) = sso9_run_retype();
+        // N3: `author` (creativework family) whose TARGET is a re-typed
+        // curated_entities row is dropped (counted in author:2 above).
+        assert_eq!(etype(&conn, "e_author_ce_tgt"), None);
+    }
+
+    #[test]
+    fn sso9_retype_leaves_undispositioned_edges_and_unrelated_edges_alone() {
+        let (_tmp, conn, log) = sso9_run_retype();
+        for id in ["e_undisp", "e_related", "e_unrelated", "e_coll_ab"] {
+            assert!(etype(&conn, id).is_some(), "{id} must be untouched");
+        }
+        assert_eq!(etype(&conn, "e_undisp").as_deref(), Some("handoffFor"));
+        assert!(log.iter().any(|l| l.contains("undispositioned=3 (left untouched)")), "{log:#?}");
+    }
+
+    #[test]
+    fn sso9_retype_leaves_updated_at_checked_at_and_outbox_byte_identical() {
+        let (tmp, conn) = sso9_retype_brain();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        for (table, id) in [("llm_wiki_entries", "h1"), ("llm_wiki_entries", "h_tomb"), ("llm_wiki_entries", "s1")] {
+            let (u, o, h): (i64, i64, i64) = conn
+                .query_row(
+                    &format!("SELECT updated_at, ontology_checked_at, heal_checked_at FROM {table} WHERE id = ?1"),
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!((u, o, h), (77, 88, 99), "{id}");
+        }
+        for table in ["llm_wiki_tasks", "curated_entities"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table} WHERE updated_at <> 77"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table}.updated_at untouched");
+        }
+        let (ob, ca): (String, i64) = conn
+            .query_row(
+                "SELECT payload, created_at FROM llm_wiki_outbox WHERE id = 'ob1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((ob.as_str(), ca), (r#"{"okf_type":"handoff"}"#, 3), "outbox untouched");
+        let obn: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_wiki_outbox", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(obn, 1, "no outbox rows added");
+        // Pending proposal payloads are counted, never rewritten.
+        let pl: String = conn
+            .query_row("SELECT payload FROM curated_proposal_items WHERE id = 'pi1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pl, r#"{"type":"handoff"}"#);
+    }
+
+    #[test]
+    fn sso9_retype_has_no_triggers_on_retyped_columns() {
+        let (_tmp, conn, _log) = sso9_run_retype();
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'
+                  AND tbl_name IN ('llm_wiki_entries','llm_wiki_edges','llm_wiki_tasks','curated_entities')",
+            )
+            .unwrap();
+        let triggers: Vec<(String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for (name, tbl, sql) in &triggers {
+            assert!(
+                tbl == "llm_wiki_entries" && !sql.contains("okf_type"),
+                "trigger {name} on {tbl} must not fire on okf_type/entity_type: {sql}"
+            );
+            let upper = sql.to_uppercase();
+            assert!(
+                !upper.contains("AFTER UPDATE ON") && !upper.contains("BEFORE UPDATE ON"),
+                "unscoped UPDATE trigger {name} would fire on the re-type: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn sso9_retype_entity_types_rewrite_only_the_two_dropped_slugs() {
+        let (_tmp, conn, log) = sso9_run_retype();
+        assert_eq!(ce_type(&conn, "ce_h").as_deref(), Some("decision"));
+        assert_eq!(ce_type(&conn, "ce_s").as_deref(), Some("lesson"), "tombstone included");
+        for (id, t) in [
+            ("ce_concept", "concept"),
+            ("ce_process", "process"),
+            ("ce_repo", "repository"),
+            ("ce_job", "job"),
+            ("ce_cv", "HANDOFF"),
+        ] {
+            assert_eq!(ce_type(&conn, id).as_deref(), Some(t), "{id} must be untouched");
+        }
+        assert!(
+            log.iter().any(|l| l.contains("handoff->decision") && l.contains("curated_entities=1")),
+            "{log:#?}"
+        );
+        let census = log.iter().find(|l| l.contains("retype census")).unwrap();
+        assert!(census.contains("entities_handoff=1") && census.contains("entities_session_recap=1"));
+    }
+
+    #[test]
+    fn sso9_retype_does_not_run_when_the_refresh_slot_is_unstamped() {
+        let (_tmp, conn) = sso9_retype_brain();
+        conn.execute("DELETE FROM schema_version WHERE version = ?1", [SSO9_REFRESH_VERSION]).unwrap();
+        let before = sso9_data_snapshot(&conn);
+        assert!(run_sso9_retype_txn(&conn).unwrap().is_none());
+        assert!(!sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
+        assert_eq!(sso9_data_snapshot(&conn), before);
+    }
+
+    #[test]
+    fn sso9_retype_is_idempotent_across_migrate_calls() {
+        let (tmp, conn, _log) = sso9_run_retype();
+        let data = sso9_data_snapshot(&conn);
+        let stamps = sso9_snapshot(&conn).1;
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(sso9_data_snapshot(&conn), data, "second run changes zero rows");
+        assert_eq!(sso9_snapshot(&conn).1, stamps, "second run stamps nothing new");
+        assert!(sso9_log_lines().iter().all(|l| !l.contains("backup ok")));
+    }
+
+    #[test]
+    fn sso9_retype_body_is_idempotent_with_the_stamp_bypassed() {
+        let (_tmp, conn, _log) = sso9_run_retype();
+        let data = sso9_data_snapshot(&conn);
+        conn.execute("DELETE FROM schema_version WHERE version = ?1", [SSO9_RETYPE_VERSION]).unwrap();
+        let disp = run_sso9_retype_txn(&conn).unwrap().expect("body ran");
+        assert!(disp.remapped.is_empty() && disp.dropped.is_empty());
+        assert_eq!(sso9_data_snapshot(&conn), data, "zero rows change on a second body run");
+        assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
+    }
+
+    #[test]
+    fn sso9_retype_census_log_carries_every_count() {
+        let (_tmp, conn) = sso9_retype_brain();
+        sso9_clear_log();
+        let before = sso9_data_snapshot(&conn);
+        sso9_retype_census(&conn).unwrap();
+        assert_eq!(sso9_data_snapshot(&conn), before, "dry pass must not write");
+        let log = sso9_log_lines();
+        let line = log.iter().find(|l| l.contains("retype census")).unwrap();
+        for want in [
+            "entries_handoff_live=1",
+            "entries_handoff_tombstoned=1",
+            "entries_session_recap_live=1",
+            "entries_session_recap_tombstoned=1",
+            "tasks_handoff_live=1",
+            "tasks_handoff_tombstoned=0",
+            "tasks_session_recap_live=0",
+            "tasks_session_recap_tombstoned=1",
+            "case_variant_entries=1",
+            "case_variant_tasks=1",
+            "case_variant_entities=1",
+            "entities_handoff=1",
+            "entities_session_recap=1",
+            "handoffFor_by_target=[organization:1,service:1,software_application:3]",
+            "edges_touching_by_type=[about:5,author:2,handoffFor:5,publisher:1,relatedTo:1,supersedes:1]",
+            "planned_remap=3",
+            "planned_service_drop=1",
+            "planned_parent_family_drop=7",
+            "kept_about_organization=1",
+            "undispositioned=3",
+            "pending_proposal_items_with_dropped_types=1",
+            "pending_proposal_items_with_handoffFor=1",
+        ] {
+            assert!(line.contains(want), "census line missing `{want}`: {line}");
+        }
+    }
+
+    #[test]
+    fn sso9_retype_backup_is_gone_after_both_steps_and_the_log_says_so() {
+        let (tmp, _conn, log) = sso9_run_retype();
+        assert!(sso9_backups(tmp.path()).is_empty());
+        assert!(log.iter().any(|l| l.contains("backup deleted: path=")), "{log:#?}");
+    }
+
+    #[test]
+    fn sso9_retype_one_migrate_call_creates_exactly_one_backup() {
+        // Proven from the LOG LINES only (the post-migrate listing is empty).
+        let (_tmp, _conn, log) = sso9_run_retype();
+        assert_eq!(log.iter().filter(|l| l.contains("sso9 backup ok:")).count(), 1, "{log:#?}");
+        assert!(log.iter().any(|l| l.contains("manifest refresh committed")));
+        assert!(log.iter().any(|l| l.contains("sso9 retype committed")));
+    }
+
+    #[test]
+    fn sso9_retype_deletion_failure_is_logged_and_never_fatal() {
+        let (tmp, conn) = sso9_retype_brain();
+        SSO9_DELETE_OVERRIDE.with(|c| {
+            c.set(Some(|_p: &Path| Err(std::io::Error::other("injected delete failure"))))
+        });
+        sso9_clear_log();
+        let result = sso9_migrate(&conn, tmp.path());
+        SSO9_DELETE_OVERRIDE.with(|c| c.set(None));
+        result.expect("the open still succeeds");
+        assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
+        assert!(
+            sso9_log_lines().iter().any(|l| l.contains("could not be deleted") && l.contains("injected delete failure")),
+            "{:#?}",
+            sso9_log_lines()
+        );
+        assert_eq!(sso9_backups(tmp.path()).len(), 1, "the undeleted backup remains");
+    }
+
+    /// Runs the full migrate with `hook` firing after the re-type COMMIT and
+    /// asserts the verification-failure contract: backup KEPT, CRITICAL line
+    /// names the path and the failed check, the open still succeeds.
+    fn sso9_assert_retype_verification_fires(hook: impl Fn(&Connection) + 'static, marker: &str) {
+        let (tmp, conn) = sso9_retype_brain();
+        SSO9_AFTER_RETYPE_COMMIT.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+        sso9_clear_log();
+        let result = sso9_migrate(&conn, tmp.path());
+        SSO9_AFTER_RETYPE_COMMIT.with(|h| *h.borrow_mut() = None);
+        result.expect("a verification failure is not propagated");
+        let backups = sso9_backups(tmp.path());
+        assert_eq!(backups.len(), 1, "backup KEPT on the verification-failure path");
+        let name = backups[0].file_name().unwrap().to_string_lossy().to_string();
+        let log = sso9_log_lines();
+        let crit = log
+            .iter()
+            .find(|l| l.contains("CRITICAL"))
+            .unwrap_or_else(|| panic!("no CRITICAL line: {log:#?}"));
+        assert!(crit.contains(&name), "CRITICAL names the backup path: {crit}");
+        assert!(crit.contains(marker), "CRITICAL names `{marker}`: {crit}");
+        assert!(log.iter().all(|l| !l.contains("backup deleted")), "no deletion on failure");
+        // The kept backup's row counts are proven from the log line.
+        for (t, a, b) in sso9_backup_log_counts() {
+            assert_eq!(a, b, "{t}");
+        }
+    }
+
+    // (a) STAMPS is EXEMPT from a firing test (S4): the stamps commit in the
+    // same transaction as the data, so a missed stamp is a rollback, not a
+    // verifiable post-state.
+
+    #[test]
+    fn sso9_verification_b_stale_slug_after_commit_fires() {
+        sso9_assert_retype_verification_fires(
+            |c| {
+                c.execute(
+                    "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at, okf_type)
+                     VALUES ('late','ent1','t','b',1,1,'handoff')",
+                    [],
+                )
+                .unwrap();
+            },
+            "(b) stale slugs",
+        );
+    }
+
+    #[test]
+    fn sso9_verification_c_dropped_edge_reappearing_fires() {
+        sso9_assert_retype_verification_fires(
+            |c| {
+                c.execute(
+                    "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+                     VALUES ('e_svc','ent1','h1','svc1','handoffFor',1)",
+                    [],
+                )
+                .unwrap();
+            },
+            "(c) dropped edge e_svc",
+        );
+    }
+
+    #[test]
+    fn sso9_verification_c_step2_gone_without_an_about_on_the_tuple_fires() {
+        // T1 tuple-proof branch: the captured collision id (e_coll_hf) is GONE
+        // by the dedupe; deleting the surviving `about` on its tuple leaves
+        // GONE with no proof.
+        sso9_assert_retype_verification_fires(
+            |c| {
+                c.execute(
+                    "DELETE FROM llm_wiki_edges WHERE entity_id = 'ent1' AND source_id = 'h1'
+                       AND target_id = 'sw1' AND edge_type = 'about'",
+                    [],
+                )
+                .unwrap();
+            },
+            "(c) step-2 re-mapped edge e_coll_hf",
+        );
+    }
+
+    #[test]
+    fn sso9_verification_c_step2b_present_but_wrong_type_fires() {
+        // V1: a successfully re-mapped captured row set BACK to handoffFor.
+        sso9_assert_retype_verification_fires(
+            |c| {
+                c.execute("UPDATE llm_wiki_edges SET edge_type = 'handoffFor' WHERE id = 'e_remap'", [])
+                    .unwrap();
+            },
+            "(c) step-2 re-mapped edge e_remap",
+        );
+    }
+
+    #[test]
+    fn sso9_verification_shape_check_tamper_between_commit_and_check_fires() {
+        let (tmp, conn) = sso9_retype_brain();
+        SSO9_AFTER_REFRESH_COMMIT.with(|h| {
+            *h.borrow_mut() = Some(Box::new(|c: &Connection| {
+                c.execute(
+                    "UPDATE llm_wiki_entity_manifests SET manifest_json = '{\"node_types\":[],\"edge_types\":[]}'
+                      WHERE entity_id IN ('tier_fact','ent_custom')",
+                    [],
+                )
+                .unwrap();
+            }))
+        });
+        sso9_clear_log();
+        let result = sso9_migrate(&conn, tmp.path());
+        SSO9_AFTER_REFRESH_COMMIT.with(|h| *h.borrow_mut() = None);
+        result.expect("not propagated");
+        let backups = sso9_backups(tmp.path());
+        assert_eq!(backups.len(), 1, "backup KEPT");
+        let name = backups[0].file_name().unwrap().to_string_lossy().to_string();
+        let log = sso9_log_lines();
+        let crit = log.iter().find(|l| l.contains("CRITICAL")).expect("CRITICAL line");
+        assert!(crit.contains(&name) && crit.contains("shape check"), "{crit}");
+    }
+
+    #[test]
+    fn sso9_alias_end_to_end_handoff_admits_as_decision_after_migration() {
+        let (_tmp, conn, _log) = sso9_run_retype();
+        let manifest = crate::wiki_graph::wiki_get_ontology(&conn, "tier_fact")
+            .unwrap()
+            .manifest
+            .expect("tier_fact manifest");
+        let vocab = crate::db::entity_gate::NodeVocabulary::from_manifest(&manifest);
+        assert_eq!(
+            crate::db::entity_gate::admit_label_landing(&vocab, "handoff").as_deref(),
+            Some("decision")
+        );
+        assert_eq!(
+            crate::db::entity_gate::admit_label_landing(&vocab, "session_recap").as_deref(),
+            Some("lesson")
+        );
     }
 }
