@@ -52,8 +52,8 @@ importers:
         specifier: 8.0.2
         version: 8.0.2
       '@equationalapplications/schema-software-org':
-        specifier: 8.0.2
-        version: 8.0.2
+        specifier: 9.18.0
+        version: 9.18.0
       '@mantine/core':
         specifier: 9.7.4
         version: 9.7.4(@mantine/hooks@9.7.4(react@19.3.1))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -304,8 +304,8 @@ packages:
     resolution: {integrity: sha512-Yq/4tXr+MjUH6hLu2qQCwpZYJZgTEbf/KWGy+g7xOLPq7geGx9iPsSdiSIO/C7uKFPLFtYO/dR0smnXfIL1m1A==}
     engines: {node: '>=20'}
 
-  '@equationalapplications/schema-software-org@8.0.2':
-    resolution: {integrity: sha512-RPcoP/F52GQ0y7FLFTgMlW4HBuwVsS2iWYnHEnG9GBC74/ocOZqfsqWdyZn44iHEBezE7d6TaUgXyWlDZe4Cvw==}
+  '@equationalapplications/schema-software-org@9.18.0':
+    resolution: {integrity: sha512-L8C7z5sam1LgnqzrKDN2Zd8z7hSQBpwWYq2oIR1ui9aVYIUPto0fz7s7A1PMoC+5JXzlvWOwSeCItw8pt/asRA==}
     engines: {node: '>=20'}
 
   '@eslint-community/eslint-utils@4.10.1':
@@ -3566,7 +3566,7 @@ snapshots:
     dependencies:
       '@equationalapplications/core-llm-wiki': 8.0.2
 
-  '@equationalapplications/schema-software-org@8.0.2':
+  '@equationalapplications/schema-software-org@9.18.0':
     dependencies:
       '@equationalapplications/core-llm-wiki': 8.0.2
 
