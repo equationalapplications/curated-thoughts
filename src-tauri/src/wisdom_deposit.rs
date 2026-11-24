@@ -1150,14 +1150,26 @@ async fn deposit_inner(
 /// kick-ledger state, and the state machine that reconciles them (INTENT
 /// rule 3). The vault-relative path is the caller's handle; document probes
 /// use the canonical key form the kick stages (see [`deposit_status_row`]).
+/// Rung-3 (tier-1.5) MAJOR-1: the deposit-status path guard. The
+/// `immutable-source-files/agents/` prefix alone does NOT contain the path —
+/// a `..` segment would escape the vault, and `deposit_status_row`'s hub
+/// re-read does a plain `fs::read_to_string` on `vault_root.join(rel)`.
+/// Reject any `..` segment up front (absolute paths already fail the prefix).
+fn deposit_status_path(raw: &str) -> Result<String> {
+    let rel = raw.replace('\\', "/");
+    if !rel.starts_with(crate::vault::safe_path::AGENTS_DEPOSIT_PREFIX)
+        || rel.split('/').any(|seg| seg == "..")
+    {
+        bail!("not a deposit path: {raw}");
+    }
+    Ok(rel)
+}
+
 pub async fn dispatch_wisdom_deposit_status(
     ctx: &ToolDispatchContext,
     p: WisdomDepositStatusParams,
 ) -> Result<Value> {
-    let rel = p.path.replace('\\', "/");
-    if !rel.starts_with(crate::vault::safe_path::AGENTS_DEPOSIT_PREFIX) {
-        bail!("not a deposit path: {}", p.path);
-    }
+    let rel = deposit_status_path(&p.path)?;
     let audit_path = rel.clone();
     let client = ctx.client.clone();
     ctx.with_rw(move |conn| {
@@ -3854,5 +3866,25 @@ mod tests {
                  documents.path is watcher-absolute — the queue's attribution join never matches"
             );
         });
+    }
+
+    #[test]
+    fn deposit_status_path_rejects_traversal() {
+        assert!(
+            deposit_status_path("immutable-source-files/agents/../../../etc/passwd").is_err(),
+            "`..` segments must be refused"
+        );
+        assert!(
+            deposit_status_path("/etc/passwd").is_err(),
+            "absolute paths must be refused"
+        );
+        assert!(
+            deposit_status_path("wiki/notes.md").is_err(),
+            "non-deposit prefixes must be refused"
+        );
+        assert!(
+            deposit_status_path("immutable-source-files/agents/dep.md").is_ok(),
+            "a normal deposit path passes"
+        );
     }
 }

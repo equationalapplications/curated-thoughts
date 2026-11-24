@@ -239,7 +239,12 @@ pub(crate) fn live_survivor(conn: &Connection, id: &str) -> std::result::Result<
 
 fn is_live(conn: &Connection, id: &str) -> bool {
     conn.query_row(
-        "SELECT 1 FROM live_entities WHERE id = ?1",
+        // Rung-3 (tier-1.5) MAJOR-2: liveness is ONE rule — the force-include
+        // (`synthesis.rs`) and the codebase convention (`db/wisdom.rs`,
+        // `db/proposals.rs`) also require `deleted_at IS NULL`; a soft-deleted
+        // configured hub must resolve `unresolved` here, not pass the door
+        // and then silently fail the force-include's stricter check.
+        "SELECT 1 FROM live_entities WHERE id = ?1 AND deleted_at IS NULL",
         [id],
         |_| Ok(()),
     )

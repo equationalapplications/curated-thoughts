@@ -222,6 +222,30 @@ fn redirect_cycle_is_unresolved() {
 }
 
 #[test]
+fn soft_deleted_configured_hub_is_unresolved() {
+    // Rung-3 (tier-1.5) MAJOR-2: liveness is ONE rule — a SOFT-DELETED
+    // configured hub (`deleted_at` set, no redirect row) is NOT live. The
+    // resolver must refuse it at the door (`hub_reason: not live`) exactly
+    // as the synthesis force-include already does.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let conn = db();
+    add_entity(&conn, "hub-a");
+    conn.execute(
+        "UPDATE curated_entities SET deleted_at = 1 WHERE id = 'hub-a'",
+        [],
+    )
+    .unwrap();
+    let cfg = cfg_one(&root, "hub-a");
+    let path = root.join("f.rs").to_string_lossy().into_owned();
+    match resolve_deposit_hub(&conn, Some(&cfg), &path) {
+        DepositHub::Unresolved(reason) => assert!(reason.contains("not live"), "{reason}"),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+#[test]
 fn dead_survivor_is_unresolved() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("repo");
