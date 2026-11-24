@@ -328,9 +328,15 @@ jobs:
             # A bare Mach-O cannot be stapled; notarizing it registers the
             # ticket with Apple so Gatekeeper accepts it online.
             ditto -c -k --keepParent "${TARGET_DIR}/ct" "${RUNNER_TEMP}/ct-notarize.zip"
-            xcrun notarytool submit "${RUNNER_TEMP}/ct-notarize.zip" \
+            # `submit --wait` exits 0 even when the notarization verdict is
+            # Invalid/Rejected — the exit code is NOT the gate. Capture the
+            # log, print it for diagnostics, and assert `status: Accepted`
+            # (CodeRabbit #337: rely on the verdict, not the exit code).
+            NOTARY_OUT="$(xcrun notarytool submit "${RUNNER_TEMP}/ct-notarize.zip" \
               --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" \
-              --issuer "$APPLE_API_ISSUER" --wait
+              --issuer "$APPLE_API_ISSUER" --wait)"
+            echo "$NOTARY_OUT"
+            grep -q 'status: Accepted' <<<"$NOTARY_OUT"
           fi
           ASSET="ct_${{ steps.ctver.outputs.version }}_macos_universal.tar.gz"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
