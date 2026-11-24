@@ -124,9 +124,14 @@ fn patch_config(vault: &Path, key: &str, value: serde_json::Value) {
     std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
 }
 
-fn wisdom_block(areas_yaml: &Path, hub: &str) -> serde_json::Value {
+fn wisdom_block(checkout: &Path, hub: &str) -> serde_json::Value {
+    // `wisdom.areas_paths` maps a hub id to the AREAS FILE path (§3.1) —
+    // `<checkout>/.ct-areas.yaml`, not the checkout directory itself. The
+    // directory form used to pass only because an unloadable path silently
+    // degraded to an empty vocabulary and the §6.7 NULL stamp; the tier-1.5
+    // rung-1 fix (configured-but-unloaded now drops and reports) exposed it.
     serde_json::json!({
-        "areas_paths": { hub: areas_yaml.to_string_lossy() },
+        "areas_paths": { hub: checkout.join(".ct-areas.yaml").to_string_lossy() },
         "org_entity_id": "org-e2e"
     })
 }
