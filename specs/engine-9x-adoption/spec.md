@@ -1,6 +1,6 @@
 # Spec: engine 9.x adoption (expo-llm-wiki 8.0.2 → 9.18.0)
 
-Status: Draft
+Status: Approved 2026-11-24 (Kurt — all three disclosed items accepted; unbounded vector_removals follow-up: expo-llm-wiki#487)
 Owner: Kurt VanDusen / Hermes Agent
 Date: 2026-11-24
 Related issues: #342 (vector_removals ledger, non-blocking), #348 (sso 9.x node types, blocking), #353 (source_pointer mirror, blocking for the guard).
