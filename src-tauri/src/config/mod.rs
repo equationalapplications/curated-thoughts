@@ -11,6 +11,8 @@ use std::io::Write;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod hub_resolver;
+
 /// Fatal errors from `BrainConfig::load_lenient`.
 ///
 /// Malformed top-level JSON, non-object roots, and present-but-non-string
@@ -1094,6 +1096,236 @@ impl Default for ConfirmationsConfig {
     }
 }
 
+/// Areas/org wisdom configuration (spec 2026-11-14-areas §3.3).
+///
+/// Lives in `config.json` as an optional `wisdom` object (`BrainConfig`
+/// parses config.json, not TOML): `{"wisdom": {"areas_paths": {"<repo hub
+/// entity id>": "/abs/checkout/.ct-areas.yaml", ...}, "org_entity_id":
+/// "<org entity id>"}}`. Absent object → UNSCOPED delivery downstream; the
+/// owner records it once per machine.
+///
+/// `areas_paths` is stored as an ordered `Vec<(id, path)>` — a JSON object
+/// preserves insertion order, and the §9.3 longest-prefix resolver (Task 3)
+/// consumes it as a map keyed by brain-unique entity ids (a collision is
+/// impossible: `curated_entities.id` is a primary key).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WisdomConfig {
+    /// Repo hub entity id → ABSOLUTE path of that checkout's `.ct-areas.yaml`
+    /// (its parent directory IS the checkout root, §3.1).
+    pub areas_paths: Vec<(String, std::path::PathBuf)>,
+    /// The org hub's entity id (§9.3). Exactly one per brain — the
+    /// single-org guard is structural.
+    pub org_entity_id: Option<String>,
+}
+
+/// Gauntlet fix 2: the derived `Serialize` would emit `areas_paths` as an
+/// ARRAY OF PAIRS while `from_value` accepts only an OBJECT — a
+/// `serde_json::to_value` round-trip (config rewrite, debug dump) would
+/// produce a block the loader refuses. `areas_paths` serializes as an
+/// ordered JSON object (insertion order preserved via `serde_json::Map`
+/// iteration over the Vec), matching the on-disk grammar.
+impl serde::Serialize for WisdomConfig {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        // Serialize as the bare `wisdom` object (what `from_value` parses).
+        let mut areas = serde_json::Map::new();
+        for (id, path) in &self.areas_paths {
+            areas.insert(
+                id.clone(),
+                serde_json::Value::String(path.to_string_lossy().into_owned()),
+            );
+        }
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "areas_paths".to_string(),
+            serde_json::Value::Object(areas),
+        );
+        if let Some(org) = &self.org_entity_id {
+            map.insert(
+                "org_entity_id".to_string(),
+                serde_json::Value::String(org.clone()),
+            );
+        }
+        serde_json::Value::Object(map).serialize(s)
+    }
+}
+
+/// Marker prefix on the duplicate-checkout-root error. `from_value`'s
+/// `Result<Option<WisdomConfig>>` cannot carry a LoadReport diagnostic
+/// (tier-3 r6 NIT-2), so it signals the fail-closed drop with this message
+/// and `load_lenient_from_object` records it verbatim as the ONE
+/// diagnostics line naming both ids.
+const WISDOM_DUP_DROP_PREFIX: &str = "wisdom block dropped: duplicate areas-file directory";
+
+/// Marker prefix on the relative-areas-path error (controller ruling, fix
+/// round 1): a RELATIVE path would resolve against the loading process's
+/// cwd — binding a hub in `ct` but not the sidecar — so it refuses the WHOLE
+/// block FAIL CLOSED, same drop-path semantics as the duplicate-directory
+/// drop, with ONE diagnostics line naming the offending entity id.
+const WISDOM_REL_DROP_PREFIX: &str = "wisdom block dropped: relative areas-file path";
+
+/// `std::path::absolute`-NORMALIZED form of `path` (lexical `.`/`..`
+/// cleanup, cwd-relative resolution). This is the LOAD-time comparison form
+/// (spec §3.3); symlink-level equality is enforced at RESOLUTION time
+/// (Task 3) — a load-time `fs::canonicalize` would re-target the check
+/// behind the user's back and is deliberately NOT used here.
+fn absolute_normalized(path: &std::path::Path) -> std::path::PathBuf {
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut out = std::path::PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+impl WisdomConfig {
+    /// Typed parse of the on-disk `wisdom` object. Absent/`null` →
+    /// `Ok(None)` (UNSCOPED downstream). Duplicate PARENT-DIRECTORY
+    /// (checkout-root) entries make the WHOLE block unusable: the §9.3
+    /// longest-prefix rule must never face a tie, so the block is dropped
+    /// FAIL CLOSED — UNSCOPED downstream, never a brain refusal — and the
+    /// drop is signalled via `Err` with the `WISDOM_DUP_DROP_PREFIX`
+    /// message naming both ids (see the const's doc).
+    pub fn from_value(v: &serde_json::Value) -> Result<Option<WisdomConfig>> {
+        if v.is_null() {
+            return Ok(None);
+        }
+        let obj = v
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("wisdom block must be a JSON object"))?;
+        let paths = obj
+            .get("areas_paths")
+            .ok_or_else(|| anyhow::anyhow!("wisdom.areas_paths missing"))?
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("wisdom.areas_paths must be an object"))?;
+        let mut areas_paths: Vec<(String, std::path::PathBuf)> = Vec::new();
+        for (id, p) in paths {
+            let s = p
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("wisdom.areas_paths[{id}] must be a string path"))?;
+            if !std::path::Path::new(s).is_absolute() {
+                bail!(
+                    "{WISDOM_REL_DROP_PREFIX} {id} ({s}); failing closed to UNSCOPED"
+                );
+            }
+            areas_paths.push((id.clone(), std::path::PathBuf::from(s)));
+        }
+        // Duplicate checkout roots (§3.1): two hubs claiming one directory.
+        // Compare on absolute-NORMALIZED parent directories — see
+        // `absolute_normalized`.
+        let mut dirs: std::collections::HashMap<std::path::PathBuf, Vec<String>> =
+            std::collections::HashMap::new();
+        for (id, p) in &areas_paths {
+            let dir = absolute_normalized(p.parent().unwrap_or(p));
+            dirs.entry(dir).or_default().push(id.clone());
+        }
+        let mut dupes: Vec<(String, Vec<String>)> = dirs
+            .into_iter()
+            .filter(|(_, ids)| ids.len() > 1)
+            .map(|(dir, ids)| (dir.to_string_lossy().into_owned(), ids))
+            .collect();
+        dupes.sort();
+        if let Some((dir, mut ids)) = dupes.into_iter().next() {
+            ids.sort();
+            bail!(
+                "{WISDOM_DUP_DROP_PREFIX} {dir} (ids: {}); failing closed to UNSCOPED",
+                ids.join(", ")
+            );
+        }
+        let org_entity_id = match obj.get("org_entity_id") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => Some(
+                v.as_str()
+                    .ok_or_else(|| anyhow::anyhow!("wisdom.org_entity_id must be a string"))?
+                    .to_string(),
+            ),
+        };
+        Ok(Some(WisdomConfig {
+            areas_paths,
+            org_entity_id,
+        }))
+    }
+}
+
+impl<'de> Deserialize<'de> for WisdomConfig {
+    /// Round-trip via the typed `from_value` parser (the strict
+    /// `BrainConfig::load` arm deserializes the whole config, so the wisdom
+    /// block must satisfy the same rules there — a duplicate-directory
+    /// block fails this parse, routes `load` into `load_lenient`, and is
+    /// dropped there with the diagnostic: identical outcome under BOTH
+    /// loaders).
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        match Self::from_value(&v) {
+            Ok(Some(c)) => Ok(c),
+            Ok(None) => Ok(Self::default()),
+            Err(e) => Err(serde::de::Error::custom(format!("{e}"))),
+        }
+    }
+}
+
+/// Canonicalize a path LENIENTLY for the areas resolver (spec §9.3):
+/// canonicalize the LONGEST EXISTING ancestor and re-append the remainder,
+/// because `std::fs::canonicalize` errors on any not-yet-existing component
+/// (a freshly planned checkout root, or an areas file not yet written).
+/// A relative input resolves against cwd first. Consumers (Task 3) use this
+/// on both sides of the prefix comparison; a not-yet-existing root "can
+/// prefix nothing" and must NOT fail.
+pub fn canonicalize_lenient(path: &str) -> String {
+    let raw = std::path::Path::new(path);
+    let abs = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(raw),
+            Err(_) => raw.to_path_buf(),
+        }
+    };
+    // Climb to the deepest existing ancestor ("." and the filesystem root
+    // always terminate the climb).
+    let mut anc = abs.as_path();
+    while !anc.exists() {
+        match anc.parent() {
+            Some(p) if !p.as_os_str().is_empty() => anc = p,
+            _ => break,
+        }
+    }
+    match std::fs::canonicalize(anc) {
+        Ok(real) => {
+            if anc == abs.as_path() {
+                real.to_string_lossy().into_owned()
+            } else {
+                // Gauntlet fix 3: normalize `.`/`..` INSIDE the appended
+                // nonexistent remainder (`.../existing/new/../f.md` must not
+                // keep the literal `new/../` — the climb leaves it because
+                // `new` does not exist). Symlink semantics are untouched:
+                // `real` is still the canonicalized existing ancestor; only
+                // the not-yet-existing tail is cleaned LEXICALLY, so a `..`
+                // here resolves against the tail, never re-targeting a
+                // symlinked prefix the way an early lexical cleanup would.
+                let remainder = abs.strip_prefix(anc).unwrap_or(abs.as_path());
+                let mut joined = real;
+                for comp in remainder.components() {
+                    match comp {
+                        std::path::Component::CurDir => {}
+                        std::path::Component::ParentDir => {
+                            joined.pop();
+                        }
+                        other => joined.push(other.as_os_str()),
+                    }
+                }
+                joined.to_string_lossy().into_owned()
+            }
+        }
+        Err(_) => abs.to_string_lossy().into_owned(),
+    }
+}
+
 /// Unified configuration for a brain directory.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BrainConfig {
@@ -1133,6 +1365,12 @@ pub struct BrainConfig {
     /// config into `load_lenient`.
     #[serde(default)]
     pub confirmations: ConfirmationsConfig,
+    /// Areas/org wisdom config (spec 2026-11-14-areas §3.3). `None` = the
+    /// absent/unusable block → UNSCOPED delivery downstream (never a brain
+    /// refusal). `skip_serializing_if` keeps pre-wisdom configs byte-shaped
+    /// as before on write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wisdom: Option<WisdomConfig>,
     /// Approved symlink `(link, target)` pairs. Written only by the approval
     /// flows (`ct trust`, the Desktop review prompt) — never hand-edited.
     #[serde(default)]
@@ -1326,6 +1564,7 @@ impl BrainConfig {
             "wiki",
             "ingest",
             "confirmations",
+            "wisdom",
             "trusted_links",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
@@ -1448,8 +1687,12 @@ impl BrainConfig {
                 // re-serialization would drop them unless the strict arm
                 // captures them too — mirroring `preserved_wiki`).
                 if let Some(ing_val) = obj.get("ingest").and_then(|v| v.as_object()) {
-                    let known_ingest_keys =
-                        ["folder_tiers", "folder_ontology", "ontology_default", "folder_ages"];
+                    let known_ingest_keys = [
+                        "folder_tiers",
+                        "folder_ontology",
+                        "ontology_default",
+                        "folder_ages",
+                    ];
                     let unknown: serde_json::Map<String, serde_json::Value> = ing_val
                         .iter()
                         .filter(|(k, _)| !known_ingest_keys.contains(&k.as_str()))
@@ -1587,6 +1830,7 @@ impl BrainConfig {
             "wiki",
             "ingest",
             "confirmations",
+            "wisdom",
             "trusted_links",
         ];
         let unknown_keys: serde_json::Map<String, serde_json::Value> = obj
@@ -1607,6 +1851,40 @@ impl BrainConfig {
         if let Some(c) = obj.get("confirmations") {
             report.config.confirmations =
                 serde_json::from_value::<ConfirmationsConfig>(c.clone()).unwrap_or_default();
+        }
+        // wisdom block (spec 2026-11-14-areas §3.3), mirroring the per-block
+        // lenient family above. BOTH consumers read this lenient report:
+        // `librarian/mod.rs` (the Librarian sidecar reads the config beside
+        // the brain at prompt-build/validation time) and the `ct wisdom
+        // match` path — so the duplicate-directory drop must be exercised
+        // HERE, not only under strict `load` (identical behavior is
+        // enforced by `wisdom_config_duplicate_directory_dropped_by_*`).
+        // `WisdomConfig::from_value` returns `Ok(None)` for an absent/null
+        // block (UNSCOPED default). A duplicate PARENT-DIRECTORY (checkout
+        // root, §3.1) entry drops the WHOLE block fail-closed — UNSCOPED
+        // downstream, NOT a brain refusal — and, because
+        // `Result<Option<WisdomConfig>>` cannot carry the diagnostic
+        // (tier-3 r6 NIT-2), from_value signals the drop with a
+        // WISDOM_DUP_DROP_PREFIX error that THIS wrapper records as the ONE
+        // diagnostics line naming both ids. Comparison is on
+        // `std::path::absolute`-NORMALIZED parent dirs at LOAD time;
+        // symlink-level equality is enforced at RESOLUTION time (Task 3),
+        // where a not-yet-existing root "can prefix nothing" without
+        // failing the load.
+        if let Some(w) = obj.get("wisdom") {
+            match WisdomConfig::from_value(w) {
+                Ok(c) => report.config.wisdom = c,
+                Err(e) => {
+                    let msg = format!("{e}");
+                    if msg.starts_with(WISDOM_DUP_DROP_PREFIX) {
+                        report.diagnostics.push(msg);
+                    } else {
+                        report
+                            .diagnostics
+                            .push(format!("wisdom block unparseable: {msg}"));
+                    }
+                }
+            }
         }
         if let Some(gen_val) = obj.get("generation").and_then(|v| v.as_object()) {
             let known_gen_keys = [
@@ -1901,8 +2179,12 @@ impl BrainConfig {
                 return Ok(report);
             };
             // Unknown sub-keys → preserved_ingest (always kept).
-            let known_ingest_keys =
-                ["folder_tiers", "folder_ontology", "ontology_default", "folder_ages"];
+            let known_ingest_keys = [
+                "folder_tiers",
+                "folder_ontology",
+                "ontology_default",
+                "folder_ages",
+            ];
             let unknown: serde_json::Map<String, serde_json::Value> = ing_obj
                 .iter()
                 .filter(|(k, _)| !known_ingest_keys.contains(&k.as_str()))
@@ -1943,8 +2225,7 @@ impl BrainConfig {
             }
 
             if let Some(fa) = ing_obj.get("folder_ages") {
-                match serde_json::from_value::<std::collections::HashMap<String, u64>>(fa.clone())
-                {
+                match serde_json::from_value::<std::collections::HashMap<String, u64>>(fa.clone()) {
                     Ok(m) => report.config.ingest.folder_ages = m,
                     Err(_) => {
                         // Entry-by-entry salvage; drop only bad entries
@@ -2493,9 +2774,10 @@ mod tests {
     /// Absent `folder_ages` key: every path resolves to `None` (never ages).
     #[test]
     fn absent_folder_ages_means_never_ages() {
-        let cfg: BrainConfig =
-            serde_json::from_str(&brain_config_json(r#"{"folder_tiers":{"records":"chunks-only"}}"#))
-                .unwrap();
+        let cfg: BrainConfig = serde_json::from_str(&brain_config_json(
+            r#"{"folder_tiers":{"records":"chunks-only"}}"#,
+        ))
+        .unwrap();
         assert!(cfg.ingest.folder_ages.is_empty());
         assert_eq!(cfg.ingest.age_days_for("records/a.md"), None);
         assert_eq!(cfg.ingest.age_days_for("records"), None);
@@ -2631,7 +2913,6 @@ mod tests {
         );
         assert_eq!(reloaded.config.ingest.folder_ages.get("notes"), Some(&7));
     }
-
 
     /// A hand-edited key spelled with `\` separators matches like its `/`
     /// spelling — normalization is symmetric, not path-only.
@@ -3358,7 +3639,9 @@ mod tests {
         cfg.write(&paths).unwrap();
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.config_path).unwrap()).unwrap();
-        let conf = root.get("confirmations").expect("confirmations block written");
+        let conf = root
+            .get("confirmations")
+            .expect("confirmations block written");
         assert_eq!(conf.get("enabled"), Some(&serde_json::json!(false)));
         // Unknown nested key survived the write cycle.
         assert_eq!(
@@ -4187,5 +4470,220 @@ mod tests {
             OntologyLookup::Climb,
             "unrelated paths still resolve"
         );
+    }
+
+    // ---- WisdomConfig (spec 2026-11-14-areas §3.3) -----------------------
+    //
+    // NOTE ON CONSUMERS: BOTH `librarian/mod.rs` (the Librarian sidecar,
+    // which reads the config beside the brain at prompt-build/validation
+    // time) AND the `ct wisdom match` path (the lenient report the CLI
+    // consumes) go through `load_lenient_from_str`'s LoadReport — so the
+    // duplicate-directory drop MUST be exercised under the LENIENT loader,
+    // not only under strict `load`, and the two loaders must agree.
+    // Comparison is on `std::path::absolute`-NORMALIZED paths at LOAD time;
+    // symlink-level equality is enforced at RESOLUTION time (Task 3).
+    use std::path::PathBuf;
+
+    fn wisdom_config_fixture_json(areas: &str) -> String {
+        format!(
+            r#"{{"vault_path":"/tmp/v","generation":{{"provider":"ollama"}},"wisdom":{areas}}}"#
+        )
+    }
+
+    /// The typed fields parse: areas_paths keyed by repo entity id pointing
+    /// at the absolute areas-file path, plus the org entity id.
+    #[test]
+    fn wisdom_config_from_value_parses_fields() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"areas_paths":{"hub-a":"/repo/a/.ct-areas.yaml","hub-b":"/repo/b/.ct-areas.yaml"},"org_entity_id":"org-1"}"#,
+        )
+        .unwrap();
+        let cfg = WisdomConfig::from_value(&v).unwrap().unwrap();
+        assert_eq!(
+            cfg.areas_paths,
+            vec![
+                ("hub-a".to_string(), PathBuf::from("/repo/a/.ct-areas.yaml")),
+                ("hub-b".to_string(), PathBuf::from("/repo/b/.ct-areas.yaml")),
+            ]
+        );
+        assert_eq!(cfg.org_entity_id.as_deref(), Some("org-1"));
+    }
+
+    /// An absent `wisdom` object is `Ok(None)` — UNSCOPED is the default.
+    #[test]
+    fn wisdom_config_absent_object_is_none() {
+        let none = WisdomConfig::from_value(&serde_json::Value::Null).unwrap();
+        assert!(none.is_none());
+    }
+
+    /// Duplicate PARENT DIRECTORY (the checkout root, §3.1) → the WHOLE
+    /// `wisdom` block is DROPPED (fail closed → UNSCOPED downstream) with ONE
+    /// `LoadReport.diagnostics` line naming both ids. Tested under
+    /// `load_lenient_from_str` — the lenient report is what both consumers
+    /// read (see module note above).
+    #[test]
+    fn wisdom_config_duplicate_directory_dropped_by_lenient_load() {
+        let text = wisdom_config_fixture_json(
+            r#"{"areas_paths":{"hub-a":"/repo/a/.ct-areas.yaml","hub-b":"/repo/a/./.ct-areas.yaml"}}"#,
+        );
+        let report = BrainConfig::load_lenient_from_str(&text).unwrap();
+        // Fail closed: no wisdom config at all.
+        assert!(
+            report.config.wisdom.is_none(),
+            "wisdom block must be dropped"
+        );
+        // Exactly ONE diagnostic, and it names BOTH ids.
+        let dup_lines: Vec<&String> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.contains("hub-a") && d.contains("hub-b"))
+            .collect();
+        assert_eq!(
+            dup_lines.len(),
+            1,
+            "one diagnostic naming both ids: {:?}",
+            report.diagnostics
+        );
+    }
+
+    /// A RELATIVE `areas_paths` value would resolve against the loading
+    /// process's cwd — binding a hub in `ct` but not the sidecar — so it is
+    /// REFUSED at load: the WHOLE `wisdom` block drops FAIL CLOSED with ONE
+    /// diagnostic naming the offending id (same drop-path semantics as the
+    /// duplicate-directory drop). Tested under `load_lenient_from_str`.
+    #[test]
+    fn wisdom_config_relative_path_dropped_by_lenient_load() {
+        let text = wisdom_config_fixture_json(
+            r#"{"areas_paths":{"hub-a":"repo/a/.ct-areas.yaml","hub-b":"/repo/b/.ct-areas.yaml"}}"#,
+        );
+        let report = BrainConfig::load_lenient_from_str(&text).unwrap();
+        assert!(
+            report.config.wisdom.is_none(),
+            "relative areas path must drop the whole wisdom block"
+        );
+        let rel_lines: Vec<&String> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.contains("hub-a"))
+            .collect();
+        assert_eq!(
+            rel_lines.len(),
+            1,
+            "one diagnostic naming the offending id: {:?}",
+            report.diagnostics
+        );
+    }
+
+    /// Distinct parent directories load cleanly under the lenient loader,
+    /// with `org_entity_id` carried through — the non-degenerate case.
+    #[test]
+    fn wisdom_config_org_entity_id_round_trip_lenient() {
+        let text = wisdom_config_fixture_json(
+            r#"{"areas_paths":{"hub-a":"/repo/a/.ct-areas.yaml","hub-b":"/repo/b/.ct-areas.yaml"},"org_entity_id":"org-1"}"#,
+        );
+        let report = BrainConfig::load_lenient_from_str(&text).unwrap();
+        let w = report.config.wisdom.as_ref().expect("wisdom loads");
+        assert_eq!(w.areas_paths.len(), 2);
+        assert_eq!(w.org_entity_id.as_deref(), Some("org-1"));
+        // No wisdom-related diagnostics for a clean block.
+        assert!(
+            !report.diagnostics.iter().any(|d| d.contains("wisdom")),
+            "clean block is silent: {:?}",
+            report.diagnostics
+        );
+    }
+
+    /// The block behaves IDENTICALLY under STRICT `load` (which routes
+    /// through lenient on its success path and has live runtime callers):
+    /// duplicate directories → wisdom dropped, brain still loads.
+    #[test]
+    fn wisdom_config_duplicate_directory_dropped_by_strict_load() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = BrainPaths {
+            brain_dir: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.json"),
+            db_path: tmp.path().join("brain.db"),
+        };
+        std::fs::write(
+            &paths.config_path,
+            r#"{"vault_path":"/tmp/v","generation":{"provider":"ollama"},"wisdom":{"areas_paths":{"hub-a":"/repo/a/.ct-areas.yaml","hub-b":"/repo/a/.ct-areas.yaml"}}}"#,
+        )
+        .unwrap();
+        let cfg = BrainConfig::load(&paths).unwrap();
+        assert!(
+            cfg.wisdom.is_none(),
+            "strict load must drop the duplicate wisdom block too"
+        );
+    }
+
+    /// `canonicalize_lenient`: a path whose tail does not exist resolves to
+    /// the canonical form of its longest EXISTING ancestor with the
+    /// remainder re-appended (§9.3); a fully-existing path resolves
+    /// entirely. Task 3's resolver consumes this.
+    #[test]
+    fn canonicalize_lenient_existing_ancestor_plus_remainder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let existing = tmp.path().join("real-repo");
+        std::fs::create_dir_all(&existing).unwrap();
+        // Fully-existing path: resolved (canonicalized).
+        let got = canonicalize_lenient(existing.to_str().unwrap());
+        let want = std::fs::canonicalize(&existing).unwrap();
+        assert_eq!(got, want.to_string_lossy().into_owned());
+        // Non-existent tail under the existing root: ancestor + remainder.
+        let absent = existing.join("deep").join("new").join(".ct-areas.yaml");
+        let got = canonicalize_lenient(absent.to_str().unwrap());
+        let want = std::fs::canonicalize(&existing)
+            .unwrap()
+            .join("deep/new/.ct-areas.yaml");
+        assert_eq!(got, want.to_string_lossy().into_owned());
+
+        // Gauntlet fix 3: parent components INSIDE the nonexistent remainder
+        // are normalized — `new/../` must not survive the join.
+        let dotted = existing.join("new").join("..").join("f.md");
+        let got = canonicalize_lenient(dotted.to_str().unwrap());
+        let want = std::fs::canonicalize(&existing).unwrap().join("f.md");
+        assert_eq!(
+            got,
+            want.to_string_lossy().into_owned(),
+            "`new/../` in the nonexistent tail must resolve to the parent"
+        );
+
+        // Gauntlet fix 3 (outside the checkout): the climb terminates at the
+        // first EXISTING ancestor (here `/`), and the remainder — which now
+        // starts with the nonexistent base — is still cleaned lexically.
+        let outside = "/ct-gauntlet-nonexistent-base/new/../f.md";
+        let got = canonicalize_lenient(outside);
+        assert_eq!(
+            got, "/ct-gauntlet-nonexistent-base/f.md",
+            "`..` inside a wholly-nonexistent tail resolves lexically, no literal `new/../`"
+        );
+    }
+
+    /// Gauntlet fix 2 (CodeRabbit Major): `serde_json::to_value` →
+    /// `from_value` must round-trip — the serializer emits `areas_paths` as
+    /// an OBJECT (not the derived array-of-pairs) and the loader accepts it.
+    #[test]
+    fn wisdom_config_serialize_round_trips_through_from_value() {
+        let cfg = WisdomConfig {
+            areas_paths: vec![
+                ("hub-a".to_string(), std::path::PathBuf::from("/tmp/repo-a/.ct-areas.yaml")),
+                ("hub-b".to_string(), std::path::PathBuf::from("/tmp/repo b/.ct-areas.yaml")),
+            ],
+            org_entity_id: Some("org-1".to_string()),
+        };
+        let v = serde_json::to_value(&cfg).expect("serialize");
+        let areas = v
+            .get("areas_paths")
+            .and_then(|x| x.as_object())
+            .expect("areas_paths must serialize as an object");
+        assert_eq!(areas.len(), 2);
+        assert_eq!(
+            areas.get("hub-a").and_then(|x| x.as_str()),
+            Some("/tmp/repo-a/.ct-areas.yaml")
+        );
+        let back = WisdomConfig::from_value(&v)
+            .expect("from_value must accept our own output")
+            .expect("non-empty areas_paths yields Some");
+        assert_eq!(back, cfg);
     }
 }

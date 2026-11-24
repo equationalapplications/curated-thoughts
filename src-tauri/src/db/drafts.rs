@@ -44,7 +44,7 @@ pub(crate) fn fact_row_outbox_payload(
                 COALESCE(source_ref, ''), okf_type, okf_sources, okf_verified,
                 okf_usage_window, created_at, updated_at, deleted_at,
                 lifecycle_status, stale_after, generated_by,
-                last_verified_at, last_verified_by
+                last_verified_at, last_verified_by, area
            FROM llm_wiki_entries WHERE id = ?1 AND entity_id = ?2",
         params![entry_id, entity_id],
         |r| {
@@ -66,6 +66,7 @@ pub(crate) fn fact_row_outbox_payload(
             let lifecycle_status: Option<String> = r.get(14)?;
             let generated_by: Option<String> = r.get(16)?;
             let last_verified_by: Option<String> = r.get(18)?;
+            let area: Option<String> = r.get(19)?;
             Ok(wiki_fact_outbox_payload(
                 entry_id,
                 entity_id,
@@ -88,6 +89,7 @@ pub(crate) fn fact_row_outbox_payload(
                 generated_by.as_deref(),
                 r.get(17)?,
                 last_verified_by.as_deref(),
+                area.as_deref(),
             ))
         },
     )?)
@@ -229,6 +231,30 @@ mod tests {
         let payload_verified: serde_json::Value =
             serde_json::from_str(payload["okf_verified"].as_str().unwrap()).unwrap();
         assert_eq!(payload_verified[1]["by"], LOCAL_REVIEWER);
+    }
+
+    /// Review round 1 m4: promoting a draft PRESERVES an existing `deploy`
+    /// area in the pushed Update payload.
+    #[test]
+    fn promoted_draft_payload_preserves_existing_area() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "fact_da", "tier_fact", "draft", None);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET area = 'deploy' WHERE id = 'fact_da'",
+            [],
+        )
+        .unwrap();
+
+        promote_draft(&conn, "fact_da", "tier_fact", NOW).unwrap();
+
+        let rows = outbox_rows(&conn, "fact_da");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].2["area"],
+            serde_json::json!("deploy"),
+            "promote must preserve the existing area, got: {}",
+            rows[0].2
+        );
     }
 
     #[test]

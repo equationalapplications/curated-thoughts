@@ -2046,6 +2046,89 @@ pub fn print_proposal_detail(detail: &tauri_app_lib::db::proposals::ProposalDeta
     }
 }
 
+// ---------------------------------------------------------------------------
+// Task 9 (spec 2026-11-14-areas §12, rev 12): `ct wisdom areas rename`
+// ---------------------------------------------------------------------------
+
+/// `ct wisdom areas rename --hub <entity id> <old> <new> [--yes]`.
+///
+/// Dry-run DEFAULT: without `--yes`, the preview (hub, old → new, affected
+/// row count) prints and NOTHING is written; `--yes` executes. All guardrails
+/// (unknown hub listing every configured key, dead/colliding hub, `new` not
+/// defined by the hub's areas file, zero matching rows) live in
+/// `tauri_app_lib::db::areas_rename::areas_rename` — the CLI is the thin
+/// open-brain + config-load + print shell. Errors exit nonzero (refuse,
+/// never degrade).
+pub fn wisdom_areas_rename_cmd(hub: &str, old: &str, new: &str, yes: bool) -> Result<i32> {
+    use tauri_app_lib::config::BrainConfig;
+    use tauri_app_lib::db::areas_rename::areas_rename;
+
+    let paths = tauri_app_lib::retrieval::resolve_brain_paths();
+    if !paths.db_path.exists() {
+        anyhow::bail!(
+            "brain.db not found at {} — run ingest first",
+            paths.db_path.display()
+        );
+    }
+    // Gauntlet fix 8: a DRY RUN must not mutate the database — that includes
+    // the SCHEMA. `migrate_brain_db` writes (user_version bumps, ALTERs), so
+    // it runs ONLY on the execute path. The preview opens the db READ-ONLY
+    // and inspects it as-is; a schema too old to answer the preview bails
+    // with an actionable error instead of being silently migrated.
+    if yes {
+        tauri_app_lib::db::connection::migrate_brain_db(&paths.db_path);
+    }
+    let flags = if yes {
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+    } else {
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+    };
+    let conn = rusqlite::Connection::open_with_flags(&paths.db_path, flags)
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", paths.db_path.display()))?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+
+    let cfg = BrainConfig::load(&paths).map_err(|e| {
+        anyhow::anyhow!("load brain config {}: {e}", paths.config_path.display())
+    })?;
+    let Some(wisdom) = cfg.wisdom.as_ref() else {
+        anyhow::bail!(
+            "rename refused: wisdom.areas_paths is not configured in {} — there is no hub \
+             to rename against",
+            paths.config_path.display()
+        );
+    };
+
+    let report = match areas_rename(&conn, wisdom, hub, old, new, yes) {
+        Ok(r) => r,
+        // Gauntlet fix 8: dry-run on a pre-V30 (or otherwise too-old) db
+        // cannot be answered — bail with the actionable upgrade hint rather
+        // than migrating underneath the preview.
+        Err(e)
+            if !yes
+                && (format!("{e:#}").contains("no such table")
+                    || format!("{e:#}").contains("no such column")) =>
+            anyhow::bail!(
+                "rename preview impossible: {} schema is too old for the areas preview \
+                 (missing tables or columns) — run `ct ingest` (or migrate) to bring brain.db \
+                 up to date, then retry",
+                paths.db_path.display()
+            ),
+        Err(e) => return Err(e),
+    };
+    if report.executed {
+        println!(
+            "renamed {} fact row(s) on hub {}: {} -> {}",
+            report.rows, report.hub, report.old, report.new
+        );
+    } else {
+        println!(
+            "dry-run: hub {}: {} -> {} would rename {} fact row(s); pass --yes to execute",
+            report.hub, report.old, report.new, report.rows
+        );
+    }
+    Ok(0)
+}
+
 #[cfg(test)]
 use tempfile::TempDir;
 
@@ -2054,7 +2137,84 @@ mod tests {
     use super::*;
     use tauri_app_lib::db::queries::upsert_document;
 
-    // ---- replace_trusted_links (repointed-symlink dedup) ----
+    // ---- Gauntlet fix 8: dry-run must not migrate ----
+
+    /// `ct wisdom areas rename` (no --yes) on a PRE-V30 brain.db: the preview
+    /// must NOT run `migrate_brain_db` — the db file's bytes are untouched,
+    /// and the unusable schema surfaces as an actionable error instead.
+    #[test]
+    fn areas_rename_dry_run_on_pre_v30_db_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("brain.db");
+        // A pre-V30 db: old-era tables exist (entities + redirects) but the
+        // V30 areas tables (`llm_wiki_entries`) do not, so the preview
+        // capture cannot be answered without migrating (which the dry run
+        // must not do).
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE curated_entities (
+                     id TEXT PRIMARY KEY, name TEXT, entity_type TEXT, summary TEXT,
+                     created_at INTEGER, updated_at INTEGER, deleted_at INTEGER);
+                 CREATE TABLE entity_redirects (entity_id TEXT PRIMARY KEY, merged_into TEXT);
+                 CREATE VIEW live_entities AS
+                     SELECT ce.* FROM curated_entities ce WHERE NOT EXISTS (
+                         SELECT 1 FROM entity_redirects r WHERE r.entity_id = ce.id);
+                 INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+                     VALUES ('ent-hub', 'Hub', 'concept', 's', 100, 100);",
+            )
+            .unwrap();
+        }
+        // The areas file must parse so the guard failure comes from the
+        // capture SELECT, not an earlier refusal.
+        std::fs::create_dir_all(tmp.path().join("nowhere")).unwrap();
+        std::fs::write(
+            tmp.path().join("nowhere/.ct-areas.yaml"),
+            "areas:\n  deploy:\n    - \"**\"\n  new-area:\n    - \"**\"\n",
+        )
+        .unwrap();
+        let areas_yaml = tmp.path().join("nowhere/.ct-areas.yaml");
+        let cfg_path = tmp.path().join("config.json");
+        std::fs::write(
+            &cfg_path,
+            // Coderabbit follow-up: serialize with serde_json — interpolating
+            // `display()` into a string literal produces invalid JSON escapes
+            // on Windows-style paths.
+            serde_json::json!({
+                "vault_path": "/tmp/nowhere-vault",
+                "wisdom": { "areas_paths": { "ent-hub": areas_yaml.to_string_lossy() } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let before = std::fs::read(&db).unwrap();
+        let db_str = db.to_string_lossy().into_owned();
+        let cfg_str = cfg_path.to_string_lossy().into_owned();
+        temp_env::with_var("CURATED_BRAIN_DB", Some(&db_str), || {
+            temp_env::with_var("CURATED_BRAIN_CONFIG", Some(&cfg_str), || {
+                let r = wisdom_areas_rename_cmd("ent-hub", "deploy", "new-area", false);
+                let msg = format!(
+                    "{}",
+                    r.expect_err("dry-run on pre-V30 db must error")
+                );
+                assert!(
+                    msg.contains("too old"),
+                    "error must be actionable about the stale schema: {msg}"
+                );
+                assert!(
+                    msg.contains("ingest") || msg.contains("migrate"),
+                    "error must name the upgrade path: {msg}"
+                );
+            });
+        });
+        let after = std::fs::read(&db).unwrap();
+        assert_eq!(
+            before, after,
+            "dry-run on a pre-V30 db must not modify a single byte (no migration, no write)"
+        );
+    }
+
+
 
     fn trusted_link(
         link: &str,
@@ -2592,6 +2752,7 @@ mod tests {
     #[test]
     fn redact_home_collapses_exact_match() {
         let home = "/Users/example-home";
+        let _home_guard = HOME_LOCK.lock().unwrap();
         temp_env::with_var("HOME", Some(home), || {
             assert_eq!(redact_home(home), "~");
         });
@@ -2600,6 +2761,7 @@ mod tests {
     /// A path outside the home directory is left verbatim.
     #[test]
     fn redact_home_leaves_non_home_paths_untouched() {
+        let _home_guard = HOME_LOCK.lock().unwrap();
         temp_env::with_var("HOME", Some("/Users/example-home"), || {
             let outside = "/var/tmp/repo-docs";
             assert_eq!(redact_home(outside), outside);
@@ -2617,6 +2779,7 @@ mod tests {
     fn redact_home_redacts_child_path_using_platform_separator() {
         let sep = std::path::MAIN_SEPARATOR;
         let home = format!("{sep}Users{sep}example-home");
+        let _home_guard = HOME_LOCK.lock().unwrap();
         temp_env::with_var("HOME", Some(home.as_str()), || {
             let target = format!("{home}{sep}.ssh{sep}id_ed25519");
             assert_eq!(redact_home(&target), format!("~{sep}.ssh{sep}id_ed25519"));
@@ -2628,6 +2791,7 @@ mod tests {
     /// component-wise comparison must not treat it as "inside home".
     #[test]
     fn redact_home_does_not_match_a_string_prefix_sibling() {
+        let _home_guard = HOME_LOCK.lock().unwrap();
         temp_env::with_var("HOME", Some("/Users/example-home"), || {
             let sibling = "/Users/example-home-secrets/file.txt";
             assert_eq!(redact_home(sibling), sibling);
@@ -2668,6 +2832,13 @@ mod tests {
         ));
     }
 
+    // Task 11 review fix: process-wide `$HOME` reads and writes must not
+    // overlap across parallel tests — `temp-env`'s internal lock serializes
+    // `with_var` CALLS against each other but does NOT cover a plain
+    // `dirs::home_dir()` read (the redact_home canonicalize test), which
+    // then saw a sibling's temporary HOME and returned an unredacted path.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// End-to-end over *actual* `canonicalize` output for the real home dir,
     /// rather than a hand-written string: on Windows this is the
     /// `\\?\`-prefixed form, which must still collapse to `~`.
@@ -2679,6 +2850,11 @@ mod tests {
     /// site by canonicalizing `vault_root`, not here).
     #[test]
     fn redact_home_collapses_actual_canonicalize_output_for_home() {
+        // Hold the HOME lock for the WHOLE read→assert window: redact_home
+        // re-reads `$HOME` internally, so a sibling test's temporary
+        // with_var("HOME") inside the window redacted against the wrong
+        // prefix and the assertion failed spuriously (full-suite-only flake).
+        let _home_guard = HOME_LOCK.lock().unwrap();
         let Some(home) = dirs::home_dir() else {
             return;
         };

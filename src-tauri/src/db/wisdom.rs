@@ -412,7 +412,7 @@ pub fn update_wisdom_in_tx(
                 "SELECT tags, confidence, source_type, COALESCE(source_ref, ''), created_at,
                         source_hash, okf_type, okf_sources, okf_verified, okf_usage_window,
                         lifecycle_status, stale_after, generated_by,
-                        last_verified_at, last_verified_by
+                        last_verified_at, last_verified_by, area
                  FROM llm_wiki_entries
                  WHERE id = ? AND entity_id IN ({placeholders}) AND deleted_at IS NULL"
             ),
@@ -438,6 +438,7 @@ pub fn update_wisdom_in_tx(
                     r.get::<_, Option<String>>(12)?,
                     r.get::<_, Option<i64>>(13)?,
                     r.get::<_, Option<String>>(14)?,
+                    r.get::<_, Option<String>>(15)?,
                 ))
             },
         )
@@ -458,6 +459,7 @@ pub fn update_wisdom_in_tx(
         existing_generated_by,
         existing_last_verified_at,
         existing_last_verified_by,
+        existing_area,
     )) = existing
     else {
         bail!("wisdom not found or archived: {wisdom_id}");
@@ -518,6 +520,7 @@ pub fn update_wisdom_in_tx(
             existing_generated_by.as_deref(),
             existing_last_verified_at,
             existing_last_verified_by.as_deref(),
+            existing_area.as_deref(),
         ),
         now_ms,
     )?;
@@ -679,6 +682,37 @@ mod tests {
         assert_eq!(loaded.facts[0].body, "New body with more detail.");
         assert_eq!(loaded.facts[0].title, "New body with more detail.");
         assert_eq!(outbox_count(&conn, &fact.id, "UPDATE"), 1);
+    }
+
+    /// Review round 1 m4: update_wisdom PRESERVES an existing `deploy` area
+    /// in the pushed Update payload — editing a body never un-scopes it.
+    #[test]
+    fn update_wisdom_payload_preserves_existing_area() {
+        let mut conn = open_in_memory().unwrap();
+        let entity_id = make_entity(&mut conn);
+        let fact = seed_fact(&conn, &entity_id, "Old body.");
+        conn.execute(
+            "UPDATE llm_wiki_entries SET area = 'deploy' WHERE id = ?1",
+            params![&fact.id],
+        )
+        .unwrap();
+
+        update_wisdom(&mut conn, &entity_id, &fact.id, "New body with more detail.").unwrap();
+
+        let raw: String = conn
+            .query_row(
+                "SELECT payload FROM llm_wiki_outbox
+                 WHERE table_name = 'entries' AND record_id = ?1 AND operation = 'UPDATE'",
+                params![&fact.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            payload["area"],
+            serde_json::json!("deploy"),
+            "update payload must preserve the existing area, got: {payload}"
+        );
     }
 
     #[test]

@@ -322,6 +322,9 @@ fn activity_fp0_on_user_confirmed_kernel_brain() {
             now,
             profile_key,
             tauri_app_lib::wisdom_match::QueryKind::Activity,
+            // Task 4 band plumbing: the frozen replay is UNSCOPED (no
+            // bindings) — `None` keeps the byte-frozen gate-decision shape.
+            None,
         )
         .unwrap();
         assert!(

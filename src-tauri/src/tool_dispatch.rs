@@ -2190,7 +2190,14 @@ mod curated_memory_tests {
     /// additive per-hit label keys while the `ct wisdom match` output — the
     /// cached message-mode surface — stays BYTE-IDENTICAL: same schema
     /// version, same field set, same bytes for the same seeded brain (no
-    /// `SCHEMA_VERSION` bump).
+    /// `SCHEMA_VERSION` bump). Task 4 (spec 2026-11-14-areas §10.4): the
+    /// WisdomItem struct gained `band`/`area`, but BOTH are
+    /// `skip_serializing_if = "Option::is_none"` and this pin runs UNSCOPED
+    /// (via `wisdom_match_with_floor`, whose body passes no bindings), so
+    /// the serialized bytes are unchanged — additive struct fields that never
+    /// serialize do not count as a byte change. The signature itself is
+    /// untouched (Task 4 threaded bindings through `wisdom_match_impl`, not
+    /// through this entry point).
     #[test]
     fn message_mode_output_byte_identical() {
         let conn = crate::db::connection::open_in_memory().unwrap();
