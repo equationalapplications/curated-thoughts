@@ -340,6 +340,12 @@ fn generate_summary_inner(
     // UNSCOPED synthesis, never an ingest refusal.
     let deposit_hub = read_deposit_hub_content(conn, source_path, note_content.as_deref());
     let areas = load_areas_vocab(conn);
+    // §6.6: the §6.7 NULL-stamp exemption is keyed on CONFIGURATION, not on
+    // the loaded vocabulary — a configured hub whose areas file failed to
+    // load must drop (and report) area-bearing facts, never stamp them NULL.
+    let areas_configured = wisdom_config_for_conn(conn)
+        .map(|c| !c.areas_paths.is_empty())
+        .unwrap_or(false);
 
     let chunks: Vec<ChunkRow> = {
         let mut stmt = conn.prepare("PRAGMA table_info(chunks)")?;
@@ -427,6 +433,7 @@ fn generate_summary_inner(
                 force,
                 deposit_hub.as_deref(),
                 &areas,
+                areas_configured,
             )
         }
         None => {

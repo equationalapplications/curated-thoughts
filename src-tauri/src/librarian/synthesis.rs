@@ -943,7 +943,7 @@ fn collect_sources(
     }
     sources
 }
-
+#[allow(clippy::too_many_arguments)]
 fn validate_llm_output(
     raw: &LlmSynthesisOutput,
     mode: SynthesisMode,
@@ -952,6 +952,7 @@ fn validate_llm_output(
     model: &str,
     trigger_doc_id: i64,
     areas: &AreasVocab,
+    areas_configured: bool,
 ) -> Result<(Vec<ValidatedProposal>, Vec<String>)> {
     let candidate_ids: HashSet<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
     let injected_fact_ids: HashSet<&str> = candidates
@@ -1038,8 +1039,19 @@ fn validate_llm_output(
                     Some(area) => {
                         // §6.7 (M1 ruling): where NO areas are configured the
                         // machine stamps NULL and keeps the fact — the §6.6
-                        // drop exists only where areas ARE configured.
+                        // drop exists only where areas ARE configured. A
+                        // CONFIGURED hub whose areas file failed to load is
+                        // NOT the §6.7 exemption: the fact must not land
+                        // silently as whole-repo, so it is dropped and
+                        // reported like any other out-of-vocabulary area.
                         if areas.is_empty() {
+                            if areas_configured {
+                                dropped.push(format!(
+                                    "fact_{} dropped: area \"{area}\" is not in the target's areas vocabulary (§6.6): areas are configured but no areas file loaded",
+                                    fact.op
+                                ));
+                                continue;
+                            }
                             None
                         } else {
                             let allowed = entity_id
@@ -1249,7 +1261,7 @@ fn write_synthesized_event(conn: &Connection, entity_id: &str, summary: &str) ->
     )?;
     Ok(())
 }
-
+#[allow(clippy::too_many_arguments)]
 fn parse_and_validate(
     raw_json: &str,
     mode: SynthesisMode,
@@ -1258,11 +1270,21 @@ fn parse_and_validate(
     model: &str,
     trigger_doc_id: i64,
     areas: &AreasVocab,
+    areas_configured: bool,
 ) -> Result<(Vec<ValidatedProposal>, Vec<String>)> {
     let stripped = strip_json_fences(raw_json);
     let parsed: LlmSynthesisOutput =
         serde_json::from_str(&stripped).context("invalid synthesis JSON")?;
-    validate_llm_output(&parsed, mode, candidates, numbered, model, trigger_doc_id, areas)
+    validate_llm_output(
+        &parsed,
+        mode,
+        candidates,
+        numbered,
+        model,
+        trigger_doc_id,
+        areas,
+        areas_configured,
+    )
 }
 
 fn call_llm_with_retry(completer: &dyn LlmCompleter, system: &str, user: &str) -> Result<String> {
@@ -1343,6 +1365,12 @@ pub fn run_synthesis(
     // Record the CONFIGURED model (the one that will actually serve the call),
     // not the caller's fallback recommendation.
     let watermark_model = active_generation_model(model);
+    // §6.6: the §6.7 NULL-stamp exemption is keyed on CONFIGURATION, not on
+    // the loaded vocabulary — a configured hub whose areas file failed to
+    // load must drop (and report) area-bearing facts, never stamp them NULL.
+    let areas_configured = super::wisdom_config_for_conn(conn)
+        .map(|c| !c.areas_paths.is_empty())
+        .unwrap_or(false);
     run_synthesis_areas_with_completer(
         conn,
         source_path,
@@ -1356,6 +1384,7 @@ pub fn run_synthesis(
         force,
         deposit_hub,
         areas,
+        areas_configured,
     )
 }
 
@@ -1460,6 +1489,7 @@ pub(crate) fn run_synthesis_with_completer(
         force,
         None,
         &BTreeMap::new(),
+        false,
     )
 }
 
@@ -1482,6 +1512,7 @@ pub(crate) fn run_synthesis_areas_with_completer(
     force: bool,
     deposit_hub: Option<&str>,
     areas: &AreasVocab,
+    areas_configured: bool,
 ) -> Result<()> {
     if !force {
         // Watermark gate: skip docs whose content hash and active model
@@ -1616,6 +1647,7 @@ pub(crate) fn run_synthesis_areas_with_completer(
         watermark_model,
         trigger_doc_id,
         areas,
+        areas_configured,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -2068,6 +2100,7 @@ mod tests {
             "test",
             10,
             &BTreeMap::new(),
+            false,
         )
         .unwrap();
         assert_eq!(validated.len(), 1);
@@ -2110,7 +2143,7 @@ mod tests {
             }],
         };
         let (validated, _dropped) =
-            validate_llm_output(&raw, SynthesisMode::Synthesize, &[], &numbered, "test", 10, &BTreeMap::new())
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &[], &numbered, "test", 10, &BTreeMap::new(), false)
                 .unwrap();
         assert_eq!(validated[0].items[0].evidence.len(), 1);
         assert_eq!(validated[0].items[0].evidence[0].chunk_id, Some(1));
@@ -2158,7 +2191,7 @@ mod tests {
             }],
         };
         let (validated, _dropped) =
-            validate_llm_output(&raw, SynthesisMode::Summarize, &[], &numbered, "test", 10, &BTreeMap::new())
+            validate_llm_output(&raw, SynthesisMode::Summarize, &[], &numbered, "test", 10, &BTreeMap::new(), false)
                 .unwrap();
         assert_eq!(validated.len(), 1);
         assert_eq!(validated[0].items.len(), 1);
@@ -3672,6 +3705,7 @@ mod tests {
             false,
             Some("ent-alpha"),
             &areas,
+            true,
         )
         .unwrap();
 
@@ -3805,7 +3839,7 @@ mod tests {
             }],
         };
         let (validated, dropped) =
-            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas, true)
                 .unwrap();
         assert!(dropped.is_empty(), "in-vocabulary area must not drop: {dropped:?}");
         let fact = validated[0]
@@ -3873,7 +3907,7 @@ mod tests {
             }],
         };
         let (validated, dropped) =
-            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas, true)
                 .unwrap();
         let bodies: Vec<&str> = validated[0]
             .items
@@ -3944,7 +3978,7 @@ mod tests {
             ],
         };
         let (validated, dropped) =
-            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas, true)
                 .unwrap();
         for prop in &validated {
             assert!(
@@ -3996,7 +4030,7 @@ mod tests {
             }],
         };
         let (validated, dropped) =
-            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas, true)
                 .unwrap();
         let edge_names: Vec<String> = validated[0]
             .items
@@ -4057,7 +4091,7 @@ mod tests {
             }],
         };
         let (validated, dropped) =
-            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas, false)
                 .unwrap();
         let fact = validated[0]
             .items
@@ -4072,6 +4106,55 @@ mod tests {
         assert!(
             dropped.is_empty(),
             "no §6.6 report line on an unconfigured machine: {dropped:?}"
+        );
+    }
+
+    /// §6.6 (tier-1.5 rung-1 MAJOR): a CONFIGURED hub whose areas file
+    /// FAILED TO LOAD (empty vocab despite configuration) is NOT the §6.7
+    /// exemption — an area-bearing fact is DROPPED and REPORTED; it must
+    /// never land silently as whole-repo.
+    #[test]
+    fn areas_write_path_configured_but_file_unloaded_drops_and_reports() {
+        let candidates = vec![CandidateEntity {
+            id: "ent-hub".into(),
+            name: "RepoHub".into(),
+            entity_type: "concept".into(),
+            summary_snippet: "hub".into(),
+            facts: vec![],
+        }];
+        // Vocabulary empty BECAUSE the areas file did not load — but areas
+        // ARE configured (areas_configured = true).
+        let areas = AreasVocab::new();
+        let raw = LlmSynthesisOutput {
+            proposals: vec![LlmProposal {
+                target: LlmTarget::Existing {
+                    existing_id: "ent-hub".into(),
+                },
+                reasoning: "Because".into(),
+                summary_update: None,
+                facts: vec![LlmFact {
+                    op: "add".into(),
+                    target_id: None,
+                    body: Some("Fact whose hub file is briefly unreadable.".into()),
+                    tags: vec![],
+                    confidence: None,
+                    evidence: vec![],
+                    area: Some("deploy".into()),
+                }],
+                edges: vec![],
+                tasks: vec![],
+            }],
+        };
+        let (validated, dropped) =
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas, true)
+                .unwrap();
+        assert!(
+            validated.iter().all(|p| p.items.iter().all(|i| i.item_type != "fact_add")),
+            "the area-bearing fact must NOT survive as whole-repo"
+        );
+        assert!(
+            dropped.iter().any(|d| d.contains("areas file")),
+            "the drop must be reported with the load-failure reason: {dropped:?}"
         );
     }
 
@@ -4105,7 +4188,7 @@ mod tests {
             }],
         };
         let (validated, dropped) =
-            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas)
+            validate_llm_output(&raw, SynthesisMode::Synthesize, &candidates, &[], "test", 10, &areas, true)
                 .unwrap();
         // The collided edge was the proposal's only item, so the whole
         // proposal is skipped; assert through a flat scan either way.
@@ -4186,6 +4269,7 @@ mod tests {
             "test",
             10,
             &areas,
+            true,
         )
         .unwrap();
         assert!(validated.is_empty());
@@ -4200,6 +4284,7 @@ mod tests {
             "test",
             10,
             &areas,
+            true,
         )
         .unwrap();
         assert!(validated.is_empty());

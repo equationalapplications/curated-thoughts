@@ -395,7 +395,8 @@ enum WisdomCmd {
         tags: Vec<String>,
         /// Optional ABSOLUTE path of the checkout this deposit concerns;
         /// resolved against the configured wisdom.areas_paths roots and
-        /// rendered as a `hub:` frontmatter key. Relative paths are refused.
+        /// rendered as a `hub:` frontmatter key. Relative paths are resolved
+        /// against the current directory.
         #[arg(long = "repo-path")]
         repo_path: Option<String>,
         /// Confirm the write.
