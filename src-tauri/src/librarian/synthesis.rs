@@ -1363,7 +1363,42 @@ pub(crate) fn llm_generation_configured() -> bool {
     // identical load seconds later succeeded). Surface it.
     match build_llm_completer(&active_generation_model("llama3.2:3b")) {
         Ok(Some(_)) => true,
-        Ok(None) => false,
+        Ok(None) => {
+            // CI 2026-11-20/24: Ok(None) fired while the SAME path loaded a
+            // valid External config seconds later, and the Err arm's eprintln
+            // never printed — so the silent-default path inside load_lenient
+            // fired (file NotFound at that instant, or a per-field drop).
+            // load_lenient records WHY it fell back; surface it. The re-load
+            // here is diagnostic only: it reads the same path the completer
+            // build just read and prints whatever state the file is in NOW
+            // (a miss-then-hit pair is itself the evidence).
+            let brain_dir_str = crate::get_brain_dir_inner();
+            let brain_path = std::path::Path::new(&brain_dir_str);
+            let diag_paths = crate::retrieval::BrainPaths {
+                brain_dir: brain_path.to_path_buf(),
+                config_path: crate::inference::config::config_path(brain_path),
+                db_path: brain_path.join("brain.db"),
+            };
+            let cfg_exists = diag_paths.config_path.exists();
+            let diag = match crate::config::BrainConfig::load_lenient(&diag_paths) {
+                Ok(report) => format!(
+                    "Ok(provider={:?} gen_missing={} emb_missing={} vault_missing={} privacy_missing={} diagnostics={:?})",
+                    report.config.generation.provider,
+                    report.generation_missing,
+                    report.embedding_missing,
+                    report.vault_path_missing,
+                    report.privacy_missing,
+                    report.diagnostics,
+                ),
+                Err(e) => format!("Err({e:#})"),
+            };
+            eprintln!(
+                "[llm_generation_configured] UNCONFIGURED: brain_dir={brain_dir_str} \
+                 cfg={} exists={cfg_exists} re-load={diag}",
+                diag_paths.config_path.display()
+            );
+            false
+        }
         Err(e) => {
             eprintln!("[llm_generation_configured] completer build failed: {e:#}");
             false
