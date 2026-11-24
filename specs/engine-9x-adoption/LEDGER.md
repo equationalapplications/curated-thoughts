@@ -4,7 +4,7 @@ Transient scaffolding — deleted in the same-PR cleanup commit.
 Plan: `specs/engine-9x-adoption/plan.md`. Spec: `specs/engine-9x-adoption/spec.md` (Approved 2026-11-24).
 Receipts dir: `.superpowers/sdd/engine-9x-pr-a/receipts/`.
 
-**In flight:** Q1–Q13 ruled; rung 1 FAIL ($1.67, 2 MAJOR + 9 MINOR — folded); rung 2 FAIL ($1.31, F10 drift + partials + N1–N4 — folded); rung 3 FAIL ($0.65: M2 MAJOR — the relocated backup-gone test failed Task 4's own gate — plus M1/M4 backup-lifecycle gaps, M3 nit) — all adjudicated REAL and folded (deletion owned by step-2 completion with "no unstamped step remains" condition; Task 4 keeps exists-after-migrate test; post-commit verification specified; 4 new 5c tests). Delta rung 4 next. Ladder spend: $5.81.
+**In flight:** Q1–Q13 ruled; rungs 1–3 folded ($1.67/$1.31/$0.65); rung 4 FAIL ($0.52: P1 MAJOR — 4e exists-test red at Task 5's gate; P2 MAJOR — verification compared post-state to pre-write counts; P3 test-hook mechanisms; P4/P5 nits) — all adjudicated REAL and folded (commit pending): expected-post-state verification, Task 5 step 11 rewrites the 4e test, concrete mid-migrate hooks, log-line-only reuse proof, N-only interim trigger note. Delta rung 5 next. Ladder spend: $6.33.
 
 ## Baseline (39fc129f)
 
