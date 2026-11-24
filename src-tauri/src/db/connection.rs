@@ -1628,7 +1628,8 @@ struct Sso9Edge {
 #[derive(Debug, Default)]
 struct Sso9EdgePlan {
     /// Step 2: `handoffFor` → `about` (source in the snapshot, target type
-    /// `software_application` or `statement`).
+    /// `software_application` only — a `statement`-typed target is not a
+    /// declared `about` shape, U-review finding 1).
     remap: Vec<Sso9Edge>,
     /// Step 3: `handoffFor` with a `service` target.
     service_drop: Vec<Sso9Edge>,
@@ -1637,6 +1638,10 @@ struct Sso9EdgePlan {
     parent_drop: Vec<Sso9Edge>,
     /// Keep set: `about` → `organization` from a re-typed source.
     kept_about_org: usize,
+    /// U-review finding 7: `about` from a re-typed source to a target that
+    /// becomes a DECLARED statement shape (software_application, area) —
+    /// kept, and counted separately from undispositioned.
+    kept_declared_about: usize,
     /// Step 5 / Q5: outside the spec's keep/drop lists — untouched, counted.
     undispositioned: usize,
     /// Census inputs.
@@ -1742,7 +1747,11 @@ fn sso9_plan_edges(
                 .or_default() += 1;
             match tt.as_deref() {
                 Some("service") => plan.service_drop.push(e),
-                Some("software_application") | Some("statement") if src_in => plan.remap.push(e),
+                // U-review finding 1: a `statement`-typed target is NOT a
+                // declared `about` shape (about: statement→area/
+                // software_application/organization) — such edges fall to
+                // `undispositioned` rather than minting an undeclared shape.
+                Some("software_application") if src_in => plan.remap.push(e),
                 _ => plan.undispositioned += 1,
             }
         } else if touches {
@@ -1753,6 +1762,11 @@ fn sso9_plan_edges(
                     match tt.as_deref() {
                         Some("person") | Some("place") | Some("event") => plan.parent_drop.push(e),
                         Some("organization") => plan.kept_about_org += 1,
+                        // U-review finding 7: after the re-type these become
+                        // DECLARED statement→sa/area shapes — not unhandled.
+                        Some("software_application") | Some("area") => {
+                            plan.kept_declared_about += 1
+                        }
                         _ => plan.undispositioned += 1,
                     }
                 }
@@ -1819,11 +1833,12 @@ fn sso9_retype_census(conn: &Connection) -> Result<()> {
     parts.push(format!("edges_touching_by_type={}", sso9_fmt_map(&plan.touching_by_type)));
     parts.push(format!(
         "planned_remap={} planned_service_drop={} planned_parent_family_drop={} \
-         kept_about_organization={} undispositioned={}",
+         kept_about_organization={} kept_declared_about={} undispositioned={}",
         plan.remap.len(),
         plan.service_drop.len(),
         plan.parent_drop.len(),
         plan.kept_about_org,
+        plan.kept_declared_about,
         plan.undispositioned
     ));
     let pending_types: i64 = conn.query_row(
@@ -1916,9 +1931,10 @@ fn run_sso9_retype_txn(conn: &Connection) -> Result<Option<Sso9Dispositions>> {
         }
         sso9_log!(
             "[ct::migrate] sso9 retype: parent-family edges dropped by type={} \
-             (about->organization kept={})",
+             (about->organization kept={}, declared about->sa/area kept={})",
             sso9_fmt_map(&by_type),
-            plan.kept_about_org
+            plan.kept_about_org,
+            plan.kept_declared_about
         );
         // 5. everything else: untouched, counted.
         sso9_log!(
@@ -6076,7 +6092,8 @@ mod tests {
             assert!(etype(&conn, id).is_some(), "{id} must be untouched");
         }
         assert_eq!(etype(&conn, "e_undisp").as_deref(), Some("handoffFor"));
-        assert!(log.iter().any(|l| l.contains("undispositioned=3 (left untouched)")), "{log:#?}");
+        assert!(log.iter().any(|l| l.contains("declared about->sa/area kept=1")), "{log:#?}");
+        assert!(log.iter().any(|l| l.contains("undispositioned=2 (left untouched)")), "{log:#?}");
     }
 
     #[test]
@@ -6229,7 +6246,8 @@ mod tests {
             "planned_service_drop=1",
             "planned_parent_family_drop=7",
             "kept_about_organization=1",
-            "undispositioned=3",
+            "kept_declared_about=1",
+            "undispositioned=2",
             "pending_proposal_items_with_dropped_types=1",
             "pending_proposal_items_with_handoffFor=1",
         ] {
