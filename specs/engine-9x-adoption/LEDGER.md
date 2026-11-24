@@ -4,7 +4,7 @@ Transient scaffolding — deleted in the same-PR cleanup commit.
 Plan: `specs/engine-9x-adoption/plan.md`. Spec: `specs/engine-9x-adoption/spec.md` (Approved 2026-11-24).
 Receipts dir: `.superpowers/sdd/engine-9x-pr-a/receipts/`.
 
-**In flight:** Q1–Q13 ruled; rungs 1–3 folded ($1.67/$1.31/$0.65); rung 4 FAIL ($0.52: P1 MAJOR — 4e exists-test red at Task 5's gate; P2 MAJOR — verification compared post-state to pre-write counts; P3 test-hook mechanisms; P4/P5 nits) — all adjudicated REAL and folded (commit pending): expected-post-state verification, Task 5 step 11 rewrites the 4e test, concrete mid-migrate hooks, log-line-only reuse proof, N-only interim trigger note. Delta rung 5 next. Ladder spend: $6.33.
+**In flight:** Q1–Q13 ruled; rungs 1–4 folded ($1.67/$1.31/$0.65/$0.52); rung 5 FAIL ($0.59: Q1′ MAJOR — expected-post-state self-contradicted on manifest buckets; Q2′ measurement basis unspecified; Q3′/Q4′/Q5′) — RULED: verification REDESIGNED as invariant-based (stamps / no stale slugs in 3 tables / no snapshot-set handoffFor edges / planner new_json shape check), census stays audit-only; Q4′ hook = injected fns. Fold committed; delta rung 6 next. Ladder spend: $6.92.
 
 ## Baseline (39fc129f)
 
