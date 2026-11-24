@@ -4,7 +4,7 @@ Transient scaffolding — deleted in the same-PR cleanup commit.
 Plan: `specs/engine-9x-adoption/plan.md`. Spec: `specs/engine-9x-adoption/spec.md` (Approved 2026-11-24).
 Receipts dir: `.superpowers/sdd/engine-9x-pr-a/receipts/`.
 
-**In flight:** Q1–Q13 ruled; rungs 1–5 folded ($1.67/$1.31/$0.65/$0.52/$0.59); rung 6 FAIL ($0.70: R1 MAJOR — shape check ran after ensure rewrote the row; R2 MAJOR — invariant (c) false-failed Q5-untouched edges; R3/R4/R5/R6) — RULED: shape check moved inside step 1 pre-ensure; (c) replaced by captured-disposition-outcome check (only ids steps 2–4 dispositioned); firing-path tests required per check; step-1-only path defined. Fold committed; delta rung 7 next. Ladder spend: $7.62.
+**In flight:** Q1–Q13 ruled; rungs 1–6 folded; rung 7 FAIL ($0.51: S1 MAJOR — "gone-or-about" accepted a failed step-4 drop since those rows were already `about`; S2 capture via pre-write SELECT; S3 vacuous-shape clause restored; S4 (a) exempt with reason; S5 (b) evaluated on step-1-only path; S6 hook-point cross-ref) — all folded. Delta rung 8 next. Ladder spend: $8.13.
 
 ## Baseline (39fc129f)
 
