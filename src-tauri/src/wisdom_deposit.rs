@@ -1017,6 +1017,23 @@ async fn deposit_inner(
         validate_handle(&a.source)
             .map_err(|e| anyhow!("invalid attribution_source: {e}"))?;
     }
+    // Tier-3 p2 F4: the lexical traversal vet of the user-controlled
+    // sub-parent must run BEFORE the existence probe below — otherwise a
+    // `..`-bearing path gets a distinguishing reply (`deposit_exists` vs
+    // `unsafe deposit path`) that turns wisdom_deposit into a host file
+    // existence oracle. Pure lexical check; nothing else may probe the
+    // filesystem on the raw join before it passes.
+    let sub_parent = std::path::Path::new(&rel)
+        .strip_prefix(AGENTS_DIR)
+        .ok()
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| std::path::Path::new(""));
+    if !sub_parent
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        bail!("unsafe deposit path: traversal component in {}", p.path);
+    }
     let target = vault.join(&rel);
     if target.symlink_metadata().is_ok() {
         bail!("deposit_exists: {} (append-only; supersede instead)", rel);
@@ -1047,19 +1064,9 @@ async fn deposit_inner(
     // `immutable-source-files` (or `agents`) and materialize the lane tree
     // outside the vault before safe_vault_path rejects the write. The
     // user-controlled sub-parent (a deposit may live deeper, e.g.
-    // agents/topic/note.md) is vetted first: plain names only — no `..`, no
-    // root — so nothing is created outside the lane before validation runs.
-    let sub_parent = std::path::Path::new(&rel)
-        .strip_prefix(AGENTS_DIR)
-        .ok()
-        .and_then(|p| p.parent())
-        .unwrap_or_else(|| std::path::Path::new(""));
-    if !sub_parent
-        .components()
-        .all(|c| matches!(c, std::path::Component::Normal(_)))
-    {
-        bail!("unsafe deposit path: traversal component in {}", p.path);
-    }
+    // `agents/topic/note.md) is vetted above (Tier-3 p2 F4 moved the check
+    // ahead of the existence probe) — plain names only, so nothing is
+    // created outside the lane before validation runs.
     let lane_rel = std::path::Path::new(AGENTS_DIR).join(sub_parent);
     crate::okf::write::create_parents_no_symlink(&vault, &lane_rel)
         .map_err(|e| anyhow!("unsafe deposit path: {e}"))?;

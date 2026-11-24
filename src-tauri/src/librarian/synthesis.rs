@@ -1663,6 +1663,34 @@ pub(crate) fn run_synthesis_areas_with_completer(
     }
 
     if validated.is_empty() {
+        // Tier-3 (CT #367 follow-up pass): when EVERY item was dropped by the
+        // §6.6 area-vocabulary validation, writing the watermark would seal
+        // the drop as permanent — the run reports "ingested", the status
+        // reply shows no facts, and the document is never re-synthesized.
+        // That is exactly the silent loss §6.3(c) forbids. Fail the leg
+        // instead: no watermark, and the kick ledger records "failed" with
+        // the drop reasons, so the status reply carries the cause. Candidate-
+        // gate and §6.5 drops keep the settled Task-6 completion behavior
+        // (pinned by tests/areas_carrier.rs): the run completes with zero
+        // facts and the drops are reported on stderr.
+        if !dropped.is_empty()
+            && dropped
+                .iter()
+                .all(|r| r.contains("is not in the target's areas vocabulary"))
+        {
+            // House style for "no proposals because it failed" (#298):
+            // typed SynthesisFailure → kick "failed" with the drop reasons.
+            return finish_failed_synthesis(
+                conn,
+                trigger_doc_id,
+                source_path,
+                vault_root,
+                format!(
+                    "synthesis dropped every item for {source_path}: {}",
+                    dropped.join("; ")
+                ),
+            );
+        }
         write_synth_watermark(conn, trigger_doc_id, watermark_model)?;
         return Ok(());
     }
@@ -3725,6 +3753,87 @@ mod tests {
         assert!(
             system.contains("\"area\""),
             "attach clause must instruct the model to add the area field: {system}"
+        );
+    }
+
+    /// §6.3(c)/#298 honesty (Tier-3 pass 2 MAJOR): when EVERY item is
+    /// dropped (here: the only fact carries an out-of-vocabulary area),
+    /// the run must FAIL (typed SynthesisFailure naming the drop reasons)
+    /// instead of stamping the watermark and reporting "ingested" — that
+    /// would seal the drop as a permanent silent loss. The watermark stays
+    /// unset so a later sweep retries the document.
+    #[test]
+    fn all_items_dropped_fails_instead_of_sealing_a_watermark() {
+        let mut conn = open_in_memory().unwrap();
+        let (doc_id, chunk_id) = seed_doc_and_chunk(
+            &conn,
+            "/vault/immutable-source-files/alpha-deploy.md",
+            "Alpha deploy notes for the runbook",
+        );
+        seed_entity_with_fact(&conn, "ent-alpha", "Alpha", "fact-a1");
+        let areas = areas_vocab(&[("ent-alpha", &["deploy", "infra"])]);
+        // The model's ONLY proposal carries an out-of-vocab area → dropped.
+        let json = serde_json::json!({
+            "proposals": [{
+                "target": { "existing_id": "ent-alpha" },
+                "reasoning": "Because",
+                "facts": [{
+                    "op": "add",
+                    "body": "Deploys land somewhere.",
+                    "tags": [],
+                    "evidence": [],
+                    "area": "deployment"
+                }],
+                "edges": [],
+                "tasks": []
+            }]
+        })
+        .to_string();
+        let mock = MockCompleter::new(vec![json]);
+        let chunks = vec![ChunkRow {
+            id: chunk_id,
+            entity_id: "tier_working::abc".into(),
+            text: "Alpha deploy notes for the runbook".into(),
+            symbol_name: None,
+            start_line: 1,
+            end_line: 3,
+            tier: "user_doc".into(),
+            path: "/vault/immutable-source-files/alpha-deploy.md".into(),
+        }];
+
+        let result = run_synthesis_areas_with_completer(
+            &mut conn,
+            "/vault/immutable-source-files/alpha-deploy.md",
+            &chunks,
+            doc_id,
+            SynthesisMode::Synthesize,
+            false,
+            None,
+            &mock,
+            "test-model",
+            false,
+            Some("ent-alpha"),
+            &areas,
+            true,
+        );
+        let err = result.expect_err("all-dropped synthesis must Err, not report ingested");
+        let failure = err
+            .downcast_ref::<SynthesisFailure>()
+            .expect("must be the typed SynthesisFailure");
+        assert!(
+            failure.0.contains("dropped every item") && failure.0.contains("deployment"),
+            "failure must carry the drop reasons, got: {}",
+            failure.0
+        );
+        let (hash, _) = watermark_of(&conn, doc_id);
+        assert!(
+            hash.is_none(),
+            "watermark must stay unset so a later sweep retries the document"
+        );
+        let queue = list_proposals(&conn, &ProposalFilter::default()).unwrap();
+        assert!(
+            queue.is_empty(),
+            "no proposal may land when every item was dropped: {queue:?}"
         );
     }
 
