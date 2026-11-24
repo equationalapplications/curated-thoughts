@@ -861,6 +861,10 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // every open, stamp last gated on V22. NULL means whole-repo; legacy
     // rows keep NULL (no backfill).
     apply_v30_area_column(conn)?;
+    // sso9 migration step 1 (engine-9x PR-A plan Task 4): MERGE-refresh the
+    // stored 8.x EA manifests. Backed up, gated on V22 + exact stamp
+    // membership; skipped (unstamped) on in-memory opens.
+    apply_sso9_manifest_refresh(conn)?;
 
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
     // rev 4.1 §1/D4): the deposit file's frontmatter is authoritative; this
@@ -1403,6 +1407,237 @@ fn apply_v30_area_column(conn: &Connection) -> Result<()> {
             "INSERT OR IGNORE INTO schema_version (version) VALUES (30)",
             [],
         )?;
+    }
+    Ok(())
+}
+
+/// Slot of the sso9 manifest MERGE-refresh step: (highest stamped literal on
+/// this branch = V30) + 1. Every stamp, gate, test and log line reads this
+/// const; if another lane takes the slot before merge, renumber the two
+/// consts (V27 renumber precedent above).
+pub(crate) const SSO9_REFRESH_VERSION: i64 = 31;
+/// Slot of the sso9 okf_type/edge re-type step (plan Task 5).
+#[allow(dead_code)]
+pub(crate) const SSO9_RETYPE_VERSION: i64 = SSO9_REFRESH_VERSION + 1;
+/// Free-space margin required on top of db + wal size before the backup (S2).
+const SSO9_BACKUP_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
+/// Tables whose row counts are compared source-vs-backup (S3 sanity check).
+const SSO9_SANITY_TABLES: [&str; 3] = [
+    "llm_wiki_entity_manifests",
+    "llm_wiki_entries",
+    "llm_wiki_edges",
+];
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: pin the backup timestamp so a test can pre-create the target
+    /// and force a genuine `VACUUM INTO` failure.
+    static SSO9_BACKUP_TS_OVERRIDE: std::cell::Cell<Option<u128>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn sso9_version_stamped(conn: &Connection, version: i64) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM schema_version WHERE version = ?1",
+            [version],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// S2 + S3: disk check, then a crash-consistent `VACUUM INTO` snapshot next to
+/// the brain (`<stem>.bak-pre-sso9-<ts>`) and a source-vs-backup row-count
+/// sanity check. Any failure is returned as `Err` (S4: the open aborts, N is
+/// not stamped, the next open retries).
+fn sso9_backup_before_migration(conn: &Connection, db_path: &Path) -> Result<std::path::PathBuf> {
+    let dir = match db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let wal = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+    let size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0)
+        + std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    let free = fs4::available_space(dir)
+        .map_err(|e| anyhow::anyhow!("sso9 backup: cannot read free disk space: {e}"))?;
+    if free < size.saturating_add(SSO9_BACKUP_MARGIN_BYTES) {
+        anyhow::bail!(
+            "sso9 backup: insufficient free disk space ({free} bytes free, \
+             need db+wal {size} bytes plus {SSO9_BACKUP_MARGIN_BYTES} margin)"
+        );
+    }
+    let stem = db_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("brain.db");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    #[cfg(test)]
+    let ts = SSO9_BACKUP_TS_OVERRIDE.with(|c| c.get()).unwrap_or(ts);
+    let backup = dir.join(format!("{stem}.bak-pre-sso9-{ts}"));
+    // Never delete a file we did not create (a pre-existing target makes
+    // `VACUUM INTO` itself fail; the cleanup below must not touch it).
+    let pre_existing = backup.exists();
+    let result = (|| -> Result<String> {
+        conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
+        let bk = Connection::open_with_flags(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut summary = Vec::new();
+        for table in SSO9_SANITY_TABLES {
+            let sql = format!("SELECT COUNT(*) FROM {table}");
+            let src: i64 = conn.query_row(&sql, [], |r| r.get(0))?;
+            let dst: i64 = bk.query_row(&sql, [], |r| r.get(0))?;
+            if src != dst {
+                anyhow::bail!("sso9 backup sanity: {table} has {src} rows, backup has {dst}");
+            }
+            summary.push(format!("{table}={src}/{dst}"));
+        }
+        Ok(summary.join(" "))
+    })();
+    match result {
+        Ok(summary) => {
+            eprintln!(
+                "[ct::migrate] sso9 backup ok: path={} sanity(source/backup) {summary}",
+                backup.display()
+            );
+            Ok(backup)
+        }
+        Err(e) => {
+            if !pre_existing {
+                let _ = std::fs::remove_file(&backup);
+            }
+            Err(e.context("sso9 backup failed; open aborted, slot not stamped"))
+        }
+    }
+}
+
+fn sso9_read_manifests(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT entity_id, manifest_json FROM llm_wiki_entity_manifests")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// S5 dry pass: classify every stored manifest without writing; log the census.
+fn sso9_census(conn: &Connection) -> Result<()> {
+    use crate::db::entity_gate::{plan_sso9_manifest_refresh, RefreshPlan};
+    let (mut total, mut eligible, mut untouched, mut malformed) = (0, 0, 0, 0);
+    for (_id, json) in sso9_read_manifests(conn)? {
+        total += 1;
+        match plan_sso9_manifest_refresh(&json)? {
+            RefreshPlan::Refresh { .. } => eligible += 1,
+            RefreshPlan::Untouched(_) => untouched += 1,
+            RefreshPlan::Malformed(_) => malformed += 1,
+        }
+    }
+    eprintln!(
+        "[ct::migrate] sso9 manifest census (dry pass, slot {SSO9_REFRESH_VERSION}): \
+         total={total} eligible={eligible} foreign_or_untouched={untouched} malformed={malformed}"
+    );
+    Ok(())
+}
+
+/// S6 + S7: the step body. `BEGIN IMMEDIATE`; re-check the slot unstamped
+/// under the lock; MERGE-refresh every eligible manifest with a compare-and-
+/// swap UPDATE; stamp; `COMMIT` (any error → `ROLLBACK`). Idempotent: a
+/// refreshed manifest no longer passes the old-17 eligibility, so a re-run
+/// changes nothing. Returns the refreshed entity ids.
+fn run_sso9_refresh_txn(conn: &Connection) -> Result<Vec<String>> {
+    use crate::db::entity_gate::{plan_sso9_manifest_refresh, RefreshPlan};
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let applied = (|| -> Result<Vec<String>> {
+        if sso9_version_stamped(conn, SSO9_REFRESH_VERSION)? {
+            return Ok(Vec::new());
+        }
+        let mut refreshed = Vec::new();
+        for (entity_id, old_json) in sso9_read_manifests(conn)? {
+            if let RefreshPlan::Refresh { new_json } = plan_sso9_manifest_refresh(&old_json)? {
+                let changed = conn.execute(
+                    "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1
+                      WHERE entity_id = ?2 AND manifest_json = ?3",
+                    rusqlite::params![new_json, entity_id, old_json],
+                )?;
+                if changed != 1 {
+                    anyhow::bail!(
+                        "sso9 refresh: compare-and-swap changed {changed} rows for {entity_id}"
+                    );
+                }
+                refreshed.push(entity_id);
+            }
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (?1)",
+            [SSO9_REFRESH_VERSION],
+        )?;
+        Ok(refreshed)
+    })();
+    match applied {
+        Ok(refreshed) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(refreshed)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// sso9 migration step 1 (plan Task 4): see the plan's §4b gate shape and §4c
+/// safety requirements S1–S7.
+fn apply_sso9_manifest_refresh(conn: &Connection) -> Result<()> {
+    let stamped_max: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped_max < 22 {
+        eprintln!(
+            "[ct::migrate] sso9 manifest refresh (slot {SSO9_REFRESH_VERSION}) skipped: \
+             V22 not stamped (deferred open)"
+        );
+        return Ok(());
+    }
+    // Exact membership, never MAX-based (a later slot landing first must not
+    // skip this step forever).
+    if sso9_version_stamped(conn, SSO9_REFRESH_VERSION)? {
+        return Ok(());
+    }
+    // S1: path probe. In-memory / unknown → WARN, skip backup AND migration,
+    // do not stamp.
+    let db_path = match conn.path() {
+        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        _ => {
+            eprintln!(
+                "[ct::migrate WARN] sso9 manifest refresh (slot {SSO9_REFRESH_VERSION}) \
+                 skipped: database path unavailable (in-memory or unknown); \
+                 the step does not run unbacked and is not stamped"
+            );
+            return Ok(());
+        }
+    };
+    // S2 + S3 + S4: a backup failure propagates and aborts the open.
+    sso9_backup_before_migration(conn, &db_path)?;
+    // S5: dry pass.
+    sso9_census(conn)?;
+    // S6/S7: the transactional body.
+    let refreshed = run_sso9_refresh_txn(conn)?;
+    eprintln!(
+        "[ct::migrate] sso9 manifest refresh committed (slot {SSO9_REFRESH_VERSION}): \
+         refreshed={} entities",
+        refreshed.len()
+    );
+    // HOOK (plan Task 5 step 10): the shape check runs HERE — after COMMIT,
+    // before the ensure loop. Do not move the ensure above it.
+    for entity_id in &refreshed {
+        // The ensure opens its own transaction, so it runs only after COMMIT.
+        // Best-effort by design: a per-row failure is logged, never fatal.
+        match crate::db::entity_gate::ensure_manifest_vocabulary(conn, entity_id) {
+            Ok(outcome) => eprintln!("[ct::migrate] sso9 ensure {entity_id}: {outcome:?}"),
+            Err(e) => eprintln!("[ct::migrate WARN] sso9 ensure {entity_id} failed: {e:#}"),
+        }
     }
     Ok(())
 }
@@ -4803,5 +5038,270 @@ mod tests {
             )
             .unwrap();
         assert_eq!(memo_count, 1, "ensure must record its memo post-commit");
+    }
+
+    // ---- sso9 manifest MERGE refresh (engine-9x PR-A plan Task 4e) ----
+
+    const SSO8_MANIFEST: &str = include_str!("testdata/schema-software-org-8.0.2.manifest.json");
+
+    fn sso9_backups(dir: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("brain.db.bak-pre-sso9-"))
+            })
+            .collect()
+    }
+
+    /// Full migrate with a real vault root, so V22 stamps (the sso9 step is
+    /// gated on V22; a rootless open defers it).
+    fn sso9_migrate(conn: &Connection, dir: &Path) -> Result<()> {
+        let vault = dir.join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let root = vault.to_string_lossy().to_string();
+        let roots = VaultRoots {
+            configured: root.clone(),
+            canonical: canonicalize_workspace_root(&root),
+        };
+        migrate(conn, Some(roots), Some(dir))
+    }
+
+    fn sso9_stamped(conn: &Connection) -> bool {
+        sso9_version_stamped(conn, SSO9_REFRESH_VERSION).unwrap()
+    }
+
+    fn sso9_snapshot(conn: &Connection) -> (Vec<(String, String)>, Vec<i64>, Vec<(String, String)>) {
+        let manifests = {
+            let mut s = conn
+                .prepare("SELECT entity_id, manifest_json FROM llm_wiki_entity_manifests ORDER BY entity_id")
+                .unwrap();
+            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        let stamps = {
+            let mut s = conn
+                .prepare("SELECT version FROM schema_version ORDER BY version")
+                .unwrap();
+            s.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+        };
+        let memo = {
+            let mut s = conn
+                .prepare("SELECT entity_id, manifest_hash FROM manifest_ensure_memo ORDER BY entity_id, manifest_hash")
+                .unwrap();
+            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        (manifests, stamps, memo)
+    }
+
+    /// A tempfile brain migrated once, then rewound to the pre-step state: the
+    /// slot unstamped, an 8.x tier_fact + a customised 8.x entity + a foreign
+    /// + a malformed manifest planted, and the first backup removed.
+    fn sso9_rewound_brain() -> (tempfile::TempDir, Connection) {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmp.path().join("brain.db")).unwrap();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        for b in sso9_backups(tmp.path()) {
+            std::fs::remove_file(b).unwrap();
+        }
+        let mut custom: serde_json::Value = serde_json::from_str(SSO8_MANIFEST).unwrap();
+        custom["node_types"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"type": "gadget"}));
+        custom["fallback_node_type"] = serde_json::json!("project");
+        for (id, json) in [
+            ("tier_fact", SSO8_MANIFEST.to_string()),
+            ("ent_custom", custom.to_string()),
+            (
+                "ent_foreign",
+                r#"{"node_types":[{"type":"widget"}],"fallback_node_type":"widget"}"#.to_string(),
+            ),
+            ("ent_bad", "{not json".to_string()),
+        ] {
+            conn.execute(
+                "INSERT OR REPLACE INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+                 VALUES (?1, 'strict', ?2, 1)",
+                rusqlite::params![id, json],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "DELETE FROM schema_version WHERE version = ?1",
+            [SSO9_REFRESH_VERSION],
+        )
+        .unwrap();
+        (tmp, conn)
+    }
+
+    fn manifest_value(conn: &Connection, id: &str) -> serde_json::Value {
+        let s: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&s).unwrap()
+    }
+
+    fn type_keys(v: &serde_json::Value) -> Vec<String> {
+        v["node_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["type"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn sso9_refresh_slot_is_one_past_the_highest_prior_stamp() {
+        assert_eq!(SSO9_REFRESH_VERSION, 31);
+        assert_eq!(SSO9_RETYPE_VERSION, SSO9_REFRESH_VERSION + 1);
+        // 30 = highest stamped literal elsewhere in this file (V30 area column).
+        assert_eq!(SSO9_REFRESH_VERSION, 30 + 1);
+        let conn = open_in_memory().unwrap();
+        assert!(!sso9_stamped(&conn), "in-memory leaves the sso9 slot unstamped");
+    }
+
+    #[test]
+    fn sso9_refresh_merges_8x_manifests_stamps_and_backs_up() {
+        let (tmp, conn) = sso9_rewound_brain();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert!(sso9_stamped(&conn));
+        // Backup exists and opens with matching row counts (deletion arrives
+        // with Task 5 step 10 — not asserted here).
+        let backups = sso9_backups(tmp.path());
+        assert_eq!(backups.len(), 1, "one backup per migrate()");
+        let bk = Connection::open_with_flags(&backups[0], rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        for t in SSO9_SANITY_TABLES {
+            let sql = format!("SELECT COUNT(*) FROM {t}");
+            let (a, b): (i64, i64) = (
+                conn.query_row(&sql, [], |r| r.get(0)).unwrap(),
+                bk.query_row(&sql, [], |r| r.get(0)).unwrap(),
+            );
+            assert_eq!(a, b, "{t} row counts match");
+        }
+        // The backup holds the PRE-refresh manifest.
+        let pre: String = bk
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&pre).unwrap(),
+            serde_json::from_str::<serde_json::Value>(SSO8_MANIFEST).unwrap()
+        );
+        // tier_fact (incl.) refreshed AND ensured: 9.x types + document/process + fallback.
+        let tf = manifest_value(&conn, "tier_fact");
+        let keys = type_keys(&tf);
+        for k in ["decision", "lesson", "area", "document", "process"] {
+            assert!(keys.contains(&k.to_string()), "tier_fact missing {k}");
+        }
+        assert!(!keys.contains(&"handoff".to_string()));
+        assert!(tf["fallback_node_type"].is_string());
+        // Customised keeps extras + its own fallback.
+        let cu = manifest_value(&conn, "ent_custom");
+        assert!(type_keys(&cu).contains(&"gadget".to_string()));
+        assert_eq!(cu["fallback_node_type"], "project");
+        // Foreign + malformed untouched.
+        assert_eq!(
+            manifest_value(&conn, "ent_foreign")["node_types"][0]["type"],
+            "widget"
+        );
+        let bad: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'ent_bad'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad, "{not json");
+    }
+
+    #[test]
+    fn sso9_refresh_in_memory_leaves_slot_unstamped_and_manifests_unchanged() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', ?1, 1)",
+            [SSO8_MANIFEST],
+        )
+        .unwrap();
+        let before = sso9_snapshot(&conn);
+        apply_sso9_manifest_refresh(&conn).unwrap();
+        assert!(!sso9_stamped(&conn));
+        assert_eq!(sso9_snapshot(&conn), before);
+    }
+
+    #[test]
+    fn sso9_refresh_backup_failure_aborts_migrate_without_stamping() {
+        let (tmp, conn) = sso9_rewound_brain();
+        // Force a genuine `VACUUM INTO` failure: pin the backup timestamp and
+        // pre-create the target (VACUUM INTO refuses an existing file). A
+        // read-only dir cannot be used — earlier steps need the journal.
+        SSO9_BACKUP_TS_OVERRIDE.with(|c| c.set(Some(42)));
+        let squatter = tmp.path().join("brain.db.bak-pre-sso9-42");
+        std::fs::write(&squatter, b"squatter").unwrap();
+        let before = sso9_snapshot(&conn);
+        let result = sso9_migrate(&conn, tmp.path());
+        SSO9_BACKUP_TS_OVERRIDE.with(|c| c.set(None));
+        let err = result.expect_err("backup failure must abort migrate()");
+        assert!(
+            format!("{err:#}").contains("sso9 backup"),
+            "failure must come from the backup step: {err:#}"
+        );
+        assert!(!sso9_stamped(&conn));
+        assert_eq!(sso9_snapshot(&conn), before);
+        // Only the squatter remains, untouched by the failure cleanup.
+        assert_eq!(sso9_backups(tmp.path()), vec![squatter.clone()]);
+        assert_eq!(std::fs::read(&squatter).unwrap(), b"squatter");
+        // The next open retries and succeeds.
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert!(sso9_stamped(&conn));
+    }
+
+    #[test]
+    fn sso9_refresh_is_idempotent_across_migrate_calls() {
+        let (tmp, conn) = sso9_rewound_brain();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        let first = sso9_snapshot(&conn);
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(sso9_snapshot(&conn), first);
+        assert_eq!(sso9_backups(tmp.path()).len(), 1, "stamped slot takes no new backup");
+    }
+
+    #[test]
+    fn sso9_refresh_body_is_idempotent_with_the_stamp_bypassed() {
+        let (tmp, conn) = sso9_rewound_brain();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        let first = sso9_snapshot(&conn);
+        // Bypass the stamp check: drop the stamp and run the BODY again.
+        conn.execute(
+            "DELETE FROM schema_version WHERE version = ?1",
+            [SSO9_REFRESH_VERSION],
+        )
+        .unwrap();
+        let refreshed = run_sso9_refresh_txn(&conn).unwrap();
+        assert!(refreshed.is_empty(), "no row may change on a second body run");
+        assert_eq!(sso9_snapshot(&conn), first);
+    }
+
+    #[test]
+    fn sso9_refresh_logs_backup_path_sanity_and_census() {
+        // Smoke: the dry pass classifies without writing and does not error.
+        let (_tmp, conn) = sso9_rewound_brain();
+        let before = sso9_snapshot(&conn);
+        sso9_census(&conn).unwrap();
+        assert_eq!(sso9_snapshot(&conn), before, "dry pass must not write");
     }
 }

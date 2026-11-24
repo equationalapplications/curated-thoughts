@@ -945,6 +945,166 @@ pub(crate) fn plan_manifest_ensure(
     }
 }
 
+/// The vendored SchemaSoftwareOrg 9.18.0 manifest snapshot (spec §3 change 5);
+/// the source the sso9 MERGE refresh copies new node/edge entries from.
+pub(crate) const SSO_9X_VENDORED_MANIFEST_JSON: &str =
+    include_str!("vendored/schema-software-org-9.18.0.manifest.json");
+
+/// The OLD (sso 8.x era) 17-slug EA subset. Private to the sso9 refresh
+/// planner: a stored manifest declaring all of these is an 8.x EA manifest
+/// eligible for the MERGE refresh (Q12). Superseded for every other purpose by
+/// [`EA_SEED_TYPES`].
+const EA_SEED_TYPES_SSO_8X: &[&str] = &[
+    "action",
+    "creativework",
+    "design_spec",
+    "event",
+    "handoff",
+    "organization",
+    "person",
+    "place",
+    "procedure",
+    "product",
+    "project",
+    "reference_doc",
+    "review",
+    "role",
+    "service",
+    "session_recap",
+    "software_application",
+];
+
+/// Node types the 9.x ontology retired from the EA family.
+const SSO9_REMOVED_NODE_TYPES: &[&str] = &["handoff", "session_recap"];
+/// The edge type retired with them.
+const SSO9_REMOVED_EDGE_TYPE: &str = "handoffFor";
+/// Node types the refresh adds from the vendored snapshot.
+const SSO9_ADDED_NODE_TYPES: &[&str] = &["statement", "rule", "decision", "lesson", "trap", "area"];
+
+/// The pure verdict of the sso9 MERGE refresh for one stored manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RefreshPlan {
+    /// Eligible 8.x EA manifest: the edited JSON to write back.
+    Refresh { new_json: String },
+    /// Foreign / already-9.x / non-object manifest — never touched.
+    Untouched(String),
+    /// Unparseable `manifest_json` — never guess, leave alone.
+    Malformed(String),
+}
+
+/// Membership key of one `node_types` / `edge_types` array entry: either a
+/// bare string or a `{type: …}` object (the lenient shapes the gate reader
+/// accepts).
+fn refresh_entry_key(entry: &serde_json::Value) -> Option<String> {
+    let name = match entry {
+        serde_json::Value::String(s) => Some(s.as_str()),
+        serde_json::Value::Object(o) => o.get("type").and_then(|v| v.as_str()),
+        _ => None,
+    }?;
+    Some(NodeVocabulary::key(name))
+}
+
+fn refresh_edge_triple(entry: &serde_json::Value) -> Option<(String, String, String)> {
+    let o = entry.as_object()?;
+    let field = |k: &str| {
+        o.get(k)
+            .and_then(|v| v.as_str())
+            .map(NodeVocabulary::key)
+            .unwrap_or_default()
+    };
+    Some((field("type"), field("source_type"), field("target_type")))
+}
+
+/// The sso9 manifest MERGE refresh's pure planner (plan Task 4d). Eligible
+/// (Q12) = the manifest declares every OLD 17-slug EA type. Edits, and
+/// nothing else: drop `handoff`/`session_recap` nodes and `handoffFor` edges;
+/// append the six new node types and the new edge shapes from the vendored
+/// 9.18.0 snapshot, skipping anything already declared. Every other key and
+/// entry — and array order — is preserved.
+pub(crate) fn plan_sso9_manifest_refresh(manifest_json: &str) -> Result<RefreshPlan> {
+    let mut root: serde_json::Value = match serde_json::from_str(manifest_json) {
+        Ok(v) => v,
+        Err(e) => return Ok(RefreshPlan::Malformed(format!("{e}"))),
+    };
+    if !root.is_object() {
+        return Ok(RefreshPlan::Untouched("manifest is not a JSON object".into()));
+    }
+    let vocab = NodeVocabulary::from_manifest(&crate::wiki_graph::parse_manifest_value(&root));
+    if !EA_SEED_TYPES_SSO_8X.iter().all(|s| vocab.contains(s)) {
+        return Ok(RefreshPlan::Untouched(
+            "not an sso 8.x EA manifest (old 17-slug subset not declared)".into(),
+        ));
+    }
+
+    let vendored: serde_json::Value = serde_json::from_str(SSO_9X_VENDORED_MANIFEST_JSON)
+        .context("vendored sso 9.18.0 manifest is not valid JSON")?;
+    let vendored_nodes = vendored
+        .get("node_types")
+        .and_then(|v| v.as_array())
+        .context("vendored manifest missing node_types")?;
+    let vendored_edges = vendored
+        .get("edge_types")
+        .and_then(|v| v.as_array())
+        .context("vendored manifest missing edge_types")?;
+
+    // Node types: remove retired, then add missing new ones.
+    let removed: Vec<String> = SSO9_REMOVED_NODE_TYPES
+        .iter()
+        .map(|s| NodeVocabulary::key(s))
+        .collect();
+    let nodes = root
+        .get_mut("node_types")
+        .and_then(|v| v.as_array_mut())
+        .context("eligible manifest missing node_types array")?;
+    nodes.retain(|e| refresh_entry_key(e).is_none_or(|k| !removed.contains(&k)));
+    for slug in SSO9_ADDED_NODE_TYPES {
+        let key = NodeVocabulary::key(slug);
+        if nodes.iter().any(|e| refresh_entry_key(e).as_deref() == Some(key.as_str())) {
+            continue;
+        }
+        if let Some(entry) = vendored_nodes
+            .iter()
+            .find(|e| refresh_entry_key(e).as_deref() == Some(key.as_str()))
+        {
+            nodes.push(entry.clone());
+        }
+    }
+
+    // Edge types: remove `handoffFor`, add the new shapes (any vendored edge
+    // touching one of the added node types) not already declared.
+    if let Some(edges) = root.get_mut("edge_types").and_then(|v| v.as_array_mut()) {
+        let removed_edge = NodeVocabulary::key(SSO9_REMOVED_EDGE_TYPE);
+        edges.retain(|e| refresh_entry_key(e).is_none_or(|k| k != removed_edge));
+        let added_keys: Vec<String> = SSO9_ADDED_NODE_TYPES
+            .iter()
+            .map(|s| NodeVocabulary::key(s))
+            .collect();
+        for v in vendored_edges {
+            let Some(triple) = refresh_edge_triple(v) else {
+                continue;
+            };
+            if !(added_keys.contains(&triple.1) || added_keys.contains(&triple.2)) {
+                continue;
+            }
+            if edges
+                .iter()
+                .any(|e| refresh_edge_triple(e).as_ref() == Some(&triple))
+            {
+                continue;
+            }
+            edges.push(v.clone());
+        }
+    }
+
+    Ok(RefreshPlan::Refresh {
+        new_json: serde_json::to_string(&root)?,
+    })
+}
+
+#[cfg(test)]
+#[path = "entity_gate_sso9_tests.rs"]
+mod sso9_refresh_tests;
+
 /// Idempotent ensure step (spec §2.4.4, plan-p10-m4).
 ///
 /// Adds `document` and `process` to a manifest that already declares every EA
