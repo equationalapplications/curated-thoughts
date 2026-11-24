@@ -103,6 +103,17 @@ fn write_generation_config(vault: &Path) {
         },
     )
     .unwrap();
+    // The 9.x engine gates External completers on the effective privacy mode
+    // (Strict default when unset — INTENT rule 11, fail-closed). These lane
+    // tests exercise External kick delivery, so mark the mode chosen and
+    // permissive; Ephemeral allows external generation and skips the keyring
+    // (unavailable on headless CI) — same pattern as provider_rollback.rs.
+    tauri_app_lib::privacy::write_privacy_mode(
+        vault,
+        tauri_app_lib::privacy::PrivacyMode::Ephemeral,
+        true,
+    )
+    .expect("write privacy mode");
 }
 
 fn patch_config(vault: &Path, key: &str, value: serde_json::Value) {

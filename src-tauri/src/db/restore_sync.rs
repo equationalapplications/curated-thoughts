@@ -263,7 +263,12 @@ pub fn stage_backup(backup_path: &Path, db_path: &Path) -> Result<PathBuf> {
     let staged = staged_backup_path(db_path);
     std::fs::copy(backup_path, &staged)
         .with_context(|| format!("copy {} -> {}", backup_path.display(), staged.display()))?;
-    let file = std::fs::File::open(&staged)
+    // The fsync handle must carry WRITE access: on Windows `sync_all` routes
+    // to `FlushFileBuffers`, which requires GENERIC_WRITE and fails with
+    // ERROR_ACCESS_DENIED on a read-only handle.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&staged)
         .with_context(|| format!("reopen {} to fsync", staged.display()))?;
     file.sync_all()
         .with_context(|| format!("fsync {}", staged.display()))?;

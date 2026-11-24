@@ -68,6 +68,16 @@ fn write_generation_config(app: &TestApp) {
         },
     )
     .unwrap();
+    // External completers are gated on the effective privacy mode (Strict
+    // default when unset — INTENT rule 11, fail-closed). Mark chosen +
+    // permissive: Ephemeral allows external generation and skips the keyring
+    // (unavailable on headless CI) — same pattern as provider_rollback.rs.
+    tauri_app_lib::privacy::write_privacy_mode(
+        app.tmp.path(),
+        tauri_app_lib::privacy::PrivacyMode::Ephemeral,
+        true,
+    )
+    .expect("write privacy mode");
 }
 
 fn seed_deposit(
