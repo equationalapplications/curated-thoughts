@@ -55,7 +55,7 @@ Your release and build workflows already handle GitHub authentication:
     tauriScript: pnpm tauri
     tagName: v__VERSION__
     releaseName: "Curated Thoughts v__VERSION__"
-    releaseDraft: false
+    releaseDraft: true
     prerelease: false
     args: ${{ matrix.args }}
 

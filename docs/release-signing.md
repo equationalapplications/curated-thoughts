@@ -11,10 +11,12 @@ leaves a draft, never a public unsigned release. If a build leg fails after the
 draft exists, publish manually once fixed: `gh release edit <tag> --draft=false`
 (run it only after every leg is green — a failed leg means missing or unverified
 assets). Residual exposure accepted on
-signed Windows runs: the Azure client secret is present in the Tauri build env
-(reaching `beforeBuildCommand` and build scripts) because `signCommand` runs
-inside the bundler — trusted first-party code only, and the secret is gated to
-Windows legs where `WIN_SIGNING` is true.
+signed Windows runs: the Azure client secret is present in the Tauri build env — it
+reaches `beforeBuildCommand` (the whole frontend toolchain) and every third
+party crate's build script, not only the bundler. This is accepted for now
+because `signCommand` runs inside the bundler, all of this code is pinned via
+the lockfile, and the secret is gated to Windows legs where `WIN_SIGNING` is
+true; the OIDC follow-up below is the real fix.
 
 | Platform | What gets signed | How |
 |---|---|---|
