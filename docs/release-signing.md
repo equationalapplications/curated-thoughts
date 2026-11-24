@@ -7,7 +7,10 @@ verify step fails the release if any artifact comes out unsigned. The release
 is created as a DRAFT — semantic-release (`draftRelease: true`) on the main
 path, `tauri-action` on a human-pushed tag — and the `publish-release` job
 flips it public only after every build leg verified and uploaded, so a failure
-leaves a draft, never a public unsigned release. Residual exposure accepted on
+leaves a draft, never a public unsigned release. If a build leg fails after the
+draft exists, publish manually once fixed: `gh release edit <tag> --draft=false`
+(run it only after every leg is green — a failed leg means missing or unverified
+assets). Residual exposure accepted on
 signed Windows runs: the Azure client secret is present in the Tauri build env
 (reaching `beforeBuildCommand` and build scripts) because `signCommand` runs
 inside the bundler — trusted first-party code only, and the secret is gated to

@@ -383,7 +383,9 @@ jobs:
           TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
           APP="$(find "$TARGET_DIR/universal-apple-darwin/release/bundle/macos" -maxdepth 1 -name '*.app' | head -1)"
           codesign --verify --deep --strict --verbose=2 "$APP"
-          sidecar_info="$(codesign -dv "$APP/Contents/MacOS/curated-thoughts-mcp" 2>&1)"
+          # `-dvv` (not `-dv`): the Authority= lines only print at verbose >=2,
+          # and the greps below depend on them.
+          sidecar_info="$(codesign -dvv "$APP/Contents/MacOS/curated-thoughts-mcp" 2>&1)"
           grep -q 'Developer ID Application' <<<"$sidecar_info"
           spctl --assess --type execute --verbose=2 "$APP"
           xcrun stapler validate "$APP"
@@ -395,13 +397,13 @@ jobs:
           # dmg/mod.rs) — the stapled ticket rides on the .app inside, which IS
           # stapled before dmg creation (app.rs notarize()). `stapler validate`
           # on the dmg would fail every signed release; verify sig+authority.
-          dmg_info="$(codesign -dv "$DMG" 2>&1)"
+          dmg_info="$(codesign -dvv "$DMG" 2>&1)"
           grep -q 'Developer ID Application' <<<"$dmg_info"
           codesign --verify --strict --verbose=2 "$DMG"
           # Bare Mach-O can never hold a staple — `stapler validate` would
           # always fail (the ct build step notarizes via `notarytool submit
           # --wait`, which IS the gate). Verify the signature + authority.
-          ct_info="$(codesign -dv "${TARGET_DIR}/ct" 2>&1)"
+          ct_info="$(codesign -dvv "${TARGET_DIR}/ct" 2>&1)"
           grep -q 'Developer ID Application' <<<"$ct_info"
           codesign --verify --strict --verbose=2 "${TARGET_DIR}/ct"
 
