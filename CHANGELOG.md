@@ -1,3 +1,42 @@
+## [3.14.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.13.1...v3.14.0) (2026-11-24)
+
+### Features
+
+* **cli:** ct wisdom areas rename via outbox with merge-group expansion ([9636961](https://github.com/equationalapplications/curated-thoughts/commit/9636961c625a66212c3b42d10bf34821177b90f9))
+* **cli:** ct wisdom match --path= SCOPED wiring ([1c1ed34](https://github.com/equationalapplications/curated-thoughts/commit/1c1ed34cb9cce38bad7523ffebf69045eabb8d82))
+* **config:** shared hub resolver (longest-prefix, redirect+live, glob match) ([bb0fa60](https://github.com/equationalapplications/curated-thoughts/commit/bb0fa604190c31013645639b6bd4fb53a73f8054))
+* **config:** wisdom.areas_paths + org_entity_id (WisdomConfig) ([26e0bdb](https://github.com/equationalapplications/curated-thoughts/commit/26e0bdb5294684ecaf8121b0f4f683429a04da32))
+* **db:** V30 adds llm_wiki_entries.area; INSERT binds it ([c781601](https://github.com/equationalapplications/curated-thoughts/commit/c781601d4f967484c49bff1aaaaeaba7d3fd784b))
+* **deposit:** repo_path carrier — deposit-time hub resolution, hub: render, reply contract ([712eee6](https://github.com/equationalapplications/curated-thoughts/commit/712eee6f681efd4dce954f37efe5c9b597a643d0))
+* **librarian:** areas write path — hub read, force-include, per-hub clause, LlmFact.area, drops ([add3c87](https://github.com/equationalapplications/curated-thoughts/commit/add3c87b73320c64ef9a95c64830acd1268fc3b0))
+* **match:** band_predicate_where three-arm SCOPED predicate; WisdomItem band/area ([561405f](https://github.com/equationalapplications/curated-thoughts/commit/561405fa0027453f254a90000c464181e99f1dfb))
+* **outbox:** area rides wiki_fact payloads; schema guard + bundle summary line ([792218d](https://github.com/equationalapplications/curated-thoughts/commit/792218d5e961c7202146442a17757c1972f9ace9))
+
+### Bug Fixes
+
+* **areas:** contain deposit-status path; liveness includes soft-delete ([0a2a60d](https://github.com/equationalapplications/curated-thoughts/commit/0a2a60d5f5809f5d5e29791e86e40a52426508b7))
+* **areas:** key the §6.7 NULL-stamp exemption on configuration, not loaded vocabulary ([d9bd511](https://github.com/equationalapplications/curated-thoughts/commit/d9bd51114170439b013293ad95b1547fc345db80))
+* **areas:** refuse areas rename when old == new ([4f02d9f](https://github.com/equationalapplications/curated-thoughts/commit/4f02d9fa91d5afd8a487c32c3d103ed1ef315aad))
+* **cli:** load-side diagnostics printed loudly; duplicate-dir drop spawn test; minors folded ([9df97d4](https://github.com/equationalapplications/curated-thoughts/commit/9df97d4756e3bece7cfeb2ee31403280f5eebc28))
+* **config:** clippy never_loop + derivable_impls; refuse relative areas paths at load ([8392d6b](https://github.com/equationalapplications/curated-thoughts/commit/8392d6b817ce7e9e0e7c4fd086048243774730f5))
+* **config:** gauntlet task-11 fixes 1-3 — empty area name rejection, WisdomConfig map serializer round-trip, canonicalize_lenient remainder .. normalization ([c19fa87](https://github.com/equationalapplications/curated-thoughts/commit/c19fa87b59870134b3bf002964d8a30e41442330))
+* **db,deposit:** coderabbit round-1 threads — true BEGIN IMMEDIATE rename tx ([4c51794](https://github.com/equationalapplications/curated-thoughts/commit/4c517948eb2682f443eab450d84c3dd363e5e2fa))
+* **db:** gauntlet task-11 fixes 4-5 — BEGIN IMMEDIATE before rename capture, skew-safe updated_at ordering token ([89b343d](https://github.com/equationalapplications/curated-thoughts/commit/89b343d8096cb00dff3a67cb465e9bd605ae2e3b))
+* **deposit:** review round 1 - empty-path refusal, read-only status, non-vacuous no-area pin, hub-value guard ([20f9eb7](https://github.com/equationalapplications/curated-thoughts/commit/20f9eb753b65866f605ce1ee85a87c38631b5569))
+* **librarian:** review round 1 - unconfigured NULL-stamp, both-endpoint 6.5 drop, E2E hub-read fence, lenient-loader diagnostics; minors folded ([d3031de](https://github.com/equationalapplications/curated-thoughts/commit/d3031de31ff531aabd88a44e546fd1cdcc9c8531))
+* **librarian:** surface the silent completer-build failure in llm_generation_configured ([cd48ec1](https://github.com/equationalapplications/curated-thoughts/commit/cd48ec16d6a318fac861a2118f4a4d6ec5a4e626))
+* **match:** pre-V30 SCOPED degrades whole-repo; band invariants pinned ([9260559](https://github.com/equationalapplications/curated-thoughts/commit/926055978a6557beb63aa4a6c80e3653a3959839))
+* **outbox:** review round 1 - summary after commit, restore carry pin, warnings channel, presence pins ([8d95180](https://github.com/equationalapplications/curated-thoughts/commit/8d95180bda7550b3f0a64d0de7ceded9c8d7411a))
+* **rename:** review round 1 - update bound to captured ids w/ count check; minors folded ([51f4a7b](https://github.com/equationalapplications/curated-thoughts/commit/51f4a7b9402f1135bff9b43d879b5a4387759690))
+* **resolver:** symlink tie + ScopedResolution three-way + loud areas-file errors ([647d0c2](https://github.com/equationalapplications/curated-thoughts/commit/647d0c2f98da02e328bf5b19f99891b7de66b7c9))
+* **test,okf:** gauntlet task-11 fixes 6-7 — shared ENV_LOCK in counter tests, renders_as_string_scalar quote/whitespace guard ([4b91dba](https://github.com/equationalapplications/curated-thoughts/commit/4b91dba340cdf2e204e3b418e2807a06251342d8))
+* **test:** coderabbit round-2 follow-ups - stricter miss classification, column-aware preview guard, serde_json fixture ([ae8d7e5](https://github.com/equationalapplications/curated-thoughts/commit/ae8d7e5169da359ad84bf66aecbdc98aa3762674))
+* **test:** guard $HOME reads/writes with a module-local lock in cmds tests ([c68ee3c](https://github.com/equationalapplications/curated-thoughts/commit/c68ee3cd8d092958458d003b0650bbe34f0de0e0)), closes [#352](https://github.com/equationalapplications/curated-thoughts/issues/352)
+* **test:** hermetic brain-dir pin + librarian env lock in generate_summary skip test ([7c936bf](https://github.com/equationalapplications/curated-thoughts/commit/7c936bff2e4b03276f31ec491dbbd8937dd90b02))
+* **test:** scope CURATED_EMBED_COUNT_FILE to the pipeline stub guard ([224d8f7](https://github.com/equationalapplications/curated-thoughts/commit/224d8f7d70855760a4c73fafb965a7ec09850b5a))
+* **test:** wisdom_gate_bench passes the Task-4 BandBindings arg (None = UNSCOPED frozen replay) ([4d23d9e](https://github.com/equationalapplications/curated-thoughts/commit/4d23d9ea78dbabf076d64f93c0d3e6ccc598dcd3))
+* **tools:** gauntlet task-11 fix 8 — rename dry-run skips migrate (read-only preview, actionable stale-schema bail); declines 9-10 recorded (deferred note + model-miss vs drop distinction in measurement helper) ([02c2ef8](https://github.com/equationalapplications/curated-thoughts/commit/02c2ef82adf80fa340d274754d7530879a8f77a5))
+
 ## [3.13.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.13.0...v3.13.1) (2026-11-19)
 
 ### Bug Fixes
