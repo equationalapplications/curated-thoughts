@@ -4,7 +4,7 @@ Transient scaffolding — deleted in the same-PR cleanup commit.
 Plan: `specs/engine-9x-adoption/plan.md`. Spec: `specs/engine-9x-adoption/spec.md` (Approved 2026-11-24).
 Receipts dir: `.superpowers/sdd/engine-9x-pr-a/receipts/`.
 
-**In flight:** LADDER CLOSED 2026-11-24 — APPROVE-WITH-NITS. History: rung 1 FAIL $1.67 (2 MAJOR + 9 MINOR) → rung 2 FAIL $1.31 → rung 3 FAIL $0.65 → rung 4 FAIL $0.52 → rung 5 FAIL $0.59 → rung 6 FAIL $0.70 → rung 7 FAIL $0.51 → rung 8 FAIL $0.57 → rung 9 FAIL $0.51 → rung 10 **PASS $0.34** (U1/U2 RESOLVED; V1 MINOR folded controller-side without a further rung: (c-step2b) firing test added). Ladder spend $9.55; plan total with author $11.73. PLAN CONVERGED — draft PR next, then implementation wave (Tasks 1+2 as one commit, then 3–6 per task).
+**In flight:** LADDER CLOSED 2026-11-24 — APPROVE-WITH-NITS (rung 10 PASS $0.34; V1 MINOR folded controller-side). Ladder spend $9.55; plan total with author $11.73. PLAN CONVERGED. **Draft PR #369 opened** (chore/sso-9x-readiness → main; carries spec errata + plan + LEDGER; body records the 4 divergences). IMPLEMENTATION WAVE starting: Tasks 1+2 as one commit (T1 first for RED, T2 re-pins), then 3–6 per task.
 
 ## Baseline (39fc129f)
 
@@ -30,8 +30,8 @@ Receipts dir: `.superpowers/sdd/engine-9x-pr-a/receipts/`.
 
 ## Tasks
 
-- [ ] T1 — sso 9.18.0 pin + trial install + lockfile locked; 8.0.2 and 9.18.0 manifest snapshots vendored; drift test green; manifest diff recorded. Evidence: _link_
-- [ ] T2 — ontology-packages.test.ts pins the sso 9.x contract (statement kinds, area, about); ontology.ts copy → "Specs, statements, services"; vitest + tsc green. Evidence: _link_
+- [x] T1 — sso 9.18.0 pin + trial install + lockfile locked; 8.0.2 and 9.18.0 manifest snapshots vendored; drift test green; manifest diff recorded. Evidence: commit 9e3bca1a; receipts/t12-reconcile.out, t12-gates.out, t12-vitest-ontology-red.out; controller re-verified: vendored JSON deep-equals tarball manifest, full vitest 0 fail (625+1skip), tsc clean
+- [x] T2 — ontology-packages.test.ts pins the sso 9.x contract (statement kinds, area, about); ontology.ts copy → "Specs, statements, services"; vitest + tsc green. Evidence: commit 9e3bca1a (same commit per §0.1 sequencing); controller re-ran vitest (exit 0) + typecheck (exit 0)
 - [ ] T3 — EA_SEED_TYPES re-pinned from installed 9.18.0 manifest (count recorded); ALIAS_TABLE handoff→decision, session_recap→lesson; planner epoch bumped; onboard copy → statements; sweep dispositions recorded. Evidence: _link_
 - [ ] T4 — migration step 1 (slot N, computed) MERGE-refreshes 8.x EA manifests from the vendored 9.18.0 snapshot; backup/abort/in-memory-skip/dry-pass/idempotency each pinned by a test; ensure re-run after commit. Evidence: _link_
 - [ ] T5 — migration step 2 (slot N+1) re-types entries+tasks+touched curated_entities (tombstones included) handoff→decision, session_recap→lesson; handoffFor→about via UPDATE OR IGNORE + dedupe; service and undeclared parent-family edges dropped with counts; safety + idempotency pinned. Evidence: _link_
