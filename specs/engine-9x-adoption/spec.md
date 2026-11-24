@@ -56,7 +56,9 @@ Changes:
 1. Update `src/__tests__/ontology-packages.test.ts` expectations: `creativework` children lose `handoff` and `session_recap`; add assertions for the new surface (`statement` with kinds `rule`, `decision`, `lesson`, `trap`; `area` node type; `about` edges) so the test pins the NEW contract, not just the absence of the old one.
 2. Update `src-tauri/src/db/entity_gate.rs` `EA_SEED_TYPES`: remove `handoff` and `session_recap`; add the statement kinds and `area` per the 9.18.0 sso manifest. Update the pin test at `entity_gate.rs:1984-2008` to the new slug list and new count (the count is whatever the 9.18.0 manifest declares — the implementer must read the installed tarball and pin the actual list, not this spec's guess).
 3. Update copy: `src/lib/ontology.ts:29` and `src-tauri/src/onboard/mod.rs:128` replace "handoffs" with the 9.x vocabulary wording (e.g. "Specs, statements, services" — final wording in implementation).
-4. Sweep `src-tauri/src/onboard/mod.rs`, `src-tauri/src/wisdom_match.rs`, `src-tauri/src/db/wisdom.rs`, `src-tauri/src/db/evidence_reanchor.rs`, and `tools/src/cmds.rs` for `handoff`/`session_recap` logic branches (grep hits exist in all five) and state each disposition: re-map to the new statement kinds, or keep as legacy-data-only handling.
+4. Sweep for the quoted slug literals `"handoff"` and `"session_recap"` (case-sensitive string literals, not the word "handoff" in prose) and state each disposition: re-map to the new statement kinds, or keep as legacy-data-only handling. The real logic hits live in `src-tauri/src/db/entity_gate.rs`, `src-tauri/src/onboard/mod.rs:128`, `src/lib/ontology.ts:29`, and `tools/tests/ct_heal.rs:319`. CAUTION: `evidence_reanchor.rs` and `tools/src/cmds.rs` hit only `flag_handoffs_planned`, an unrelated counter for evidence-anchor flags — do not rename or re-map it. `wisdom.rs` and `wisdom_match.rs` hit only prose comments about watcher handoffs — no code change.
+
+5. REFRESH STORED PER-ENTITY MANIFESTS. The node-type gate reads each entity's stored `llm_wiki_entity_manifests.manifest_json` (`entity_gate.rs` loads it by `entity_id` and computes `is_ea_subset` against `EA_SEED_TYPES`). After change 2, existing entities' stored manifests still declare the 8.x vocabulary, so the subset check fails, those entities drop to the fallback path, and retyped rows (`decision`, `lesson`) are slugs the stored manifest does not declare. PR-A must refresh the stored manifests before the `okf_type` rewrite lands: either a CT migration that reseeds `manifest_json` from the new sso manifest, or a TS reseed trigger on upgrade. Add a test: an entity holding an 8.x-era manifest classifies correctly after the constants change.
 
 Data re-typing proposal (Kurt's decision — this spec does NOT implement a migration until he picks a mapping):
 
@@ -72,19 +74,21 @@ Data re-typing proposal (Kurt's decision — this spec does NOT implement a migr
 
 Bump all four remaining packages to 9.18.0 — `core-llm-wiki`, `core-okf` (pnpm overrides, lines 8-9) and `core-llm-wiki`, `react-llm-wiki`, `schema-org-llm-wiki` (dependencies, lines 49-52) — AND regenerate the Rust mirror in the SAME commit.
 
-Guard-ordering resolution: option (a) — ride ALL engine schema mirrors (v16 `source_pointer`, v17 `source_store`, v18 `prior_valid_to`/`derived_events`/partial index, v19 `forgotten_at`, and the 8.4.0 `vector_removals` ledger if PR-C folds in) in the same commit as the pin bump.
+Guard-ordering resolution: option (a) — ride ALL engine schema mirrors (v16 `source_pointer`, v17 `source_store`, v18 `prior_valid_to`/`derived_events`/partial index, v19 `forgotten_at`, and the 8.4.0 `vector_removals` ledger) in the same commit as the pin bump. A verbatim regen of `LLM_WIKI_PACKAGE_DDL` necessarily includes the ledger and its triggers — hand edits are banned and the guard checks exact equality — so the DDL always lands in PR-B. PR-C covers consumption only.
 
 1. Regenerate `src-tauri/src/db/okf_ddl.rs` `LLM_WIKI_PACKAGE_DDL` verbatim from the 9.18.0 `core-llm-wiki` `setupDatabase` output, prefix applied, exactly as the file header demands. No hand edits.
 2. Bump `src-tauri/src/db/schema_guard.rs:8` `PINNED_CORE_LLM_WIKI_VERSION` to `"9.18.0"`.
-3. Update the exact-equality `TableExpectation` sets in `schema_guard.rs` (verify_table, ~line 190) to the 9.18.0 column sets: new columns on `entries`, `events`; new tables `source_store`, `derived_events`, `vector_removals` (13 tables total, schema_version 19).
+3. Update the exact-equality `TableExpectation` sets in `schema_guard.rs` (verify_table, ~line 190) to the 9.18.0 engine column sets PLUS the CT-local additions the guard already carries (`tier` and `embed_scheme` on `entries`, `schema_guard.rs:53-55`). New engine columns land on `entries`, `events`; new tables are `source_store`, `derived_events`, `vector_removals` with the `llm_wiki_` prefix (13 tables total). The engine's package `schema_version` moving 15→19 is an engine fact only — CT's own `schema_version` gate (`< 7`) is untouched.
 4. CT's own `okf_migration` (`src-tauri/src/db/okf_migration.rs`) must not conflict: verify it does not create columns the engine now creates itself; adjust or remove any CT-side pre-add now that the engine owns them.
-5. Bump CT's local migration chain in `src-tauri/src/db/connection.rs` as needed for any CT-owned columns (existing files get them via CT migrations; fresh installs get them from the package DDL — both paths must converge on identical column sets, which is exactly what the guard asserts).
+5. MANDATORY: extend CT's local migration chain in `src-tauri/src/db/connection.rs`. `CREATE TABLE IF NOT EXISTS` in the package DDL cannot add columns or tables to an existing file, so every engine-side delta needs an idempotent CT migration (`ALTER TABLE ... ADD COLUMN` for `source_pointer`, `prior_valid_to`, `forgotten_at`; `CREATE TABLE IF NOT EXISTS` for `source_store`, `derived_events`, `vector_removals` plus the partial index and the ledger triggers). Fresh installs get the same objects from the package DDL; both paths must converge on identical column sets — that is exactly what the guard asserts. Precedent: `connection.rs:318-327` and the 8-bump lane's engine-migration mapping.
+
+Interim ledger behavior between PR-B and PR-C: the hard-delete trigger enqueues a removal row only when a LIVE (`deleted_at IS NULL`) entry is hard-deleted while `meta.external_index_in_use = '1'`; otherwise it deletes pending rows instead (`schema.ts` trigger `vector_removals_hard_delete` at v9.18.0). CT's hard deletes (`commit.rs:616`, `queries.rs:227`, `bundle_apply.rs:982`) therefore leave the ledger empty unless CT sets that meta flag; until PR-C lands the consumption, any accumulated rows simply wait. State this window in PR-B's PR body.
 
 Why option (a) over option (b) (CT pre-adds columns before the bump): pre-adding means CT ships columns the pinned engine DDL does not have, which the SAME exact-equality guard rejects in the other direction ("unexpected columns") until the bump lands. That is a broken intermediate state for zero benefit. Rejected alternative — recorded.
 
 ### PR-C: vector_removals ledger adoption (resolves #342; may fold into PR-B)
 
-Wire the engine's `vector_removals` ledger: mirror its DDL and DELETE/enqueue triggers in `okf_ddl.rs` (if not already folded into PR-B) and consume the ledger where CT currently does ad-hoc vector cleanup. If the consumption surface turns out larger than a small patch, land the DDL mirror in PR-B and split consumption into this follow-up PR. Non-blocking.
+Wire the engine's `vector_removals` ledger into CT's delete paths: consume the ledger where CT currently does ad-hoc vector cleanup. The DDL mirror and triggers always land in PR-B (the verbatim regen includes them). If the consumption surface turns out larger than a small patch, split consumption into a follow-up PR. Non-blocking.
 
 ## 4. Files touched (real paths, verified on origin/main)
 
@@ -96,7 +100,7 @@ PR-A:
 - `src-tauri/src/db/entity_gate.rs`
 - `src-tauri/src/onboard/mod.rs`
 - `src/lib/ontology.ts`
-- sweep dispositions only if logic branches exist: `src-tauri/src/wisdom_match.rs`, `src-tauri/src/db/wisdom.rs`, `src-tauri/src/db/evidence_reanchor.rs`, `tools/src/cmds.rs`, `tools/tests/ct_heal.rs`
+- sweep dispositions only where the quoted slug literals appear in logic: `tools/tests/ct_heal.rs` (plus the caution on `flag_handoffs_planned` in `src-tauri/src/db/evidence_reanchor.rs` and `tools/src/cmds.rs` — no change there)
 
 PR-B:
 
@@ -105,12 +109,11 @@ PR-B:
 - `src-tauri/src/db/okf_ddl.rs`
 - `src-tauri/src/db/schema_guard.rs`
 - `src-tauri/src/db/okf_migration.rs` (only if step 4 applies)
-- `src-tauri/src/db/connection.rs` (only if step 5 applies)
+- `src-tauri/src/db/connection.rs` (mandatory — step 5; engine-mirror migrations for existing DBs)
 
 PR-C (if standalone):
 
-- `src-tauri/src/db/okf_ddl.rs`
-- the vector-consumption surface, identified at implementation time
+- the vector-consumption surface, identified at implementation time (no `okf_ddl.rs` change — the mirror landed in PR-B)
 
 Note: `src/tests/ontology.test.ts` from the impact report does not exist; it is dropped from every file list.
 
@@ -128,9 +131,9 @@ Frontend:
 
 New tests required in PR-B (both DB paths):
 
-1. Fresh-install path: create a brand-new DB through the new `LLM_WIKI_PACKAGE_DDL`, run `schema_guard::verify` against the 9.18.0 expectations. Must pass.
-2. Existing-DB path: take a DB fixture created under the 8.0.2 DDL, run CT's migration chain (including the new engine-mirror migrations), then run `schema_guard::verify`. Must pass. This test is the whole point of the same-commit rule — it fails if the DDL mirror and the pin ever drift apart again.
-3. Round-trip: open the migrated fixture with the OLD pinned build (CI job or a pinned-version test) and assert the guard bails with the documented "unexpected columns" message — the intended forward-incompat behavior, documented rather than silent. Mechanism: PR-B must check in an 8.0.2 expectation fixture (a snapshot of the current `TableExpectation` sets plus the 8.0.2 `LLM_WIKI_PACKAGE_DDL` text, e.g. under `src-tauri/src/db/testdata/`), and the test runs `schema_guard::verify` with the NEW guard pointed at that fixture's DB. The old expectations therefore live in the fixture, not in the deleted guard code.
+1. Fresh-install path: create a brand-new DB through the new `LLM_WIKI_PACKAGE_DDL`, run `verify_llm_wiki_schema` against the 9.18.0 expectations. Must pass.
+2. Existing-DB path: take a DB fixture created under the 8.0.2 DDL, run CT's migration chain (including the new engine-mirror migrations), then run `verify_llm_wiki_schema`. Must pass. This test is the whole point of the same-commit rule — it fails if the DDL mirror and the pin ever drift apart again.
+3. Round-trip: assert the documented forward-incompat behavior. Mechanism: PR-B must check in an 8.0.2 expectation fixture (a snapshot of the CURRENT `TableExpectation` sets and the 8.0.2 `LLM_WIKI_PACKAGE_DDL` text, e.g. under `src-tauri/src/db/testdata/`), plus a parameterized verify entry point (today `verify_llm_wiki_schema(conn)` reads the hard-coded const — add e.g. `verify_schema_with(conn, &expects)` and keep the existing fn as a thin wrapper). The test creates an 8.0.2-DDL fixture DB, runs CT's migration chain over it, then runs the OLD expectations against the MIGRATED DB through the parameterized entry point. The migrated DB has extra columns, so `verify_table` must bail with "unexpected columns". (Running the NEW guard against the unmigrated 8.0.2 DB would give "missing columns" — that is the other direction and is not the asserted message.)
 
 PR-A tests:
 
@@ -142,7 +145,7 @@ PR-A tests:
 
 1. **Option (b) for guard ordering — CT pre-adds engine columns before the bump.** The exact-equality guard rejects "unexpected columns" on the pre-bump build. Broken intermediate state. Option (a) chosen.
 2. **Bumping everything in one PR.** Mixes a TS-only surface change (sso) with the DDL-mirror change. PR-A lands independently, ships value, and shrinks PR-B's blast radius. Split.
-3. **Splitting the DDL regen from the pin bump into separate commits/PRs.** Every intermediate commit would fail `schema_guard::verify` on existing DBs. Same commit, by construction.
+3. **Splitting the DDL regen from the pin bump into separate commits/PRs.** Every intermediate commit would fail `verify_llm_wiki_schema` on existing DBs. Same commit, by construction.
 4. **Hand-editing `LLM_WIKI_PACKAGE_DDL`.** The file header says verbatim. Regenerate from `setupDatabase`.
 5. **Freezing `handoff`/`session_recap` rows with no decision (option c — defer migration to PR-B).** Leaves rows typed as node types no manifest declares through the entire PR-A window — the node-type gate and heal cannot classify them the day PR-A merges. Feasibility is settled (kind storage verified at 8.0.2), so deferral buys nothing.
 6. **Degrade migration in PR-A: old types → plain `statement`, kind enrichment in PR-B (option b).** Pointless intermediate: the kind is the `okf_type` slug itself, so the `statement`-only rewrite and the `decision`/`lesson` rewrite are the same one-UPDATE migration. Two passes double the migration code for zero fidelity gain.
