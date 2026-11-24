@@ -73,7 +73,8 @@ impl<'c> std::ops::DerefMut for ImmediateTx<'c> {
     }
 }
 
-/// The 17 EA / SchemaSoftwareOrg seed slugs (spec §1.1).
+/// The 20 EA / SchemaSoftwareOrg 9.18.0 seed slugs (spec §1.1; every declared
+/// slug except the abstract parent `statement`, spec E1).
 ///
 /// The ensure's subset guard compares a manifest's `node_types` against this
 /// set: every EA slug ⊆ the row's declared `node_types` is the pass condition.
@@ -81,10 +82,12 @@ impl<'c> std::ops::DerefMut for ImmediateTx<'c> {
 /// report treatment (no `document`/`process` injection).
 pub const EA_SEED_TYPES: &[&str] = &[
     "action",
+    "area",
     "creativework",
+    "decision",
     "design_spec",
     "event",
-    "handoff",
+    "lesson",
     "organization",
     "person",
     "place",
@@ -94,9 +97,10 @@ pub const EA_SEED_TYPES: &[&str] = &[
     "reference_doc",
     "review",
     "role",
+    "rule",
     "service",
-    "session_recap",
     "software_application",
+    "trap",
 ];
 
 /// The signed alias table (spec §2.6.2 + R2.4.4 degrade ladder rung).
@@ -107,6 +111,8 @@ pub const EA_SEED_TYPES: &[&str] = &[
 pub const ALIAS_TABLE: &[(&str, &str)] = &[
     ("agent", "role"),
     ("component", "service"),
+    ("handoff", "decision"),
+    ("session_recap", "lesson"),
     ("software", "document"),
 ];
 
@@ -1082,7 +1088,7 @@ pub enum EnsureOutcome {
 /// pre-r26 memo kept `Complete` on rows r26 repairs or reports, so the
 /// ensure answered `AlreadyEnsured` forever while read-only `ct heal`
 /// reported the row unusable).
-const ENSURE_PLANNER_EPOCH: &str = "r26";
+const ENSURE_PLANNER_EPOCH: &str = "r27";
 
 /// The mode the GATE sees for `entity_id`'s row: its stored `mode`, except
 /// that a merged-away (or cycle-locked) id's row is never read — rung 1b
@@ -1984,10 +1990,12 @@ mod tests {
     fn ea_seed_types_match_spec_section_1_1() {
         let expected: &[&str] = &[
             "action",
+            "area",
             "creativework",
+            "decision",
             "design_spec",
             "event",
-            "handoff",
+            "lesson",
             "organization",
             "person",
             "place",
@@ -1997,12 +2005,13 @@ mod tests {
             "reference_doc",
             "review",
             "role",
+            "rule",
             "service",
-            "session_recap",
             "software_application",
+            "trap",
         ];
         assert_eq!(EA_SEED_TYPES, expected);
-        assert_eq!(EA_SEED_TYPES.len(), 17);
+        assert_eq!(EA_SEED_TYPES.len(), 20);
     }
 
     /// `fallback_node_type` reader: declared fallback is what the ladder uses.
@@ -2125,6 +2134,49 @@ mod tests {
             } => {
                 assert_eq!(original_label, "agent");
                 assert_eq!(landed_as, "project");
+            }
+            other => panic!("expected DegradedToFallback, got {other:?}"),
+        }
+    }
+
+    /// 9.x retype aliases: handoff → decision, session_recap → lesson.
+    #[test]
+    fn alias_ladder_9x_retype_aliases_land() {
+        let manifest = WikiManifest {
+            node_types: ["decision", "lesson"]
+                .iter()
+                .map(|t| WikiNodeType {
+                    type_name: (*t).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            edge_types: vec![],
+            fallback_node_type: None,
+        };
+        let v = NodeVocabulary::from_manifest(&manifest);
+        for (label, target) in [("handoff", "decision"), ("session_recap", "lesson")] {
+            match run_admit_ladder(&v, Some(label)) {
+                AdmitInternal::Aliased { landed_as, .. } => assert_eq!(landed_as, target),
+                other => panic!("expected Aliased for {label}, got {other:?}"),
+            }
+        }
+    }
+
+    /// 9.x retype alias with `decision` undeclared → fallback.
+    #[test]
+    fn alias_ladder_9x_retype_undeclared_target_falls_through() {
+        let manifest = WikiManifest {
+            node_types: vec![WikiNodeType {
+                type_name: "person".into(),
+                ..Default::default()
+            }],
+            edge_types: vec![],
+            fallback_node_type: Some("project".into()),
+        };
+        let v = NodeVocabulary::from_manifest(&manifest);
+        match run_admit_ladder(&v, Some("handoff")) {
+            AdmitInternal::DegradedToFallback { landed_as, .. } => {
+                assert_eq!(landed_as, "project")
             }
             other => panic!("expected DegradedToFallback, got {other:?}"),
         }
