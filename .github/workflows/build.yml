@@ -15,7 +15,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Race gate (CodeRabbit Major, build.yml:375 context): on a human-pushed
+  # tag no draft release exists yet, and the three concurrent publish-tauri
+  # legs each run tauri-action with releaseDraft:true — two legs that both
+  # see "no release for tag" can create SEPARATE drafts, splitting platform
+  # artifacts across drafts so the published release ends up missing
+  # artifacts. Create the draft ONCE here, before the matrix: each leg's
+  # tauri-action then finds the existing draft and only uploads assets. On
+  # the semantic-release path a draft already exists, so this is a no-op.
+  ensure-draft-release:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the draft release if absent
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No checkout in this job — gh needs GH_REPO to resolve the repo
+          # (same pattern as the publish-release job below).
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "release for $GITHUB_REF_NAME already exists — reusing it"
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --title "Curated Thoughts $GITHUB_REF_NAME" \
+            --notes "See the assets below to download and install this version."
+
   publish-tauri:
+    # Proceed when the draft gate SUCCEEDED (tag path — exactly one draft
+    # exists, no cross-leg race) or was SKIPPED (branch-push path — no
+    # release involved). A FAILED gate blocks the matrix: building artifacts
+    # into a racy release is exactly what this gate exists to prevent.
+    needs: ensure-draft-release
+    if: ${{ !cancelled() && (needs.ensure-draft-release.result == 'success' || needs.ensure-draft-release.result == 'skipped') }}
     permissions:
       contents: write
     strategy:
