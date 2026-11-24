@@ -4,7 +4,7 @@ Status: Draft
 Owner: Kurt VanDusen / Hermes Agent
 Date: 2026-11-24
 Related issues: #342 (vector_removals ledger, non-blocking), #348 (sso 9.x node types, blocking), #353 (source_pointer mirror, blocking for the guard).
-Authority check: this spec was checked against the repo's `INTENT.md` on 2026-11-24. INTENT imposes no rule on node-type vocabulary or pin bumps; its engine-mirror rule (§12, "The Rust side follows the engine's words") is exactly what PR-B implements. INTENT wins on any conflict.
+Authority check: this spec was checked against the repo's `INTENT.md` on 2026-11-24. INTENT §12 ("The Rust side follows the engine's words") demands two things: Rust writes engine tables only with the engine's states and verbs, and Rust goes through the engine wherever the engine exposes the operation. PR-B implements the first directly (the verbatim DDL mirror). The second has a live consequence: the 9.18.0 engine exposes `forget()` / `erase` operations (`packages/core/src/types.ts:1566-1570` at v9.18.0), while CT deletes `llm_wiki_entries` rows raw at `commit.rs:616`, `queries.rs:227`, and `bundle_apply.rs:982`. PR-C must disposition each of those three call sites against the engine's exposed surface — route through the engine operation where one fits, or record the divergence as an explicit owner decision. INTENT wins on any conflict.
 Related spec: this is the "engine bump lane" deferred by `specs/2026-11-14-areas/spec.md` §14.1. That file lives on the UNMERGED areas branch (PR #352, branch `areas`), not on main; the citation names intent, and the areas lane owns the file. The `area` ingest-mapping decision (§14.2 there) stays deferred; it is not part of this spec.
 
 ## 1. Problem
@@ -30,7 +30,7 @@ Evidence (each anchor verified against origin/main at e1e75165 on 2026-11-24):
 
 1. `src-tauri/src/db/okf_ddl.rs:10` defines `LLM_WIKI_PACKAGE_DDL` as "verbatim `setupDatabase` SQL from `@equationalapplications/core-llm-wiki`". Verified.
 2. `src-tauri/src/db/schema_guard.rs:8` pins `PINNED_CORE_LLM_WIKI_VERSION: &str = "8.0.2"`. Verified.
-3. `src-tauri/src/db/schema_guard.rs` `verify_table` (~line 190) compares `PRAGMA table_info` column sets as `BTreeSet` equality and bails on "missing columns" / "unexpected columns" (~lines 203-212). Verified. Any DB opened by a new build against an old file, or an old build against a new file, fails startup.
+3. `src-tauri/src/db/schema_guard.rs` `verify_table` (~line 177) compares `PRAGMA table_info` column sets as `BTreeSet` equality and bails on "missing columns" / "unexpected columns" (~lines 200-212). Verified. Any DB opened by a new build against an old file, or an old build against a new file, fails startup.
 4. The engine changed the schema additively between 8.0.2 and 9.18.0: migration v16 adds `entries.source_pointer` (9.1.0), v17 adds a `source_store` table, v18 adds `entries.prior_valid_to`, `derived_events`, and a partial index, v19 adds `events.forgotten_at`, and 8.4.0 adds the `vector_removals` ledger with DELETE/enqueue triggers on entries. Package `schema_version` moves 15→19; CREATE TABLE count moves 10→13.
 5. The TS import surface is additive-only between 8.0.2 and 9.18.0. All 13 symbols CT imports still exist. Imports live at `src/lib/wiki.ts:1`, `src/lib/ontology.ts:1-7`, `src/lib/wikiAdapter.ts:2`, `src/main.tsx:3`, and type-only imports in `DraftsPanel`, `HealthReportPanel`, and `ontologySeed`. The only semver break (9.0.0 removes `prompts.librarianSystemPrompt`) has zero CT hits. Verified by grep.
 6. The one semver break CT does hit is schema-software-org 9.0.0: it removes the `handoff` and `session_recap` node types and `handoffFor` edges; it adds statement kinds (`rule`, `decision`, `lesson`, `trap` under abstract `statement`), the `area` node type, and `about` edges. CT asserts the old set:
@@ -66,6 +66,7 @@ Data re-typing proposal (Kurt's decision — this spec does NOT implement a migr
   - `handoffFor` edges → `about` edges (same source node, same target node). EDGE ENDPOINT VERIFICATION (verified 2026-11-24 against the v9.18.0 sso manifest): `handoffFor` at v8.0.2 declares two shapes — `handoff` → `software_application` and `handoff` → `service`. The 9.18.0 `about` edges with source `statement` declare exactly three targets — `area`, `software_application`, `organization` (`packages/schema-software-org/src/index.ts:97-99` at v9.18.0). A `statement` → `service` edge has NO declared `about` shape, so mapped edges whose original target was a `service` node cannot become `about` rows without the node-type gate refusing them. The migration must classify every `handoffFor` edge by target type and dispose of `service`-targeted edges explicitly (drop with a logged count, or hold as an owner decision) — never rewrite them blind.
   - `handoff` → `decision` (a handoff is a decision about where work stands); `session_recap` → `lesson`. Since the kinds ARE node types, these are single `okf_type` rewrites — no composite "statement + kind" encoding.
 - Implementation vehicle: a CT-side one-time migration on CT's OWN chain in `src-tauri/src/db/connection.rs` (CT numbering is independent of engine numbering; the chain is at V29 on main and moves to V30 when PR #352, the areas lane, merges). The data migration rides as a new local migration step on top of whatever the base branch carries at merge time — no hardcoded number in this spec. PR #352 owns V30; this spec's step takes the next free slot. The areas spec (`specs/2026-11-14-areas/spec.md` §14.1) already flags "heal for handoff and session_recap rows" as bump-lane work; this is it.
+- SAFETY REQUIREMENTS for the migration: back up the brain.db file before the step runs (a file copy next to the original, logged); run a dry pass first that reports the row counts per `okf_type` and the `handoffFor` edge counts by target type, and write those counts to the migration log; and the whole step must be idempotent — running it twice is a no-op, pinned by a test.
 - REJECTED degrade variant: re-type to plain `statement` and defer kind enrichment to PR-B. Pointless: the kind IS the `okf_type` slug (see verification above), so `decision` costs the same one UPDATE as `statement` and preserves fidelity.
 - Alternative if Kurt prefers no data rewrite: keep old-type rows frozen, exclude them from the node-type gate, and let heal re-anchor them. This loses type fidelity but touches nothing.
 - DECISION REQUIRED from Kurt at spec review: re-type with the mapping above (evidence supports this — the storage mechanism exists at 8.0.2), or freeze-and-exclude. The only open product question is the semantic mapping (handoff→decision, session_recap→lesson), not feasibility.
@@ -88,16 +89,17 @@ Why option (a) over option (b) (CT pre-adds columns before the bump): pre-adding
 
 ### PR-C: vector_removals ledger adoption (resolves #342; may fold into PR-B)
 
-Wire the engine's `vector_removals` ledger into CT's delete paths: consume the ledger where CT currently does ad-hoc vector cleanup. The DDL mirror and triggers always land in PR-B (the verbatim regen includes them). If the consumption surface turns out larger than a small patch, split consumption into a follow-up PR. Non-blocking.
+Wire the engine's `vector_removals` ledger into CT's delete paths: consume the ledger where CT currently does ad-hoc vector cleanup. The DDL mirror and triggers always land in PR-B (the verbatim regen includes them). PR-C also reconciles CT's raw `DELETE FROM llm_wiki_entries` call sites (`commit.rs:616`, `queries.rs:227`, `bundle_apply.rs:982`) with the engine's exposed `forget()`/`erase` surface, per the INTENT §12 check: disposition each site as route-through or recorded divergence. If the consumption surface turns out larger than a small patch, split consumption into a follow-up PR. Non-blocking.
 
 ## 4. Files touched (real paths, verified on origin/main)
 
 PR-A:
 
 - `package.json` (one dependency line)
-- `pnpm-lock.yaml`
+- `pnpm-lock.yaml` (the trial-install resolution from the compatibility note)
 - `src/__tests__/ontology-packages.test.ts`
 - `src-tauri/src/db/entity_gate.rs`
+- `src-tauri/src/db/connection.rs` (the manifest-refresh migration, PR-A change 5, if that step lands as a CT migration)
 - `src-tauri/src/onboard/mod.rs`
 - `src/lib/ontology.ts`
 - sweep dispositions only where the quoted slug literals appear in logic: `tools/tests/ct_heal.rs` (plus the caution on `flag_handoffs_planned` in `src-tauri/src/db/evidence_reanchor.rs` and `tools/src/cmds.rs` — no change there)
@@ -139,7 +141,9 @@ PR-A tests:
 
 - Updated `ontology-packages.test.ts` asserts the 9.18.0 sso manifest (statement kinds, `area`, `about`; no `handoff`/`session_recap`).
 - Updated `entity_gate.rs` pin test asserts the new slug list and count.
-- If Kurt approves re-typing: a migration test seeds `handoff`/`session_recap` rows in an 8.0.2-era fixture and asserts `okf_type` = `decision`/`lesson` and the mapped `about` edges after migration.
+- If Kurt approves re-typing: a migration test seeds `handoff`/`session_recap` rows in an 8.0.2-era fixture and asserts `okf_type` = `decision`/`lesson` and the mapped `about` edges after migration, plus an idempotency assertion (running the migration twice changes nothing) and the dry-run count report in the log.
+- Manifest-refresh test (PR-A change 5): an entity holding an 8.x-era stored manifest passes the `is_ea_subset` gate after the constants change.
+- Smoke test: the frontend build imports sso 9.18.0 and loads its manifest under the core-llm-wiki 8.0.2 override, proving the runtime (not just type) compatibility.
 
 ## 6. Rejected alternatives
 
