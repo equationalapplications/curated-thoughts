@@ -23,13 +23,14 @@ export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_PROFILE_TEST_DEBUG=0
 ```
 
-- Every cargo run must go through the heavy-build wrapper (`~/.hermes/bin/heavy-build`), per pins.
+- Every cargo gate runs through the heavy-build wrapper (F5): the invocation is `~/.hermes/bin/heavy-build --need-mb 3500 --mem-high 4500 --mem-max 6000 -- <the bare gate command>`. Receipts record BOTH the wrapped invocation line and the bare command. Small single-file checks may run bare.
 - Pre-flight before each cargo gate: `df -h "<repo-root>"` must show ≥30G free (AGENTS.md floor).
 - Below 30G free: STOP and report to the controller. Never delete caches.
 - On linker `Bus error`, `ENOSPC`, or `os error 122`: STOP and report. This is an environment failure.
 - `--manifest-path` goes AFTER the subcommand (cargo 1.96 rejects the other form).
 - `tools/Cargo.toml` has no `test-utils` feature. Never pass `--features test-utils` there.
 - Cargo work runs serial. Never run two cargo gates at once.
+- Commit sequencing (F9b): Tasks 1 and 2 land as ONE commit (Task 1's drift test turns the old expectations RED; Task 2 re-pins them). Tasks 3–6 commit per task.
 
 ### 0.2 Canonical gate commands
 
@@ -102,8 +103,8 @@ Steps:
 9. Add the drift test to `src/__tests__/ontology-packages.test.ts` (a §4-listed file).
    It must import `schemaSoftwareOrgManifest` and deep-equal it against the vendored 9.18.0 JSON.
    The failure message must name the regenerate command from step 6.
-10. Add a Rust sanity test beside the `include_str!` (Task 4 owns the include).
-   It must assert the vendored JSON parses through `crate::wiki_graph::parse_manifest_value` and declares 21 node-type slugs.
+   This test is ALSO the spec §5 runtime-load evidence (F8): extend it (or add a sibling case) that passes `schemaSoftwareOrgManifest` through the same manifest-loading code CT uses (`src/lib/ontology.ts` seed path) under the 8.0.2 core override. `pnpm build` in Task 6 remains bundling evidence only.
+   (Former step 10 — Rust parse test beside the `include_str!` — MOVED to Task 4d per F4: the include does not exist until Task 4, and Task 1 has no cargo gate. Note for Task 4d: `parse_manifest_value` takes a `&serde_json::Value`, so the test must `serde_json::from_str` first.)
 
 Gates:
 
@@ -168,7 +169,7 @@ Steps:
 9. Sweep the quoted literals `"handoff"` and `"session_recap"` (case-sensitive, code only). Record each disposition in LEDGER. Known hits at base:
    - `entity_gate.rs:87`, `:98` (const) → removed by step 3.
    - `entity_gate.rs:1990`, `:2001` (pin test) → re-pinned by step 2.
-   - `tools/tests/ct_heal.rs:308`, `:319` (`seed_tier_fact_manifest`) → re-pin the fixture to the new seed list, OR keep it as an 8.x-era fixture that the Task 4 refresh migrates. Pick by what the test asserts; record the choice.
+   - `tools/tests/ct_heal.rs:308`, `:319` (`seed_tier_fact_manifest`) → re-pin the fixture to the new seed list, built from `curated_thoughts::…::EA_SEED_TYPES` if the tools crate can see it. (F2, RULED: the "keep as 8.x-era fixture" option is INVALID — `init_brain_db` goes through `AppDb::open_with_config`, so `migrate()` stamps N before the fixture seeds, and the next open would never refresh it; against 20-slug `EA_SEED_TYPES` the old manifest then fails `is_ea_subset` and the tests would quietly exercise the foreign path.) 8.x-era refresh coverage lives in Task 4's tempfile tests.
    - `src/__tests__/ontology-packages.test.ts:23`, `:26` → handled by Task 2.
    - `docs/mcp-write-tools-okf-frontmatter.md` → prose examples of `entry_type`, not logic. Disposition: no change (out of the spec's "logic hits" scope).
    - CAUTION: `flag_handoffs_planned` in `src-tauri/src/db/evidence_reanchor.rs` and `tools/src/cmds.rs` is unrelated. Do not touch it.
@@ -233,7 +234,7 @@ Backup sharing: step 2 (Task 5) may reuse a backup step 1 took in the same `migr
    - remove every edge with type `handoffFor`;
    - add `statement`, `rule`, `decision`, `lesson`, `trap`, `area` from the vendored JSON (with `description` and `parent_type`), skipping any already declared;
    - add the new edge shapes from the vendored JSON (`about` ×3 and `partOf` — Q2 RULED YES, spec E2), skipping any already declared by `(type, source_type, target_type)`;
-   - preserve every other key and entry byte-for-byte in order. Do not touch `fallback_node_type` here.
+   - preserve every other key and entry, and the order of array entries (F6: serde_json has no `preserve_order`, and the ensure already round-trips through `serde_json::Value` (`entity_gate.rs:825`), so byte-for-byte serialization is not achievable — tests must compare PARSED `Value`s for content+array-order equality; the compare-and-swap UPDATE stays as designed). Do not touch `fallback_node_type` here.
 5. Apply: `UPDATE llm_wiki_entity_manifests SET manifest_json = ? WHERE entity_id = ? AND manifest_json = ?` (compare-and-swap, as the ensure does). Include the `tier_fact` row.
 6. After `COMMIT`, call `ensure_manifest_vocabulary` for every refreshed entity id (spec: restore `document`/`process` and `fallback_node_type`).
    It opens its own transaction, so it must run after `COMMIT`, never inside the step's `BEGIN IMMEDIATE`. Log each outcome; a per-row failure is logged, not fatal (ensure is best-effort by design).
@@ -248,6 +249,7 @@ All migration tests must use a tempfile-backed DB. `open_in_memory()` skips the 
 - Backup-failure test: force the backup to fail (e.g. read-only target dir). `migrate()` returns `Err` and N is not stamped.
 - In-memory test: `open_in_memory()` leaves N unstamped and manifests unchanged.
 - Idempotency test: migrate twice; manifests, stamps, and memo rows are identical after the second run.
+- Body-level idempotency test (F3): delete the stamp row (or invoke the step body with the stamp check bypassed) and run the body again on the already-migrated DB; assert zero rows change and the manifest/edge/memo snapshots are identical. The double-`migrate` test alone only exercises the stamp check, not the body.
 - Ensure re-run test: a refreshed EA manifest gains `document`, `process`, and `fallback_node_type`.
 
 Gates:
@@ -277,23 +279,25 @@ Same as Task 4 (4b, 4c) at slot N + 1, with these additions:
   - `handoffFor` edges by resolved target type (Q4 resolver);
   - per edge type, edges touching (source OR target) a row being re-typed;
   - pending `curated_proposal_items` whose payload carries `handoff`/`session_recap` types or `handoffFor` edges (counted, never rewritten);
-  - `curated_entities` rows with `entity_type` in (`handoff`, `session_recap`) (counted; disposition per Q3).
+  - `curated_entities` rows with `entity_type` in (`handoff`, `session_recap`) (counted; re-typed per E3 — see writes step 8).
 
 #### 5b. Writes (single `BEGIN IMMEDIATE` transaction)
 
-Order matters: compute every edge disposition BEFORE the `okf_type` rewrite. After it, re-typed rows no longer carry the old type.
+Order matters: compute every edge disposition BEFORE the `okf_type`/`entity_type` rewrites (all three tables) — the Q4 resolver reads `curated_entities.entity_type`, so re-typed rows must still carry their OLD type while edges are classified. After the rewrites they no longer do.
 
-1. Snapshot the set of entry ids being re-typed (old `okf_type` in the two slugs).
-2. `handoffFor` → `about`, target `software_application` (or a declared `statement` target): `UPDATE OR IGNORE llm_wiki_edges SET edge_type = 'about' WHERE …`.
+1. Snapshot the re-typed id set: entry ids with old `okf_type` in the two slugs PLUS `curated_entities.id` with `entity_type` in the two slugs (tombstones included in both). This set drives the edge steps below.
+2. `handoffFor` → `about`, where BOTH the source_id is in the snapshot set AND the target type is `software_application` (or a declared `statement` target): `UPDATE OR IGNORE llm_wiki_edges SET edge_type = 'about' WHERE …` (F7: edges whose source is not in the set go to the untouched count — an untypeable source would create an undeclared shape).
    Then `DELETE` the leftover `handoffFor` rows that lost the UNIQUE race. Log the deduped count.
 3. `handoffFor` with target type `service`: `DELETE`, log the count (RATIFIED drop-with-count).
-4. Parent-family edges touching a re-typed row whose re-typed shape is undeclared: `DELETE`, log a count per edge type.
+4. Parent-family edges touching a snapshot-set row whose re-typed shape is undeclared: `DELETE`, log a count per edge type.
    Drop set per spec: `author`, `publisher`, `about`→person/place/event, `supersedes`.
    Keep set per spec: `about`→`organization` (becomes a declared `statement`→`organization` shape).
 5. Any edge class outside the spec's keep/drop lists (Q5): leave untouched, log the count as `undispositioned`.
 6. `UPDATE llm_wiki_entries SET okf_type = 'decision' WHERE okf_type = 'handoff'` and `'lesson'` for `'session_recap'`. Tombstones included (no `deleted_at` filter).
 7. Same two UPDATEs on `llm_wiki_tasks.okf_type`, tombstones included.
-8. Stamp N + 1; `COMMIT`.
+8. `UPDATE curated_entities SET entity_type = 'decision' | 'lesson'` for the two dropped slugs (E3, F1) — AFTER the edge steps; tombstones included; log the count. Do NOT touch `concept`, `process`, `repository`, `job` or any other pre-existing type (E3 scope fence).
+9. Stamp N + 1; `COMMIT`.
+10. After COMMIT + dry-pass verify: delete the backup file created earlier in this step (F10 ruling — the backup has served its purpose once the step commits; kills the fresh-brain `.bak` litter without weakening the backup-before-dry-pass safety order, which is UNCHANGED per spec).
 
 INTENT §12 constraints (spec): do NOT touch `llm_wiki_outbox`; do NOT rewrite `updated_at`; leave `ontology_checked_at` and `heal_checked_at` alone.
 The PR body must record the §12 divergence: no engine bulk re-type operation exists, so these raw writes are the recorded boundary case.
@@ -308,10 +312,13 @@ All on tempfile-backed DBs seeded as an 8.0.2-era brain.
 - Collision test (spec §5): an entity holding BOTH `handoffFor` and `about` on the same (entity, source, target). Migration succeeds; the pre-existing `about` row survives; the `handoffFor` row is gone; the deduped count is logged.
 - Service-drop test: `handoffFor` → `service` edge is deleted; the drop count is logged.
 - Parent-family test: one edge per drop class is deleted with per-type counts; an `about`→`organization` edge survives.
+- Curated-entity endpoint test (F1): a `handoffFor` edge whose SOURCE is a `curated_entities` row typed `handoff` re-maps to `about` (or is dropped per class), proving the snapshot set in writes step 1 includes curated entities and the edge steps see them.
 - Untouched-columns test: `updated_at`, `ontology_checked_at`, `heal_checked_at`, and `llm_wiki_outbox` are byte-identical before and after.
+- Trigger-coverage check (F11): before trusting the untouched-columns test, check `setupDatabase` at the 8.0.2 core tag for triggers on `llm_wiki_entries`, `llm_wiki_edges`, `curated_entities` (spec §2.4 names `createResurrectTrigger`). If any fire on the re-typed columns, recreate them in the Rust fixture first; otherwise record the absence check as the evidence.
 - Entity-type test (E3): seeded `curated_entities` rows typed `handoff`/`session_recap` end as `decision`/`lesson`; rows typed `concept`/`process`/`repository`/`job` are untouched; the counts land in the census log.
 - Order test: the re-type step does not run when N is unstamped.
 - Idempotency test: migrate twice; second run changes zero rows and stamps nothing new.
+- Body-level idempotency test (F3): same as Task 4e's — run the re-type body a second time with the stamp check bypassed; assert zero rows change.
 - Census-log test: the dry-pass log line carries every census count (capture via the existing log/test pattern in `connection.rs` tests).
 - Alias test (end-to-end): after migration, a pending payload typed `handoff` admits as `decision` through the gate.
 
@@ -353,7 +360,7 @@ Ledger text: `T6 — all gates green vs baseline (counts recorded); frontend bui
 
 ## 2. Risks
 
-1. **kv-work disk pressure.** 17G free at lane open, 18G after baseline; the canonical shared target is 86G. The AGENTS.md floor is 30G, so the floor already fails. Every cargo gate must pre-flight `df -h`. Below the floor, STOP and report; cache deletion is a controller decision only.
+1. **Build-cache disk pressure.** The canonical target is `<repo-root>/.cargo-shared-target` (Q7 ruling) on `/`, which had 176G free at the Q7 ruling — above the AGENTS.md 30G floor (F9: the pre-Q7 "floor already fails" text was stale). Every cargo gate still pre-flights `df -h "<repo-root>"`. Below the floor, STOP and report; cache deletion is a controller decision only. `/mnt/kv-work` (18G free) hosts only the superseded 86G tree from the baseline.
 2. **Declared-vs-actual `core-llm-wiki` range mismatch.** sso 9.18.0 declares `core-llm-wiki` 9.18.0 exact; the override forces 8.0.2. Accepted, recorded state per the spec compat note. The lockfile and install log are its review record. PR-B resolves it.
 3. **PR #368 merging mid-lane.** File-disjoint except possibly `connection.rs` migration slots. Sync by `git merge origin/main`, never rebase. Recompute slot N after every merge (Task 4a).
 4. **Shared `node_modules`.** The worktree's `node_modules` symlinks to the main checkout (`../../node_modules`). A `pnpm install` here would bump sso for the main checkout and every other worktree. See Q9.
