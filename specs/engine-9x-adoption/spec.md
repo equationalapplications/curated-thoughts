@@ -4,7 +4,8 @@ Status: Draft
 Owner: Kurt VanDusen / Hermes Agent
 Date: 2026-11-24
 Related issues: #342 (vector_removals ledger, non-blocking), #348 (sso 9.x node types, blocking), #353 (source_pointer mirror, blocking for the guard).
-Related spec: this is the "engine bump lane" deferred by `specs/2026-11-14-areas/spec.md` §14.1. The `area` ingest-mapping decision (§14.2 there) stays deferred; it is not part of this spec.
+Authority check: this spec was checked against the repo's `INTENT.md` on 2026-11-24. INTENT imposes no rule on node-type vocabulary or pin bumps; its engine-mirror rule (§12, "The Rust side follows the engine's words") is exactly what PR-B implements. INTENT wins on any conflict.
+Related spec: this is the "engine bump lane" deferred by `specs/2026-11-14-areas/spec.md` §14.1. That file lives on the UNMERGED areas branch (PR #352, branch `areas`), not on main; the citation names intent, and the areas lane owns the file. The `area` ingest-mapping decision (§14.2 there) stays deferred; it is not part of this spec.
 
 ## 1. Problem
 
@@ -48,6 +49,8 @@ Three PRs, in order. PR-A and PR-B are blocking; PR-C may fold into PR-B.
 
 Bump `@equationalapplications/schema-software-org` alone to 9.18.0 in `package.json` dependencies. The guard is untouched: sso has no DDL mirror (evidence §2.7), and core stays at 8.0.2 so `schema_guard.rs` still matches.
 
+Compatibility note (verified 2026-11-24): the published `schema-software-org` 9.18.0 tarball declares an exact dependency on `core-llm-wiki` 9.18.0. The CT pnpm override forces `core-llm-wiki` to 8.0.2 in every resolution, so the install resolves, but the declared range goes unsatisfied. The only core surface sso imports is the `OntologyManifest` type family, and `packages/core/src/types.ts` at tag v8.0.2 (lines 52-66) already defines `OntologyNodeType.parent_type` and the manifest shape sso 9.18.0 uses. PR-A must include a trial install with the bumped pin and lock the resulting `pnpm-lock.yaml` resolution in the PR, so the mismatched declared range is a recorded, reviewed state rather than a surprise at merge time.
+
 Changes:
 
 1. Update `src/__tests__/ontology-packages.test.ts` expectations: `creativework` children lose `handoff` and `session_recap`; add assertions for the new surface (`statement` with kinds `rule`, `decision`, `lesson`, `trap`; `area` node type; `about` edges) so the test pins the NEW contract, not just the absence of the old one.
@@ -58,8 +61,8 @@ Changes:
 Data re-typing proposal (Kurt's decision — this spec does NOT implement a migration until he picks a mapping):
 
 - Existing brain.db facts typed `handoff` or `session_recap` reference node types that no longer exist in the 9.18.0 manifest. KIND-STORAGE VERIFICATION (owner review item 2): the storage mechanism for statement kinds EXISTS at 8.0.2. In sso 9.x the four kinds are four manifest NODE TYPES (`rule`, `decision`, `lesson`, `trap` — `packages/schema-software-org/src/index.ts:45-46` at tag v9.18.0: "Statement kinds: one abstract parent, four content-defined children"), not a separate column. They live in the same `okf_type TEXT` column the engine has carried since the OKF migration (expo-llm-wiki `packages/core/src/db/schema.ts:22` at BOTH tags v8.0.2 and v9.18.0; mirrored verbatim in `src-tauri/src/db/okf_ddl.rs` `LLM_WIKI_PACKAGE_DDL` and in `schema_guard.rs` expectations). Neither tag adds a `kind` column to entries. So re-typing is a plain `UPDATE llm_wiki_entries SET okf_type = :slug` — the 8.0.2 build can hold `decision`/`lesson` slugs even though the 8.0.2 sso manifest does not declare them (the column is free-form TEXT; per-entry validation is the node-type gate, which PR-A updates in the same change). Proposed mapping:
+  - `handoffFor` edges → `about` edges (same source node, same target node). EDGE ENDPOINT VERIFICATION (verified 2026-11-24 against the v9.18.0 sso manifest): `handoffFor` at v8.0.2 declares two shapes — `handoff` → `software_application` and `handoff` → `service`. The 9.18.0 `about` edges with source `statement` declare exactly three targets — `area`, `software_application`, `organization` (`packages/schema-software-org/src/index.ts:97-99` at v9.18.0). A `statement` → `service` edge has NO declared `about` shape, so mapped edges whose original target was a `service` node cannot become `about` rows without the node-type gate refusing them. The migration must classify every `handoffFor` edge by target type and dispose of `service`-targeted edges explicitly (drop with a logged count, or hold as an owner decision) — never rewrite them blind.
   - `handoff` → `decision` (a handoff is a decision about where work stands); `session_recap` → `lesson`. Since the kinds ARE node types, these are single `okf_type` rewrites — no composite "statement + kind" encoding.
-  - `handoffFor` edges → `about` edges (same source, same target).
 - Implementation vehicle: a CT-side one-time migration on CT's OWN chain in `src-tauri/src/db/connection.rs` (CT numbering is independent of engine numbering; the chain is at V29 on main and moves to V30 when PR #352, the areas lane, merges). The data migration rides as a new local migration step on top of whatever the base branch carries at merge time — no hardcoded number in this spec. PR #352 owns V30; this spec's step takes the next free slot. The areas spec (`specs/2026-11-14-areas/spec.md` §14.1) already flags "heal for handoff and session_recap rows" as bump-lane work; this is it.
 - REJECTED degrade variant: re-type to plain `statement` and defer kind enrichment to PR-B. Pointless: the kind IS the `okf_type` slug (see verification above), so `decision` costs the same one UPDATE as `statement` and preserves fidelity.
 - Alternative if Kurt prefers no data rewrite: keep old-type rows frozen, exclude them from the node-type gate, and let heal re-anchor them. This loses type fidelity but touches nothing.
@@ -113,7 +116,7 @@ Note: `src/tests/ontology.test.ts` from the impact report does not exist; it is 
 
 ## 5. Test plan
 
-Rust (repo is NOT a cargo workspace — always `--manifest-path`; export `CARGO_TARGET_DIR=/mnt/kv-work/build/cargo/curated-thoughts`):
+Rust (repo is NOT a cargo workspace — always `--manifest-path`; export `CARGO_TARGET_DIR=<absolute repo root>/.cargo-shared-target` per the AGENTS.md single-build-location rule). Run `df -h "$(dirname "$CARGO_TARGET_DIR")"` before the first build. It must show at least 30G free:
 
 - `cargo --manifest-path src-tauri/Cargo.toml test --lib --features test-utils` — covers the `ea_seed_types_match_spec_section_1_1` pin test, `schema_guard` expectations, and `okf_migration`.
 - `cargo --manifest-path tools/Cargo.toml test --lib --features test-utils` — covers tool-side vocabulary.
@@ -127,7 +130,7 @@ New tests required in PR-B (both DB paths):
 
 1. Fresh-install path: create a brand-new DB through the new `LLM_WIKI_PACKAGE_DDL`, run `schema_guard::verify` against the 9.18.0 expectations. Must pass.
 2. Existing-DB path: take a DB fixture created under the 8.0.2 DDL, run CT's migration chain (including the new engine-mirror migrations), then run `schema_guard::verify`. Must pass. This test is the whole point of the same-commit rule — it fails if the DDL mirror and the pin ever drift apart again.
-3. Round-trip: open the migrated fixture with the OLD pinned build (CI job or a pinned-version test) and assert the guard bails with the documented "unexpected columns" message — the intended forward-incompat behavior, documented rather than silent.
+3. Round-trip: open the migrated fixture with the OLD pinned build (CI job or a pinned-version test) and assert the guard bails with the documented "unexpected columns" message — the intended forward-incompat behavior, documented rather than silent. Mechanism: PR-B must check in an 8.0.2 expectation fixture (a snapshot of the current `TableExpectation` sets plus the 8.0.2 `LLM_WIKI_PACKAGE_DDL` text, e.g. under `src-tauri/src/db/testdata/`), and the test runs `schema_guard::verify` with the NEW guard pointed at that fixture's DB. The old expectations therefore live in the fixture, not in the deleted guard code.
 
 PR-A tests:
 
