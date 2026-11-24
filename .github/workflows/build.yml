@@ -419,7 +419,37 @@ jobs:
           if (-not $msi) { throw 'no MSI produced' }
           $nsis = Get-ChildItem "$targetDir/release/bundle/nsis/*.exe"
           if (-not $nsis) { throw 'no NSIS installer produced' }
-          $files = @($msi) + @($nsis) + @(Get-ChildItem "$targetDir/release/curated-thoughts.exe", "$targetDir/release/ct.exe", "src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe")
+          # Tauri's bundler signs the main binary per package type, then
+          # RESTORES the unsigned, unpatched original into target/release
+          # (tauri-bundler bundle.rs "Restore unsigned and unpatched binary").
+          # So target/release/curated-thoughts.exe is unsigned after bundling —
+          # checking it would fail every signed run while proving nothing about
+          # what ships. Extract the app exe from each installer and verify THAT.
+          $tmp = Join-Path $env:RUNNER_TEMP 'verify-packaged'
+          New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+          $packagedApp = @()
+          foreach ($m in @($msi)) {
+            $out = Join-Path $tmp ("msi_" + $m.BaseName)
+            $p = Start-Process msiexec.exe -ArgumentList @('/a', "`"$($m.FullName)`"", '/qn', "TARGETDIR=`"$out`"") -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "msiexec admin extract failed for $($m.Name)" }
+            $exe = Get-ChildItem $out -Recurse -Filter 'curated-thoughts.exe' | Select-Object -First 1
+            if (-not $exe) { throw "curated-thoughts.exe not found inside $($m.Name)" }
+            $packagedApp += $exe
+          }
+          foreach ($n in @($nsis)) {
+            $out = Join-Path $tmp ("nsis_" + $n.BaseName)
+            $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+            if (-not $sevenZip) { $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe' }
+            & $sevenZip x -y "`"$($n.FullName)`"" "-o$out" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "7z extract failed for $($n.Name)" }
+            $exe = Get-ChildItem $out -Recurse -Filter 'curated-thoughts.exe' | Select-Object -First 1
+            if (-not $exe) { throw "curated-thoughts.exe not found inside $($n.Name)" }
+            $packagedApp += $exe
+          }
+          # ct.exe is signed standalone (not via tauri bundling) and the sidecar
+          # is signed by sign_binaries_if_needed (only the MAIN binary gets
+          # restored) — both keep their on-disk copies valid.
+          $files = @($msi) + @($nsis) + $packagedApp + @(Get-ChildItem "$targetDir/release/ct.exe", "src-tauri/binaries/curated-thoughts-mcp-x86_64-pc-windows-msvc.exe")
           $bad = $files | Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' }
           $files | ForEach-Object { "{0}: {1}" -f $_.Name, (Get-AuthenticodeSignature $_.FullName).Status }
           if ($bad) { throw "Unsigned or invalid: $($bad.Name -join ', ')" }
