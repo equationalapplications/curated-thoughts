@@ -4,7 +4,7 @@ Transient scaffolding — deleted in the same-PR cleanup commit.
 Plan: `specs/engine-9x-adoption/plan.md`. Spec: `specs/engine-9x-adoption/spec.md` (Approved 2026-11-24).
 Receipts dir: `.superpowers/sdd/engine-9x-pr-a/receipts/`.
 
-**In flight:** Q1–Q13 ruled; rungs 1–8 folded; rung 9 FAIL ($0.51: T1–T4 RESOLVED; U1 MAJOR — the T1 tuple-proof branch had no firing test; U2 nit) — folded ((c-step2) firing form added: delete the about row on one step-2 captured tuple via cfg(test) hook; acceptance-rule wording). Delta rung 10 (confirmation) next. Ladder spend: $9.21.
+**In flight:** LADDER CLOSED 2026-11-24 — APPROVE-WITH-NITS. History: rung 1 FAIL $1.67 (2 MAJOR + 9 MINOR) → rung 2 FAIL $1.31 → rung 3 FAIL $0.65 → rung 4 FAIL $0.52 → rung 5 FAIL $0.59 → rung 6 FAIL $0.70 → rung 7 FAIL $0.51 → rung 8 FAIL $0.57 → rung 9 FAIL $0.51 → rung 10 **PASS $0.34** (U1/U2 RESOLVED; V1 MINOR folded controller-side without a further rung: (c-step2b) firing test added). Ladder spend $9.55; plan total with author $11.73. PLAN CONVERGED — draft PR next, then implementation wave (Tasks 1+2 as one commit, then 3–6 per task).
 
 ## Baseline (39fc129f)
 
