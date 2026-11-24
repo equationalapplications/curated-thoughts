@@ -4,7 +4,7 @@ Transient scaffolding — deleted in the same-PR cleanup commit.
 Plan: `specs/engine-9x-adoption/plan.md`. Spec: `specs/engine-9x-adoption/spec.md` (Approved 2026-11-24).
 Receipts dir: `.superpowers/sdd/engine-9x-pr-a/receipts/`.
 
-**In flight:** Q1–Q13 ruled; rungs 1–6 folded; rung 7 FAIL ($0.51: S1 MAJOR — "gone-or-about" accepted a failed step-4 drop since those rows were already `about`; S2 capture via pre-write SELECT; S3 vacuous-shape clause restored; S4 (a) exempt with reason; S5 (b) evaluated on step-1-only path; S6 hook-point cross-ref) — all folded. Delta rung 8 next. Ladder spend: $8.13.
+**In flight:** Q1–Q13 ruled; rungs 1–7 folded; rung 8 FAIL ($0.57: T1 MAJOR — step-2 GONE branch accepted a no-op UPDATE + successful dedupe DELETE, losing re-mappable edges with no `about` replacement; T2/T3/T4 nits) — RULED: step-2 GONE requires tuple proof (an `about` row on the same (entity_id, source_id, target_id)); T2 wording fixed; T3 reason narrowed; T4 cross-ref clarified. Fold committed; delta rung 9 next. Ladder spend: $8.70.
 
 ## Baseline (39fc129f)
 
