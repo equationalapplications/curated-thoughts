@@ -1,3 +1,18 @@
+## [3.14.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.14.0...v3.14.1) (2026-11-24)
+
+### Bug Fixes
+
+* **ci:** assert notarytool verdict is Accepted — submit --wait exits 0 on Invalid (CodeRabbit [#337](https://github.com/equationalapplications/curated-thoughts/issues/337)) ([ec23cdd](https://github.com/equationalapplications/curated-thoughts/commit/ec23cdd911f07e7763594766ff2adaaa9fef61cf))
+* **ci:** draft-then-publish release gate, full verify coverage, scoped keychain ACL, key cleanup ([dafffc0](https://github.com/equationalapplications/curated-thoughts/commit/dafffc0627040887c2ef602bacc97767467bfd3c))
+* **ci:** high rung — codesign -dvv so Authority= greps match; draft-publish runbook note ([c078749](https://github.com/equationalapplications/curated-thoughts/commit/c078749be5a6980358e6cc1f490e84366de319d4))
+* **ci:** high-rung blockers — ct stapler always-fail, draft gate now covers the semantic-release path ([13786b6](https://github.com/equationalapplications/curated-thoughts/commit/13786b6d734d0d6efc86bf351ca62272b692bccd))
+* **ci:** review rung-low fixes — full-secret gates, env-passed vars, pinned signing CLI, pipefail-safe verify ([f136e72](https://github.com/equationalapplications/curated-thoughts/commit/f136e72cb3326a8fa85542de789c07120fedb65c))
+* **ci:** single-draft gate — create/reuse the release draft once before the matrix so concurrent tauri-action legs cannot race separate drafts on human-pushed tags (CodeRabbit [#337](https://github.com/equationalapplications/curated-thoughts/issues/337) build.yml:375) ([403eea6](https://github.com/equationalapplications/curated-thoughts/commit/403eea6983b97d4072773fdc995406e437f7f2b9))
+* **ci:** sonnet-high — package Windows zip AFTER signing; dmg is signed-never-stapled ([b1a427a](https://github.com/equationalapplications/curated-thoughts/commit/b1a427ab7c256098044f47db7a4e883d432ce4a3))
+* **ci:** verify packaged app exe inside MSI/NSIS installers — tauri restores unsigned binary into target/release (CodeRabbit [#337](https://github.com/equationalapplications/curated-thoughts/issues/337) :422) ([84b2c67](https://github.com/equationalapplications/curated-thoughts/commit/84b2c6720be6b71481a8d02f574a402de1f5bb64))
+* **ci:** xhigh rung — GH_REPO/GH_TOKEN in publish-release, notarytool diag on hard fail, doc accuracy ([e5a31d2](https://github.com/equationalapplications/curated-thoughts/commit/e5a31d209f0e6af334e3697c4dc8ede56b6b4d26))
+* **ci:** xhigh rung — secret-scope split, draft-lookup verified upstream, verify-step asserts ([ad45d79](https://github.com/equationalapplications/curated-thoughts/commit/ad45d7990cbfa01370eeb8e5a0de5fb03cd8152d))
+
 ## [3.14.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.13.1...v3.14.0) (2026-11-24)
 
 ### Features
