@@ -23,7 +23,7 @@ export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_PROFILE_TEST_DEBUG=0
 ```
 
-- Every cargo gate runs through the heavy-build wrapper (F5): the invocation is `~/.hermes/bin/heavy-build --need-mb 3500 --mem-high 4500 --mem-max 6000 -- <the bare gate command>`. Receipts record BOTH the wrapped invocation line and the bare command. Small single-file checks may run bare.
+- Every cargo gate runs through the heavy-build wrapper (F5): the invocation is `~/.hermes/bin/heavy-build --need-mb 3500 --mem-high 4500 --mem-max 6000 -- <the bare gate command>`. ALL cargo gates are wrapped — no bare cargo runs (the rung-2 "small checks bare" loophole is struck). Receipts record BOTH the wrapped invocation line and the bare command. pnpm gates always run bare.
 - Pre-flight before each cargo gate: `df -h "<repo-root>"` must show ≥30G free (AGENTS.md floor).
 - Below 30G free: STOP and report to the controller. Never delete caches.
 - On linker `Bus error`, `ENOSPC`, or `os error 122`: STOP and report. This is an environment failure.
@@ -103,8 +103,8 @@ Steps:
 9. Add the drift test to `src/__tests__/ontology-packages.test.ts` (a §4-listed file).
    It must import `schemaSoftwareOrgManifest` and deep-equal it against the vendored 9.18.0 JSON.
    The failure message must name the regenerate command from step 6.
-   This test is ALSO the spec §5 runtime-load evidence (F8): extend it (or add a sibling case) that passes `schemaSoftwareOrgManifest` through the same manifest-loading code CT uses (`src/lib/ontology.ts` seed path) under the 8.0.2 core override. `pnpm build` in Task 6 remains bundling evidence only.
-   (Former step 10 — Rust parse test beside the `include_str!` — MOVED to Task 4d per F4: the include does not exist until Task 4, and Task 1 has no cargo gate. Note for Task 4d: `parse_manifest_value` takes a `&serde_json::Value`, so the test must `serde_json::from_str` first.)
+   This test is ALSO the spec §5 runtime-load evidence (F8, completed per its delta): add a case that calls `manifestFor`/`ontologyConfigFor` in `src/lib/ontology.ts` — CT's actual frontend seed wrappers — with the real installed `schemaSoftwareOrgManifest`, asserting the seed shape. RECORDED FACT (delta-verified): the frontend's core-llm-wiki involvement is TYPES-ONLY (`ontology.ts:1-5`); no 8.0.2 core runtime entry point exists in the frontend to exercise, so this wrapper-path test + the Rust-side Task 4d/4e tests are the recorded runtime-compatibility evidence, and the divergence note in the PR body says so. `pnpm build` in Task 6 is bundling evidence only.
+   (Former step 10 — now Task 4d step 7 per F4; nothing left to do in this task.)
 
 Gates:
 
@@ -169,7 +169,7 @@ Steps:
 9. Sweep the quoted literals `"handoff"` and `"session_recap"` (case-sensitive, code only). Record each disposition in LEDGER. Known hits at base:
    - `entity_gate.rs:87`, `:98` (const) → removed by step 3.
    - `entity_gate.rs:1990`, `:2001` (pin test) → re-pinned by step 2.
-   - `tools/tests/ct_heal.rs:308`, `:319` (`seed_tier_fact_manifest`) → re-pin the fixture to the new seed list, built from `curated_thoughts::…::EA_SEED_TYPES` if the tools crate can see it. (F2, RULED: the "keep as 8.x-era fixture" option is INVALID — `init_brain_db` goes through `AppDb::open_with_config`, so `migrate()` stamps N before the fixture seeds, and the next open would never refresh it; against 20-slug `EA_SEED_TYPES` the old manifest then fails `is_ea_subset` and the tests would quietly exercise the foreign path.) 8.x-era refresh coverage lives in Task 4's tempfile tests.
+   - `tools/tests/ct_heal.rs:308`, `:319` (`seed_tier_fact_manifest`) → re-pin the fixture to the new seed list, built from `tauri_app_lib::db::entity_gate::EA_SEED_TYPES` (F2 RULED: the "keep as 8.x-era fixture" option is INVALID — `init_brain_db` goes through `AppDb::open_with_config`, so `migrate()` stamps N before the fixture seeds, and the next open would never refresh it; against 20-slug `EA_SEED_TYPES` the old manifest then fails `is_ea_subset` and the tests would quietly exercise the foreign path. F4-delta N2: this is the exact path — the tools crate imports the CT lib as `tauri_app_lib`.) 8.x-era refresh coverage lives in Task 4's tempfile tests.
    - `src/__tests__/ontology-packages.test.ts:23`, `:26` → handled by Task 2.
    - `docs/mcp-write-tools-okf-frontmatter.md` → prose examples of `entry_type`, not logic. Disposition: no change (out of the spec's "logic hits" scope).
    - CAUTION: `flag_handoffs_planned` in `src-tauri/src/db/evidence_reanchor.rs` and `tools/src/cmds.rs` is unrelated. Do not touch it.
@@ -220,7 +220,7 @@ Blocked by: Q2 (`partOf` edge), Q6 (slot numbering), Q12 (MERGE eligibility), Q1
 - [ ] S6 Transaction: `BEGIN IMMEDIATE`; re-check N unstamped under the lock (concurrent opens); apply; stamp N; `COMMIT`. Any error → `ROLLBACK` and propagate.
 - [ ] S7 Idempotency: running the step body twice is a no-op. Pinned by a test (4e).
 
-Backup sharing: step 2 (Task 5) may reuse a backup step 1 took in the same `migrate()` call. Otherwise step 2 takes its own.
+Backup sharing: step 2 (Task 5) may reuse a backup step 1 took in the same `migrate()` call. Otherwise step 2 takes its own. Backup DELETION is governed by the Task 5 step 10 lifecycle ruling: one deletion point at the end of `migrate()` after both steps commit + post-commit verification; the Task 4e backup test is revised accordingly (F10 delta).
 
 #### 4d. MERGE semantics
 
@@ -238,6 +238,7 @@ Backup sharing: step 2 (Task 5) may reuse a backup step 1 took in the same `migr
 5. Apply: `UPDATE llm_wiki_entity_manifests SET manifest_json = ? WHERE entity_id = ? AND manifest_json = ?` (compare-and-swap, as the ensure does). Include the `tier_fact` row.
 6. After `COMMIT`, call `ensure_manifest_vocabulary` for every refreshed entity id (spec: restore `document`/`process` and `fallback_node_type`).
    It opens its own transaction, so it must run after `COMMIT`, never inside the step's `BEGIN IMMEDIATE`. Log each outcome; a per-row failure is logged, not fatal (ensure is best-effort by design).
+7. Rust parse test (F4, completed per its delta): `serde_json::from_str` the vendored JSON and pass it through `wiki_graph::parse_manifest_value`; assert it parses and declares 21 node-type entries. (F4-delta N2: import the seed const as `tauri_app_lib::db::entity_gate::EA_SEED_TYPES` — the tools crate's name for the CT lib; the `curated_thoughts::` hedge in Task 3 step 9 is superseded by this exact path.) Runs under this task's `entity_gate` gate.
 
 #### 4e. Tests (RED first where behavior is new)
 
@@ -245,7 +246,7 @@ All migration tests must use a tempfile-backed DB. `open_in_memory()` skips the 
 
 - Planner unit tests: an 8.0.2 manifest (from the Task 1 testdata JSON) refreshes to the expected shape; a customised 17+extras manifest keeps its extras; a foreign manifest is `Untouched`; malformed JSON is `Malformed`; bare-string node types refresh.
 - Spec test (§5 "Manifest-refresh test"): an entity holding an 8.x-era stored manifest passes `is_ea_subset` after the constants change, and classifies `decision`/`lesson` as declared.
-- Backup test: after migrate on a tempfile brain, a `brain.db.bak-pre-sso9-*` file exists and opens with matching row counts.
+- Backup test (REVISED per F10 delta): the migration log line records the backup path + row-count verification, and after `migrate()` returns the `.bak-pre-sso9-*` file is GONE (post-commit cleanup ran). The file's existence DURING migration is proven by the log line + a mid-migration assertion where the test drives the steps directly.
 - Backup-failure test: force the backup to fail (e.g. read-only target dir). `migrate()` returns `Err` and N is not stamped.
 - In-memory test: `open_in_memory()` leaves N unstamped and manifests unchanged.
 - Idempotency test: migrate twice; manifests, stamps, and memo rows are identical after the second run.
@@ -286,8 +287,8 @@ Same as Task 4 (4b, 4c) at slot N + 1, with these additions:
 Order matters: compute every edge disposition BEFORE the `okf_type`/`entity_type` rewrites (all three tables) — the Q4 resolver reads `curated_entities.entity_type`, so re-typed rows must still carry their OLD type while edges are classified. After the rewrites they no longer do.
 
 1. Snapshot the re-typed id set: entry ids with old `okf_type` in the two slugs PLUS `curated_entities.id` with `entity_type` in the two slugs (tombstones included in both). This set drives the edge steps below.
-2. `handoffFor` → `about`, where BOTH the source_id is in the snapshot set AND the target type is `software_application` (or a declared `statement` target): `UPDATE OR IGNORE llm_wiki_edges SET edge_type = 'about' WHERE …` (F7: edges whose source is not in the set go to the untouched count — an untypeable source would create an undeclared shape).
-   Then `DELETE` the leftover `handoffFor` rows that lost the UNIQUE race. Log the deduped count.
+2. `handoffFor` → `about`, where BOTH the source_id is in the snapshot set AND the target type is `software_application` (or a declared `statement` target): `UPDATE OR IGNORE llm_wiki_edges SET edge_type = 'about' WHERE …` (F7: edges whose source is not in the set go to the `undispositioned` bucket — an untypeable source would create an undeclared shape).
+   Then `DELETE` the leftover `handoffFor` rows that lost the UNIQUE race, using the SAME full predicate as the UPDATE (snapshot-set source AND mapped target — N1: a target-only DELETE would silently remove edges F7 deliberately left alone and miscount them as deduped). Log the deduped count. The F7 left-alone rows land in `undispositioned` (same bucket as step 5 — one name).
 3. `handoffFor` with target type `service`: `DELETE`, log the count (RATIFIED drop-with-count).
 4. Parent-family edges touching a snapshot-set row whose re-typed shape is undeclared: `DELETE`, log a count per edge type.
    Drop set per spec: `author`, `publisher`, `about`→person/place/event, `supersedes`.
@@ -297,7 +298,7 @@ Order matters: compute every edge disposition BEFORE the `okf_type`/`entity_type
 7. Same two UPDATEs on `llm_wiki_tasks.okf_type`, tombstones included.
 8. `UPDATE curated_entities SET entity_type = 'decision' | 'lesson'` for the two dropped slugs (E3, F1) — AFTER the edge steps; tombstones included; log the count. Do NOT touch `concept`, `process`, `repository`, `job` or any other pre-existing type (E3 scope fence).
 9. Stamp N + 1; `COMMIT`.
-10. After COMMIT + dry-pass verify: delete the backup file created earlier in this step (F10 ruling — the backup has served its purpose once the step commits; kills the fresh-brain `.bak` litter without weakening the backup-before-dry-pass safety order, which is UNCHANGED per spec).
+10. Backup lifecycle (F10/N-series, RULED): migrate() takes ONE backup before step 1; step 2 REUSES it (no second backup). After BOTH steps commit and the post-commit verification (re-read the census counts and manifest row shape) passes, migrate() DELETES the backup file — one deletion point at the migrate() level, not per step. Deletion failure is logged, never fatal (the backup is redundant after commit). This keeps the spec's backup-before-dry-pass safety order AND kills the fresh-brain `.bak` litter.
 
 INTENT §12 constraints (spec): do NOT touch `llm_wiki_outbox`; do NOT rewrite `updated_at`; leave `ontology_checked_at` and `heal_checked_at` alone.
 The PR body must record the §12 divergence: no engine bulk re-type operation exists, so these raw writes are the recorded boundary case.
@@ -312,9 +313,10 @@ All on tempfile-backed DBs seeded as an 8.0.2-era brain.
 - Collision test (spec §5): an entity holding BOTH `handoffFor` and `about` on the same (entity, source, target). Migration succeeds; the pre-existing `about` row survives; the `handoffFor` row is gone; the deduped count is logged.
 - Service-drop test: `handoffFor` → `service` edge is deleted; the drop count is logged.
 - Parent-family test: one edge per drop class is deleted with per-type counts; an `about`→`organization` edge survives.
-- Curated-entity endpoint test (F1): a `handoffFor` edge whose SOURCE is a `curated_entities` row typed `handoff` re-maps to `about` (or is dropped per class), proving the snapshot set in writes step 1 includes curated entities and the edge steps see them.
+- Curated-entity endpoint test (F1, N3): seed ONE fixed case — a `handoffFor` edge whose SOURCE is a `curated_entities` row typed `handoff` with target `software_application` — and assert the edge becomes `about` (single expected result, no "or is dropped" ambiguity).
+- Curated-entity TARGET parent-family test (N3): an `author` edge (creativework family) whose TARGET is a re-typed `curated_entities` row is deleted with the per-type count, proving step 4's "touching (source OR target)" reaches curated entities on the target side too.
 - Untouched-columns test: `updated_at`, `ontology_checked_at`, `heal_checked_at`, and `llm_wiki_outbox` are byte-identical before and after.
-- Trigger-coverage check (F11): before trusting the untouched-columns test, check `setupDatabase` at the 8.0.2 core tag for triggers on `llm_wiki_entries`, `llm_wiki_edges`, `curated_entities` (spec §2.4 names `createResurrectTrigger`). If any fire on the re-typed columns, recreate them in the Rust fixture first; otherwise record the absence check as the evidence.
+- Trigger-coverage check (F11, N4): before trusting the untouched-columns test, check `setupDatabase` at the 8.0.2 core tag for triggers on `llm_wiki_entries`, `llm_wiki_edges`, `llm_wiki_tasks`, and `curated_entities` (spec §2.4 names `createResurrectTrigger`). If any fire on the re-typed columns, recreate them in the Rust fixture first; otherwise record the absence check as the evidence.
 - Entity-type test (E3): seeded `curated_entities` rows typed `handoff`/`session_recap` end as `decision`/`lesson`; rows typed `concept`/`process`/`repository`/`job` are untouched; the counts land in the census log.
 - Order test: the re-type step does not run when N is unstamped.
 - Idempotency test: migrate twice; second run changes zero rows and stamps nothing new.
@@ -339,7 +341,7 @@ Steps:
 
 1. Re-sync with origin/main if it moved (merge, never rebase). Re-check slot N (Task 4a step 2) after the merge.
 2. Run every gate in §0.2, one at a time, with the disk pre-flight before each cargo gate.
-3. Smoke test (spec §5): run the `package.json` `build` script. It must import sso 9.18.0 and load its manifest under the 8.0.2 core override.
+3. Smoke test (spec §5, F8-delta wording): run the `package.json` `build` script — this is BUNDLING evidence only (F8 delta: `tsc && vite build` never executes the manifest). The spec's runtime-load evidence is the Task 1 drift/seed-wrapper vitest case; record that pointer in the LEDGER line and the PR body.
 4. e2e fixture check: grep e2e/fixture paths for `handoff`, `session_recap`, `handoffFor`, `Specs, handoffs`. Base had zero hits; record the re-grep.
 5. Draft the PR-body inputs in LEDGER: the §12 divergence note, the recorded unmet `core-llm-wiki` range, the sweep table, slot N, and the open-question rulings.
 6. Post-session sweep (AGENTS.md): `du -sh "$REPO_ROOT/.cargo-shared-target"` (Q7 — the canonical dir, not /mnt/kv-work), check for stray `target/` dirs in the worktree, record `df -h` on both `/` and `/mnt/kv-work`.
@@ -365,7 +367,7 @@ Ledger text: `T6 — all gates green vs baseline (counts recorded); frontend bui
 3. **PR #368 merging mid-lane.** File-disjoint except possibly `connection.rs` migration slots. Sync by `git merge origin/main`, never rebase. Recompute slot N after every merge (Task 4a).
 4. **Shared `node_modules`.** The worktree's `node_modules` symlinks to the main checkout (`../../node_modules`). A `pnpm install` here would bump sso for the main checkout and every other worktree. See Q9.
 5. **Backup aborts the open.** Spec mandates abort-without-stamp on backup failure. A persistently full disk therefore blocks every open until space is freed. The log line must say exactly that and name the fix.
-6. **Fresh-brain backup cost.** Every file-backed first open (including tests) takes a `VACUUM INTO` of a near-empty DB. Cheap, but it litters test temp dirs and fresh brain dirs with one backup file.
+6. **Fresh-brain backup cost.** Every file-backed first open (including tests) takes a `VACUUM INTO` of a near-empty DB. Cheap; the `.bak-pre-sso9-*` file is DELETED at the end of `migrate()` per the Task 5 step 10 lifecycle ruling (F10 delta), so no litter remains after a successful open.
 7. **Planner memo staleness.** Without the epoch bump (Task 3 step 6), memos recorded under the 17-slug set short-circuit the new verdict on unchanged bytes.
 8. **Ensure re-run inside a transaction.** `ensure_manifest_vocabulary` opens its own transaction; calling it inside the step's `BEGIN IMMEDIATE` fails. Task 4d step 6 orders it after `COMMIT`.
 9. **PR-B landing surface.** PR-A must not edit `okf_ddl.rs`, `schema_guard.rs`, `ddl_compat.rs`, or the overrides. The slot consts keep PR-B free to take the next free slot after PR-A.

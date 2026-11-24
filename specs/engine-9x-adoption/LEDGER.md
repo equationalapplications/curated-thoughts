@@ -4,7 +4,7 @@ Transient scaffolding — deleted in the same-PR cleanup commit.
 Plan: `specs/engine-9x-adoption/plan.md`. Spec: `specs/engine-9x-adoption/spec.md` (Approved 2026-11-24).
 Receipts dir: `.superpowers/sdd/engine-9x-pr-a/receipts/`.
 
-**In flight:** Q1–Q13 ruled; T3 rung 1 verdict GATE: FAIL ($1.67/30 turns) — 2 MAJOR + 9 MINOR, ALL adjudicated REAL and folded (F1–F11, see plan deltas marked F*); delta rung next.
+**In flight:** Q1–Q13 ruled; T3 rung 1 FAIL ($1.67, 2 MAJOR + 9 MINOR — all folded); delta rung 2 FAIL ($1.31: F10 backup-lifecycle drift + F4/F8 partial + N1–N4) — all adjudicated REAL and folded; delta rung 3 next. Ladder spend: $5.16.
 
 ## Baseline (39fc129f)
 
