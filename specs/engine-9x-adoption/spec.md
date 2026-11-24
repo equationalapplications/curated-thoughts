@@ -57,13 +57,13 @@ Changes:
 
 Data re-typing proposal (Kurt's decision — this spec does NOT implement a migration until he picks a mapping):
 
-- Existing brain.db facts typed `handoff` or `session_recap` reference node types that no longer exist in the 9.18.0 manifest. Proposed mapping:
-  - `handoff` → `statement` with kind `decision` (a handoff is a decision about where work stands), or degrade to plain `statement`.
-  - `session_recap` → `statement` with kind `lesson`.
+- Existing brain.db facts typed `handoff` or `session_recap` reference node types that no longer exist in the 9.18.0 manifest. KIND-STORAGE VERIFICATION (owner review item 2): the storage mechanism for statement kinds EXISTS at 8.0.2. In sso 9.x the four kinds are four manifest NODE TYPES (`rule`, `decision`, `lesson`, `trap` — `packages/schema-software-org/src/index.ts:45-46` at tag v9.18.0: "Statement kinds: one abstract parent, four content-defined children"), not a separate column. They live in the same `okf_type TEXT` column the engine has carried since the OKF migration (expo-llm-wiki `packages/core/src/db/schema.ts:22` at BOTH tags v8.0.2 and v9.18.0; mirrored verbatim in `src-tauri/src/db/okf_ddl.rs` `LLM_WIKI_PACKAGE_DDL` and in `schema_guard.rs` expectations). Neither tag adds a `kind` column to entries. So re-typing is a plain `UPDATE llm_wiki_entries SET okf_type = :slug` — the 8.0.2 build can hold `decision`/`lesson` slugs even though the 8.0.2 sso manifest does not declare them (the column is free-form TEXT; per-entry validation is the node-type gate, which PR-A updates in the same change). Proposed mapping:
+  - `handoff` → `decision` (a handoff is a decision about where work stands); `session_recap` → `lesson`. Since the kinds ARE node types, these are single `okf_type` rewrites — no composite "statement + kind" encoding.
   - `handoffFor` edges → `about` edges (same source, same target).
-- Implementation vehicle: a CT-side one-time migration in `src-tauri/src/db/connection.rs` (CT's own migration chain, currently at version 19 locally — CT numbering is independent of engine numbering) gated on rows with the old types, plus heal coverage. The areas spec (`specs/2026-11-14-areas/spec.md` §14.1) already flags "heal for handoff and session_recap rows" as bump-lane work; this is it.
+- Implementation vehicle: a CT-side one-time migration on CT's OWN chain in `src-tauri/src/db/connection.rs` (CT numbering is independent of engine numbering; the chain is at V29 on main and moves to V30 when PR #352, the areas lane, merges). The data migration rides as a new local migration step on top of whatever the base branch carries at merge time — no hardcoded number in this spec. PR #352 owns V30; this spec's step takes the next free slot. The areas spec (`specs/2026-11-14-areas/spec.md` §14.1) already flags "heal for handoff and session_recap rows" as bump-lane work; this is it.
+- REJECTED degrade variant: re-type to plain `statement` and defer kind enrichment to PR-B. Pointless: the kind IS the `okf_type` slug (see verification above), so `decision` costs the same one UPDATE as `statement` and preserves fidelity.
 - Alternative if Kurt prefers no data rewrite: keep old-type rows frozen, exclude them from the node-type gate, and let heal re-anchor them. This loses type fidelity but touches nothing.
-- DECISION REQUIRED from Kurt at spec review: re-type (mapping above or a different one), or freeze-and-exclude.
+- DECISION REQUIRED from Kurt at spec review: re-type with the mapping above (evidence supports this — the storage mechanism exists at 8.0.2), or freeze-and-exclude. The only open product question is the semantic mapping (handoff→decision, session_recap→lesson), not feasibility.
 
 ### PR-B: core/okf/react/schema-org pin bump to 9.18.0 (resolves #353)
 
@@ -133,7 +133,7 @@ PR-A tests:
 
 - Updated `ontology-packages.test.ts` asserts the 9.18.0 sso manifest (statement kinds, `area`, `about`; no `handoff`/`session_recap`).
 - Updated `entity_gate.rs` pin test asserts the new slug list and count.
-- If Kurt approves re-typing: a migration test seeds `handoff`/`session_recap` rows in an 8.0.2-era fixture and asserts the mapped types and `about` edges after migration, including a handoff→statement-with-kind row.
+- If Kurt approves re-typing: a migration test seeds `handoff`/`session_recap` rows in an 8.0.2-era fixture and asserts `okf_type` = `decision`/`lesson` and the mapped `about` edges after migration.
 
 ## 6. Rejected alternatives
 
@@ -141,8 +141,9 @@ PR-A tests:
 2. **Bumping everything in one PR.** Mixes a TS-only surface change (sso) with the DDL-mirror change. PR-A lands independently, ships value, and shrinks PR-B's blast radius. Split.
 3. **Splitting the DDL regen from the pin bump into separate commits/PRs.** Every intermediate commit would fail `schema_guard::verify` on existing DBs. Same commit, by construction.
 4. **Hand-editing `LLM_WIKI_PACKAGE_DDL`.** The file header says verbatim. Regenerate from `setupDatabase`.
-5. **Freezing `handoff`/`session_recap` rows with no decision.** Leaves rows typed as node types no manifest declares — the node-type gate and heal cannot classify them. Kurt must pick re-typing or freeze-and-exclude; this spec records the option, not the decision.
-6. **Waiting for the age gate on these packages.** Internal EA packages are exempt (owner ruling 2026-11-24).
+5. **Freezing `handoff`/`session_recap` rows with no decision (option c — defer migration to PR-B).** Leaves rows typed as node types no manifest declares through the entire PR-A window — the node-type gate and heal cannot classify them the day PR-A merges. Feasibility is settled (kind storage verified at 8.0.2), so deferral buys nothing.
+6. **Degrade migration in PR-A: old types → plain `statement`, kind enrichment in PR-B (option b).** Pointless intermediate: the kind is the `okf_type` slug itself, so the `statement`-only rewrite and the `decision`/`lesson` rewrite are the same one-UPDATE migration. Two passes double the migration code for zero fidelity gain.
+7. **Waiting for the age gate on these packages.** Internal EA packages are exempt (owner ruling 2026-11-24).
 
 ## 7. Out of scope
 
