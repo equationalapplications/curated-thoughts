@@ -125,6 +125,12 @@ pub fn areas_rename(
     // `new` must be defined by THIS hub's areas file (§12.1).
     let file = load_areas_file(areas_path)
         .with_context(|| format!("rename refused: areas file for hub {hub_id} unusable"))?;
+    if old == new {
+        bail!(
+            "rename refused: `--hub {hub_id} --from {old} --to {new}` renames an area \
+             onto itself; nothing would change"
+        );
+    }
     if !file.areas.iter().any(|(name, _)| name == new) {
         let defined = if file.areas.is_empty() {
             "(none)".to_string()
@@ -733,5 +739,29 @@ mod tests {
             "dry run must not open a transaction"
         );
         second().execute("INSERT INTO t VALUES (3)", []).unwrap();
+    }
+
+    /// Rung-2 nit (tier-1.5): `old == new` is a refusal, not a no-op rename —
+    /// a no-op would still bump `updated_at`, emit outbox Updates for every
+    /// row, and write an audit row while changing nothing.
+    #[test]
+    fn old_equals_new_is_refused() {
+        let conn = open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, _) = cfg_with_hub(dir.path(), AREAS_YAML);
+        seed_entity(&conn, "ent-hub");
+        seed_fact(&conn, "fact-a", "ent-hub", Some("old"), 100);
+
+        let err = format!(
+            "{}",
+            areas_rename(&conn, &cfg, "ent-hub", "old", "old", true).unwrap_err()
+        );
+        assert!(err.contains("onto itself"), "must refuse a self-rename: {err}");
+        assert_eq!(outbox_updates(&conn).len(), 0, "no outbox rows staged");
+        assert_eq!(audit_rows(&conn).len(), 0, "no audit row written");
+        let area: String = conn
+            .query_row("SELECT area FROM llm_wiki_entries WHERE id = 'fact-a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(area, "old", "row untouched");
     }
 }
