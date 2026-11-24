@@ -1,3 +1,10 @@
+## [3.14.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.14.1...v3.14.2) (2026-11-24)
+
+### Bug Fixes
+
+* **areas:** report §6.6 all-drop synthesis as failure; vet deposit path before existence probe ([7cb4f15](https://github.com/equationalapplications/curated-thoughts/commit/7cb4f155808da78f4f0d55df07396e415dcefbc4)), closes [#367](https://github.com/equationalapplications/curated-thoughts/issues/367) [#352](https://github.com/equationalapplications/curated-thoughts/issues/352) [#298](https://github.com/equationalapplications/curated-thoughts/issues/298) [#367](https://github.com/equationalapplications/curated-thoughts/issues/367)
+* **synthesis:** mixed §6.6+§6.5 drops fail instead of sealing the watermark (CodeRabbit [#368](https://github.com/equationalapplications/curated-thoughts/issues/368)) ([d34aa14](https://github.com/equationalapplications/curated-thoughts/commit/d34aa1409b9f1af7f3b0fe610b12dd630bad2eb2))
+
 ## [3.14.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.14.0...v3.14.1) (2026-11-24)
 
 ### Bug Fixes
