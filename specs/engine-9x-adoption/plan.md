@@ -220,7 +220,7 @@ Blocked by: Q2 (`partOf` edge), Q6 (slot numbering), Q12 (MERGE eligibility), Q1
 - [ ] S6 Transaction: `BEGIN IMMEDIATE`; re-check N unstamped under the lock (concurrent opens); apply; stamp N; `COMMIT`. Any error → `ROLLBACK` and propagate.
 - [ ] S7 Idempotency: running the step body twice is a no-op. Pinned by a test (4e).
 
-Backup sharing: step 2 (Task 5) may reuse a backup step 1 took in the same `migrate()` call. Otherwise step 2 takes its own. Backup DELETION is governed by the Task 5 step 10 lifecycle ruling: one deletion point at the end of `migrate()` after both steps commit + post-commit verification; the Task 4e backup test is revised accordingly (F10 delta).
+Backup sharing (M1, RULED rung-3 fold): a backup is taken when EITHER N or N+1 is unstamped, after the V22 and path checks pass — one backup per `migrate()` call. If step 1 did not run (N already stamped) but N+1 is unstamped, step 2's open takes the backup before step 2. There is no "step 2 takes its own otherwise" case. DELETION is owned by step 2's completion (Task 5 step 10): after the last unstamped step of the pair commits + post-commit verification passes, `migrate()` deletes the backup; if step 2 is skipped (N+1 already stamped), deletion runs after step 1's verification instead. Task 4's own 4e test asserts the file EXISTS after migrate (Task 5 relocates deletion + the gone-assertion; M2 resolution).
 
 #### 4d. MERGE semantics
 
@@ -238,7 +238,7 @@ Backup sharing: step 2 (Task 5) may reuse a backup step 1 took in the same `migr
 5. Apply: `UPDATE llm_wiki_entity_manifests SET manifest_json = ? WHERE entity_id = ? AND manifest_json = ?` (compare-and-swap, as the ensure does). Include the `tier_fact` row.
 6. After `COMMIT`, call `ensure_manifest_vocabulary` for every refreshed entity id (spec: restore `document`/`process` and `fallback_node_type`).
    It opens its own transaction, so it must run after `COMMIT`, never inside the step's `BEGIN IMMEDIATE`. Log each outcome; a per-row failure is logged, not fatal (ensure is best-effort by design).
-7. Rust parse test (F4, completed per its delta): `serde_json::from_str` the vendored JSON and pass it through `wiki_graph::parse_manifest_value`; assert it parses and declares 21 node-type entries. (F4-delta N2: import the seed const as `tauri_app_lib::db::entity_gate::EA_SEED_TYPES` — the tools crate's name for the CT lib; the `curated_thoughts::` hedge in Task 3 step 9 is superseded by this exact path.) Runs under this task's `entity_gate` gate.
+7. Rust parse test (F4, completed per its delta): `serde_json::from_str` the vendored JSON and pass it through `crate::wiki_graph::parse_manifest_value`; assert it parses and declares 21 node-type entries. Runs under this task's `entity_gate` gate.
 
 #### 4e. Tests (RED first where behavior is new)
 
@@ -246,7 +246,7 @@ All migration tests must use a tempfile-backed DB. `open_in_memory()` skips the 
 
 - Planner unit tests: an 8.0.2 manifest (from the Task 1 testdata JSON) refreshes to the expected shape; a customised 17+extras manifest keeps its extras; a foreign manifest is `Untouched`; malformed JSON is `Malformed`; bare-string node types refresh.
 - Spec test (§5 "Manifest-refresh test"): an entity holding an 8.x-era stored manifest passes `is_ea_subset` after the constants change, and classifies `decision`/`lesson` as declared.
-- Backup test (REVISED per F10 delta): the migration log line records the backup path + row-count verification, and after `migrate()` returns the `.bak-pre-sso9-*` file is GONE (post-commit cleanup ran). The file's existence DURING migration is proven by the log line + a mid-migration assertion where the test drives the steps directly.
+- Backup test (Task-4-scoped, M2 resolution): after migrate on a tempfile brain, a `brain.db.bak-pre-sso9-*` file EXISTS and opens with matching row counts. (Deletion + the gone-assertion arrive with Task 5 step 10 — do NOT assert deletion here.)
 - Backup-failure test: force the backup to fail (e.g. read-only target dir). `migrate()` returns `Err` and N is not stamped.
 - In-memory test: `open_in_memory()` leaves N unstamped and manifests unchanged.
 - Idempotency test: migrate twice; manifests, stamps, and memo rows are identical after the second run.
@@ -298,7 +298,7 @@ Order matters: compute every edge disposition BEFORE the `okf_type`/`entity_type
 7. Same two UPDATEs on `llm_wiki_tasks.okf_type`, tombstones included.
 8. `UPDATE curated_entities SET entity_type = 'decision' | 'lesson'` for the two dropped slugs (E3, F1) — AFTER the edge steps; tombstones included; log the count. Do NOT touch `concept`, `process`, `repository`, `job` or any other pre-existing type (E3 scope fence).
 9. Stamp N + 1; `COMMIT`.
-10. Backup lifecycle (F10/N-series, RULED): migrate() takes ONE backup before step 1; step 2 REUSES it (no second backup). After BOTH steps commit and the post-commit verification (re-read the census counts and manifest row shape) passes, migrate() DELETES the backup file — one deletion point at the migrate() level, not per step. Deletion failure is logged, never fatal (the backup is redundant after commit). This keeps the spec's backup-before-dry-pass safety order AND kills the fresh-brain `.bak` litter.
+10. Backup lifecycle (F10 + rung-3 M1/M2/M4, RULED): `migrate()` takes ONE backup per call when either N or N+1 is unstamped (see 4c). DELETION is owned HERE: after step 2 commits and the post-commit verification passes, delete the backup file. If step 2 was skipped (N+1 already stamped), deletion runs after step 1's verification instead. The deletion condition in code: no unstamped step of the pair remains. Deletion failure is logged, never fatal. Post-commit verification (M4, specified): re-read the census and assert every bucket matches the dry-pass log, and re-parse one refreshed manifest row and compare it against the expected refreshed shape (parsed-Value comparison per F6); on verification failure: KEEP the backup, log a CRITICAL line naming the backup path and the mismatch, and continue the open (data is committed; the backup is the safety artifact).
 
 INTENT §12 constraints (spec): do NOT touch `llm_wiki_outbox`; do NOT rewrite `updated_at`; leave `ontology_checked_at` and `heal_checked_at` alone.
 The PR body must record the §12 divergence: no engine bulk re-type operation exists, so these raw writes are the recorded boundary case.
@@ -322,6 +322,10 @@ All on tempfile-backed DBs seeded as an 8.0.2-era brain.
 - Idempotency test: migrate twice; second run changes zero rows and stamps nothing new.
 - Body-level idempotency test (F3): same as Task 4e's — run the re-type body a second time with the stamp check bypassed; assert zero rows change.
 - Census-log test: the dry-pass log line carries every census count (capture via the existing log/test pattern in `connection.rs` tests).
+- Backup-gone test (M2/M4): after migrate on a tempfile brain where BOTH steps ran, the `.bak-pre-sso9-*` file is GONE and the log carries the deletion line.
+- Backup-reuse test (M4): across one `migrate()` call that runs both steps, exactly ONE `.bak-pre-sso9-*` file is ever created (capture via log lines or directory listing).
+- Deletion-failure test (M4): make the backup file undeletable (e.g. read-only directory); the open still succeeds and the failure is logged.
+- Verification-failure test (M4): force the post-commit verification to mismatch; the backup is KEPT, the CRITICAL line names the path, and the open still succeeds.
 - Alias test (end-to-end): after migration, a pending payload typed `handoff` admits as `decision` through the gate.
 
 Gates:
@@ -367,7 +371,7 @@ Ledger text: `T6 — all gates green vs baseline (counts recorded); frontend bui
 3. **PR #368 merging mid-lane.** File-disjoint except possibly `connection.rs` migration slots. Sync by `git merge origin/main`, never rebase. Recompute slot N after every merge (Task 4a).
 4. **Shared `node_modules`.** The worktree's `node_modules` symlinks to the main checkout (`../../node_modules`). A `pnpm install` here would bump sso for the main checkout and every other worktree. See Q9.
 5. **Backup aborts the open.** Spec mandates abort-without-stamp on backup failure. A persistently full disk therefore blocks every open until space is freed. The log line must say exactly that and name the fix.
-6. **Fresh-brain backup cost.** Every file-backed first open (including tests) takes a `VACUUM INTO` of a near-empty DB. Cheap; the `.bak-pre-sso9-*` file is DELETED at the end of `migrate()` per the Task 5 step 10 lifecycle ruling (F10 delta), so no litter remains after a successful open.
+6. **Fresh-brain backup cost.** Every file-backed first open (including tests) takes a `VACUUM INTO` of a near-empty DB. Cheap; the `.bak-pre-sso9-*` file is deleted when the last unstamped step of the pair commits + verification passes (Task 5 step 10 lifecycle, rung-3 M1/M2/M4 folds), so no litter remains after a successful open.
 7. **Planner memo staleness.** Without the epoch bump (Task 3 step 6), memos recorded under the 17-slug set short-circuit the new verdict on unchanged bytes.
 8. **Ensure re-run inside a transaction.** `ensure_manifest_vocabulary` opens its own transaction; calling it inside the step's `BEGIN IMMEDIATE` fails. Task 4d step 6 orders it after `COMMIT`.
 9. **PR-B landing surface.** PR-A must not edit `okf_ddl.rs`, `schema_guard.rs`, `ddl_compat.rs`, or the overrides. The slot consts keep PR-B free to take the next free slot after PR-A.
