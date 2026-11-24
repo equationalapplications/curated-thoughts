@@ -170,3 +170,36 @@ PR-A tests:
 1. The `area` column ingest mapping (areas spec §14.2 — separate decision).
 2. Any new feature built on 9.x engine behavior beyond the mirrors listed here.
 3. Other pinned packages (`@tiptap/*`, `@blocknote/*`, `@mantine/*`).
+
+## 8. Errata (controller, 2026-11-24 — verified against the installed 9.18.0 tarball and the live brain DB before amendment)
+
+- **E1 (change 2):** the count label "21 slugs" is an arithmetic slip: the
+  quoted derivation (17 − `handoff` − `session_recap` + 4 kinds + `area`)
+  yields **20**, and the installed manifest has 21 node-type entries only
+  because the abstract `statement` is one of them. The binding rule
+  ("statement does NOT join EA_SEED_TYPES") governs; the implementer's
+  re-pin from the installed tarball must produce **20 slugs**.
+- **E2 (change 5):** the new edge shapes are not only `about`. The 9.18.0
+  manifest declares 42 edge shapes; 8.0.2 pinned 40 with 2 `handoffFor`
+  shapes, so the delta is −2 `handoffFor` + 4 new: three `about` shapes
+  (statement→area, statement→software_application, statement→organization)
+  **plus `partOf` (area→software_application)**. The MERGE refresh and the
+  drift test must cover all four.
+- **E3 (change 4 re-type scope):** add `curated_entities.entity_type` for
+  the two dropped slugs only, same ratified mapping
+  (`handoff`→`decision`, `session_recap`→`lesson`). Live census
+  2026-11-24: handoff ×1, session_recap ×5, zero otherwise. Rationale: the
+  node-type gate writes that column; leaving stale slugs there re-admits
+  rejected vocabulary through entity reads. Other non-manifest entity types
+  observed in the same census (`concept`, `process`, `repository`, `job`)
+  are pre-existing and OUT of scope.
+- **E4 (change 3 chain-state text):** main already carries V30 (stamped by
+  #352); the "V29 on main" text is stale. And the chain stamps literal
+  per-step versions (`connection.rs` convention), so "computes the next
+  version at open time" lands as implementation-time named consts
+  (max stamped + 1, recomputed on the merge base). Ground truth for the
+  migrations: `llm_wiki_entries.okf_type` / `llm_wiki_tasks.okf_type` are
+  currently unpopulated on the live DB (1436/2420 rows NULL), and exactly 2
+  `handoffFor` edge rows exist in `llm_wiki_edges` — census buckets will be
+  near-zero on this install, but the machinery is required for upgraded
+  DBs with stamped stock.
