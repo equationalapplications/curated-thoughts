@@ -520,6 +520,84 @@ mod tests {
         );
     }
 
+    /// Removals are not landings: true when EVERY occurrence of EITHER
+    /// vector column (`embedding_blob`, `embedding`) in `stmt` is
+    /// `<column> = NULL` at a token boundary. Such a statement can only
+    /// remove a vector (e.g. the package-owned confirmed-removal trigger
+    /// body inside the verbatim `LLM_WIKI_PACKAGE_DDL` — spec engine-9x
+    /// §3 PR-B step 1 forbids hand edits, so no CT stamp can be inside it).
+    /// Any value write of either column (`embedding = ?`, `NULLIF(...)`,
+    /// `NULL_integer`) makes this false and the statement a landing.
+    fn removals_only_statement(stmt: &str) -> bool {
+        for column in ["embedding_blob", "embedding"] {
+            let mut scan = stmt;
+            loop {
+                match scan.find(column) {
+                    None => break,
+                    Some(i) => {
+                        let rest = &scan[i..];
+                        // Longer-identifier guard: `embedding` also matches
+                        // inside `embedding_blob` — an occurrence that
+                        // continues into a longer identifier is neither a
+                        // write of THIS column nor a failure; skip it.
+                        let col_after = rest[column.len()..].chars().next();
+                        if matches!(col_after, Some(c) if c.is_ascii_alphanumeric() || c == '_') {
+                            scan = &rest[column.len()..];
+                            continue;
+                        }
+                        let stamped = format!("{column} = NULL");
+                        if !rest.starts_with(&stamped) {
+                            return false;
+                        }
+                        // Token boundary: `NULLIF(...)` and any other
+                        // NULL-prefixed token is a VALUE write, not a
+                        // removal — only a true boundary (or end) counts.
+                        let after = rest[stamped.len()..].chars().next();
+                        if let Some(c) = after {
+                            if c.is_ascii_alphanumeric() || c == '_' || c == '(' {
+                                return false;
+                            }
+                        }
+                        scan = &rest[stamped.len()..];
+                    }
+                }
+            }
+        }
+        // Every occurrence of every vector column was a token-boundary
+        // `= NULL` — nothing lands.
+        true
+    }
+
+    #[test]
+    fn removals_only_statement_pins_the_mixed_and_boundary_cases() {
+        // Package-owned confirmed-removal trigger body: both columns NULLed
+        // with a format placeholder after — a removal, stays exempt.
+        assert!(removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding_blob = NULL, embedding = NULL{} WHERE id = NEW.id AND EXISTS (SELECT 1 FROM llm_wiki_vector_removals WHERE fact_id = NEW.id AND confirmed_at IS NOT NULL);"
+        ));
+        // The haiku-r3 scenario: blob NULLed but `embedding` VALUE-written —
+        // lands a vector, must NOT be exempt.
+        assert!(!removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding_blob = NULL, embedding = ? WHERE id = ?"
+        ));
+        // NULL-prefixed tokens are VALUE writes.
+        assert!(!removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding = NULLIF(?, '')"
+        ));
+        assert!(!removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding = NULL_integer"
+        ));
+        // `embedding` occurrences inside `embedding_blob` are skipped, not
+        // misclassified; a lone `embedding_failed_at` mention is neither.
+        assert!(removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding = NULL, embedding_failed_at = 1"
+        ));
+        // A plain landing is a writer.
+        assert!(!removals_only_statement(
+            "INSERT INTO llm_wiki_entries (id, embedding_blob, embed_scheme) VALUES (?1, ?2, ?3)"
+        ));
+    }
+
     #[test]
     fn writer_inventory_every_embedding_blob_write_stamps_embed_scheme() {
         // Plan-review F4 (docs/superpowers/plans/2026-10-07-issue265-wisdom-
@@ -536,60 +614,7 @@ mod tests {
         for (rel, lits) in production_literals() {
             for lit in lits {
                 let t = &lit.text;
-                // Removals are not landings: if EVERY occurrence of EITHER
-                // vector column (`embedding_blob`, `embedding`) in the
-                // statement is immediately followed by `= NULL`, the
-                // statement can only remove a vector (e.g. the package-owned
-                // confirmed-removal trigger body in the verbatim
-                // `LLM_WIKI_PACKAGE_DDL` — spec engine-9x §3 PR-B step 1
-                // forbids hand edits, so no CT stamp can be inside it).
-                // Scanning BOTH columns: `SET embedding_blob = NULL,
-                // embedding = ?` lands a vector and must trip the guard.
-                // Nothing lands, so no scheme stamp applies, only when no
-                // column is value-written.
-                let mut removals_only = true;
-                for column in ["embedding_blob", "embedding"] {
-                    let mut blob_scan = t.as_str();
-                    loop {
-                        match blob_scan.find(column) {
-                            None => break,
-                            Some(i) => {
-                                let rest = &blob_scan[i..];
-                                // Longer-identifier guard: `embedding` also
-                                // matches inside `embedding_blob` — an
-                                // occurrence that continues into a longer
-                                // identifier is neither a write of THIS
-                                // column nor a failure; skip it.
-                                let col_after = rest[column.len()..].chars().next();
-                                if matches!(col_after, Some(c) if c.is_ascii_alphanumeric() || c == '_')
-                                {
-                                    blob_scan = &rest[column.len()..];
-                                    continue;
-                                }
-                                let stamped = format!("{column} = NULL");
-                                if !rest.starts_with(&stamped) {
-                                    removals_only = false;
-                                    break;
-                                }
-                                // Token boundary: `NULLIF(...)` and any other
-                                // NULL-prefixed token is a VALUE write, not a
-                                // removal — only a true boundary (or end)
-                                // counts.
-                                let after = rest[stamped.len()..].chars().next();
-                                if let Some(c) = after {
-                                    if c.is_ascii_alphanumeric() || c == '_' || c == '(' {
-                                        removals_only = false;
-                                        break;
-                                    }
-                                }
-                                blob_scan = &rest[stamped.len()..];
-                            }
-                        }
-                    }
-                    if !removals_only {
-                        break;
-                    }
-                }
+                let removals_only = removals_only_statement(t);
                 let targets_entries = t.contains("INSERT INTO llm_wiki_entries")
                     || t.contains("UPDATE llm_wiki_entries");
                 if !(targets_entries && t.contains("embedding_blob")) || removals_only {
