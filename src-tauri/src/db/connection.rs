@@ -1520,17 +1520,25 @@ fn sso9_backup_before_migration(conn: &Connection, db_path: &Path) -> Result<std
     if let Some(h) = SSO9_BACKUP_RACE_HOOK.with(|c| c.get()) {
         h(&backup);
     }
-    // Impl-review (owxT): reserve the destination ATOMICALLY — an exclusive
-    // create of an EMPTY file, which `VACUUM INTO` accepts as its target.
-    // Two openers migrating in the same millisecond can no longer both
-    // observe "absent" and both clean up on failure: only the opener whose
-    // `create_new` succeeded ever removes the path, so a lost race leaves
-    // the other opener's backup untouched.
-    let reserved = std::fs::OpenOptions::new()
+    // Impl-review (owxT, rOZU follow-up): reserve the destination ATOMICALLY
+    // — an exclusive create of an EMPTY file, which `VACUUM INTO` accepts as
+    // its target. A FAILED reservation means another opener already holds
+    // this exact millisecond slot: proceeding would run `VACUUM INTO` into
+    // the winner's (still empty) file, and this opener's eventual failure-
+    // cleanup could then delete the winner's COMPLETED backup (`reserved`
+    // was true only for the winner). Bail instead — the open aborts, and
+    // the next open retries with a fresh timestamp.
+    std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&backup)
-        .is_ok();
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "sso9 backup: cannot exclusively reserve {} ({e}) — another opener \
+                 holds this slot; open aborted, the next open retries with a fresh timestamp",
+                backup.display()
+            )
+        })?;
     let result = (|| -> Result<String> {
         conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
         let bk = Connection::open_with_flags(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -1555,9 +1563,9 @@ fn sso9_backup_before_migration(conn: &Connection, db_path: &Path) -> Result<std
             Ok(backup)
         }
         Err(e) => {
-            if reserved {
-                let _ = std::fs::remove_file(&backup);
-            }
+            // We own the reservation (an exclusive create succeeded above) —
+            // always remove our own failed attempt's file.
+            let _ = std::fs::remove_file(&backup);
             Err(e.context("sso9 backup failed; open aborted, slot not stamped"))
         }
     }
@@ -1718,7 +1726,11 @@ fn sso9_snapshot_ids(conn: &Connection) -> Result<std::collections::HashSet<Stri
 }
 
 /// Q4 resolver: `llm_wiki_entries.okf_type` when the id names an entry, else
-/// `curated_entities.entity_type`, else unresolved (`None`). Lower-cased.
+/// `curated_entities.entity_type`, else unresolved (`None`). Returns the
+/// stored value TRIMMED but otherwise RAW (rOZe: the parent-shape check must
+/// map the re-type over the EXACT stored spelling to predict what the SQL's
+/// exact-slug updates write — lowercasing happens at the classification call
+/// sites, which compare against lowercase slugs).
 fn sso9_resolve_type(
     conn: &Connection,
     cache: &mut std::collections::HashMap<String, Option<String>>,
@@ -1745,15 +1757,20 @@ fn sso9_resolve_type(
             .optional()?
             .flatten(),
     }
-    .map(|t| t.trim().to_lowercase());
+    .map(|t| t.trim().to_string());
     cache.insert(id.to_string(), resolved.clone());
     Ok(resolved)
 }
 
-/// Impl-review (owxi): the entity's refreshed manifest's declared edge
-/// triples, keyed by entity id (`None` = no usable manifest row — every
-/// shape counts undeclared). Step 1 has committed before the re-type runs,
-/// so the stored manifest IS the refreshed one.
+/// Impl-review (owxi): the entity's applicable manifest's declared edge
+/// triples, keyed by entity id (`None` = no applicable manifest — every shape
+/// counts undeclared). Step 1 has committed before the re-type runs, so a
+/// stored manifest IS the refreshed one. Applicability follows the gate's own
+/// two-lookup cascade (rOZa: `resolve_strict_edge_vocabulary_with`) — the
+/// entity's own strict manifest wins; WITHOUT one, a curated entity inherits
+/// the canonical `tier_fact` partition manifest (the typical production
+/// case). Non-strict and unreadable rows fall through to the partition leg,
+/// exactly like the gate's.
 type Sso9DeclaredEdgeSet = std::collections::HashSet<(String, String, String)>;
 type Sso9DeclaredEdgeCache = std::collections::HashMap<String, Option<Sso9DeclaredEdgeSet>>;
 
@@ -1765,14 +1782,21 @@ fn sso9_declared_edges(
     if let Some(hit) = cache.get(entity_id) {
         return Ok(hit.clone());
     }
-    let json: Option<String> = conn
-        .query_row(
-            "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
-            [entity_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let set = json.and_then(|j| crate::db::entity_gate::declared_edge_triples(&j).ok());
+    let mut set = None;
+    for lookup in [entity_id, "tier_fact"] {
+        match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
+            Ok(o) if o.mode == "strict" => {
+                set = o
+                    .manifest
+                    .as_ref()
+                    .map(crate::db::entity_gate::manifest_declared_edge_triples);
+                break;
+            }
+            // Present but not strict (or no row), or unreadable: fall through
+            // to the next lookup id — the gate's leg semantics.
+            _ => {}
+        }
+    }
     cache.insert(entity_id.to_string(), set.clone());
     Ok(set)
 }
@@ -1840,7 +1864,8 @@ fn sso9_plan_edges(
             *plan.touching_by_type.entry(e.edge_type.clone()).or_default() += 1;
         }
         if e.edge_type == "handoffFor" {
-            let tt = sso9_resolve_type(conn, &mut cache, &e.target_id)?;
+            let tt = sso9_resolve_type(conn, &mut cache, &e.target_id)?
+                .map(|t| t.to_lowercase());
             *plan
                 .handoff_for_by_target
                 .entry(tt.clone().unwrap_or_else(|| "unresolved".into()))
@@ -1868,7 +1893,8 @@ fn sso9_plan_edges(
                     }
                 }
                 "about" if src_in => {
-                    let tt = sso9_resolve_type(conn, &mut cache, &e.target_id)?;
+                    let tt = sso9_resolve_type(conn, &mut cache, &e.target_id)?
+                        .map(|t| t.to_lowercase());
                     match tt.as_deref() {
                         Some("person") | Some("place") | Some("event") => plan.parent_drop.push(e),
                         Some("organization") => plan.kept_about_org += 1,
@@ -1997,39 +2023,66 @@ fn run_sso9_retype_txn(conn: &Connection, backup: &Path) -> Result<Option<Sso9Di
         // 1. snapshot + every disposition, BEFORE any rewrite.
         let snapshot = sso9_snapshot_ids(conn)?;
         let plan = sso9_plan_edges(conn, &snapshot)?;
-        // Impl-review (owxv): the backup is a `VACUUM INTO` snapshot taken
-        // BEFORE the refresh transaction; nothing holds a database-wide lock
-        // across that span, so a late write could commit an edge that V32's
-        // deletes would then destroy WITHOUT the retained backup ever holding
-        // a recovery copy. Under the write lock, before any delete: when
-        // edges are about to be dropped, the live edge count must still
-        // match the backup's — any drift (a late insert OR a late delete by
-        // another writer) aborts the retype unapplied, backup preserved, and
-        // the next open retries with a fresh backup. The backup itself does
-        // not change after its snapshot, and the refresh step writes no edge
-        // rows, so equality is the invariant. (Idempotent replays with
-        // nothing left to drop skip the check — the direct-call tests rely
-        // on that.)
-        if !plan.service_drop.is_empty() || !plan.parent_drop.is_empty() {
-            let live_edges: i64 =
-                conn.query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))?;
-            let bk =
-                Connection::open_with_flags(backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "sso9 retype: cannot open the pre-migration backup {}: {e}",
-                            backup.display()
-                        )
-                    })?;
-            let backup_edges: i64 =
-                bk.query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))?;
-            if backup_edges != live_edges {
-                anyhow::bail!(
-                    "sso9 retype: llm_wiki_edges moved since the backup \
-                     (live {live_edges}, backup {backup_edges}) — a late write slipped \
-                     between the backup and the re-type; aborting before any delete, \
-                     backup preserved, retype retried on the next open"
+        // Impl-review (owxv, rOZt/rOZh follow-up): the backup is a point-in-
+        // time snapshot; the plan is captured under this write lock, but a
+        // write committed between the backup and this lock is invisible to
+        // the backup while the plan sees it. The previous COUNT-equality
+        // guard had two holes: it missed EQUAL-COUNT drift (a late writer
+        // that removed one unrelated edge and added a service-target
+        // `handoffFor` passed the check, and the re-type then deleted a row
+        // the backup never held), and it armed only when a drop was planned
+        // (a remap-only pass could still destroy a late row in the dedupe
+        // DELETE). The precise invariant: EVERY row this transaction will
+        // destroy (remap losers, service drops, parent drops) must still
+        // exist in the backup with identical content. Any missing or changed
+        // planned row aborts the retype unapplied — backup preserved, and
+        // the next open takes a fresh backup and re-captures the plan.
+        // (Idempotent replays with nothing left to destroy skip the check —
+        // the direct-call tests rely on that.)
+        let destructive: Vec<&Sso9Edge> = plan
+            .remap
+            .iter()
+            .chain(plan.service_drop.iter())
+            .chain(plan.parent_drop.iter())
+            .collect();
+        if !destructive.is_empty() {
+            let bk = Connection::open_with_flags(
+                backup,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "sso9 retype: cannot open the pre-migration backup {}: {e}",
+                    backup.display()
+                )
+            })?;
+            for e in &destructive {
+                let in_backup: Option<(String, String, String, String)> = bk
+                    .query_row(
+                        "SELECT entity_id, source_id, target_id, edge_type
+                          FROM llm_wiki_edges WHERE id = ?1",
+                        [&e.id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .optional()?;
+                let expected = (
+                    e.entity_id.clone(),
+                    e.source_id.clone(),
+                    e.target_id.clone(),
+                    e.edge_type.clone(),
                 );
+                if in_backup.as_ref() != Some(&expected) {
+                    anyhow::bail!(
+                        "sso9 retype: planned edge {} ({}/{}/{}) is missing from or changed \
+                         since the pre-migration backup — a late write slipped between the \
+                         backup and the re-type; aborting before any delete, backup preserved, \
+                         retype retried on the next open",
+                        e.id,
+                        e.entity_id,
+                        e.source_id,
+                        e.target_id
+                    );
+                }
             }
         }
         let disp = Sso9Dispositions {
@@ -5972,9 +6025,12 @@ mod tests {
     #[test]
     fn sso9_refresh_backup_failure_aborts_migrate_without_stamping() {
         let (tmp, conn) = sso9_rewound_brain();
-        // Force a genuine `VACUUM INTO` failure: pin the backup timestamp and
-        // pre-create the target (VACUUM INTO refuses an existing file). A
-        // read-only dir cannot be used — earlier steps need the journal.
+        // Force a backup failure: pin the backup timestamp and pre-create the
+        // target — the exclusive reservation refuses an existing file, so the
+        // step bails before `VACUUM INTO` ever runs (rOZU: a lost reservation
+        // means another opener holds the slot; proceeding could destroy the
+        // winner's completed backup). A read-only dir cannot be used —
+        // earlier steps need the journal.
         SSO9_BACKUP_TS_OVERRIDE.with(|c| c.set(Some(42)));
         let squatter = tmp.path().join("brain.db.bak-pre-sso9-42");
         std::fs::write(&squatter, b"squatter").unwrap();
@@ -6490,7 +6546,10 @@ mod tests {
         let result = sso9_migrate(&conn, tmp.path());
         SSO9_AFTER_REFRESH_COMMIT.with(|h| *h.borrow_mut() = None);
         let err = result.expect_err("a late edge write must abort the re-type before any delete");
-        assert!(format!("{err:#}").contains("moved since the backup"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("between the backup and the re-type"),
+            "{err:#}"
+        );
         assert!(
             !sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap(),
             "re-type slot unstamped"
@@ -6505,6 +6564,199 @@ mod tests {
         sso9_migrate(&conn, tmp.path()).unwrap();
         assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
         assert_eq!(etype(&conn, "e_svc"), None, "retype drops the service edge");
+    }
+
+    #[test]
+    fn sso9_retype_equal_count_late_swap_aborts_the_retype() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (rOZt): count equality missed EQUAL-COUNT drift. A late
+        // writer that removes one unrelated edge and adds a service-target
+        // `handoffFor` between the backup and the write lock keeps the counts
+        // equal; the count guard passed and the re-type then deleted a row
+        // the retained backup never held. The per-row backup check must
+        // abort instead.
+        SSO9_AFTER_REFRESH_COMMIT.with(|h| {
+            *h.borrow_mut() = Some(Box::new(|c: &Connection| {
+                c.execute("DELETE FROM llm_wiki_edges WHERE id = 'e_unrelated'", [])
+                    .unwrap();
+                c.execute(
+                    "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+                     VALUES ('e_late_swap','ent1','s1','svc1','handoffFor',1)",
+                    [],
+                )
+                .unwrap();
+            }))
+        });
+        sso9_clear_log();
+        let result = sso9_migrate(&conn, tmp.path());
+        SSO9_AFTER_REFRESH_COMMIT.with(|h| *h.borrow_mut() = None);
+        let err = result.expect_err("an equal-count late swap must abort the re-type");
+        assert!(
+            format!("{err:#}").contains("between the backup and the re-type"),
+            "{err:#}"
+        );
+        assert!(
+            !sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap(),
+            "re-type slot unstamped"
+        );
+        assert_eq!(sso9_backups(tmp.path()).len(), 1, "backup preserved");
+        assert!(etype(&conn, "e_svc").is_some(), "no delete happened");
+        // The next open retries cleanly with a fresh backup.
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
+        assert_eq!(
+            etype(&conn, "e_late_swap"),
+            None,
+            "the fresh backup covers the late row"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_remap_only_late_write_aborts_the_retype() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (rOZh): the old count guard armed only when a DROP was
+        // planned. A remap-eligible `handoffFor` committed between the backup
+        // and the write lock reaches the remap loop with no drops planned —
+        // its UPDATE OR IGNORE loses to the pre-existing `about` row on the
+        // same tuple and the dedupe DELETE destroys a row the backup never
+        // held. Strip the fixture's drop-class edges so the plan carries
+        // remap rows ONLY (the guard-disarm precondition), then commit the
+        // late write in the window.
+        conn.execute_batch(
+            "DELETE FROM llm_wiki_edges WHERE edge_type IN ('author','publisher','supersedes');
+             DELETE FROM llm_wiki_edges WHERE edge_type = 'handoffFor'
+               AND id NOT IN ('e_coll_hf','e_remap');
+             DELETE FROM llm_wiki_edges WHERE edge_type = 'about'
+               AND target_id NOT IN ('sw1','org1');
+             INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+               VALUES ('e_pre_tomb','ent1','h_tomb','sw1','about',1);",
+        )
+        .unwrap();
+        SSO9_AFTER_REFRESH_COMMIT.with(|h| {
+            *h.borrow_mut() = Some(Box::new(|c: &Connection| {
+                c.execute(
+                    "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+                     VALUES ('e_late_remap','ent1','h_tomb','sw1','handoffFor',1)",
+                    [],
+                )
+                .unwrap();
+            }))
+        });
+        sso9_clear_log();
+        let result = sso9_migrate(&conn, tmp.path());
+        SSO9_AFTER_REFRESH_COMMIT.with(|h| *h.borrow_mut() = None);
+        let err = result.expect_err("a late remap row must abort before any delete");
+        assert!(
+            format!("{err:#}").contains("between the backup and the re-type"),
+            "{err:#}"
+        );
+        assert!(
+            !sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap(),
+            "re-type slot unstamped"
+        );
+        assert_eq!(sso9_backups(tmp.path()).len(), 1, "backup preserved");
+        assert!(
+            etype(&conn, "e_remap").is_some(),
+            "no delete happened"
+        );
+        // The next open retries cleanly with a fresh backup that holds the
+        // late row: the remap loses to the pre-existing about row and the
+        // dedupe DELETE runs against a row the backup now covers.
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
+        assert_eq!(etype(&conn, "e_late_remap"), None, "remapped row deduped");
+        assert_eq!(
+            etype(&conn, "e_pre_tomb").as_deref(),
+            Some("about"),
+            "the pre-existing about row is kept"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_keeps_parent_edges_declared_by_the_inherited_partition_manifest() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (rOZa): ent1 has NO manifest row of its own — the
+        // production-typical case. The gate's two-lookup cascade
+        // (`resolve_strict_edge_vocabulary_with`) inherits the canonical
+        // `tier_fact` partition manifest; the re-type's declared-shape check
+        // must consult the same cascade, or a shape the inherited manifest
+        // declares is read as undeclared and a legal edge is deleted.
+        let mut m: serde_json::Value = serde_json::from_str(SSO8_MANIFEST).unwrap();
+        m["edge_types"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "type": "author", "source_type": "decision", "target_type": "person"
+            }));
+        let no_ent1_row: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entity_manifests WHERE entity_id = 'ent1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            no_ent1_row, 0,
+            "fixture: ent1 must have no manifest row of its own"
+        );
+        conn.execute(
+            "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1 WHERE entity_id = 'tier_fact'",
+            [&m.to_string()],
+        )
+        .unwrap();
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            etype(&conn, "e_author").as_deref(),
+            Some("author"),
+            "inherited-declared parent edge kept"
+        );
+        assert_eq!(
+            etype(&conn, "e_publisher"),
+            None,
+            "genuinely undeclared shapes still drop"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_parent_shape_mixed_case_target_is_predicted_as_stored() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (rOZe): the declared-shape check must predict what the
+        // SQL actually writes. The re-type updates EXACT slugs (`WHERE
+        // okf_type = 'handoff'`), so the mixed-case `Handoff` row (`hv`) is
+        // NOT retyped — an edge landing on it stays (…, handoff) after the
+        // migration and must be adjudicated by its STORED type, not by the
+        // lowered-and-mapped one. The exact-slug retype scope itself is
+        // pinned (`entity_types_rewrite_only_the_two_dropped_slugs`) and
+        // untouched here.
+        let mut m: serde_json::Value = serde_json::from_str(SSO8_MANIFEST).unwrap();
+        m["edge_types"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "type": "supersedes", "source_type": "decision", "target_type": "decision"
+            }));
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('ent1', 'strict', ?1, 1)",
+            [&m.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('e_sup_hv','ent1','h1','hv','supersedes',1)",
+            [],
+        )
+        .unwrap();
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            etype(&conn, "e_sup_hv"),
+            None,
+            "the target stays stored-typed 'Handoff' (exact-slug SQL) — the shape is undeclared"
+        );
+        // The lowercase twin keeps adjudicating as declared (unchanged).
+        assert_eq!(etype(&conn, "e_supersedes").as_deref(), Some("supersedes"));
     }
 
     #[test]

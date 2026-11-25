@@ -1027,22 +1027,24 @@ fn refresh_edge_triple(entry: &serde_json::Value) -> Option<(String, String, Str
     Some((field("type"), field("source_type"), field("target_type")))
 }
 
-/// The manifest's declared edge triples as membership keys (impl-review owxi
-/// consumer: the re-type's parent-family drop decision consults this set).
-/// Malformed JSON errors; a missing `edge_types` key declares nothing.
-pub(crate) fn declared_edge_triples(
-    manifest_json: &str,
-) -> Result<std::collections::HashSet<(String, String, String)>> {
-    let root: serde_json::Value = serde_json::from_str(manifest_json)?;
-    let mut out = std::collections::HashSet::new();
-    if let Some(edges) = root.get("edge_types").and_then(|v| v.as_array()) {
-        for e in edges {
-            if let Some(t) = refresh_edge_triple(e) {
-                out.insert(t);
-            }
-        }
-    }
-    Ok(out)
+/// The manifest's declared edge triples as membership keys, from a PARSED
+/// manifest (the `wiki_get_ontology` leg of the re-type's declared-shape
+/// cascade — the re-type's parent-family drop decision consults this set;
+/// rOZa). Entries are keyed exactly like `refresh_edge_triple` output.
+pub(crate) fn manifest_declared_edge_triples(
+    manifest: &crate::wiki_graph::WikiManifest,
+) -> std::collections::HashSet<(String, String, String)> {
+    manifest
+        .edge_types
+        .iter()
+        .map(|e| {
+            (
+                NodeVocabulary::key(&e.type_name),
+                NodeVocabulary::key(&e.source_type),
+                NodeVocabulary::key(&e.target_type),
+            )
+        })
+        .collect()
 }
 
 /// The sso9 manifest MERGE refresh's pure planner (plan Task 4d). Eligible
@@ -1103,12 +1105,14 @@ pub(crate) fn plan_sso9_manifest_refresh(manifest_json: &str) -> Result<RefreshP
     // Edge types: remove `handoffFor`, add the new shapes (any vendored edge
     // touching one of the added node types) not already declared.
     // Impl-review (owx8 / E2 gap): an eligible manifest may predate the
-    // `edge_types` key entirely (`parse_manifest_value` reads it as an empty
-    // list). Without initialization the merge below is skipped wholesale and
-    // the stamped manifest lacks all four required new shapes — `partOf`
-    // included. Initialize to an empty array; existing arrays keep their
-    // merge behavior.
-    if root.get("edge_types").is_none() {
+    // `edge_types` key entirely, or carry any NON-ARRAY form (`null`, a
+    // scalar) — `parse_manifest_value` reads ALL of those as an empty list,
+    // so they all pass eligibility when the 17 node slugs are declared
+    // (rOZz: an explicit `null` previously skipped the merge wholesale and
+    // the stamped manifest lacked all four required shapes). Initialize
+    // every such form to an empty array; existing arrays keep their merge
+    // behavior.
+    if !root.get("edge_types").is_some_and(|v| v.is_array()) {
         root["edge_types"] = serde_json::json!([]);
     }
     if let Some(edges) = root.get_mut("edge_types").and_then(|v| v.as_array_mut()) {

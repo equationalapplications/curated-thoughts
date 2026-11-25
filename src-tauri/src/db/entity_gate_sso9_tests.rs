@@ -117,7 +117,45 @@ fn refresh_initializes_an_absent_edge_types_key() {
         );
         assert!(triples.contains(&want), "missing {want:?}");
     }
-    assert!(!triples.iter().any(|t| t.0 == "handoffFor"));
+    // rOZx: `refresh_edge_triple` returns `NodeVocabulary::key`-normalized
+    // values — compare the retired edge's key, not the mixed-case literal,
+    // or the guard can never fire.
+    assert!(!triples
+        .iter()
+        .any(|t| t.0 == NodeVocabulary::key("handoffFor")));
+}
+
+#[test]
+fn refresh_initializes_a_null_edge_types_value() {
+    // Impl-review (rOZz): `parse_manifest_value` reads ANY non-array
+    // `edge_types` (explicit `null` included) as an empty list, so a
+    // null-keyed manifest passes eligibility on its 17 node slugs alone.
+    // The initialization must cover the null form too, or the merge is
+    // skipped wholesale and the stamped manifest lacks all four required
+    // E2 shapes.
+    let mut v: Value = serde_json::from_str(SSO_8_0_2).unwrap();
+    v.as_object_mut()
+        .unwrap()
+        .insert("edge_types".into(), Value::Null);
+    let out = refreshed(&v.to_string());
+    let edges = out["edge_types"].as_array().expect("edge_types initialized");
+    let triples: Vec<(String, String, String)> = edges
+        .iter()
+        .map(|e| refresh_edge_triple(e).unwrap())
+        .collect();
+    for want in [
+        ("about", "statement", "area"),
+        ("about", "statement", "software_application"),
+        ("about", "statement", "organization"),
+        ("partOf", "area", "software_application"),
+    ] {
+        let want = (
+            NodeVocabulary::key(want.0),
+            NodeVocabulary::key(want.1),
+            NodeVocabulary::key(want.2),
+        );
+        assert!(triples.contains(&want), "missing {want:?}");
+    }
 }
 
 #[test]
