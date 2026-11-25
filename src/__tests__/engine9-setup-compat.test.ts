@@ -17,7 +17,14 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+// Loaded via `process.getBuiltinModule`, NOT a static import: vite 8.3.5's
+// builtin-loader plugin does not recognize `node:sqlite` for client-environment
+// (jsdom) externalization and fails the transform with "Cannot bundle Node.js
+// built-in node:sqlite" on a cold cache. `getBuiltinModule` is a runtime call
+// the bundler never sees (Node >= 22.3).
+const sqliteModule = process.getBuiltinModule("node:sqlite");
+const DatabaseSync = sqliteModule.DatabaseSync;
+type DatabaseSync = InstanceType<typeof DatabaseSync>;
 import { createWiki } from "@equationalapplications/core-llm-wiki";
 import type { SQLiteAdapter } from "@equationalapplications/core-llm-wiki";
 
