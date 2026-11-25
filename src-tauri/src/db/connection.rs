@@ -1846,8 +1846,10 @@ fn sso9_declared_edges(
 }
 
 /// Verdict of the declared-shape consult. `UnresolvedEndpoint` is KEPT per
-/// the owner's ruling (Kurt, 2026-11-25): the live gate admits these edges,
-/// and the count is reported in the plan/log instead of a drop.
+/// the owner's ruling (Kurt, 2026-11-25, spec erratum E6): NULL type
+/// information does not establish that a stored edge's shape is undeclared,
+/// so the migration must not delete it — the count is reported in the
+/// plan/log instead of a drop.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Sso9ShapeVerdict {
     Declared,
@@ -1868,7 +1870,35 @@ fn sso9_parent_shape_declared(
     type_cache: &mut std::collections::HashMap<String, Option<String>>,
     e: &Sso9Edge,
 ) -> Result<Sso9ShapeVerdict> {
-    let Some(declared) = sso9_declared_edges(conn, declared_cache, &e.entity_id)? else {
+    // The applicable-partition manifest read (inside sso9_declared_edges)
+    // runs FIRST: a corrupt APPLICABLE partition aborts fail-closed (E7)
+    // before any keep verdict can fire.
+    let declared = sso9_declared_edges(conn, declared_cache, &e.entity_id)?;
+    let post_retype = |t: Option<String>| -> Option<String> {
+        t.map(|x| {
+            SSO9_RETYPE_MAP
+                .iter()
+                .find(|(from, _)| *from == x)
+                .map(|(_, to)| to.to_string())
+                .unwrap_or(x)
+        })
+    };
+    let src = post_retype(sso9_resolve_type(conn, type_cache, &e.source_id)?);
+    let tgt = post_retype(sso9_resolve_type(conn, type_cache, &e.target_id)?);
+    // An unresolvable endpoint (row absent or okf_type/entity_type NULL —
+    // 1,436/2,420 live rows carry NULL okf_type): NULL type information does
+    // NOT establish that the stored shape is undeclared — the live gate
+    // climbs endpoints by owning entity and never reads okf_type NULLness.
+    // RULING (Kurt, 2026-11-25; spec erratum E6): KEEP and count on EVERY
+    // path — gated, ungated, and empty-vocabulary alike — never drop (the
+    // migration's success path deletes the backup, so a wrong drop is
+    // irreversible). This preserves STORED edges; it does not admit new
+    // ones (a genuinely undeclared shape or a missing endpoint row still
+    // drops/rejects at runtime).
+    if src.is_none() || tgt.is_none() {
+        return Ok(Sso9ShapeVerdict::UnresolvedEndpoint);
+    }
+    let Some(declared) = declared else {
         // Impl-review (T1.5 rung 2 MAJOR 1): ungated — keep. RATIFIED (spec
         // erratum E5, owner-authorized 2026-11-25): the justification is NOT
         // the Rust edge gate (it checks edge-type NAMES only, never endpoint
@@ -1883,38 +1913,14 @@ fn sso9_parent_shape_declared(
         // declares no edge types" is treated as most permissive) — mirror it.
         return Ok(Sso9ShapeVerdict::Declared);
     }
-    let post_retype = |t: Option<String>| -> Option<String> {
-        t.map(|x| {
-            SSO9_RETYPE_MAP
-                .iter()
-                .find(|(from, _)| *from == x)
-                .map(|(_, to)| to.to_string())
-                .unwrap_or(x)
-        })
-    };
-    let src = post_retype(sso9_resolve_type(conn, type_cache, &e.source_id)?);
-    let tgt = post_retype(sso9_resolve_type(conn, type_cache, &e.target_id)?);
-    match (src, tgt) {
-        (Some(s), Some(t)) => {
-            if declared.contains(
-                &crate::db::entity_gate::NodeVocabulary::key(&e.edge_type),
-                &crate::db::entity_gate::NodeVocabulary::key(&s),
-                &crate::db::entity_gate::NodeVocabulary::key(&t),
-            ) {
-                Ok(Sso9ShapeVerdict::Declared)
-            } else {
-                Ok(Sso9ShapeVerdict::Undeclared)
-            }
-        }
-        // An unresolvable endpoint (row absent or okf_type/entity_type
-        // NULL — 1,436/2,420 live rows carry NULL okf_type): the shape
-        // cannot be verified, but the live gate climbs endpoints by OWNING
-        // ENTITY and never reads okf_type NULLness, so the edge is ADMITTED
-        // at runtime — RULING (Kurt, 2026-11-25, resolving the rung 3 /
-        // T3 MINOR 3 / t93c open question): KEEP and count, never drop
-        // (the migration's success path deletes the backup, so a wrong
-        // drop is irreversible).
-        _ => Ok(Sso9ShapeVerdict::UnresolvedEndpoint),
+    if declared.contains(
+        &crate::db::entity_gate::NodeVocabulary::key(&e.edge_type),
+        &crate::db::entity_gate::NodeVocabulary::key(&src.unwrap()),
+        &crate::db::entity_gate::NodeVocabulary::key(&tgt.unwrap()),
+    ) {
+        Ok(Sso9ShapeVerdict::Declared)
+    } else {
+        Ok(Sso9ShapeVerdict::Undeclared)
     }
 }
 
@@ -2088,7 +2094,9 @@ fn sso9_retype_census(conn: &Connection) -> Result<()> {
         plan.parent_drop.len(),
         plan.kept_about_org,
         plan.kept_declared_about,
-        plan.kept_declared_parent.len(),
+        // CHv: exclusive of the NULL-endpoint keeps, so this field matches
+        // the write-log line exactly (the inclusive total is the sum).
+        plan.kept_declared_parent.len() - plan.kept_unresolved_endpoint,
         plan.kept_unresolved_endpoint,
         plan.undispositioned
     ));
@@ -2529,10 +2537,11 @@ fn apply_sso9_migrations(conn: &Connection) -> Result<()> {
     let backup = sso9_backup_before_migration(conn, &db_path)?;
 
     let mut shape_failure = None;
+    let mut refreshed: Vec<(String, String)> = Vec::new();
     if refresh_pending {
         // S5: dry pass, then S6/S7: the transactional body.
         sso9_census(conn)?;
-        let refreshed = run_sso9_refresh_txn(conn)?;
+        refreshed = run_sso9_refresh_txn(conn)?;
         sso9_log!(
             "[ct::migrate] sso9 manifest refresh committed (slot {SSO9_REFRESH_VERSION}): \
              refreshed={} entities",
@@ -2562,6 +2571,25 @@ fn apply_sso9_migrations(conn: &Connection) -> Result<()> {
         );
         #[cfg(test)]
         sso9_run_hook(&SSO9_AFTER_RETYPE_COMMIT, conn);
+    }
+
+    if dispositions.is_some() {
+        // CodeRabbit round on fa887299 (CH0): the R1 shape check predates
+        // the re-type transaction, so a manifest row restored to its
+        // pre-refresh JSON after the re-type commit would pass every other
+        // verification (stamps, stale slugs, dispositioned edges) while the
+        // stored manifest drifted from the planned refresh — and the backup
+        // would be deleted on top of the drift. Re-run the comparison AFTER
+        // the re-type commit and BEFORE the backup decision; fail-closed:
+        // verification failure keeps the backup (CRITICAL, retried next
+        // open). Vacuous when the refresh ran in a previous open (nothing
+        // captured to compare).
+        if let Some(why) = sso9_shape_check(conn, &refreshed)? {
+            shape_failure = Some(match shape_failure {
+                Some(prev) => format!("{prev}; {why}"),
+                None => why,
+            });
+        }
     }
 
     let failures = sso9_verify(conn, shape_failure, dispositions.as_ref());
@@ -7181,6 +7209,90 @@ mod tests {
         // The undeclared publisher edge on the same brain still drops —
         // the ruling widens NOTHING except the unresolved-endpoint class.
         assert_eq!(etype(&conn, "e_publisher"), None);
+    }
+
+    #[test]
+    fn sso9_retype_null_endpoint_ungated_keeps_are_counted_too() {
+        let (tmp, conn) = sso9_retype_brain();
+        // CodeRabbit round on fa887299 (CHk): on an UNGATED brain the
+        // consult used to return `Declared` before resolving endpoint
+        // types, so a NULL-endpoint parent edge was kept WITHOUT the E6
+        // count — the ruling says keep AND log the count, on every path.
+        // The ungated/empty-vocabulary keep outcome itself must not change,
+        // and the E7 applicable-partition Err abort must still fire first.
+        conn.execute(
+            "DELETE FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at, okf_type, deleted_at, ontology_checked_at, heal_checked_at) VALUES
+               ('null_e','ent1','t','b',1,77,NULL,NULL,88,99);
+             INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at) VALUES
+               ('e_null_author','ent1','h1','null_e','author',1);",
+        )
+        .unwrap();
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            etype(&conn, "e_null_author").as_deref(),
+            Some("author"),
+            "ungated brain still keeps the NULL-endpoint edge"
+        );
+        let log = sso9_log_lines();
+        assert!(
+            log.iter()
+                .any(|l| l.contains("unresolved-endpoint parent edges kept=1")),
+            "the E6 count must cover ungated keeps too: {log:#?}"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_manifest_restored_after_retype_commit_keeps_the_backup() {
+        let (tmp, conn) = sso9_retype_brain();
+        // CodeRabbit round on fa887299 (CH0): the shape check ran once,
+        // between the refresh COMMIT and the re-type; a manifest row
+        // restored to its pre-refresh JSON after the re-type commit would
+        // pass the remaining verification (stamps, stale slugs,
+        // dispositioned edges) and the backup would be deleted while the
+        // stored manifest differs from the planned refresh. Re-run the
+        // comparison after the re-type commit and keep the backup on drift.
+        let before: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        SSO9_AFTER_RETYPE_COMMIT.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move |c: &Connection| {
+                c.execute(
+                    "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1
+                     WHERE entity_id = 'tier_fact'",
+                    [&before],
+                )
+                .unwrap();
+            }));
+        });
+        sso9_clear_log();
+        let result = sso9_migrate(&conn, tmp.path());
+        SSO9_AFTER_RETYPE_COMMIT.with(|h| *h.borrow_mut() = None);
+        // Verification failure is not fatal: CRITICAL log, backup KEPT.
+        result.expect("migrate() completes; verification failure keeps the backup");
+        assert_eq!(
+            sso9_backups(tmp.path()).len(),
+            1,
+            "backup kept when the post-retype manifest re-check fails"
+        );
+        let log = sso9_log_lines();
+        assert!(
+            log.iter().any(|l| l.contains("verification FAILED")),
+            "{log:#?}"
+        );
+        assert!(
+            log.iter().all(|l| !l.contains("backup deleted")),
+            "no deletion on manifest drift: {log:#?}"
+        );
     }
 
     #[test]

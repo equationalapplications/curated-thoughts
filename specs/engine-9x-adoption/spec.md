@@ -213,12 +213,17 @@ PR-A tests:
 - **E6 (change 6, NULL-endpoint keep — owner ruling 2026-11-25):** a
   parent-family edge whose endpoint type resolves to nothing (endpoint row
   absent, or `okf_type`/`entity_type` NULL — 1,436/2,420 live rows carry
-  NULL `okf_type`) is KEPT and its count logged, NOT dropped. The live gate
-  climbs endpoints by owning entity and never reads `okf_type` NULLness,
-  so such edges are admitted at runtime; the migration's success path
-  deletes the backup, making a wrong drop irreversible. Implementable today
-  only via the parent-family arm (`author`/`publisher`/`supersedes`): a
-  NULL `about` target falls to `undispositioned` before the consult, and a
+  NULL `okf_type`) is KEPT and its count logged on every path (gated,
+  ungated, and empty-vocabulary), NOT dropped. The live gate climbs
+  endpoints by owning entity and never reads `okf_type` NULLness, so NULL
+  type information does not establish that a STORED edge's shape is
+  undeclared — dropping it during migration could delete an edge the gate
+  would admit, and the migration's success path deletes the backup,
+  making the loss irreversible. This is about preserving stored edges, not
+  admitting new ones: a genuinely undeclared edge shape or a missing
+  endpoint row still drops/rejects at runtime. Implementable today only
+  via the parent-family arm (`author`/`publisher`/`supersedes`): a NULL
+  `about` target falls to `undispositioned` before the consult, and a
   snapshot source always resolves.
 - **E7 (malformed-manifest fail-closed — owner-confirmed 2026-11-25):** a
   manifest-read error on the APPLICABLE partition manifest aborts the
