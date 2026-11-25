@@ -8066,6 +8066,63 @@ mod tests {
         assert!(engine9_v33_stamped(&conn), "V32 fixture is past V22 → stamps");
     }
 
+    /// Desktop-upgrade proof (#376): an engine-generated 8.0.2 brain that
+    /// already carries FTS-at-rest text goes through the V33 chain. The
+    /// guarded ALTERs must not error, rows must survive, and the
+    /// engine-owned FTS objects must be untouched by the mirror.
+    #[test]
+    fn engine9_mirror_over_fts_carrying_8_0_2_brain_preserves_data_and_fts() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/db/testdata/ct-brain-v33-src-8.0.2-fts.db");
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("brain.db");
+        std::fs::copy(&src, &dst).expect("copy FTS fixture brain");
+        let conn = Connection::open(&dst).expect("raw open of FTS fixture copy");
+        // The fixture is engine-only (no CT-owned tables); the chain's
+        // stamp step needs CT's version table, which a real desktop brain has.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
+             INSERT OR IGNORE INTO schema_version (version) VALUES (32);",
+        )
+        .unwrap();
+
+        let count = |c: &Connection, t: &str| -> i64 {
+            c.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).unwrap()
+        };
+        let fts_objects = |c: &Connection| -> Vec<(String, String, Option<String>)> {
+            let mut stmt = c
+                .prepare(
+                    "SELECT type, name, sql FROM sqlite_master \
+                     WHERE name LIKE '%fts%' ORDER BY type, name",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        let entries_before = count(&conn, "llm_wiki_entries");
+        let content_before = count(&conn, "llm_wiki_entries_fts_content");
+        let fts_before = fts_objects(&conn);
+        assert!(entries_before >= 24, "fixture seeds >= 8 entities x 3 entries");
+        assert_eq!(content_before, entries_before, "FTS at-rest text present");
+        assert!(!fts_before.is_empty());
+
+        apply_engine9_mirror(&conn).expect("V33 chain over FTS-carrying brain");
+        // Second run: every guarded ALTER now targets an existing column.
+        apply_engine9_mirror(&conn).expect("V33 chain is idempotent");
+
+        assert_eq!(count(&conn, "llm_wiki_entries"), entries_before);
+        assert_eq!(count(&conn, "llm_wiki_entries_fts_content"), content_before);
+        assert_eq!(fts_objects(&conn), fts_before, "mirror must not touch engine FTS");
+        let entries = crate::db::ddl_compat::existing_columns(&conn, "llm_wiki_entries").unwrap();
+        for col in ["source_pointer", "prior_valid_to", "derived_events"] {
+            assert!(entries.iter().any(|c| c == col), "entries.{col}");
+        }
+    }
+
     /// V33's snapshot → BEGIN IMMEDIATE → re-inspect → apply
     /// sequence is the only guard against the desktop/`--mcp` double-open
     /// race. Four concurrent opens race `apply_engine9_mirror` on a raw

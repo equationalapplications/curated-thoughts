@@ -19,8 +19,9 @@
  * so `node:sqlite` resolves either way.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 // Loaded via `process.getBuiltinModule`, NOT a static import: vite 8.3.5's
 // builtin-loader plugin does not recognize `node:sqlite` for client-environment
 // (jsdom) externalization and fails the transform with "Cannot bundle Node.js
@@ -37,6 +38,11 @@ import type { SQLiteAdapter } from "@equationalapplications/core-llm-wiki";
 const SCHEMA_DUMP = resolve(
   __dirname,
   "../../src-tauri/src/db/testdata/ct-engine9-migrated.llm_wiki.schema.sql",
+);
+/** Engine-generated 8.0.2 brain carrying FTS-at-rest text (see testdata/README.md). */
+const FTS_FIXTURE = resolve(
+  __dirname,
+  "../../src-tauri/src/db/testdata/ct-brain-v33-src-8.0.2-fts.db",
 );
 /** core-llm-wiki 8.0.2's last engine migration (8.0.2 dist `MIGRATIONS`). */
 const ENGINE_8_0_2_SCHEMA_VERSION = "15";
@@ -274,5 +280,53 @@ describe.skipIf(!DatabaseSync && !process.env.CI)(
       if (!eng.has(key) && !CT_OWNED.has(key)) problems.push(`rust-only, not CT_OWNED: ${key}`);
     }
     expect(problems).toEqual([]);
+  });
+
+  it("desktop upgrade: setup() over an FTS-carrying 8.0.2 brain keeps FTS objects and text", async () => {
+    // The real-desktop case the dump-based tests cannot cover: an 8.0.2 brain
+    // whose FTS shadow already holds at-rest text.
+    const dir = mkdtempSync(join(tmpdir(), "ct-fts-fixture-"));
+    const copy = join(dir, "brain.db");
+    copyFileSync(FTS_FIXTURE, copy);
+    const db = new DatabaseSync(copy);
+    try {
+      const ftsSql = () =>
+        new Map(
+          (
+            db
+              .prepare(
+                "SELECT type, name, sql FROM sqlite_master WHERE name LIKE '%fts%' AND type IN ('index','trigger') AND sql IS NOT NULL",
+              )
+              .all() as { type: string; name: string; sql: string }[]
+          ).map((r) => [`${r.type}:${r.name}`, r.sql.replace(/\s+/g, " ").trim()]),
+        );
+      const count = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
+      expect(engineVersion(db)).toBe(ENGINE_8_0_2_SCHEMA_VERSION);
+      const entriesBefore = count("SELECT COUNT(*) n FROM llm_wiki_entries");
+      const contentBefore = count("SELECT COUNT(*) n FROM llm_wiki_entries_fts_content");
+      const ftsBefore = ftsSql();
+      expect(entriesBefore).toBeGreaterThanOrEqual(24);
+      expect(contentBefore).toBe(entriesBefore);
+      expect(ftsBefore.size).toBeGreaterThan(0);
+
+      await expect(engine(db).setup()).resolves.toBeUndefined();
+
+      expect(engineVersion(db)).toBe(ENGINE_9_18_0_SCHEMA_VERSION);
+      const ftsAfter = ftsSql();
+      for (const [key, body] of ftsBefore) expect(ftsAfter.get(key), key).toBe(body);
+      expect(count("SELECT COUNT(*) n FROM llm_wiki_entries")).toBe(entriesBefore);
+      expect(count("SELECT COUNT(*) n FROM llm_wiki_entries_fts_content")).toBe(contentBefore);
+      const body = db
+        .prepare("SELECT body FROM llm_wiki_entries WHERE id = 'ent_astronomy_fact_0'")
+        .get() as { body: string };
+      expect(body.body).toContain("distinctwordastronomy0");
+      const fts = db
+        .prepare("SELECT COUNT(*) n FROM llm_wiki_entries_fts_content WHERE c3 LIKE '%distinctwordastronomy0%'")
+        .get() as { n: number };
+      expect(fts.n).toBe(1);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
