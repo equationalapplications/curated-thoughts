@@ -1321,6 +1321,89 @@ mod clear_vault_tables_tests {
         // Outbox still append-only: replica DELETEs for entries were pushed.
         assert!(count(&conn, "llm_wiki_outbox") > 0);
     }
+
+    /// Brain-wide guard: every table must be swept, partially-cleared-with-
+    /// reason, or exempted-with-reason (spec §2 S6). Static list, cross-checked
+    /// against sqlite_master of a seeded in-memory brain. Iterates ACTUAL
+    /// tables only: FTS objects are engine-owned and absent from Rust
+    /// in-memory brains (enforced in the TS-side inventory, spec S7/S8), and
+    /// transient migration tables (`wiki_pages_new`, `documents_v15`) are
+    /// absent at steady state.
+    #[test]
+    fn every_brain_table_has_an_explicit_switch_disposition() {
+        let conn = open_in_memory().unwrap();
+        seed_full_vault(&conn);
+        let tables: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        // Every table `clear_vault_tables` deletes outright.
+        const SWEPT: &[&str] = &[
+            "llm_wiki_entries",
+            "llm_wiki_tasks",
+            "llm_wiki_edges",
+            "llm_wiki_events",
+            "llm_wiki_source_ref_index",
+            "llm_wiki_checkpoints",
+            "curated_agent_log",
+            "entity_type_origin",
+            "entity_redirects",
+            "ct_entity_optouts",
+            "manifest_ensure_memo",
+            "curated_entities",
+            "curated_proposal_items",
+            "curated_proposal_sources",
+            "curated_proposal_deleted_sources",
+            "curated_proposals",
+            "curated_relationships",
+            "embeddings",
+            "chunks",
+            "ingest_runs",
+            "documents",
+            "wiki_pages",
+            "folder_rules",
+            "stall_strikes",
+            "stated_attestations",
+            "queue_denials",
+            "deposit_attribution",
+            "deposit_kick_state",
+            "llm_wiki_source_documents",
+            "llm_wiki_source_passages",
+        ];
+        // Cleared in part (tier-vocabulary rows are kept).
+        const PARTIAL: &[&str] = &["llm_wiki_entity_manifests"];
+        const EXEMPT: &[&str] = &[
+            // Survives INTACT (incl. the rederive stamp); only the
+            // `alias_remap_completed` KEY is deleted by the sweep.
+            "llm_wiki_meta",
+            "llm_wiki_outbox",          // append-only replica ledger
+            "llm_wiki_vector_removals", // #213/T9 marker-gated
+            "schema_version",           // watermark
+            "system_strikes",           // vault-independent single-row ledger
+            // Operator-facing; rows carry per-document `subject` columns that
+            // may name old-vault documents (spec Q9 sub-ruling: keep, caveat).
+            "pipeline_heartbeat",
+            "pipeline_stalls",
+            // Orphan caveat: evidence rows may outlive the entries they cite
+            // after a switch; they are inert without their parents (spec Q9).
+            "librarian_evidence",
+        ];
+        for t in &tables {
+            assert!(
+                SWEPT.contains(&t.as_str())
+                    || PARTIAL.contains(&t.as_str())
+                    || EXEMPT.contains(&t.as_str()),
+                "table {t} has no switch disposition — sweep it or add it with a reason (spec §2 S6)"
+            );
+        }
+        // Negative control: a future table fails this test by construction.
+        assert!(SWEPT.contains(&"llm_wiki_entries"));
+    }
 }
 
 #[cfg(test)]
