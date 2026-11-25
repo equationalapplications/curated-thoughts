@@ -37,3 +37,22 @@ Nits and dispositions:
 4. spec status line — **DISMISSED** (branch named IS this PR's branch; AGENTS.md draft rule satisfied: status reads Implemented, commit 0aba3516).
 
 Reviewer "unverified" items, controller-verified: edge_writer_gate connection.rs=7 PASSES; lib 1699/1699 green; clippy --all-targets -D warnings EXIT 0.
+
+## Fresh CodeRabbit round on 16bde2d0 (3 findings — reviewed the round-3 fold) + T1.5 rung 2 (sonnet xhigh)
+
+### CodeRabbit fresh round (02:24Z)
+| Thread | Sev | Finding | Verdict |
+|---|---|---|---|
+| PRRT_kwDOSVmXas67slyA | MAJOR | Unreadable owner manifest falls through to tier_fact and classifies shapes undeclared → irreversible drop | REAL — FIXED: an Err leg now BAILS the re-type before any write (rollback, backup retained, operator repairs); gate fall-through untouched. RED test `sso9_retype_unreadable_owner_manifest_aborts_the_retype` |
+| PRRT_kwDOSVmXas67slx2 | Minor | Resolver TRIMS the stored value → `'handoff '` mispredicted as `decision` though the exact-slug SQL leaves it stored | REAL — FIXED: resolver returns stored VERBATIM; classification sites trim+lowercase on their own side. RED test `sso9_retype_parent_shape_trailing_space_target_is_predicted_as_stored` |
+| PRRT_kwDOSVmXas67slxp | Minor | Reservation error conflates permission failures with "another opener holds this slot" | REAL — FIXED: only `ErrorKind::AlreadyExists` reports the collision; other errors report destination + underlying error (early return kept) |
+
+### T1.5 rung 2 (claude-sonnet-5-5, review-depth xhigh, effort high @ 70ad5e71) — REQUEST CHANGES
+**Cost $0.7316** (29 turns). 1 MAJOR + 3 MINOR:
+
+1. **Ungated entities (MAJOR) — PARTIALLY REAL, FIXED.** The strict-with-empty-`edge_types` scenario is MOOT post-refresh: the E2 merge (owx8 fold + rOZz) fills every eligible refreshed manifest with the four required shapes, so the refreshed gate is ACTIVE there (reviewer missed that interaction — dismissed with receipts). The remaining sub-cases are REAL: no strict manifest on either leg, or a non-eligible manifest with an empty edge vocabulary, leave `declared` empty/None while the live gate is DISARMED (`ontology_leg` Strict(None): "ungated means most permissive") — the re-type then deleted edges the gate admits, irreversibly. FIX: empty declared set OR no applicable manifest ⇒ KEEP (ungated), mirroring the gate. RED tests `sso9_retype_ungated_entity_keeps_parent_family_edges`, `sso9_retype_strict_empty_edge_vocabulary_keeps_parent_family_edges`. Spec change-6 says "UNDECLARED … DROPPED" — an UNGATED shape is not an undeclared shape; interpretation recorded here for Kurt's merge-ask review.
+2. **Stale backup accumulation (MINOR) — FIXED.** Success path now prunes stale `<stem>.bak-pre-sso9-<ts>` siblings, keeping the newest 3 (SSO9_BACKUP_KEEP); only the success path prunes. RED test `sso9_success_prunes_stale_backups_keeping_the_newest_three`.
+3. **Leading-space stored types (MINOR) — ALREADY FIXED in-tree** by the slx2 fold above (verbatim resolver); the rung reviewed 70ad5e71 before those fixes were pushed. Duplicate — dismissed with receipts.
+4. **Receipt .json isn't JSON (MINOR) — FIXED**: renamed to `-verdict.md` (tool writes markdown).
+
+Rung-2 "checked and clean" receipts: eligibility/idempotency, refresh node-set (statement excluded from EA_SEED_TYPES → 20 slugs), ensure-fold memo transactionality, empty-file VACUUM INTO target, unique-collision UPDATE OR IGNORE + per-id DELETE, DDL columns, redirect_scan allowlist, TS vendored-drift + VENDORED_PATH resolution.

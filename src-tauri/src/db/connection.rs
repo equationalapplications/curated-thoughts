@@ -1533,11 +1533,24 @@ fn sso9_backup_before_migration(conn: &Connection, db_path: &Path) -> Result<std
         .create_new(true)
         .open(&backup)
         .map_err(|e| {
-            anyhow::anyhow!(
-                "sso9 backup: cannot exclusively reserve {} ({e}) — another opener \
-                 holds this slot; open aborted, the next open retries with a fresh timestamp",
-                backup.display()
-            )
+            // Impl-review (slxp): only an existing file is a lost race with
+            // another opener; any other I/O failure (permissions, a full or
+            // unwritable directory) must say so, or the operator chases a
+            // phantom collision while reopens keep failing for the real
+            // reason. Both keep the open aborted (S4).
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::anyhow!(
+                    "sso9 backup: cannot exclusively reserve {} ({e}) — another opener \
+                     holds this slot; open aborted, the next open retries with a fresh timestamp",
+                    backup.display()
+                )
+            } else {
+                anyhow::anyhow!(
+                    "sso9 backup: cannot create the reservation at {} ({e}); open aborted, \
+                     slot not stamped",
+                    backup.display()
+                )
+            }
         })?;
     let result = (|| -> Result<String> {
         conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
@@ -1727,10 +1740,11 @@ fn sso9_snapshot_ids(conn: &Connection) -> Result<std::collections::HashSet<Stri
 
 /// Q4 resolver: `llm_wiki_entries.okf_type` when the id names an entry, else
 /// `curated_entities.entity_type`, else unresolved (`None`). Returns the
-/// stored value TRIMMED but otherwise RAW (rOZe: the parent-shape check must
-/// map the re-type over the EXACT stored spelling to predict what the SQL's
-/// exact-slug updates write — lowercasing happens at the classification call
-/// sites, which compare against lowercase slugs).
+/// stored value VERBATIM (rOZe: the parent-shape check must map the re-type
+/// over the EXACT stored spelling to predict what the SQL's exact-slug
+/// updates write; slx2: trimming here would mispredict a value like
+/// `'handoff '` that the SQL does not match. Callers normalize as needed —
+/// the classification call sites trim+lowercase for slug comparison).
 fn sso9_resolve_type(
     conn: &Connection,
     cache: &mut std::collections::HashMap<String, Option<String>>,
@@ -1757,7 +1771,7 @@ fn sso9_resolve_type(
             .optional()?
             .flatten(),
     }
-    .map(|t| t.trim().to_string());
+    .map(|t| t.to_string());
     cache.insert(id.to_string(), resolved.clone());
     Ok(resolved)
 }
@@ -1769,8 +1783,8 @@ fn sso9_resolve_type(
 /// two-lookup cascade (rOZa: `resolve_strict_edge_vocabulary_with`) — the
 /// entity's own strict manifest wins; WITHOUT one, a curated entity inherits
 /// the canonical `tier_fact` partition manifest (the typical production
-/// case). Non-strict and unreadable rows fall through to the partition leg,
-/// exactly like the gate's.
+/// case). Non-strict rows fall through to the partition leg (the gate's
+/// leg semantics); an UNREADABLE row aborts the re-type (slyA).
 type Sso9DeclaredEdgeSet = std::collections::HashSet<(String, String, String)>;
 type Sso9DeclaredEdgeCache = std::collections::HashMap<String, Option<Sso9DeclaredEdgeSet>>;
 
@@ -1792,19 +1806,34 @@ fn sso9_declared_edges(
                     .map(crate::db::entity_gate::manifest_declared_edge_triples);
                 break;
             }
-            // Present but not strict (or no row), or unreadable: fall through
-            // to the next lookup id — the gate's leg semantics.
-            _ => {}
+            // Present but not strict (or no row): fall through to the next
+            // lookup id — the gate's leg semantics.
+            Ok(_) => {}
+            // Impl-review (slyA): an UNREADABLE manifest is not an undeclared
+            // shape. The gate falls through on Err because it only accepts or
+            // rejects a write; the re-type DELETES on "undeclared" and the
+            // backup is removed after its checks pass, so a wrong drop is
+            // irreversible. Abort the re-type before any write instead — the
+            // transaction rolls back, the backup is retained for retry, and
+            // the operator repairs the manifest. (The gate's fall-through is
+            // deliberately untouched.)
+            Err(e) => anyhow::bail!(
+                "sso9 retype: cannot read the manifest for {lookup} — an unreadable \
+                 manifest must not classify shapes as undeclared: {e}"
+            ),
         }
     }
     cache.insert(entity_id.to_string(), set.clone());
     Ok(set)
 }
 
-/// True when the edge's POST-re-type shape (types resolved from the OLD
-/// rows, then mapped through `SSO9_RETYPE_MAP`) is declared in the owning
-/// entity's refreshed manifest. Spec change-6 rule: a parent-family edge
-/// that LANDS on a declared shape keeps; undeclared shapes drop.
+/// True when the edge's POST-re-type shape (types resolved VERBATIM from the
+/// OLD rows, then mapped through `SSO9_RETYPE_MAP`) is declared in the
+/// owning entity's applicable manifest — or when the entity is UNGATED
+/// (no applicable strict manifest on either leg, or a strict manifest whose
+/// edge vocabulary is empty): the gate admits every shape there
+/// (`ontology_leg`'s "ungated means most permissive" contract), so the
+/// re-type must not delete edges the live gate admits.
 fn sso9_parent_shape_declared(
     conn: &Connection,
     declared_cache: &mut Sso9DeclaredEdgeCache,
@@ -1812,8 +1841,17 @@ fn sso9_parent_shape_declared(
     e: &Sso9Edge,
 ) -> Result<bool> {
     let Some(declared) = sso9_declared_edges(conn, declared_cache, &e.entity_id)? else {
-        return Ok(false);
+        // Impl-review (T1.5 rung 2 MAJOR 1): ungated — keep. The gate would
+        // admit this edge today, and the success path deletes the backup, so
+        // a wrong drop is irreversible.
+        return Ok(true);
     };
+    if declared.is_empty() {
+        // Strict manifest with an EMPTY edge vocabulary: `ontology_leg`
+        // returns Strict(None) and disarms the gate ("a strict manifest that
+        // declares no edge types" is treated as most permissive) — mirror it.
+        return Ok(true);
+    }
     let post_retype = |t: Option<String>| -> Option<String> {
         t.map(|x| {
             SSO9_RETYPE_MAP
@@ -1865,7 +1903,7 @@ fn sso9_plan_edges(
         }
         if e.edge_type == "handoffFor" {
             let tt = sso9_resolve_type(conn, &mut cache, &e.target_id)?
-                .map(|t| t.to_lowercase());
+                .map(|t| t.trim().to_lowercase());
             *plan
                 .handoff_for_by_target
                 .entry(tt.clone().unwrap_or_else(|| "unresolved".into()))
@@ -1894,7 +1932,7 @@ fn sso9_plan_edges(
                 }
                 "about" if src_in => {
                     let tt = sso9_resolve_type(conn, &mut cache, &e.target_id)?
-                        .map(|t| t.to_lowercase());
+                        .map(|t| t.trim().to_lowercase());
                     match tt.as_deref() {
                         Some("person") | Some("place") | Some("event") => plan.parent_drop.push(e),
                         Some("organization") => plan.kept_about_org += 1,
@@ -2315,6 +2353,52 @@ fn sso9_delete_backup(path: &Path) -> std::io::Result<()> {
     std::fs::remove_file(path)
 }
 
+/// Stale sibling backups the success path keeps after pruning (each is a
+/// crash-recovery copy a failed open left behind for its retry).
+const SSO9_BACKUP_KEEP: usize = 3;
+
+/// Impl-review (T1.5 rung 2 MINOR 2): a persistently failing open used to
+/// accumulate one full-DB backup per launch — the success path only ever
+/// removed its own file. After a verified success, prune stale
+/// `<stem>.bak-pre-sso9-<ts>` siblings, keeping the newest
+/// `SSO9_BACKUP_KEEP` (concurrent openers' fresh backups sort newest and
+/// stay). Only the success path prunes: a failing open keeps everything for
+/// its retry.
+fn sso9_prune_stale_backups(own: &Path) {
+    let Some(dir) = own.parent() else { return };
+    let Some(name) = own.file_name().and_then(|s| s.to_str().map(str::to_string)) else { return };
+    let Some(prefix) = name.rsplit_once('-').map(|(p, _)| p.to_string()) else { return };
+    let mut stale: Vec<(u128, std::path::PathBuf)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let Some(n) = entry.file_name().to_str().map(str::to_string) else { continue };
+        if n == name {
+            continue;
+        }
+        if let Some(ts) = n
+            .strip_prefix(prefix.as_str())
+            .and_then(|r| r.strip_prefix('-'))
+            .and_then(|ts| ts.parse::<u128>().ok())
+        {
+            stale.push((ts, entry.path()));
+        }
+    }
+    stale.sort_by_key(|(ts, _)| *ts);
+    let excess = stale.len().saturating_sub(SSO9_BACKUP_KEEP);
+    for (_, path) in stale.into_iter().take(excess) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => sso9_log!(
+                "[ct::migrate] sso9 stale backup pruned: path={}",
+                path.display()
+            ),
+            Err(e) => sso9_log!(
+                "[ct::migrate WARN] sso9 stale backup not pruned: path={} error={e}",
+                path.display()
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 fn sso9_run_hook(
     slot: &'static std::thread::LocalKey<std::cell::RefCell<Option<Sso9CommitHook>>>,
@@ -2406,10 +2490,13 @@ fn apply_sso9_migrations(conn: &Connection) -> Result<()> {
     let failures = sso9_verify(conn, shape_failure, dispositions.as_ref());
     if failures.is_empty() {
         match sso9_delete_backup(&backup) {
-            Ok(()) => sso9_log!(
-                "[ct::migrate] sso9 verification passed; backup deleted: path={}",
-                backup.display()
-            ),
+            Ok(()) => {
+                sso9_log!(
+                    "[ct::migrate] sso9 verification passed; backup deleted: path={}",
+                    backup.display()
+                );
+                sso9_prune_stale_backups(&backup);
+            }
             Err(e) => sso9_log!(
                 "[ct::migrate WARN] sso9 verification passed but the backup could not be \
                  deleted (kept): path={} error={e}",
@@ -6820,6 +6907,189 @@ mod tests {
                 .map(|f| !f.contains("tier_fact"))
                 .unwrap_or(false),
             "the matching first row must not be flagged: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_parent_shape_trailing_space_target_is_predicted_as_stored() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (slx2): the resolver must return the stored value
+        // VERBATIM. The SQL re-type matches exact slugs, so a stored `handoff `
+        // (trailing space) is NOT retyped — its post-migration key stays
+        // `handoff`. Mapping the TRIMMED value predicted `decision` and would
+        // drop an edge whose stored shape the manifest still declares.
+        let mut m: serde_json::Value = serde_json::from_str(SSO8_MANIFEST).unwrap();
+        m["edge_types"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "type": "supersedes", "source_type": "decision", "target_type": "handoff"
+            }));
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('ent1', 'strict', ?1, 1)",
+            [&m.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at, okf_type, deleted_at, ontology_checked_at, heal_checked_at)
+             VALUES ('hsp','ent1','t','b',1,77,'handoff ',NULL,88,99)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('e_sup_sp','ent1','h1','hsp','supersedes',1)",
+            [],
+        )
+        .unwrap();
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            etype(&conn, "e_sup_sp").as_deref(),
+            Some("supersedes"),
+            "the target stays stored-typed 'handoff ' (exact-slug SQL) — key 'handoff' is declared"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_unreadable_owner_manifest_aborts_the_retype() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (slyA): an UNREADABLE manifest must not classify shapes
+        // as undeclared. The gate's fall-through only accepts or rejects
+        // writes; the re-type DELETES on "undeclared" and the backup is
+        // removed after its checks pass, so the loss would be irreversible.
+        // Corrupt ent1's manifest and rely on the fixture's strict tier_fact
+        // manifest (which declares no author(decision, person) shape): the
+        // re-type must ABORT, not delete.
+        conn.execute(
+            "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('ent1', 'strict', 'not json at all', 1)",
+            [],
+        )
+        .unwrap();
+        sso9_clear_log();
+        let result = sso9_migrate(&conn, tmp.path());
+        let err = result.expect_err("an unreadable owner manifest must abort the re-type");
+        assert!(
+            format!("{err:#}").contains("cannot read the manifest for ent1"),
+            "{err:#}"
+        );
+        assert!(
+            !sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap(),
+            "re-type slot unstamped"
+        );
+        assert!(
+            sso9_version_stamped(&conn, SSO9_REFRESH_VERSION).unwrap(),
+            "the refresh committed before the abort"
+        );
+        assert_eq!(sso9_backups(tmp.path()).len(), 1, "backup preserved");
+        assert!(
+            etype(&conn, "e_author").is_some(),
+            "no delete happened"
+        );
+        // Repair the manifest (valid strict, WITHOUT the custom shape) and the
+        // next open retries cleanly: the author edge is now genuinely
+        // undeclared and drops.
+        conn.execute(
+            "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1 WHERE entity_id = 'ent1'",
+            [SSO8_MANIFEST],
+        )
+        .unwrap();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
+        assert_eq!(
+            etype(&conn, "e_author"),
+            None,
+            "genuinely undeclared shapes still drop after the repair"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_ungated_entity_keeps_parent_family_edges() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (T1.5 rung 2 MAJOR 1): an entity with NO applicable
+        // strict manifest on either leg is UNGATED — the gate admits every
+        // shape on such a brain (`ontology_leg`'s "ungated means most
+        // permissive" contract), and the success path deletes the backup, so
+        // the re-type must not delete parent-family edges the live gate
+        // admits. Remove the tier_fact partition manifest (ent1 has no
+        // manifest row of its own in the fixture).
+        conn.execute(
+            "DELETE FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+            [],
+        )
+        .unwrap();
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            etype(&conn, "e_author").as_deref(),
+            Some("author"),
+            "ungated brain keeps parent-family edges"
+        );
+        assert_eq!(
+            etype(&conn, "e_publisher").as_deref(),
+            Some("publisher"),
+            "ungated brain keeps parent-family edges"
+        );
+        // The handoffFor dispositions are NOT manifest-gated and still run.
+        assert_eq!(
+            etype(&conn, "e_svc"),
+            None,
+            "service drops are unconditional, not gated by manifests"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_strict_empty_edge_vocabulary_keeps_parent_family_edges() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (T1.5 rung 2 MAJOR 1, empty-vocabulary leg): a strict
+        // manifest with an EMPTY edge_types array disarms the gate
+        // (`ontology_leg` returns Strict(None)) — the re-type must keep the
+        // parent-family edges instead of reading the empty set as
+        // "everything undeclared". The manifest is deliberately NOT eligible
+        // for the refresh (missing the old-17 node slugs) so it is stored
+        // verbatim and the empty set survives to the re-type.
+        let m = serde_json::json!({
+            "node_types": ["person"],
+            "edge_types": [],
+        });
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('ent1', 'strict', ?1, 1)",
+            [&m.to_string()],
+        )
+        .unwrap();
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            etype(&conn, "e_author").as_deref(),
+            Some("author"),
+            "a gate-disarming manifest keeps parent-family edges"
+        );
+    }
+
+    #[test]
+    fn sso9_success_prunes_stale_backups_keeping_the_newest_three() {
+        let (tmp, conn) = sso9_rewound_brain();
+        // Impl-review (T1.5 rung 2 MINOR 2): a persistently failing open
+        // accumulated one full-DB backup per launch — the success path only
+        // ever removed its own file. It now prunes stale siblings, keeping
+        // the newest three (each may be a crash-recovery copy).
+        for ts in [10, 11, 12, 13, 14] {
+            std::fs::write(tmp.path().join(format!("brain.db.bak-pre-sso9-{ts}")), b"x")
+                .unwrap();
+        }
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        let left = sso9_backups(tmp.path());
+        assert_eq!(left.len(), 3, "keep the newest three stale backups: {left:?}");
+        let names: Vec<String> = left
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(
+            names.iter().all(|n| n.ends_with("-12") || n.ends_with("-13") || n.ends_with("-14")),
+            "the OLDEST stale backups are the pruned ones: {names:?}"
         );
     }
 
