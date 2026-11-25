@@ -536,9 +536,28 @@ mod tests {
         for (rel, lits) in production_literals() {
             for lit in lits {
                 let t = &lit.text;
+                // Removals are not landings: if EVERY `embedding_blob`
+                // occurrence in the statement is immediately followed by
+                // `= NULL`, the statement can only remove a vector (e.g. the
+                // package-owned confirmed-removal trigger body in the
+                // verbatim `LLM_WIKI_PACKAGE_DDL` — spec engine-9x §3 PR-B
+                // step 1 forbids hand edits, so no CT stamp can be inside
+                // it). Nothing lands, so no scheme stamp applies.
+                let mut blob_scan = t.as_str();
+                let removals_only = loop {
+                    match blob_scan.find("embedding_blob") {
+                        None => break true,
+                        Some(i) => {
+                            if !blob_scan[i..].starts_with("embedding_blob = NULL") {
+                                break false;
+                            }
+                            blob_scan = &blob_scan[i + "embedding_blob".len()..];
+                        }
+                    }
+                };
                 let targets_entries = t.contains("INSERT INTO llm_wiki_entries")
                     || t.contains("UPDATE llm_wiki_entries");
-                if !(targets_entries && t.contains("embedding_blob")) {
+                if !(targets_entries && t.contains("embedding_blob")) || removals_only {
                     continue;
                 }
                 writers += 1;

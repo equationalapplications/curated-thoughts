@@ -7956,7 +7956,7 @@ mod tests {
     #[test]
     fn engine9_mirror_is_idempotent_across_reopens() {
         let (tmp, conn) = engine9_migrated_fixture();
-        let snapshot = |c: &Connection| -> (Vec<(String, String, Option<String>)>, Vec<i64>, i64) {
+        let snapshot = |c: &Connection| -> Engine9Snapshot {
             let mut s = c
                 .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
                 .unwrap();
@@ -8063,19 +8063,20 @@ mod tests {
     }
 
     type Engine9Columns = std::collections::BTreeMap<String, (String, i64, Option<String>, i64)>;
+    type Engine9Snapshot = (Vec<(String, String, Option<String>)>, Vec<i64>, i64);
+    type Engine9MasterMap = std::collections::BTreeMap<(String, String), Option<String>>;
+    type Engine9Shape = (
+        Engine9MasterMap,
+        std::collections::BTreeMap<String, Engine9Columns>,
+    );
 
     /// `type → name → normalized sql` for every named schema object, plus
     /// `table → name-keyed PRAGMA table_info (cid excluded)`.
-    fn engine9_schema_shape(
-        conn: &Connection,
-    ) -> (
-        std::collections::BTreeMap<(String, String), Option<String>>,
-        std::collections::BTreeMap<String, Engine9Columns>,
-    ) {
+    fn engine9_schema_shape(conn: &Connection) -> Engine9Shape {
         let mut s = conn
             .prepare("SELECT type, name, sql FROM sqlite_master WHERE type IN ('table','index','trigger')")
             .unwrap();
-        let master: std::collections::BTreeMap<(String, String), Option<String>> = s
+        let master: Engine9MasterMap = s
             .query_map([], |r| {
                 Ok((
                     (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
@@ -8087,7 +8088,7 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         let mut cols = std::collections::BTreeMap::new();
-        for ((kind, name), _) in &master {
+        for (kind, name) in master.keys() {
             if kind != "table" {
                 continue;
             }
