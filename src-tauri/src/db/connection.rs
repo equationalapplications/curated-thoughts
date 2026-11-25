@@ -1424,17 +1424,28 @@ pub(crate) const SSO9_RETYPE_VERSION: i64 = SSO9_REFRESH_VERSION + 1;
 const SSO9_RETYPE_MAP: [(&str, &str); 2] = [("handoff", "decision"), ("session_recap", "lesson")];
 
 #[cfg(test)]
+type Sso9CommitHook = Box<dyn Fn(&Connection)>;
+#[cfg(test)]
+type Sso9DeleteFn = fn(&Path) -> std::io::Result<()>;
+#[cfg(test)]
+type Sso9SnapshotCounts = (Vec<(String, String)>, Vec<i64>, Vec<(String, String)>);
+
+#[cfg(test)]
 thread_local! {
     /// Captured `[ct::migrate]` log lines (census-log / backup-reuse tests).
     static SSO9_LOG: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Test hook: runs after step 1's COMMIT, before the shape check.
-    static SSO9_AFTER_REFRESH_COMMIT: std::cell::RefCell<Option<Box<dyn Fn(&Connection)>>> =
+    static SSO9_AFTER_REFRESH_COMMIT: std::cell::RefCell<Option<Sso9CommitHook>> =
         const { std::cell::RefCell::new(None) };
     /// Test hook: runs after step 2's COMMIT, before post-commit verification.
-    static SSO9_AFTER_RETYPE_COMMIT: std::cell::RefCell<Option<Box<dyn Fn(&Connection)>>> =
+    static SSO9_AFTER_RETYPE_COMMIT: std::cell::RefCell<Option<Sso9CommitHook>> =
         const { std::cell::RefCell::new(None) };
     /// Test hook: replaces the backup-file deletion (deletion-failure test).
-    static SSO9_DELETE_OVERRIDE: std::cell::Cell<Option<fn(&Path) -> std::io::Result<()>>> =
+    static SSO9_DELETE_OVERRIDE: std::cell::Cell<Option<Sso9DeleteFn>> =
+        const { std::cell::Cell::new(None) };
+    /// Test hook: runs right before the backup reservation, so a test can
+    /// plant a concurrent opener's file at the backup path (collision test).
+    static SSO9_BACKUP_RACE_HOOK: std::cell::Cell<Option<fn(&Path)>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -1505,9 +1516,21 @@ fn sso9_backup_before_migration(conn: &Connection, db_path: &Path) -> Result<std
     #[cfg(test)]
     let ts = SSO9_BACKUP_TS_OVERRIDE.with(|c| c.get()).unwrap_or(ts);
     let backup = dir.join(format!("{stem}.bak-pre-sso9-{ts}"));
-    // Never delete a file we did not create (a pre-existing target makes
-    // `VACUUM INTO` itself fail; the cleanup below must not touch it).
-    let pre_existing = backup.exists();
+    #[cfg(test)]
+    if let Some(h) = SSO9_BACKUP_RACE_HOOK.with(|c| c.get()) {
+        h(&backup);
+    }
+    // Impl-review (owxT): reserve the destination ATOMICALLY — an exclusive
+    // create of an EMPTY file, which `VACUUM INTO` accepts as its target.
+    // Two openers migrating in the same millisecond can no longer both
+    // observe "absent" and both clean up on failure: only the opener whose
+    // `create_new` succeeded ever removes the path, so a lost race leaves
+    // the other opener's backup untouched.
+    let reserved = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup)
+        .is_ok();
     let result = (|| -> Result<String> {
         conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
         let bk = Connection::open_with_flags(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -1532,7 +1555,7 @@ fn sso9_backup_before_migration(conn: &Connection, db_path: &Path) -> Result<std
             Ok(backup)
         }
         Err(e) => {
-            if !pre_existing {
+            if reserved {
                 let _ = std::fs::remove_file(&backup);
             }
             Err(e.context("sso9 backup failed; open aborted, slot not stamped"))
@@ -1582,17 +1605,23 @@ fn run_sso9_refresh_txn(conn: &Connection) -> Result<Vec<(String, String)>> {
         let mut refreshed = Vec::new();
         for (entity_id, old_json) in sso9_read_manifests(conn)? {
             if let RefreshPlan::Refresh { new_json } = plan_sso9_manifest_refresh(&old_json)? {
+                // Impl-review (owxz): fold the ensure planner's edits into the
+                // SAME transaction — the manifest and its required ensure
+                // edits (document/process + fallback) must commit together, or
+                // the stamp would skip the ensure forever on the next open.
+                let final_json =
+                    crate::db::entity_gate::fold_sso9_ensure(conn, &entity_id, &new_json)?;
                 let changed = conn.execute(
                     "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1
                       WHERE entity_id = ?2 AND manifest_json = ?3",
-                    rusqlite::params![new_json, entity_id, old_json],
+                    rusqlite::params![final_json, entity_id, old_json],
                 )?;
                 if changed != 1 {
                     anyhow::bail!(
                         "sso9 refresh: compare-and-swap changed {changed} rows for {entity_id}"
                     );
                 }
-                refreshed.push((entity_id, new_json));
+                refreshed.push((entity_id, final_json));
             }
         }
         conn.execute(
@@ -1602,10 +1631,16 @@ fn run_sso9_refresh_txn(conn: &Connection) -> Result<Vec<(String, String)>> {
         Ok(refreshed)
     })();
     match applied {
-        Ok(refreshed) => {
-            conn.execute_batch("COMMIT;")?;
-            Ok(refreshed)
-        }
+        Ok(refreshed) => match conn.execute_batch("COMMIT;") {
+            // Impl-review (owxc): a failed COMMIT (e.g. SQLITE_BUSY on a
+            // rollback-journal reader) must not leave the transaction open —
+            // the next BEGIN IMMEDIATE inside the same handle would fail.
+            Err(commit_err) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(commit_err.into())
+            }
+            Ok(()) => Ok(refreshed),
+        },
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK;");
             Err(e)
@@ -1636,6 +1671,9 @@ struct Sso9EdgePlan {
     /// Step 4: parent-family edges touching a re-typed row with an
     /// undeclared re-typed shape.
     parent_drop: Vec<Sso9Edge>,
+    /// Impl-review (owxi): parent-family edges whose POST-re-type shape is
+    /// DECLARED in the entity's refreshed manifest — kept, never dropped.
+    kept_declared_parent: Vec<Sso9Edge>,
     /// Keep set: `about` → `organization` from a re-typed source.
     kept_about_org: usize,
     /// U-review finding 7: `about` from a re-typed source to a target that
@@ -1712,6 +1750,67 @@ fn sso9_resolve_type(
     Ok(resolved)
 }
 
+/// Impl-review (owxi): the entity's refreshed manifest's declared edge
+/// triples, keyed by entity id (`None` = no usable manifest row — every
+/// shape counts undeclared). Step 1 has committed before the re-type runs,
+/// so the stored manifest IS the refreshed one.
+type Sso9DeclaredEdgeSet = std::collections::HashSet<(String, String, String)>;
+type Sso9DeclaredEdgeCache = std::collections::HashMap<String, Option<Sso9DeclaredEdgeSet>>;
+
+fn sso9_declared_edges(
+    conn: &Connection,
+    cache: &mut Sso9DeclaredEdgeCache,
+    entity_id: &str,
+) -> Result<Option<Sso9DeclaredEdgeSet>> {
+    if let Some(hit) = cache.get(entity_id) {
+        return Ok(hit.clone());
+    }
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
+            [entity_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let set = json.and_then(|j| crate::db::entity_gate::declared_edge_triples(&j).ok());
+    cache.insert(entity_id.to_string(), set.clone());
+    Ok(set)
+}
+
+/// True when the edge's POST-re-type shape (types resolved from the OLD
+/// rows, then mapped through `SSO9_RETYPE_MAP`) is declared in the owning
+/// entity's refreshed manifest. Spec change-6 rule: a parent-family edge
+/// that LANDS on a declared shape keeps; undeclared shapes drop.
+fn sso9_parent_shape_declared(
+    conn: &Connection,
+    declared_cache: &mut Sso9DeclaredEdgeCache,
+    type_cache: &mut std::collections::HashMap<String, Option<String>>,
+    e: &Sso9Edge,
+) -> Result<bool> {
+    let Some(declared) = sso9_declared_edges(conn, declared_cache, &e.entity_id)? else {
+        return Ok(false);
+    };
+    let post_retype = |t: Option<String>| -> Option<String> {
+        t.map(|x| {
+            SSO9_RETYPE_MAP
+                .iter()
+                .find(|(from, _)| *from == x)
+                .map(|(_, to)| to.to_string())
+                .unwrap_or(x)
+        })
+    };
+    let src = post_retype(sso9_resolve_type(conn, type_cache, &e.source_id)?);
+    let tgt = post_retype(sso9_resolve_type(conn, type_cache, &e.target_id)?);
+    match (src, tgt) {
+        (Some(s), Some(t)) => Ok(declared.contains(&(
+            crate::db::entity_gate::NodeVocabulary::key(&e.edge_type),
+            crate::db::entity_gate::NodeVocabulary::key(&s),
+            crate::db::entity_gate::NodeVocabulary::key(&t),
+        ))),
+        _ => Ok(false),
+    }
+}
+
 /// Classify every relevant edge (read-only). The captured sets ARE this
 /// pre-write SELECT's result (plan S2).
 fn sso9_plan_edges(
@@ -1720,6 +1819,7 @@ fn sso9_plan_edges(
 ) -> Result<Sso9EdgePlan> {
     let mut plan = Sso9EdgePlan::default();
     let mut cache = std::collections::HashMap::new();
+    let mut declared_cache: Sso9DeclaredEdgeCache = std::collections::HashMap::new();
     let mut stmt = conn
         .prepare("SELECT id, entity_id, source_id, target_id, edge_type FROM llm_wiki_edges ORDER BY id")?;
     let edges = stmt
@@ -1756,7 +1856,17 @@ fn sso9_plan_edges(
             }
         } else if touches {
             match e.edge_type.as_str() {
-                "author" | "publisher" | "supersedes" => plan.parent_drop.push(e),
+                // Impl-review (owxi): the drop rule is "undeclared post-re-type
+                // shape" — consult the entity's refreshed manifest before
+                // dropping; a custom manifest may still declare the re-typed
+                // shape (e.g. author(decision, person)).
+                "author" | "publisher" | "supersedes" => {
+                    if sso9_parent_shape_declared(conn, &mut declared_cache, &mut cache, &e)? {
+                        plan.kept_declared_parent.push(e);
+                    } else {
+                        plan.parent_drop.push(e);
+                    }
+                }
                 "about" if src_in => {
                     let tt = sso9_resolve_type(conn, &mut cache, &e.target_id)?;
                     match tt.as_deref() {
@@ -1833,12 +1943,14 @@ fn sso9_retype_census(conn: &Connection) -> Result<()> {
     parts.push(format!("edges_touching_by_type={}", sso9_fmt_map(&plan.touching_by_type)));
     parts.push(format!(
         "planned_remap={} planned_service_drop={} planned_parent_family_drop={} \
-         kept_about_organization={} kept_declared_about={} undispositioned={}",
+         kept_about_organization={} kept_declared_about={} kept_declared_parent={} \
+         undispositioned={}",
         plan.remap.len(),
         plan.service_drop.len(),
         plan.parent_drop.len(),
         plan.kept_about_org,
         plan.kept_declared_about,
+        plan.kept_declared_parent.len(),
         plan.undispositioned
     ));
     let pending_types: i64 = conn.query_row(
@@ -1869,7 +1981,7 @@ fn sso9_retype_census(conn: &Connection) -> Result<()> {
 /// after N is stamped (re-checked under the lock). Returns `None` when it
 /// did not run (already stamped, or N unstamped), else the captured edge
 /// dispositions for the post-commit verification.
-fn run_sso9_retype_txn(conn: &Connection) -> Result<Option<Sso9Dispositions>> {
+fn run_sso9_retype_txn(conn: &Connection, backup: &Path) -> Result<Option<Sso9Dispositions>> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let applied = (|| -> Result<Option<Sso9Dispositions>> {
         if sso9_version_stamped(conn, SSO9_RETYPE_VERSION)? {
@@ -1885,6 +1997,41 @@ fn run_sso9_retype_txn(conn: &Connection) -> Result<Option<Sso9Dispositions>> {
         // 1. snapshot + every disposition, BEFORE any rewrite.
         let snapshot = sso9_snapshot_ids(conn)?;
         let plan = sso9_plan_edges(conn, &snapshot)?;
+        // Impl-review (owxv): the backup is a `VACUUM INTO` snapshot taken
+        // BEFORE the refresh transaction; nothing holds a database-wide lock
+        // across that span, so a late write could commit an edge that V32's
+        // deletes would then destroy WITHOUT the retained backup ever holding
+        // a recovery copy. Under the write lock, before any delete: when
+        // edges are about to be dropped, the live edge count must still
+        // match the backup's — any drift (a late insert OR a late delete by
+        // another writer) aborts the retype unapplied, backup preserved, and
+        // the next open retries with a fresh backup. The backup itself does
+        // not change after its snapshot, and the refresh step writes no edge
+        // rows, so equality is the invariant. (Idempotent replays with
+        // nothing left to drop skip the check — the direct-call tests rely
+        // on that.)
+        if !plan.service_drop.is_empty() || !plan.parent_drop.is_empty() {
+            let live_edges: i64 =
+                conn.query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))?;
+            let bk =
+                Connection::open_with_flags(backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "sso9 retype: cannot open the pre-migration backup {}: {e}",
+                            backup.display()
+                        )
+                    })?;
+            let backup_edges: i64 =
+                bk.query_row("SELECT COUNT(*) FROM llm_wiki_edges", [], |r| r.get(0))?;
+            if backup_edges != live_edges {
+                anyhow::bail!(
+                    "sso9 retype: llm_wiki_edges moved since the backup \
+                     (live {live_edges}, backup {backup_edges}) — a late write slipped \
+                     between the backup and the re-type; aborting before any delete, \
+                     backup preserved, retype retried on the next open"
+                );
+            }
+        }
         let disp = Sso9Dispositions {
             remapped: plan
                 .remap
@@ -1931,10 +2078,12 @@ fn run_sso9_retype_txn(conn: &Connection) -> Result<Option<Sso9Dispositions>> {
         }
         sso9_log!(
             "[ct::migrate] sso9 retype: parent-family edges dropped by type={} \
-             (about->organization kept={}, declared about->sa/area kept={})",
+             (about->organization kept={}, declared about->sa/area kept={}, \
+             parent edges kept as declared post-retype={})",
             sso9_fmt_map(&by_type),
             plan.kept_about_org,
-            plan.kept_declared_about
+            plan.kept_declared_about,
+            plan.kept_declared_parent.len()
         );
         // 5. everything else: untouched, counted.
         sso9_log!(
@@ -1967,10 +2116,15 @@ fn run_sso9_retype_txn(conn: &Connection) -> Result<Option<Sso9Dispositions>> {
         Ok(Some(disp))
     })();
     match applied {
-        Ok(d) => {
-            conn.execute_batch("COMMIT;")?;
-            Ok(d)
-        }
+        Ok(d) => match conn.execute_batch("COMMIT;") {
+            // Impl-review (owxc): a failed COMMIT must not leave the
+            // transaction open — see run_sso9_refresh_txn.
+            Err(commit_err) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(commit_err.into())
+            }
+            Ok(()) => Ok(d),
+        },
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK;");
             Err(e)
@@ -2044,15 +2198,22 @@ fn sso9_verify(
     // (c) DISPOSITIONED-EDGE OUTCOMES
     if let Some(d) = disp {
         for (id, entity, src, tgt) in &d.remapped {
-            let ty: rusqlite::Result<Option<String>> = conn
+            let row: rusqlite::Result<Option<(String, String, String, String)>> = conn
                 .query_row(
-                    "SELECT edge_type FROM llm_wiki_edges WHERE id = ?1",
+                    "SELECT edge_type, entity_id, source_id, target_id
+                      FROM llm_wiki_edges WHERE id = ?1",
                     [id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional();
-            let ok = match ty {
-                Ok(Some(t)) => t == "about",
+            let ok = match row {
+                // Impl-review (owxn): a surviving row must ALSO match the
+                // captured (entity, source, target) — same id + type with a
+                // moved endpoint would otherwise pass verification while the
+                // original relationship is missing.
+                Ok(Some((t, e2, s2, t2))) => {
+                    t == "about" && &e2 == entity && &s2 == src && &t2 == tgt
+                }
                 Ok(None) => q(
                     "SELECT 1 FROM llm_wiki_edges
                       WHERE entity_id = ?1 AND source_id = ?2 AND target_id = ?3
@@ -2088,7 +2249,7 @@ fn sso9_delete_backup(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 fn sso9_run_hook(
-    slot: &'static std::thread::LocalKey<std::cell::RefCell<Option<Box<dyn Fn(&Connection)>>>>,
+    slot: &'static std::thread::LocalKey<std::cell::RefCell<Option<Sso9CommitHook>>>,
     conn: &Connection,
 ) {
     slot.with(|h| {
@@ -2165,7 +2326,7 @@ fn apply_sso9_migrations(conn: &Connection) -> Result<()> {
     let mut dispositions = None;
     if retype_pending && sso9_version_stamped(conn, SSO9_REFRESH_VERSION)? {
         sso9_retype_census(conn)?;
-        dispositions = run_sso9_retype_txn(conn)?;
+        dispositions = run_sso9_retype_txn(conn, &backup)?;
         sso9_log!(
             "[ct::migrate] sso9 retype committed (slot {SSO9_RETYPE_VERSION}): ran={}",
             dispositions.is_some()
@@ -5653,7 +5814,7 @@ mod tests {
             .collect()
     }
 
-    fn sso9_snapshot(conn: &Connection) -> (Vec<(String, String)>, Vec<i64>, Vec<(String, String)>) {
+    fn sso9_snapshot(conn: &Connection) -> Sso9SnapshotCounts {
         let manifests = {
             let mut s = conn
                 .prepare("SELECT entity_id, manifest_json FROM llm_wiki_entity_manifests ORDER BY entity_id")
@@ -6189,7 +6350,11 @@ mod tests {
         let (_tmp, conn) = sso9_retype_brain();
         conn.execute("DELETE FROM schema_version WHERE version = ?1", [SSO9_REFRESH_VERSION]).unwrap();
         let before = sso9_data_snapshot(&conn);
-        assert!(run_sso9_retype_txn(&conn).unwrap().is_none());
+        assert!(
+            run_sso9_retype_txn(&conn, Path::new("no-backup-here"))
+                .unwrap()
+                .is_none()
+        );
         assert!(!sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
         assert_eq!(sso9_data_snapshot(&conn), before);
     }
@@ -6211,10 +6376,180 @@ mod tests {
         let (_tmp, conn, _log) = sso9_run_retype();
         let data = sso9_data_snapshot(&conn);
         conn.execute("DELETE FROM schema_version WHERE version = ?1", [SSO9_RETYPE_VERSION]).unwrap();
-        let disp = run_sso9_retype_txn(&conn).unwrap().expect("body ran");
+        let disp = run_sso9_retype_txn(&conn, Path::new("no-backup-here"))
+            .unwrap()
+            .expect("body ran");
         assert!(disp.remapped.is_empty() && disp.dropped.is_empty());
         assert_eq!(sso9_data_snapshot(&conn), data, "zero rows change on a second body run");
         assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
+    }
+
+    #[test]
+    fn sso9_retype_keeps_parent_edges_the_refreshed_manifest_still_declares() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (owxi): ent1's manifest declares the POST-re-type shape
+        // author(decision, person); the refresh preserves the custom
+        // declaration, so the re-type must KEEP the author edge on the
+        // re-typed row. The stock-refreshed manifest declares no such shape,
+        // so the same edge still drops there (standard-fixture tests).
+        let mut m: serde_json::Value = serde_json::from_str(SSO8_MANIFEST).unwrap();
+        m["edge_types"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "type": "author", "source_type": "decision", "target_type": "person"
+            }));
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('ent1', 'strict', ?1, 1)",
+            [&m.to_string()],
+        )
+        .unwrap();
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            etype(&conn, "e_author").as_deref(),
+            Some("author"),
+            "declared post-re-type parent edge kept"
+        );
+        let log = sso9_log_lines();
+        assert!(
+            log.iter()
+                .any(|l| l.contains("parent edges kept as declared post-retype=1")),
+            "{log:#?}"
+        );
+        // The undeclared publisher edge on the same brain still drops.
+        assert_eq!(etype(&conn, "e_publisher"), None);
+    }
+
+    #[test]
+    fn sso9_ensure_fold_failure_rolls_back_the_refresh_slot() {
+        let (tmp, conn) = sso9_rewound_brain();
+        // Impl-review (owxz): break the ensure's durable memo write. With the
+        // fold, the refresh transaction must roll back WHOLE — the stamp and
+        // the ensure edits commit together or not at all (pre-fold, the stamp
+        // landed and the ensure failure was only logged, leaving the manifest
+        // unensured forever). The memo table is SCHEMA-mangled (not dropped):
+        // migrate's own table ensure only recreates a MISSING table, so the
+        // mangled one survives into the step and record_ensure_memo fails.
+        let ddl: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'manifest_ensure_memo'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute_batch(
+            "DROP TABLE manifest_ensure_memo;
+             CREATE TABLE manifest_ensure_memo (entity_id TEXT PRIMARY KEY, recorded_at TEXT);",
+        )
+        .unwrap();
+        let before: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let result = sso9_migrate(&conn, tmp.path());
+        let err = result.expect_err("a failed ensure fold must abort migrate()");
+        assert!(!sso9_stamped(&conn), "refresh slot must NOT be stamped: {err:#}");
+        let after: String = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = 'tier_fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, before, "the manifest refresh rolls back with the fold");
+        assert_eq!(sso9_backups(tmp.path()).len(), 1, "backup kept for the retry");
+        // Recreate the memo table; the next open retries and succeeds.
+        conn.execute_batch(&format!("DROP TABLE manifest_ensure_memo; {};", ddl))
+            .unwrap();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert!(sso9_stamped(&conn));
+    }
+
+    #[test]
+    fn sso9_retype_late_edge_write_between_backup_and_delete_aborts_the_retype() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (owxv): a concurrent writer commits a service-target
+        // handoffFor edge AFTER the backup snapshot — V32 must not delete a
+        // row the retained backup never held. The re-type aborts unapplied.
+        SSO9_AFTER_REFRESH_COMMIT.with(|h| {
+            *h.borrow_mut() = Some(Box::new(|c: &Connection| {
+                c.execute(
+                    "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+                     VALUES ('e_late','ent1','s1','svc1','handoffFor',1)",
+                    [],
+                )
+                .unwrap();
+            }))
+        });
+        sso9_clear_log();
+        let result = sso9_migrate(&conn, tmp.path());
+        SSO9_AFTER_REFRESH_COMMIT.with(|h| *h.borrow_mut() = None);
+        let err = result.expect_err("a late edge write must abort the re-type before any delete");
+        assert!(format!("{err:#}").contains("moved since the backup"), "{err:#}");
+        assert!(
+            !sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap(),
+            "re-type slot unstamped"
+        );
+        assert!(
+            sso9_version_stamped(&conn, SSO9_REFRESH_VERSION).unwrap(),
+            "the refresh committed before the hook fired"
+        );
+        assert_eq!(sso9_backups(tmp.path()).len(), 1, "backup preserved");
+        assert!(etype(&conn, "e_svc").is_some(), "no delete happened");
+        // The next open retries cleanly with a fresh backup.
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
+        assert_eq!(etype(&conn, "e_svc"), None, "retype drops the service edge");
+    }
+
+    #[test]
+    fn sso9_verification_c_surviving_remap_with_a_moved_target_fires() {
+        // Impl-review (owxn): the surviving row must match the captured
+        // (entity, source, target), not just its type.
+        sso9_assert_retype_verification_fires(
+            |c| {
+                c.execute(
+                    // (ent1, s1, pl1, about) is collision-free in the fixture
+                    // (e_about_place is h1->pl1; e_about_org is s1->org1).
+                    "UPDATE llm_wiki_edges SET target_id = 'pl1' WHERE id = 'e_remap'",
+                    [],
+                )
+                .unwrap();
+            },
+            "(c) step-2 re-mapped edge e_remap",
+        );
+    }
+
+    #[test]
+    fn sso9_backup_collision_never_deletes_the_other_openers_file() {
+        let (tmp, conn) = sso9_rewound_brain();
+        // Impl-review (owxT): a concurrent opener wins the race to the same
+        // millisecond — their backup file exists by the time this opener
+        // reaches the backup step. This opener must fail WITHOUT deleting it.
+        SSO9_BACKUP_TS_OVERRIDE.with(|c| c.set(Some(42)));
+        let other = tmp.path().join("brain.db.bak-pre-sso9-42");
+        SSO9_BACKUP_RACE_HOOK.with(|c| {
+            c.set(Some(|p: &Path| {
+                std::fs::write(p, b"other-openers-snapshot").unwrap();
+            }))
+        });
+        let before = sso9_snapshot(&conn);
+        let result = sso9_migrate(&conn, tmp.path());
+        SSO9_BACKUP_RACE_HOOK.with(|c| c.set(None));
+        SSO9_BACKUP_TS_OVERRIDE.with(|c| c.set(None));
+        let err = result.expect_err("the lost race must abort the migration");
+        assert!(format!("{err:#}").contains("sso9 backup"), "{err:#}");
+        assert_eq!(
+            std::fs::read(&other).unwrap(),
+            b"other-openers-snapshot",
+            "the other opener's backup is untouched"
+        );
+        assert_eq!(sso9_snapshot(&conn), before);
     }
 
     #[test]

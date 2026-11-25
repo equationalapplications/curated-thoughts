@@ -43,6 +43,27 @@ fn sso_8_0_2_refreshes_to_the_9x_shape() {
     let edges = out["edge_types"].as_array().unwrap();
     assert!(edges.iter().all(|e| e["type"] != "handoffFor"));
     assert_eq!(edges.len(), 42);
+    // Impl-review (owx4): E2 requires the EXACT four new shapes, not just a
+    // count — assert every (type, source_type, target_type) tuple.
+    let triples: Vec<(String, String, String)> = edges
+        .iter()
+        .map(|e| refresh_edge_triple(e).expect("every edge entry carries a triple"))
+        .collect();
+    for want in [
+        ("about", "statement", "area"),
+        ("about", "statement", "software_application"),
+        ("about", "statement", "organization"),
+        ("partOf", "area", "software_application"),
+    ] {
+        // Triples are membership keys (NodeVocabulary::key is trim+lowercase):
+        // normalize the wanted literals the same way.
+        let want = (
+            NodeVocabulary::key(want.0),
+            NodeVocabulary::key(want.1),
+            NodeVocabulary::key(want.2),
+        );
+        assert!(triples.contains(&want), "E2 shape missing: {want:?}");
+    }
     // Surviving 8.x entries keep their relative order (new ones appended).
     let old: Value = serde_json::from_str(SSO_8_0_2).unwrap();
     let surviving: Vec<String> = old["node_types"]
@@ -67,6 +88,36 @@ fn sso_8_0_2_refreshes_to_the_9x_shape() {
     for s in SSO9_ADDED_NODE_TYPES {
         assert_eq!(find(&out, s), find(&vend, s));
     }
+}
+
+#[test]
+fn refresh_initializes_an_absent_edge_types_key() {
+    // Impl-review (owx8): an eligible manifest may predate `edge_types`
+    // entirely (`parse_manifest_value` reads it as an empty list) — the
+    // refresh must still add the four E2-required shapes, `partOf` included,
+    // instead of skipping the edge merge wholesale.
+    let mut v: Value = serde_json::from_str(SSO_8_0_2).unwrap();
+    v.as_object_mut().unwrap().remove("edge_types");
+    let out = refreshed(&v.to_string());
+    let edges = out["edge_types"].as_array().expect("edge_types initialized");
+    let triples: Vec<(String, String, String)> = edges
+        .iter()
+        .map(|e| refresh_edge_triple(e).unwrap())
+        .collect();
+    for want in [
+        ("about", "statement", "area"),
+        ("about", "statement", "software_application"),
+        ("about", "statement", "organization"),
+        ("partOf", "area", "software_application"),
+    ] {
+        let want = (
+            NodeVocabulary::key(want.0),
+            NodeVocabulary::key(want.1),
+            NodeVocabulary::key(want.2),
+        );
+        assert!(triples.contains(&want), "missing {want:?}");
+    }
+    assert!(!triples.iter().any(|t| t.0 == "handoffFor"));
 }
 
 #[test]

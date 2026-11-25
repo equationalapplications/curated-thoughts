@@ -1027,6 +1027,24 @@ fn refresh_edge_triple(entry: &serde_json::Value) -> Option<(String, String, Str
     Some((field("type"), field("source_type"), field("target_type")))
 }
 
+/// The manifest's declared edge triples as membership keys (impl-review owxi
+/// consumer: the re-type's parent-family drop decision consults this set).
+/// Malformed JSON errors; a missing `edge_types` key declares nothing.
+pub(crate) fn declared_edge_triples(
+    manifest_json: &str,
+) -> Result<std::collections::HashSet<(String, String, String)>> {
+    let root: serde_json::Value = serde_json::from_str(manifest_json)?;
+    let mut out = std::collections::HashSet::new();
+    if let Some(edges) = root.get("edge_types").and_then(|v| v.as_array()) {
+        for e in edges {
+            if let Some(t) = refresh_edge_triple(e) {
+                out.insert(t);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The sso9 manifest MERGE refresh's pure planner (plan Task 4d). Eligible
 /// (Q12) = the manifest declares every OLD 17-slug EA type. Edits, and
 /// nothing else: drop `handoff`/`session_recap` nodes and `handoffFor` edges;
@@ -1084,6 +1102,15 @@ pub(crate) fn plan_sso9_manifest_refresh(manifest_json: &str) -> Result<RefreshP
 
     // Edge types: remove `handoffFor`, add the new shapes (any vendored edge
     // touching one of the added node types) not already declared.
+    // Impl-review (owx8 / E2 gap): an eligible manifest may predate the
+    // `edge_types` key entirely (`parse_manifest_value` reads it as an empty
+    // list). Without initialization the merge below is skipped wholesale and
+    // the stamped manifest lacks all four required new shapes — `partOf`
+    // included. Initialize to an empty array; existing arrays keep their
+    // merge behavior.
+    if root.get("edge_types").is_none() {
+        root["edge_types"] = serde_json::json!([]);
+    }
     if let Some(edges) = root.get_mut("edge_types").and_then(|v| v.as_array_mut()) {
         let removed_edge = NodeVocabulary::key(SSO9_REMOVED_EDGE_TYPE);
         edges.retain(|e| refresh_entry_key(e).is_none_or(|k| k != removed_edge));
@@ -1218,6 +1245,56 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
         tx.commit()?;
         Ok(EnsureOutcome::AlreadyComplete)
     }
+}
+
+/// sso9 impl-review (owxz): fold the ensure planner's edits into a freshly
+/// refreshed manifest INSIDE the caller's refresh transaction, so the
+/// manifest and its required ensure edits commit together. Running the ensure
+/// as a separate best-effort pass after the stamp left a crash-or-error window
+/// where the refresh slot was stamped with the ensure skipped — and the next
+/// `migrate_open_db` short-circuits on the stamp, so a refreshed strict
+/// manifest could sit without its declared fallback forever.
+///
+/// Mirrors `ensure_manifest_vocabulary` steps 2–4 minus the write: plan on the
+/// refreshed bytes, record the memo for the FOLDED bytes (so the post-commit
+/// belt-and-suspenders ensure pass short-circuits to `AlreadyEnsured`), and
+/// return them for the caller's CAS UPDATE. Any error propagates so the
+/// refresh transaction rolls back and the next open retries the whole step.
+/// `UnusableVocabulary` is NOT fatal — the same reported-loudly outcome the
+/// ensure loop itself produces (the row is left for heal / the desktop pass),
+/// never memoized so the pass re-reports.
+pub(crate) fn fold_sso9_ensure(
+    conn: &Connection,
+    entity_id: &str,
+    refreshed_json: &str,
+) -> Result<String> {
+    let mode: Option<String> = conn
+        .query_row(
+            "SELECT mode FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
+            [entity_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(mode) = mode else {
+        return Ok(refreshed_json.to_string());
+    };
+    let gated_mode = gated_row_mode(conn, entity_id, &mode)?;
+    let strict = gated_mode == "strict";
+    let new_json = match plan_manifest_ensure(refreshed_json, entity_id, strict)? {
+        EnsurePlan::Malformed(e) => {
+            anyhow::bail!("sso9 ensure fold ({entity_id}): refreshed manifest malformed: {e}")
+        }
+        EnsurePlan::ForeignNoPreferredFallback => refreshed_json.to_string(),
+        EnsurePlan::UnusableVocabulary { reason } => {
+            eprintln!("[entity-gate] manifest `{entity_id}` cannot gate: {reason}");
+            return Ok(refreshed_json.to_string());
+        }
+        EnsurePlan::Complete => refreshed_json.to_string(),
+        EnsurePlan::Edit { new_json, .. } => new_json,
+    };
+    let hash = ensure_memo_key(gated_mode, &new_json);
+    record_ensure_memo(conn, entity_id, &hash)?;
+    Ok(new_json)
 }
 
 /// What `ensure_manifest_vocabulary` did — surfaced so callers can log and
