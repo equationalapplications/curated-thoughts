@@ -520,6 +520,102 @@ mod tests {
         );
     }
 
+    /// Removals are not landings: true when EVERY occurrence of EITHER
+    /// vector column (`embedding_blob`, `embedding`) in `stmt` is a bare
+    /// `<column> = NULL` assignment (assignment ends at the boundary).
+    /// Scope: this exemption applies to ANY production statement that only
+    /// NULLs vector columns — today that is the confirmed-removal purge
+    /// statement in the resurrect-trigger format string inside
+    /// `apply_llm_wiki_resurrect_trigger` (`okf_ddl.rs`, hand-written,
+    /// deliberately outside the verbatim `LLM_WIKI_PACKAGE_DDL`) — NOT a
+    /// statement inside the const itself; the const contains no such
+    /// literal. Any value write of either column (`embedding = ?`,
+    /// `NULLIF(...)`, `NULL_integer`, `NULL IS NULL`) makes this false and
+    /// the statement a landing.
+    fn removals_only_statement(stmt: &str) -> bool {
+        for column in ["embedding_blob", "embedding"] {
+            let mut scan = stmt;
+            loop {
+                match scan.find(column) {
+                    None => break,
+                    Some(i) => {
+                        let rest = &scan[i..];
+                        // Longer-identifier guard: `embedding` also matches
+                        // inside `embedding_blob` — an occurrence that
+                        // continues into a longer identifier is neither a
+                        // write of THIS column nor a failure; skip it.
+                        let col_after = rest[column.len()..].chars().next();
+                        if matches!(col_after, Some(c) if c.is_ascii_alphanumeric() || c == '_') {
+                            scan = &rest[column.len()..];
+                            continue;
+                        }
+                        let stamped = format!("{column} = NULL");
+                        if !rest.starts_with(&stamped) {
+                            return false;
+                        }
+                        // Token boundary: the assignment must END at the NULL.
+                        // `NULL IS NULL` evaluates to 1 — a non-NULL VALUE
+                        // write — so operator/keyword continuations are
+                        // rejected. Allowed continuations: end of string,
+                        // `,`, the `{` placeholder, `;`, or `WHERE` (the
+                        // resurrect trigger's format string uses
+                        // `NULL{} WHERE`). ASSUMPTION: a `{…}` after `= NULL`
+                        // expands to removal text, never a vector value —
+                        // true for the one caller today; revisit if another
+                        // interpolated NULL assignment appears.
+                        let after = rest[stamped.len()..].trim_start();
+                        match after.chars().next() {
+                            None => {}
+                            Some(',') | Some('{') | Some(';') => {}
+                            Some('W') | Some('w')
+                                if after.starts_with("WHERE") || after.starts_with("where") => {}
+                            _ => return false,
+                        }
+                        scan = &rest[stamped.len()..];
+                    }
+                }
+            }
+        }
+        // Every occurrence of every vector column was a token-boundary
+        // `= NULL` — nothing lands.
+        true
+    }
+
+    #[test]
+    fn removals_only_statement_pins_the_mixed_and_boundary_cases() {
+        // Package-owned confirmed-removal trigger body: both columns NULLed
+        // with a format placeholder after — a removal, stays exempt.
+        assert!(removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding_blob = NULL, embedding = NULL{} WHERE id = NEW.id AND EXISTS (SELECT 1 FROM llm_wiki_vector_removals WHERE fact_id = NEW.id AND confirmed_at IS NOT NULL);"
+        ));
+        // The haiku-r3 scenario: blob NULLed but `embedding` VALUE-written —
+        // lands a vector, must NOT be exempt.
+        assert!(!removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding_blob = NULL, embedding = ? WHERE id = ?"
+        ));
+        // NULL-prefixed tokens are VALUE writes.
+        assert!(!removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding = NULLIF(?, '')"
+        ));
+        // `NULL IS NULL` evaluates to 1 — a non-NULL VALUE write despite the
+        // literal `NULL` (CodeRabbit round on d75ca75b): must NOT be exempt.
+        assert!(!removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding_blob = NULL IS NULL WHERE id = ?1"
+        ));
+        assert!(!removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding = NULL_integer"
+        ));
+        // `embedding` occurrences inside `embedding_blob` are skipped, not
+        // misclassified; a lone `embedding_failed_at` mention is neither.
+        assert!(removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding = NULL, embedding_failed_at = 1"
+        ));
+        // A plain landing is a writer.
+        assert!(!removals_only_statement(
+            "INSERT INTO llm_wiki_entries (id, embedding_blob, embed_scheme) VALUES (?1, ?2, ?3)"
+        ));
+    }
+
     #[test]
     fn writer_inventory_every_embedding_blob_write_stamps_embed_scheme() {
         // Plan-review F4 (docs/superpowers/plans/2026-10-07-issue265-wisdom-
@@ -536,9 +632,10 @@ mod tests {
         for (rel, lits) in production_literals() {
             for lit in lits {
                 let t = &lit.text;
+                let removals_only = removals_only_statement(t);
                 let targets_entries = t.contains("INSERT INTO llm_wiki_entries")
                     || t.contains("UPDATE llm_wiki_entries");
-                if !(targets_entries && t.contains("embedding_blob")) {
+                if !(targets_entries && t.contains("embedding_blob")) || removals_only {
                     continue;
                 }
                 writers += 1;

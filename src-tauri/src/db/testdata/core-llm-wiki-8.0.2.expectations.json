@@ -1,0 +1,139 @@
+[
+  {
+    "name": "llm_wiki_entries",
+    "columns": [
+      "id",
+      "entity_id",
+      "title",
+      "body",
+      "tags",
+      "confidence",
+      "source_type",
+      "source_hash",
+      "source_ref",
+      "created_at",
+      "updated_at",
+      "last_accessed_at",
+      "access_count",
+      "deleted_at",
+      "embedding",
+      "embedding_blob",
+      "okf_type",
+      "ontology_checked_at",
+      "heal_checked_at",
+      "lifecycle_status",
+      "stale_after",
+      "generated_by",
+      "last_verified_at",
+      "last_verified_by",
+      "okf_sources",
+      "okf_verified",
+      "okf_usage_window",
+      "embedding_failed_at",
+      "embedding_failure_kind",
+      "embedding_attempts",
+      "valid_from",
+      "valid_to",
+      "superseded_by",
+      "superseded_at",
+      "tier",
+      "embed_scheme",
+      "area"
+    ]
+  },
+  {
+    "name": "llm_wiki_tasks",
+    "columns": [
+      "id",
+      "entity_id",
+      "description",
+      "status",
+      "priority",
+      "created_at",
+      "updated_at",
+      "resolved_at",
+      "deleted_at",
+      "okf_type",
+      "lifecycle_status",
+      "stale_after",
+      "generated_by",
+      "last_verified_at",
+      "last_verified_by",
+      "okf_sources",
+      "okf_verified",
+      "okf_usage_window"
+    ]
+  },
+  {
+    "name": "llm_wiki_source_ref_index",
+    "columns": [
+      "id",
+      "entity_id",
+      "source_hash",
+      "source_ref",
+      "created_at",
+      "deleted_at"
+    ]
+  },
+  {
+    "name": "llm_wiki_events",
+    "columns": [
+      "id",
+      "entity_id",
+      "event_type",
+      "summary",
+      "related_entry_id",
+      "created_at",
+      "occurred_at"
+    ]
+  },
+  {
+    "name": "llm_wiki_checkpoints",
+    "columns": [
+      "entity_id",
+      "heal_checkpoint",
+      "memory_checkpoint",
+      "librarian_watermark_at",
+      "librarian_watermark_id"
+    ]
+  },
+  {
+    "name": "llm_wiki_meta",
+    "columns": [
+      "key",
+      "value"
+    ]
+  },
+  {
+    "name": "llm_wiki_outbox",
+    "columns": [
+      "id",
+      "entity_id",
+      "table_name",
+      "record_id",
+      "operation",
+      "payload",
+      "created_at"
+    ]
+  },
+  {
+    "name": "llm_wiki_edges",
+    "columns": [
+      "id",
+      "entity_id",
+      "source_id",
+      "target_id",
+      "edge_type",
+      "created_at"
+    ]
+  },
+  {
+    "name": "llm_wiki_entity_manifests",
+    "columns": [
+      "entity_id",
+      "mode",
+      "manifest_json",
+      "updated_at"
+    ]
+  }
+]

@@ -1,6 +1,6 @@
 # Spec: engine 9.x adoption (expo-llm-wiki 8.0.2 → 9.18.0)
 
-Status: Approved 2026-11-24 (Kurt — all three disclosed items accepted; unbounded vector_removals follow-up: expo-llm-wiki#487). PR-A (sso 9.x readiness): Implemented 2026-11-24 on chore/sso-9x-readiness. PR-B (core bump + DDL regen + ddl_compat extractor): pending.
+Status: Implemented 2026-11-25 (approved 2026-11-24 — Kurt accepted all three disclosed items; unbounded vector_removals follow-up: expo-llm-wiki#487). PR-A (sso 9.x readiness): Implemented 2026-11-24 on chore/sso-9x-readiness. PR-B (core bump + DDL regen + ddl_compat extractor): Implemented 2026-11-25 on chore/engine-9x-prb.
 Owner: Kurt VanDusen / Hermes Agent
 Date: 2026-11-24
 Related issues: #342 (vector_removals ledger, non-blocking), #348 (sso 9.x node types, blocking), #353 (source_pointer mirror, blocking for the guard).
@@ -231,3 +231,38 @@ PR-A tests:
   manifest is repaired. An owner-row manifest read error falls through with
   a WARN, mirroring the gate's own Err leg (round-3 fold t93k). This trade
   is owner-confirmed as intended.
+- **E8 (PR-B parity-test definition — controller ruling Q6, 2026-11-25):**
+  spec §5 test 6 "must be identical" is implemented as: equal table/index/
+  trigger NAME sets; index + trigger SQL equal after
+  `normalize_ddl_statement`; per-table `PRAGMA table_info` equal as a
+  name-keyed map of `(type, notnull, dflt_value, pk)` (cid excluded — ALTER
+  appends columns after CT-local `tier`/`embed_scheme`/`area` while fresh
+  brains carry them inline, so literal sqlite_master/cid equality is
+  unachievable by construction); table SQL equal (normalized) for every
+  table PR-B does not ALTER; plus a helper-presence assertion (parity alone
+  cannot catch an object neither path creates).
+- **E9 (PR-B delete-site line drift — controller ruling Q11, 2026-11-25):**
+  the §3 PR-B step-6 cites drifted with #369's merge: `commit.rs:616` →
+  `:634`; `bundle_apply.rs:982` → `:1017`. `queries.rs:227` matches.
+- **E10 (PR-B test-fixture form + vault-switch debt — T4 r2 m5/m3,
+  2026-11-25):** spec §5 test 3 described building the fixture DB at test
+  time from an 8.0.2 DDL text snapshot. As shipped, the fixture is a frozen
+  binary brain (`ct-brain-v32-core-8.0.2.db`, provenance + regeneration
+  recipe in `src-tauri/src/db/testdata/README.md`); the DDL-text-snapshot
+  artifact was dropped as unused (the drift anchor is the Rust-generated
+  `ct-engine9-migrated.llm_wiki.schema.sql`, drift-tested every gate run).
+  Recorded debt (latent until a consumer is adopted; fold then, not now):
+  (a) `clear_vault_tables` (`queries.rs`) does not yet clear the new
+  `llm_wiki_source_documents` / `llm_wiki_source_passages` tables — vault
+  switches would leak verbatim source text across vaults (#213 per-vault
+  rule); (b) `forgotten_at` is mirrored but NOT honoured by any Rust reader
+  of `llm_wiki_events` (the engine filters `forgotten_at IS NULL` in 11
+  places) — Rust MCP/recall reads would serve forgotten events once
+  something calls `forget()`; (c) the new entries columns (`source_pointer`,
+  `prior_valid_to`, `derived_events`) are dropped by the wipe-and-reinsert
+  path (`clear_one_entity_content` + re-insert discards engine-written
+  values); (d) `llm_wiki_vector_removals` deliberately stays OUT of the
+  vault-clear list: with the marker unset the hard-delete trigger empties
+  it, and with `external_index_in_use` set the outgoing vault's rows
+  survive the switch BY DESIGN (pinned by the T9 tests) — recorded here as
+  the #213 decision.
