@@ -20,22 +20,62 @@ pub fn split_ddl_statements(batch: &str) -> Vec<String> {
 }
 
 /// Extract setupDatabase DDL from core-llm-wiki dist/index.js, substituting `prefix`.
+///
+/// Collects EVERY `` await db.execAsync(` `` template block inside the body of
+/// `setupDatabase`, in order (9.x ships two; 8.0.2 shipped one). The body is
+/// bounded by the first line after the marker that is exactly `}` at column
+/// 0 — the dist's function-close shape — so the `execAsync` calls inside the
+/// helper functions that follow (`create…IfColumnsExist`, created OUTSIDE the
+/// template) are excluded. Each block closes at its own closing backtick +
+/// `);`. Blocks are split independently and concatenated.
 pub fn extract_setup_database_ddl(js: &str, prefix: &str) -> Vec<String> {
-    let marker = "async function setupDatabase(db, prefix)";
+    const MARKER: &str = "async function setupDatabase(db, prefix)";
+    const OPEN: &str = "await db.execAsync(`";
+    const CLOSE: &str = "`);";
+
     let base = js
-        .find(marker)
-        .expect("setupDatabase not found in package index.js");
-    let rel = js[base..]
-        .find("await db.execAsync(`")
-        .expect("setupDatabase execAsync block not found");
-    let start = base + rel + "await db.execAsync(`".len();
-    let end = js[start..]
-        .find("  `);")
-        .map(|i| start + i)
-        .expect("setupDatabase execAsync closing not found");
-    let template = &js[start..end];
-    let substituted = template.replace("${prefix}", prefix);
-    split_ddl_statements(&substituted)
+        .find(MARKER)
+        .expect("setupDatabase not found in package index.js (marker missing)");
+    let after_marker = base + MARKER.len();
+    let body_end = {
+        let mut offset = after_marker;
+        let mut found = None;
+        for line in js[after_marker..].split_inclusive('\n') {
+            if line.trim_end_matches(['\n', '\r']) == "}" {
+                found = Some(offset);
+                break;
+            }
+            offset += line.len();
+        }
+        found.expect("setupDatabase body end not found (no column-0 `}` line after the marker)")
+    };
+    let body = &js[after_marker..body_end];
+
+    let mut statements = Vec::new();
+    let mut blocks = 0usize;
+    let mut cursor = 0usize;
+    while let Some(rel) = body[cursor..].find(OPEN) {
+        let start = cursor + rel + OPEN.len();
+        let end = body[start..]
+            .find(CLOSE)
+            .map(|i| start + i)
+            .unwrap_or_else(|| {
+                panic!(
+                    "unterminated execAsync template block #{} inside setupDatabase \
+                     (no closing backtick + `);` before the body end)",
+                    blocks + 1
+                )
+            });
+        let substituted = body[start..end].replace("${prefix}", prefix);
+        statements.extend(split_ddl_statements(&substituted));
+        blocks += 1;
+        cursor = end + CLOSE.len();
+    }
+    assert!(
+        blocks > 0,
+        "setupDatabase has zero execAsync template blocks inside its body"
+    );
+    statements
 }
 
 /// Compare Rust constants against the pinned package; returns Ok or a human-readable diff.
@@ -165,6 +205,202 @@ mod tests {
     #[test]
     fn rust_llm_wiki_ddl_matches_core_llm_wiki_package() {
         package_ddl_matches_rust().expect("DDL drift — update okf_ddl.rs or pin package version");
+    }
+
+    /// Two `execAsync` template blocks inside `setupDatabase`, a non-exec
+    /// helper call between them, and a following helper function whose own
+    /// `execAsync` must NOT be picked up (the 9.x dist shape, spec step 7).
+    const TWO_BLOCK_JS: &str = r#"
+function unrelated() {
+  return 1;
+}
+
+// src/db/schema.ts
+async function setupDatabase(db, prefix) {
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS ${prefix}alpha (
+      id TEXT PRIMARY KEY,
+      body TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ${prefix}beta (
+      id TEXT PRIMARY KEY
+    );
+  `);
+  await createXIfColumnsExist(db, prefix);
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS ${prefix}gamma (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entry_id TEXT NOT NULL,
+      processed_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS ${prefix}gamma_pending_idx
+      ON ${prefix}gamma (entry_id) WHERE processed_at IS NULL;
+
+    CREATE TRIGGER IF NOT EXISTS ${prefix}alpha_gamma_trg
+      AFTER DELETE ON ${prefix}alpha
+    BEGIN
+      INSERT INTO ${prefix}gamma (entry_id) VALUES (OLD.id);
+    END;
+  `);
+}
+async function createXIfColumnsExist(db, prefix) {
+  await db.execAsync(`CREATE INDEX IF NOT EXISTS ${prefix}helper_idx ON ${prefix}alpha(body);`);
+}
+"#;
+
+    /// The 8.0.2 dist shape: one template block, then helper calls.
+    const ONE_BLOCK_JS: &str = r#"
+async function setupDatabase(db, prefix) {
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS ${prefix}alpha (
+      id TEXT PRIMARY KEY
+    );
+
+    CREATE INDEX IF NOT EXISTS ${prefix}alpha_id
+      ON ${prefix}alpha (id);
+  `);
+  await createXIfColumnsExist(db, prefix);
+}
+async function createXIfColumnsExist(db, prefix) {
+  await db.execAsync(`CREATE INDEX IF NOT EXISTS ${prefix}helper_idx ON ${prefix}alpha(id);`);
+}
+"#;
+
+    /// Rust-side text equivalent to `TWO_BLOCK_JS` block 1 + block 2 with
+    /// the `p_` prefix applied (the `LLM_WIKI_PACKAGE_DDL` shape).
+    const TWO_BLOCK_RUST: &str = r#"
+    CREATE TABLE IF NOT EXISTS p_alpha (
+      id TEXT PRIMARY KEY,
+      body TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS p_beta (
+      id TEXT PRIMARY KEY
+    );
+
+    CREATE TABLE IF NOT EXISTS p_gamma (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entry_id TEXT NOT NULL,
+      processed_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS p_gamma_pending_idx
+      ON p_gamma (entry_id) WHERE processed_at IS NULL;
+
+    CREATE TRIGGER IF NOT EXISTS p_alpha_gamma_trg
+      AFTER DELETE ON p_alpha
+    BEGIN
+      INSERT INTO p_gamma (entry_id) VALUES (OLD.id);
+    END;
+"#;
+
+    #[test]
+    fn extract_concatenates_every_exec_block_inside_setup_database() {
+        let got = extract_setup_database_ddl(TWO_BLOCK_JS, "p_");
+        assert_eq!(
+            got,
+            vec![
+                "CREATE TABLE IF NOT EXISTS p_alpha ( id TEXT PRIMARY KEY, body TEXT NOT NULL )",
+                "CREATE TABLE IF NOT EXISTS p_beta ( id TEXT PRIMARY KEY )",
+                "CREATE TABLE IF NOT EXISTS p_gamma ( id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                 entry_id TEXT NOT NULL, processed_at INTEGER )",
+                "CREATE INDEX IF NOT EXISTS p_gamma_pending_idx ON p_gamma (entry_id) \
+                 WHERE processed_at IS NULL",
+                "CREATE TRIGGER IF NOT EXISTS p_alpha_gamma_trg AFTER DELETE ON p_alpha \
+                 BEGIN INSERT INTO p_gamma (entry_id) VALUES (OLD.id)",
+                "END",
+            ],
+            "block 1 + block 2, in order, prefix substituted"
+        );
+        assert!(
+            got.iter().all(|s| !s.contains("${prefix}")),
+            "prefix must be substituted everywhere: {got:?}"
+        );
+        assert!(
+            got.iter().all(|s| !s.contains("helper_idx")),
+            "helper-function execAsync outside setupDatabase must be excluded: {got:?}"
+        );
+    }
+
+    /// Regression pin: on the single-block (8.0.2) shape the extended
+    /// extractor returns exactly what the original first-block extractor did.
+    #[test]
+    fn extract_single_block_shape_unchanged() {
+        assert_eq!(
+            extract_setup_database_ddl(ONE_BLOCK_JS, "p_"),
+            vec![
+                "CREATE TABLE IF NOT EXISTS p_alpha ( id TEXT PRIMARY KEY )",
+                "CREATE INDEX IF NOT EXISTS p_alpha_id ON p_alpha (id)",
+            ]
+        );
+    }
+
+    /// Spec 7(b): a `CREATE TRIGGER … BEGIN …; END;` body fragments into the
+    /// SAME pieces on the package side (extractor) and the Rust side
+    /// (`split_ddl_statements` over the const text): `…; END` → two fragments.
+    #[test]
+    fn trigger_fragments_identically_on_package_and_rust_sides() {
+        let expected_trigger_fragments = vec![
+            "CREATE TRIGGER IF NOT EXISTS p_alpha_gamma_trg AFTER DELETE ON p_alpha \
+             BEGIN INSERT INTO p_gamma (entry_id) VALUES (OLD.id)"
+                .to_string(),
+            "END".to_string(),
+        ];
+        let trigger_tail = |v: Vec<String>| -> Vec<String> {
+            let i = v
+                .iter()
+                .position(|s| s.starts_with("CREATE TRIGGER"))
+                .unwrap_or_else(|| panic!("no CREATE TRIGGER fragment in {v:?}"));
+            v[i..].to_vec()
+        };
+        let package = extract_setup_database_ddl(TWO_BLOCK_JS, "p_");
+        let rust = split_ddl_statements(TWO_BLOCK_RUST);
+        assert_eq!(trigger_tail(package.clone()), expected_trigger_fragments);
+        assert_eq!(trigger_tail(rust.clone()), expected_trigger_fragments);
+        assert_eq!(package, rust, "whole package/Rust statement lists must match");
+    }
+
+    /// A one-line block (`execAsync(\`…;\`);`) inside setupDatabase closes at
+    /// its own backtick, not at a later block's two-space-indented close.
+    #[test]
+    fn extract_handles_one_line_block_inside_setup_database() {
+        let js = "async function setupDatabase(db, prefix) {\n\
+                  \x20 await db.execAsync(`CREATE TABLE IF NOT EXISTS ${prefix}solo (id TEXT);`);\n\
+                  }\n\
+                  async function helper(db, prefix) {\n\
+                  \x20 await db.execAsync(`\n    CREATE INDEX IF NOT EXISTS ${prefix}helper_idx ON x(id);\n  `);\n\
+                  }\n";
+        assert_eq!(
+            extract_setup_database_ddl(js, "p_"),
+            vec!["CREATE TABLE IF NOT EXISTS p_solo (id TEXT)"]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "setupDatabase not found")]
+    fn extract_panics_when_marker_missing() {
+        extract_setup_database_ddl("async function other(db, prefix) {\n}\n", "p_");
+    }
+
+    #[test]
+    #[should_panic(expected = "zero execAsync template blocks")]
+    fn extract_panics_when_setup_database_has_no_block() {
+        extract_setup_database_ddl(
+            "async function setupDatabase(db, prefix) {\n  await other(db);\n}\n\
+             async function h(db, prefix) {\n  await db.execAsync(`CREATE TABLE x (a);`);\n}\n",
+            "p_",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unterminated execAsync template block")]
+    fn extract_panics_on_unterminated_block() {
+        extract_setup_database_ddl(
+            "async function setupDatabase(db, prefix) {\n  await db.execAsync(`\n    CREATE TABLE x (a);\n}\n",
+            "p_",
+        );
     }
 
     #[test]
