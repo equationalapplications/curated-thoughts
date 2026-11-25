@@ -29,3 +29,9 @@ rejects.
 ## `schema-software-org-8.0.2.manifest.json`
 Frozen sso 8.0.2 manifest captured during the PR-A lane (#369, T1 step 1);
 diff baseline for the sso9 re-type tests.
+
+## Line endings
+
+`testdata/*.sql` is pinned to LF via `.gitattributes` (the Rust drift gate
+byte-compares it). Windows clones created before that attribute landed need
+one re-checkout: `git rm --cached -r src-tauri/src/db/testdata && git reset --hard`.
