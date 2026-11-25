@@ -713,7 +713,7 @@ git commit -m "test: desktop-upgrade path over an FTS-carrying 8.0.2 brain (#376
 > testdata README + gitignored gen script.
 ### Task 11: Gates + wrap
 
-- [ ] **Step 1: Full wrapped gate chain** (mount guard first; ~cold):
+- [x] **Step 1: Full wrapped gate chain** (mount guard first; ~cold):
 
 ```bash
 mountpoint -q /mnt/kv-work && [ "$(df --output=avail -BG /mnt/kv-work | tail -1 | tr -dc 0-9)" -ge 30 ] \
@@ -730,6 +730,14 @@ mountpoint -q /mnt/kv-work && [ "$(df --output=avail -BG /mnt/kv-work | tail -1 
 awk '/test result:/' /mnt/kv-work/scratch/tmp/t11-gates.log
 ```
 
-- [ ] **Step 2: Vitest + tsc** (`pnpm test`, `pnpm tsc --noEmit` or the repo's script) — green.
-- [ ] **Step 3: Post-run sweep** — prune the debuginfo-era artifacts if any mixed-profile dirs appeared; `df -h /mnt/kv-work` recorded.
-- [ ] **Step 4: Push; ladder review (Opus → Fable) on the PR; CI green; owner go → merge-commit ONLY; prune plan + spec per convention at the cleanup commit; records to the vault.**
+- [x] **Step 2: Vitest + tsc** (`pnpm test`, `pnpm tsc --noEmit` or the repo's script) — green.
+- [x] **Step 3: Post-run sweep** — prune the debuginfo-era artifacts if any mixed-profile dirs appeared; `df -h /mnt/kv-work` recorded.
+- [x] **Step 4: Push; ladder review (Opus → Fable) on the PR; CI green; owner go → merge-commit ONLY; prune plan + spec per convention at the cleanup commit; records to the vault.**
+
+
+> **Task 11 closeout (controller-run, 2026-11-25 18:29):** full wrapped chain under
+> heavy-build, HEAVY_EXIT=0, zero FAIL markers (task11-gates.log): clippy src-tauri
+> (test-utils,mcp-server) + tools EXIT 0; src-tauri full suite **lib 1744 passed / 0 failed**
+> (base 1735, net +9 = exactly the landed test count); 108 result lines all ok (~2374 tests
+> total incl. integration); vitest EXIT 0; tsc EXIT 0. Review package:
+> review-9f26681..<head>.diff in the SDD dir; ladder next (Opus → Fable per plan Step 4).

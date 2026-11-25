@@ -1,6 +1,6 @@
 # Spec: engine-9.x follow-ups (vault-switch residue + drift gate + hygiene) — issue #376
 
-**Status:** Draft for owner review · **Branch:** `chore/engine9x-followups`
+**Status:** Owner-approved (Q5–Q9, 2026-11-25) · implemented on this branch, stage-close review in flight · **Branch:** `chore/engine9x-followups`
 **Backbone:** `specs/engine9x-followups/investigation.md` (same dir) — 8 review rounds (Opus medium/low, Fable step-0 + 4 deltas, final Opus consistency), every premise verified against the tree at `10e9b006` and the installed 9.18.0 dist. Line cites refer to that base.
 
 ## 1. Problem

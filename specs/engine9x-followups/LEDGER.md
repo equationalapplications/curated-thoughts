@@ -28,3 +28,8 @@ Execution: SDD controller loop, implementers = Claude Code sonnet/low (default-i
 | 8 — S6 brain-wide guard | DONE | `7a4291fb` | guard 1 passed (controller re-run); clippy ×2 exit 0 | EXEMPT entries verified live (schema.rs base DDL); limit ledgered: guard sees in-memory-chain tables only — real-brain-only shapes ride the TS fixtures |
 | 9 — S8 TS drift gate | DONE | `3f30aa60` | 5/5 vitest (controller re-run); tsc clean; negative control FAIL confirmed on a perturbed dump | Gate caught the source-passages FTS5 family in flight → ruled into FTS_FAMILY (dist 2432-2451 evidence); implementer correctly refused to self-grow sets; $0.15 + $0.30 (stop + resume) |
 | 10 — S9 FTS fixture + upgrade tests | DONE | `e333d281` | TS 6 passed; Rust mirror-over-FTS 1 passed (controller re-ran both); clippy ×2; strings hygiene 0; gitleaks clean | Fixture engine-only → Rust test stamps CT schema_version 32 pre-mirror (accepted); harness inline in README |
+
+## Stage: IMPLEMENTATION COMPLETE (2026-11-25 18:29) — review in flight
+- Wrapped gate chain (heavy-build, task11-gates.log): clippy ×2 EXIT 0; src-tauri full suite **lib 1744/0** (base 1735, net +9 = exactly the landed tests); 108 result lines all ok; vitest EXIT 0; tsc EXIT 0.
+- Range under review: `9f266816..HEAD` (all code commits; spec+plan already reviewed in planning).
+- Ladder per plan Task 11 Step 4: Opus (T3) → Fable (T4); CodeRabbit active on PR #379. SoR remains suspended (Kurt 2026-11-14).
