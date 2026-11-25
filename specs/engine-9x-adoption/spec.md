@@ -1,6 +1,6 @@
 # Spec: engine 9.x adoption (expo-llm-wiki 8.0.2 → 9.18.0)
 
-Status: Approved 2026-11-24 (Kurt — all three disclosed items accepted; unbounded vector_removals follow-up: expo-llm-wiki#487). PR-A (sso 9.x readiness): Implemented 2026-11-24 on chore/sso-9x-readiness. PR-B (core bump + DDL regen + ddl_compat extractor): pending.
+Status: Approved 2026-11-24 (Kurt — all three disclosed items accepted; unbounded vector_removals follow-up: expo-llm-wiki#487). PR-A (sso 9.x readiness): Implemented 2026-11-24 on chore/sso-9x-readiness. PR-B (core bump + DDL regen + ddl_compat extractor): Implemented 2026-11-25 on chore/engine-9x-prb.
 Owner: Kurt VanDusen / Hermes Agent
 Date: 2026-11-24
 Related issues: #342 (vector_removals ledger, non-blocking), #348 (sso 9.x node types, blocking), #353 (source_pointer mirror, blocking for the guard).
@@ -231,3 +231,16 @@ PR-A tests:
   manifest is repaired. An owner-row manifest read error falls through with
   a WARN, mirroring the gate's own Err leg (round-3 fold t93k). This trade
   is owner-confirmed as intended.
+- **E8 (PR-B parity-test definition — controller ruling Q6, 2026-11-25):**
+  spec §5 test 6 "must be identical" is implemented as: equal table/index/
+  trigger NAME sets; index + trigger SQL equal after
+  `normalize_ddl_statement`; per-table `PRAGMA table_info` equal as a
+  name-keyed map of `(type, notnull, dflt_value, pk)` (cid excluded — ALTER
+  appends columns after CT-local `tier`/`embed_scheme`/`area` while fresh
+  brains carry them inline, so literal sqlite_master/cid equality is
+  unachievable by construction); table SQL equal (normalized) for every
+  table PR-B does not ALTER; plus a helper-presence assertion (parity alone
+  cannot catch an object neither path creates).
+- **E9 (PR-B delete-site line drift — controller ruling Q11, 2026-11-25):**
+  the §3 PR-B step-6 cites drifted with #369's merge: `commit.rs:616` →
+  `:634`; `bundle_apply.rs:982` → `:1017`. `queries.rs:227` matches.
