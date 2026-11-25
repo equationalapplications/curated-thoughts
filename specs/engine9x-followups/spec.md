@@ -92,12 +92,21 @@ regardless of root, delta-r3 M3).
   only vault files; B's first ingest must not run against empty
   `queue_denials`/`deposit_attribution` (verified consumers:
   `queue.rs:347/:361`).
-- Run 2 — confirmations leg only, after ingest. The spec MUST name the
-  trigger (recommended: first full-scan-completion signal from the
-  existing pipeline watchdog/event path; fallback: drain of the ingest
-  queue). Re-run is safe (truncate-and-rebuild) and loses no live-written
+- Run 2 — confirmations leg only, after ingest, via a **worker-side drain
+  hook (a barrier that is ADDED — verified: no completion event exists to
+  hook; the pipeline is a single worker thread draining a synced channel
+  with `pending: Arc<AtomicUsize>` decremented per counted job,
+  `pipeline/mod.rs:84-146`, and ingest is event-driven via
+  `enqueue_vault_event`, so no "initial full scan" barrier exists).** The
+  worker, after completing a counted job, when `pending` transitions to 0
+  AND the channel stays empty through a short drain probe
+  (`recv_timeout` window), executes the confirmations-only leg (new narrow
+  entry point on `stated_ledger`; `PipelineJob` itself is unchanged).
+  Re-run is idempotent (truncate-and-rebuild) and loses no live-written
   row (`queue.rs:753-775` appends to the vault ledger before the table
-  insert). Stamp untouched throughout.
+  insert); the hook fires on EVERY 1→0 drain crossing (debounced by the
+  probe), so entries created by late-arriving jobs are stamped on the next
+  crossing. Stamp untouched throughout.
 - Restore branch: the sweep never runs there; only the root fix acts, and
   only on stale backups. **Pre-V5 backups are declared unsupported**
   (error message points at re-creating the vault) rather than widening the
@@ -130,15 +139,26 @@ lane.
 Extend `engine9-setup-compat.test.ts`: after `setup()`, compare
 whitespace-normalized `sqlite_master.sql` for INDEX and TRIGGER objects
 between `rustChainDb()` and a fresh engine-only brain (tables excluded —
-ALTER-added columns change stored CREATE TABLE text). Normalized comparison
-(template-gate precedent, `normalize_ddl_statement` spirit). Documented
-residual (coverage matrix in the investigation): v12 DROP behavior and
-unbuilt conditional variants (resurrect levels 0/1, column guards) are NOT
+ALTER-added columns change stored CREATE TABLE text). **Engine-ownership
+filter (CodeRabbit thread): the fresh engine-only brain's index/trigger
+name set is the ground truth for what the diff covers.** An object present
+in the engine brain is ENGINE-OWNED: missing from the rust brain, or
+present with a drifted body → FAIL. An `llm_wiki_*`-prefixed object on the
+rust side that is ABSENT from the engine brain is CT-OWNED and must appear
+on an explicit allow-list in the test (expected members: the
+`llm_wiki_vector_removals*` trigger/index family — marker-gated, CT-owned
+per #213/T9; the plan-time check enumerates rust-side-only llm_wiki
+objects on a built brain to prove the allow-list is complete — an
+unlisted object FAILS). Non-`llm_wiki` objects (CT-local tables/indexes)
+are outside the diff entirely. Normalized comparison (template-gate
+precedent, `normalize_ddl_statement` spirit). Documented residual
+(coverage matrix in the investigation): v12 DROP behavior and unbuilt
+conditional variants (resurrect levels 0/1, column guards) are NOT
 covered — dedicated assertions deferred until engine churn makes them
-worthwhile. Planning-time check: whether the migration-only v18/v19 partial
-indexes appear on both sides of the diff (they are engine-created during
-setup migration replay; if absent, a dedicated assertion lands with this
-step).
+worthwhile. Planning-time check: whether the migration-only v18/v19
+partial indexes appear on both sides of the diff (they are engine-created
+during setup migration replay; if absent, a dedicated assertion lands with
+this step).
 
 ### S9 — desktop-upgrade fixture (Q5, recommendation: in-lane)
 Generate a second fixture deterministically (core-llm-wiki@8.0.2 in a
@@ -210,15 +230,19 @@ every-open PRAGMA readers; any pin bump; pre-V5 backup support.
 
 ## 7. Decisions (Q1–Q10)
 
-| Q | Decision | Recommendation | Decider |
+**Q5–Q9 APPROVED by owner (PR #379 spec review, 2026-11-25, with the three
+required revisions applied: S5 Run-2 drain-hook barrier, S8 engine-ownership
+filter, Q10 residual + follow-up issue). Cleared to plan.**
+
+| Q | Decision | Ruling | Decider |
 |---|----------|----------------|---------|
 | Q1 | I3 comparison depth | normalized per-statement | ladder |
 | Q2 | I3 object coverage (v18/v19 visibility) | planning-time check, dedicated assertion if needed | plan |
 | Q3 | Guard inventory source | static list + runtime cross-check + FTS const | ladder |
 | Q4 | `.gitattributes` scope | RESOLVED: scoped testdata | — |
-| Q5 | I8 fixture in-lane? | IN-LANE (split if heavy at plan time) | owner (this review) |
-| Q6 | FTS window | accept + document (+ follow-up if join-back check fails) | owner (this review) |
-| Q7 | Confirmations ruling | explicit post-ingest re-run, stamp untouched, named trigger | owner (this review) |
-| Q8 | Root fix mechanism | (a) early config write | owner (this review) |
-| Q9 | `deposit_kick_state` + subject columns | DELETE in sweep; heartbeat/stall subjects keep + note | owner (this review) |
-| Q10 | serialization vs `--mcp` opens (live-writer window) | planning-time: scope to switch transaction + document residual | plan |
+| Q5 | I8 fixture in-lane? | APPROVED: IN-LANE (split if heavy at plan time) | owner |
+| Q6 | FTS window | APPROVED: accept + document (+ follow-up if join-back check fails) | owner |
+| Q7 | Confirmations ruling | APPROVED: explicit post-ingest re-run, stamp untouched — via the S5 worker-side drain-hook barrier (required revision applied) | owner |
+| Q8 | Root fix mechanism | APPROVED: (a) early config write, after point of no return | owner |
+| Q9 | `deposit_kick_state` + subject columns | APPROVED: DELETE in sweep; heartbeat/stall subjects keep + note | owner |
+| Q10 | `--mcp` live-writer window (post-commit old-root writers can insert A-keyed rows after the sweep) | RESOLVED: out-of-scope residual — the sweep transaction does NOT close this window; **#380** carries it (rejection-guard or serialization design) | owner (ruled 2026-11-25) |
