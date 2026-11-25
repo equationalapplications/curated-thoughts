@@ -548,10 +548,22 @@ mod tests {
                     match blob_scan.find("embedding_blob") {
                         None => break true,
                         Some(i) => {
-                            if !blob_scan[i..].starts_with("embedding_blob = NULL") {
+                            let rest = &blob_scan[i..];
+                            if !rest.starts_with("embedding_blob = NULL") {
                                 break false;
                             }
-                            blob_scan = &blob_scan[i + "embedding_blob".len()..];
+                            // Token boundary: `NULLIF(...)` and any other
+                            // NULL-prefixed token is a VALUE write, not a
+                            // removal — only a true boundary (or end) counts.
+                            let after = rest["embedding_blob = NULL".len()..]
+                                .chars()
+                                .next();
+                            if let Some(c) = after {
+                                if c.is_ascii_alphanumeric() || c == '_' || c == '(' {
+                                    break false;
+                                }
+                            }
+                            blob_scan = &rest["embedding_blob = NULL".len()..];
                         }
                     }
                 };

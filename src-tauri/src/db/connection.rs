@@ -1555,9 +1555,11 @@ fn apply_engine9_mirror(conn: &Connection) -> Result<()> {
             }
             Ok((cols, objs))
         })();
-        match applied {
+        match applied.and_then(|(cols, objs)| {
+            conn.execute_batch("COMMIT;")?;
+            Ok((cols, objs))
+        }) {
             Ok((cols, objs)) => {
-                conn.execute_batch("COMMIT;")?;
                 if !cols.is_empty() || !objs.is_empty() {
                     println!(
                         "[ct::migrate] engine9 mirror (slot {ENGINE9_MIRROR_VERSION}): added \
