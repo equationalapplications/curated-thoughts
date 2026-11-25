@@ -26,7 +26,7 @@
 
 **Files:** none (checks only; results recorded in this file's checkboxes).
 
-- [ ] **Step 1: Enumerate rust-side-only `llm_wiki_*` index/trigger objects** (S8 allow-list completeness):
+- [x] **Step 1: Enumerate rust-side-only `llm_wiki_*` index/trigger objects** (S8 allow-list completeness):
 
 ```bash
 cd /mnt/kv-work/build/worktrees/curated-thoughts/engine9x-followups
@@ -54,7 +54,7 @@ echo "record: rust-only llm_wiki objects -> S8 CT_OWNED allow-list"
 
 Expected: the only rust-side-only `llm_wiki_*` index/trigger objects are the `llm_wiki_vector_removals*` family (pending index, enqueue + hard-delete triggers). If MORE appear, add them to the S8 allow-list with a one-line reason each.
 
-- [ ] **Step 2: Fixture feasibility probe (S9)** — install 8.0.2 in a scratch dir and prove it can produce an FTS-carrying brain:
+- [x] **Step 2: Fixture feasibility probe (S9)** — install 8.0.2 in a scratch dir and prove it can produce an FTS-carrying brain:
 
 ```bash
 mkdir -p /mnt/kv-work/scratch/tmp/ct376-fixture && cd /mnt/kv-work/scratch/tmp/ct376-fixture
@@ -72,9 +72,21 @@ console.log('fts objects:', db.prepare(\"SELECT COUNT(*) n FROM sqlite_master WH
 
 Expected: `fts objects: > 0`. If 8.0.2's API differs (no `engine(db)` export), read its `dist/index.js` export surface and adapt the harness — record the working snippet; Task 10 depends on it. If generation is NOT feasible in ≤30 min of work, STOP and split S9 to its own issue per the spec's Q5 fallback.
 
-- [ ] **Step 3: Q6 join-back check (spec S7)** — read the engine search flow in the installed dist (`bm25` MATCH queries at `dist:7076-7078`, `:7517-7519`) far enough to answer: can a stale FTS hit surface a deleted entry's text? Record YES (→ open the follow-up issue per Q6) or NO (→ record; S7 stands as documented). This is a bounded read, not a spike.
+- [x] **Step 3: Q6 join-back check (spec S7)** — read the engine search flow in the installed dist (`bm25` MATCH queries at `dist:7076-7078`, `:7517-7519`) far enough to answer: can a stale FTS hit surface a deleted entry's text? Record YES (→ open the follow-up issue per Q6) or NO (→ record; S7 stands as documented). This is a bounded read, not a spike.
 
-- [ ] **Step 4: Commit** (nothing to commit; record all three results in this file by ticking the boxes and noting deviations).
+- [x] **Step 4: Commit** (nothing to commit; record all three results in this file by ticking the boxes and noting deviations).
+
+> **Task 0 results (controller, 2026-11-25):** Step 1 — CT_OWNED allow-list grows 3→8
+> (`vector_removals_resurrect` EXISTS in the rust chain; `idx_source_passages_doc/entity`,
+> `entries_deleted_idx`, `events_forgotten_idx` are CT-owned too — full reasons in the SDD
+> ledger). Engine-side exclusions needed: FTS family (rust chains never create FTS) and
+> `entries_legacy_source_type_idx` (dump's source brain was Rust-built; real 8.0.2 desktop
+> brains carry it) — Task 9 implements per this finding. Step 2 — FEASIBLE in-lane
+> (<10 min): 8.0.2 exports `createWiki` only (no `engine`), needs a SQLiteAdapter over
+> node:sqlite + async setup + `syncSearchIndex()` drain; ERRATA E3/E4 apply to all
+> engine-invocation snippets. Step 3 — join-back answer NO: `searchKeyword` hits hydrate
+> via `entryRepo.findByIds` only; `searchPassages` join-back-guards on `source_passages`
+> — S7 stands as documented, NO follow-up issue.
 
 ---
 
@@ -83,7 +95,7 @@ Expected: `fts objects: > 0`. If 8.0.2's API differs (no `engine(db)` export), r
 **Files:**
 - Modify: `src-tauri/src/db/connection.rs:541`, `:694`, `:918` (three `println!(` → `eprintln!(`; text unchanged)
 
-- [ ] **Step 1: Verify the three sites are still exactly these** (re-anchor):
+- [x] **Step 1: Verify the three sites are still exactly these** (re-anchor):
 
 ```bash
 grep -n '\bprintln!(' src-tauri/src/db/connection.rs
@@ -91,16 +103,16 @@ grep -n '\bprintln!(' src-tauri/src/db/connection.rs
 
 Expected: exactly lines 541, 694, 918.
 
-- [ ] **Step 2: Edit** — change `println!(` to `eprintln!(` at each of the three sites. Do not touch the message strings.
+- [x] **Step 2: Edit** — change `println!(` to `eprintln!(` at each of the three sites. Do not touch the message strings.
 
-- [ ] **Step 3: Verify**:
+- [x] **Step 3: Verify**:
 
 ```bash
 grep -n '\bprintln!(' src-tauri/src/db/connection.rs   # expect: no output
-grep -c 'eprintln!' src-tauri/src/db/connection.rs     # expect: 12 (9 prior + 3 new)
+grep -c 'eprintln!' src-tauri/src/db/connection.rs     # ERRATA E2: expect 22 (base had 19) — verified 22
 ```
 
-- [ ] **Step 4: Fast check + commit**:
+- [x] **Step 4: Fast check + commit**:
 
 ```bash
 export CARGO_TARGET_DIR=$PWD/.cargo-shared-target
@@ -121,7 +133,14 @@ git commit -m "fix(db): migrate repair reports to stderr — stdout is the --mcp
 **Interfaces:**
 - Produces: `fn grouped_mirror_tables() -> Vec<&'static str>` — distinct tables from `ENGINE9_MIRROR_COLUMNS` in first-appearance order; consumed only inside `engine9_missing`.
 
-- [ ] **Step 1: Add the helper + rewrite the loop** in `connection.rs` (just above `engine9_missing`):
+- [x] **Step 1: Add the helper + rewrite the loop** in `connection.rs` (just above `engine9_missing`):
+
+> **Task 1+2 closeout (controller, 2026-11-25):** implementer commit `e2a490e9` + `50849454`;
+> controller re-ran the engine9 gate (12 passed, exit 0) and verified both clippy exits via the
+> child's report at the same HEAD. Ruling: plan snippet's `t == table` needed a `*t == table`
+> deref for the `&&str`/`&str` comparison — accepted, mechanical type fix, behavior identical
+> (12 passed unchanged, 1723 filtered). Note: branch upstream is origin/main — push with
+> `git push origin HEAD:chore/engine9x-followups`.
 
 ```rust
 /// Distinct tables in ENGINE9_MIRROR_COLUMNS, first-appearance order.
@@ -151,7 +170,7 @@ In `engine9_missing`, replace the per-column loop:
     }
 ```
 
-- [ ] **Step 2: Run the affected tests** (expect unchanged pass — column coverage identical):
+- [x] **Step 2: Run the affected tests** (expect unchanged pass — column coverage identical):
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server \
