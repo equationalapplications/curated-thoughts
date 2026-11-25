@@ -8,6 +8,10 @@
  * The schema comes from `src-tauri/src/db/testdata/ct-engine9-migrated.llm_wiki.schema.sql`,
  * generated and drift-tested by the Rust test
  * `engine9_migrated_schema_fixture_is_current` (never from node_modules).
+ * LIMIT: the dump carries NO FTS objects and no v14 legacy index, so the
+ * "stamped 15" case does not exercise 9.18.0's FTS upgrade path on a brain
+ * that already carries 8.0.2 FTS (the common desktop upgrade). The
+ * schema-stability test below pins the no-FTS shape's footprint.
  * The DB runs on built-in `node:sqlite` (`DatabaseSync`) behind a minimal
  * `SQLiteAdapter`; no new dependency. Runs under the suite's default jsdom
  * environment: the global `src/test-setup.ts` touches `window`, so a

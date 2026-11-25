@@ -861,7 +861,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // every open, stamp last gated on V22. NULL means whole-repo; legacy
     // rows keep NULL (no backfill).
     apply_v30_area_column(conn)?;
-    // sso9 migration steps 1+2 (engine-9x PR-A plan Tasks 4+5): MERGE-refresh
+    // sso9 migration steps 1+2 (spec §3 PR-A steps 1+2): MERGE-refresh
     // the stored 8.x EA manifests, then re-type okf_type/edges. One backup,
     // gated on V22 + exact stamp membership; skipped (unstamped) on in-memory
     // opens.
@@ -872,9 +872,9 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // right after `apply_sso9_migrations` so the mirror evaluates the
     // fully-retyped shape. Ordering vs the re-type is NOT a correctness
     // invariant: on deferred-V22 opens the re-type can run with the
-    // triggers already present, which is harmless because both triggers
-    // are column-scoped (`AFTER UPDATE OF deleted_at` / `AFTER DELETE`)
-    // and the re-type UPDATEs neither.
+    // triggers already present, which is harmless because the triggers
+    // fire only on `deleted_at` updates or entry deletes and the re-type
+    // does neither — it UPDATEs other columns of surviving rows only.
     apply_engine9_mirror(conn)?;
 
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
@@ -981,7 +981,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // Rust-first opens (each gated on its V24 columns existing).
     crate::db::okf_ddl::apply_llm_wiki_v13_temporal_indexes(conn)?;
 
-    // core-llm-wiki 9.18.0 helper-created objects (PR-B plan Task 7), mirrored
+    // core-llm-wiki 9.18.0 helper-created objects (spec §3 PR-B step 5), mirrored
     // for Rust-first opens: created OUTSIDE the setupDatabase template (or
     // migration-only), so neither `migration_v7_sql` nor the V33 DDL re-run
     // makes them. Unstamped, every open, each gated like the engine helper.
@@ -6197,7 +6197,7 @@ mod tests {
         assert_eq!(memo_count, 1, "ensure must record its memo post-commit");
     }
 
-    // ---- sso9 manifest MERGE refresh (engine-9x PR-A plan Task 4e) ----
+    // ---- sso9 manifest MERGE refresh (spec §3 PR-A, MERGE-refresh step) ----
 
     const SSO8_MANIFEST: &str = include_str!("testdata/schema-software-org-8.0.2.manifest.json");
 
@@ -6479,15 +6479,21 @@ mod tests {
         assert_eq!(sso9_snapshot(&conn), before, "dry pass must not write");
     }
 
-    // ---- sso9 re-type + edge dispositions (engine-9x PR-A plan Task 5c) ----
+    // ---- sso9 re-type + edge dispositions (spec §3 PR-A, re-type step) ----
     //
     // F11/N4 trigger-coverage evidence (core-llm-wiki 8.0.2 `setupDatabase`):
-    // the only triggers are the three FTS triggers on `llm_wiki_entries`
-    // (`entries_ai` AFTER INSERT, `entries_au` AFTER UPDATE OF id, entity_id,
-    // title, body, tags, deleted_at, `entries_ad` AFTER DELETE). None fire on
-    // `okf_type`; there are NO triggers on `llm_wiki_edges`, `llm_wiki_tasks`
-    // or `curated_entities`. `sso9_retype_has_no_triggers_on_retyped_columns`
-    // re-checks this against the live Rust fixture.
+    // at capture time the only triggers were the three FTS triggers on
+    // `llm_wiki_entries` (`entries_ai` AFTER INSERT, `entries_au` AFTER
+    // UPDATE OF id, entity_id, title, body, tags, deleted_at, `entries_ad`
+    // AFTER DELETE). None fire on `okf_type`; there are NO triggers on
+    // `llm_wiki_edges`, `llm_wiki_tasks` or `curated_entities`. NOTE
+    // (engine-9x PR-B): fresh brains now ALSO carry the three ledger
+    // triggers (enqueue AFTER UPDATE OF deleted_at, hard_delete AFTER
+    // DELETE, resurrect AFTER UPDATE OF deleted_at) — all fire only on
+    // deleted_at updates or entry deletes, never on `okf_type`, which is
+    // the invariant this evidence supports.
+    // `sso9_retype_has_no_triggers_on_retyped_columns` re-checks this
+    // against the live Rust fixture.
 
     const SSO9_SEED: &str = r#"
         INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at, okf_type, deleted_at, ontology_checked_at, heal_checked_at) VALUES

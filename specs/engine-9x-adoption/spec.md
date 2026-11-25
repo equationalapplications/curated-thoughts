@@ -251,8 +251,18 @@ PR-A tests:
   recipe in `src-tauri/src/db/testdata/README.md`); the DDL-text-snapshot
   artifact was dropped as unused (the drift anchor is the Rust-generated
   `ct-engine9-migrated.llm_wiki.schema.sql`, drift-tested every gate run).
-  Recorded debt: `clear_vault_tables` (`queries.rs`) does not yet clear the
-  new `llm_wiki_source_documents` / `llm_wiki_source_passages` tables —
-  latent until a `storeSource` consumer is adopted; MUST be added when that
-  happens, or vault switches would leak verbatim source text across vaults
-  (#213 per-vault rule).
+  Recorded debt (latent until a consumer is adopted; fold then, not now):
+  (a) `clear_vault_tables` (`queries.rs`) does not yet clear the new
+  `llm_wiki_source_documents` / `llm_wiki_source_passages` tables — vault
+  switches would leak verbatim source text across vaults (#213 per-vault
+  rule); (b) `forgotten_at` is mirrored but NOT honoured by any Rust reader
+  of `llm_wiki_events` (the engine filters `forgotten_at IS NULL` in 11
+  places) — Rust MCP/recall reads would serve forgotten events once
+  something calls `forget()`; (c) the new entries columns (`source_pointer`,
+  `prior_valid_to`, `derived_events`) are dropped by the wipe-and-reinsert
+  path (`clear_one_entity_content` + re-insert discards engine-written
+  values); (d) `llm_wiki_vector_removals` deliberately stays OUT of the
+  vault-clear list: with the marker unset the hard-delete trigger empties
+  it, and with `external_index_in_use` set the outgoing vault's rows
+  survive the switch BY DESIGN (pinned by the T9 tests) — recorded here as
+  the #213 decision.

@@ -558,7 +558,11 @@ mod tests {
                         // write — so operator/keyword continuations are
                         // rejected. Allowed continuations: end of string,
                         // `,`, the `{` placeholder, `;`, or `WHERE` (the
-                        // package trigger body uses `NULL{} WHERE`).
+                        // resurrect trigger's format string uses
+                        // `NULL{} WHERE`). ASSUMPTION: a `{…}` after `= NULL`
+                        // expands to removal text, never a vector value —
+                        // true for the one caller today; revisit if another
+                        // interpolated NULL assignment appears.
                         let after = rest[stamped.len()..].trim_start();
                         match after.chars().next() {
                             None => {}
