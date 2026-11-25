@@ -690,10 +690,10 @@ git commit -m "test(ts): helper-SQL drift gate — normalized body diff vs fresh
 - Create: `src/__tests__/engine9-upgrade-fixture.test.ts` (or extend the compat test file)
 - Test: `src-tauri/src/db/connection.rs` test module (V33-over-populated-tables)
 
-- [ ] **Step 1: Generate the fixture** using the Task 0 Step 2 harness (full setup + several entities' writes so FTS carries text), then `VACUUM INTO` a clean copy. Hygiene: `strings` over the file — 0 local-path hits; README provenance paragraph (how/when generated, engine versions, regen command).
-- [ ] **Step 2: TS test** — copy of the compat test's first case over the new fixture: stamp `schema_version=15`, run 9.18.0 `setup()`, assert version + `dropped == []` modulo the FTS family already present (assert the FTS objects survive setup unchanged).
-- [ ] **Step 3: Rust test** — open the fixture brain in temp, run the V33 chain (`apply_engine9_mirror`), assert the guarded ALTERs no-op on existing columns and data survives (`SELECT COUNT(*) FROM llm_wiki_entries` unchanged).
-- [ ] **Step 4: Run both, commit**:
+- [x] **Step 1: Generate the fixture** using the Task 0 Step 2 harness (full setup + several entities' writes so FTS carries text), then `VACUUM INTO` a clean copy. Hygiene: `strings` over the file — 0 local-path hits; README provenance paragraph (how/when generated, engine versions, regen command).
+- [x] **Step 2: TS test** — copy of the compat test's first case over the new fixture: stamp `schema_version=15`, run 9.18.0 `setup()`, assert version + `dropped == []` modulo the FTS family already present (assert the FTS objects survive setup unchanged).
+- [x] **Step 3: Rust test** — open the fixture brain in temp, run the V33 chain (`apply_engine9_mirror`), assert the guarded ALTERs no-op on existing columns and data survives (`SELECT COUNT(*) FROM llm_wiki_entries` unchanged).
+- [x] **Step 4: Run both, commit**:
 
 ```bash
 git add src-tauri/src/db/testdata/ src/__tests__/ src-tauri/src/db/connection.rs
@@ -702,6 +702,15 @@ git commit -m "test: desktop-upgrade path over an FTS-carrying 8.0.2 brain (#376
 
 ---
 
+
+> **Task 10 closeout (controller, 2026-11-25):** commit `e333d281` — fixture
+> `ct-brain-v33-src-8.0.2-fts.db` (8.0.2 generator, 24 entries / 8 entities, 15 FTS objects,
+> FTS content 24 rows, schema_version 15; strings hygiene 0 hits, gitleaks clean); TS
+> desktop-upgrade test 6 passed (honest first-run RED on the FTS content column, fixed);
+> Rust `engine9_mirror_over_fts_carrying_8_0_2_brain_preserves_data_and_fts` 1 passed —
+> controller re-ran BOTH. Accepted adaptations: fixture is engine-only so the Rust test
+> creates + stamps CT `schema_version` 32 before the mirror; regen harness inline in the
+> testdata README + gitignored gen script.
 ### Task 11: Gates + wrap
 
 - [ ] **Step 1: Full wrapped gate chain** (mount guard first; ~cold):
