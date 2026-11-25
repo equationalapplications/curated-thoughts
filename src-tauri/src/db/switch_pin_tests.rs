@@ -71,15 +71,24 @@ fn sweep(db_path: &Path) {
     crate::db::clear_vault_tables(&mut conn, 1).unwrap();
 }
 
+/// Sweep, then drop the rederived stamp so the OPEN itself re-derives from the
+/// root it resolves out of the config (the stamp otherwise survives a sweep and
+/// the open would skip the walk). No root is passed by hand: whatever the
+/// reopen's derived rows say is what the open resolved from the config.
+fn sweep_and_unstamp(db_path: &Path) {
+    sweep(db_path);
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.execute("DELETE FROM llm_wiki_meta WHERE key='stated_ledger_rederived'", [])
+        .unwrap();
+}
+
 #[test]
 fn old_order_leaks_outgoing_vault_rows() {
     // OLD order: config still names A at reopen, no rewrite before it.
     let f = fixture();
-    sweep(&f.db_path);
+    sweep_and_unstamp(&f.db_path);
     let db = crate::switch_reopen_paths(&f.db_path, &f.config_path).unwrap();
-    // The root a reopen resolves is A (config) — the rederive reads A's files.
-    let root = VaultConfig::new(f.config_path.clone()).vault_root().unwrap().unwrap();
-    stated_ledger::rebuild_rederive(&db.0, &root).unwrap();
+    // The open resolved A from the config, so it derived A's rows.
     let paths = deposit_paths(&db);
     assert!(
         paths.iter().any(|p| p.contains("deposit-a.md")),
@@ -92,13 +101,14 @@ fn old_order_leaks_outgoing_vault_rows() {
 fn inplace_switch_rederives_from_new_vault_and_keeps_stamp() {
     let f = fixture();
     let before = stamp(&crate::switch_reopen_paths(&f.db_path, &f.config_path).unwrap());
-    sweep(&f.db_path);
+    sweep_and_unstamp(&f.db_path);
     // NEW order: config rewritten BEFORE the reopen.
     VaultConfig::new(f.config_path.clone())
         .set_vault_path(f.b.to_str().unwrap())
         .unwrap();
+    // The OPEN resolves B from the config and re-derives from it; no root is
+    // passed by hand, so swapping the rewrite and the reopen fails this test.
     let db = crate::switch_reopen_paths(&f.db_path, &f.config_path).unwrap();
-    stated_ledger::rebuild_rederive(&db.0, &f.b.canonicalize().unwrap()).unwrap();
 
     let paths = deposit_paths(&db);
     assert!(paths.iter().any(|p| p.contains("deposit-b.md")), "{paths:?}");
@@ -116,20 +126,23 @@ fn inplace_switch_rederives_from_new_vault_and_keeps_stamp() {
 
 #[test]
 fn restore_branch_config_before_reopen_rederives_from_new_vault() {
-    // Scope: the restore branch's ordering essence. The staged-backup install
-    // is covered by restore_sync tests; here the installed file is the stale
-    // A brain (A-derived rows present), config is rewritten to B before the
-    // reopen, and the rederive must leave no A rows.
+    // Scope: the restore branch's ordering essence — production does NOT sweep
+    // or run a hand Run 1 here (`swept` is false); it only rewrites the config
+    // before the reopen, so the open resolves B. This is therefore the in-place
+    // pin minus the sweep: the installed file is a brain whose stamp is absent
+    // (a restored backup), and the open must derive from B alone. The
+    // staged-backup install itself is covered by restore_sync tests.
     let f = fixture();
     {
-        let db = crate::switch_reopen_paths(&f.db_path, &f.config_path).unwrap();
-        assert!(!deposit_paths(&db).is_empty(), "stale backup carries A rows");
+        let conn = rusqlite::Connection::open(&f.db_path).unwrap();
+        conn.execute("DELETE FROM llm_wiki_meta WHERE key='stated_ledger_rederived'", [])
+            .unwrap();
+        conn.execute("DELETE FROM deposit_attribution", []).unwrap();
     }
     VaultConfig::new(f.config_path.clone())
         .set_vault_path(f.b.to_str().unwrap())
         .unwrap();
     let db = crate::switch_reopen_paths(&f.db_path, &f.config_path).unwrap();
-    stated_ledger::rebuild_rederive(&db.0, &f.b.canonicalize().unwrap()).unwrap();
     let paths = deposit_paths(&db);
     assert!(!paths.iter().any(|p| p.contains("deposit-a.md")), "{paths:?}");
     assert!(paths.iter().any(|p| p.contains("deposit-b.md")), "{paths:?}");

@@ -2317,6 +2317,11 @@ async fn switch_vault(
             // connection recovers the -wal natively.
             let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
             db::clear_vault_tables(&mut conn, now).map_err(|e| e.to_string())?;
+            // The sweep committed: the brain is no longer vault A's. If the
+            // config rewrite below fails, the error path must align the
+            // config with it (mirrors the restore branch) instead of
+            // reopening A over a swept brain.
+            pending_config_align_to = Some(new_path.clone());
             // S5b: config names the NEW vault before the reopen (see above).
             vault_state
                 .0
@@ -2340,7 +2345,23 @@ async fn switch_vault(
             let guard = db_state.0.lock().unwrap();
             match db::stated_ledger::rebuild_rederive(&guard.0, &canonical_new_root) {
                 Ok(report) => eprintln!("[ct::switch] stated-ledger rederive after sweep: {report:?}"),
-                Err(e) => eprintln!("[ct::switch] stated-ledger rederive after sweep failed: {e}"),
+                Err(e) => {
+                    // Run 2 does NOT retry the table legs (spec S5: Run 2 is
+                    // the confirmations leg) and the stamp gate blocks a
+                    // re-run, so this failure is permanent until the operator
+                    // re-switches or heals (`ct heal`). Persist it to the
+                    // vault's errors.log rather than only stderr. No
+                    // diagnostics flag: none fits, and the success path below
+                    // resets diagnostics anyway.
+                    eprintln!("[ct::switch] stated-ledger rederive after sweep failed: {e}");
+                    pipeline::write_error_log(
+                        Some(&canonical_new_root),
+                        &format!(
+                            "[ct::switch] stated-ledger rederive after sweep failed: {e:#}; \
+                             denials/attribution for this vault are empty — re-switch or run `ct heal`"
+                        ),
+                    );
+                }
             }
         }
 
