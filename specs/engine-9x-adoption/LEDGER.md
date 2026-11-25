@@ -1,0 +1,85 @@
+# LEDGER: engine 9.x adoption — PR-B (core bump + DDL regen + ddl_compat extractor + engine mirrors)
+
+Transient scaffolding — deleted in the same-PR cleanup commit.
+Lane: engine-9x PR-B. Spec: `specs/engine-9x-adoption/spec.md` (Approved 2026-11-24; §3 PR-B, §4, §5 tests 1–6, §8).
+Plan: `specs/engine-9x-adoption/plan.md`. Pins: `.superpowers/sdd/engine-9x-pr-b/pins.md`.
+Base: origin/main `78160f98`. Branch: `chore/engine-9x-prb`.
+Worktree: `/mnt/kv-work/build/worktrees/curated-thoughts/engine-9x-prb`.
+Receipts dir: `.superpowers/sdd/engine-9x-pr-b/receipts/` (baseline: `baseline-*.out`).
+
+**In flight:** plan drafted; Q1–Q17 RULED 2026-11-25 (table below); no task started.
+
+## Baseline (78160f98)
+
+- [x] Baseline gates green — G-tauri 1708, G-tools 61, G-heal 16, G-vitest 96 files / 625 + 1 skip, G-tsc exit 0; disk 75G free on `/mnt/kv-work`. Evidence: `receipts/baseline-*.out`
+
+## Open questions (controller must rule)
+
+- **Q1 — atomic-commit protocol (blocks T2, T10).** Recommend: T0 and T1 commit standalone (green at 8.0.2); T2–T9 land as local, unpushed `wip(engine9):` commits; the controller squashes them (`git reset --soft <T1 head>` + one commit) into the atomic commit before first push. Why: spec §2/§3/§6 alt 3 bind the bump, lockfile, regen, guard, and migration to ONE commit; per-task WIP keeps review and receipts per task without pushing a red head. Evidence needed: `git show --stat` of the atomic commit (T10 step 3). Alternative: keep T2–T9 uncommitted in the worktree (loses per-task checkpoints).
+- **Q2 — extractor before the bump (blocks T1).** Recommend: accept the reorder (brief listed the bump first). Why: the brief's binding constraints are "install precedes every dist read" and "extractor precedes regen"; T1 reads no dist except the 8.0.2 regression check, and running it pre-bump gives a real-dist green proof on the single-block shape plus a standalone green commit. The 9.18.0 shape checks (spec 7a) move to T2 step 6 / T3 step 1, both post-install. Evidence: T1 GREEN receipt at 8.0.2; T2 ddl_compat RED naming block-2 objects.
+- **Q3 — shared `node_modules` hazard (blocks T2).** Recommend: a worktree-local `node_modules` for PR-B (controller replaces the symlink before T2; pnpm store hard-links keep it small). Why: stronger than PR-A Q9 — this install puts the 9.18.0 ENGINE into the primary checkout. Any `pnpm tauri dev` there runs engine v16–v19 on the live brain, and every installed 8.0.2-guard binary (app, CLI, MCP sidecar) then fails startup with "unexpected columns" until PR-B ships; the primary checkout's own `ddl_compat` test also goes red. Fallback: accept shared + freeze primary-checkout app runs until merge + the T10 post-merge reconcile. Evidence: `ls -la node_modules` + `pnpm why` from both checkouts.
+- **Q4 — 8.0.2 expectation fixture: location, format, capture (blocks T0, T4).** Recommend: `src-tauri/src/db/testdata/core-llm-wiki-8.0.2.ddl.sql` (byte-exact const body) and `src-tauri/src/db/testdata/core-llm-wiki-8.0.2.expectations.json` (table → columns, `LLM_WIKI_TABLES` order, CT-local `tier`/`embed_scheme`/`area` included), both captured in T0 from `git show 78160f98:…` by a scratch script — NOT from `node_modules` (no dist read; immune to the symlink). `verify_schema_with` takes `&[TableExpectation<'_>]` (lifetime-generic struct) so tests can feed JSON-loaded data. Why: data (not code) fixtures stay diffable; capture from git is reproducible after the edits. Evidence: sha256s in `t0-capture.out`; T4 fidelity test (old expectations PASS on the unmigrated fixture brain).
+- **Q5 — existing-DB fixture brain (blocks T0).** Recommend: binary `src-tauri/src/db/testdata/ct-brain-v32-core-8.0.2.db`, `VACUUM INTO` from a fresh ROOTED brain opened by the base build (scratch ignored test, deleted after). Why: spec test 2 needs a DB "created under the 8.0.2 DDL" that then runs CT's chain with V7 NOT re-run. A DB built from the DDL text alone cannot be migrated: with stamps ≥7 the ladder hits non-llm_wiki tables that do not exist; without stamps `migration_v7_sql` re-runs the 9.18.0 DDL and masks a missing CREATE in the V33 step. A downgrade simulation (DROP COLUMN/TABLE on a new brain) is derived from the code under test. Evidence: fixture size + `schema_version` rows in `t0-capture.out`. Controller confirms a binary blob in-repo is acceptable (size reported first).
+- **Q6 — parity-test definition (blocks T7).** Recommend: "identical" = equal table/index/trigger NAME sets; index + trigger SQL equal after `normalize_ddl_statement`; per-table `PRAGMA table_info` equal as a name-keyed map of `(type, notnull, dflt_value, pk)` (cid excluded); table SQL equal (normalized) for every table PR-B does not ALTER. Plus a helper-presence assertion (named objects on both brains). Why: ALTER appends columns after CT-local `tier`/`embed_scheme`/`area` while fresh brains carry them inline, so literal `sqlite_master`/cid equality is unachievable by construction; and parity alone cannot catch an object neither path creates. Evidence: T7 RED/GREEN receipts. This is a spec-detail interpretation (§5 test 6 "must be identical") — ruling recorded as erratum candidate.
+- **Q7 — slot, stamp shape, placement (blocks T6).** Recommend: ONE stamped step, `pub(crate) const ENGINE9_MIRROR_VERSION: i64 = 33` (literal, recomputed after any merge); columns/tables/triggers applied ungated on every open (V24/V30 pattern) with the stamp gated on `MAX(version) >= 22`; helper objects (T7) unstamped on every open (v12/v13 precedent `connection.rs:968-972`); call site right after `apply_sso9_migrations(conn)?` (`connection.rs:868`). Why: the guard (`:974`) demands the shape on every open, including rootless opens that cannot stamp; slot order keeps the sso9 re-type ahead of the new triggers on upgrading brains. Evidence: T6 stamp-gating + idempotency tests.
+- **Q8 — how the V33 step creates tables + ledger triggers (blocks T6).** Recommend: after the guarded ALTERs, execute `LLM_WIKI_PACKAGE_DDL` itself (every statement `IF NOT EXISTS`, confirmed in T3 step 5) inside the step's `BEGIN IMMEDIATE`. Why: verbatim by construction, zero duplicated SQL literals to drift, and fresh/migrated paths run identical text. Precondition: if T3 finds any statement without `IF NOT EXISTS`, fall back to executing only the named new statements extracted from the const. Evidence: T3 step 5 record; T7 parity.
+- **Q9 — TS `setup()` harness (blocks T8).** Recommend: `node:sqlite` `DatabaseSync` (Node v24.22.1, built in — no new dependency) behind a minimal `SQLiteAdapter`; DB built from a Rust-generated, drift-tested schema dump (`testdata/ct-engine9-migrated.llm_wiki.schema.sql`); `llm_wiki_meta` seeded at the 8.0.2-era engine version (expected 15) and also absent; the real exported 9.18.0 `setup()`; a v17 negative control (extra source_documents column → throws). Why: no cross-runner DB handoff; the dump pins exactly what the Rust chain produces. If the exported `setup()` needs non-DB collaborators (embedder, etc.), use the narrowest exported entry that runs `setupDatabase` + migrations; if none is exported, STOP and ask. Evidence: T8 receipts + the entry-point name.
+- **Q10 — where new Rust tests live; integration gate (blocks T6, T10).** Recommend: all new Rust tests as lib `#[cfg(test)]` tests in `connection.rs`, `schema_guard.rs`, `ddl_compat.rs`, `okf_ddl.rs` (files already on the §4 list; G-tauri measures them). Do NOT add `src-tauri/tests/*.rs`. Separately: the controller measures the CI integration line (`cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server -- --test-threads=1`, `ci.yml:112`) at base and at T10 — new tables/triggers can disturb integration tests (`okf_bundle`, `db_only_drift`, `db_migration_v30_area`) that G-tauri never runs. Evidence: base + T10 integration receipts if ruled in.
+- **Q11 — §4 "consumption surface … identified at implementation time" (blocks T9).** Recommend: the surface is the three raw delete sites plus "no code writes/deletes `llm_wiki_vector_removals`"; outcome is NO code change, evidenced by T9's grep + ledger-survival test. Spec cites drifted: `commit.rs:616` → `:634`, `bundle_apply.rs:982` → `:1017`; `queries.rs:227` matches (`clear_vault_tables` `:207`). Why: spec step 6 decides "stay raw" and limits obligations to (i) triggers survive, (ii) no bypass. Evidence: `t9-audit.out`.
+- **Q12 — `okf_migration.rs` audit outcome (T5).** Recommend: no change. Plan-time audit: zero `ALTER`/`CREATE`/`add_column_if_missing` in the file; its only engine-table writes are `llm_wiki_events` `:269` (explicit column list; `forgotten_at` nullable) and `llm_wiki_meta` `:324`/`:341` (key/value). T5 re-runs the audit at the regen head and adds a repo-wide positional-INSERT check. Evidence: `t5-audit.out`.
+- **Q13 — drift gate for helper-object SQL (T7).** Recommend: no new gate in PR-B; open a follow-up issue. Why: spec step 7 scopes `ddl_compat` to template blocks; the v13 mirror shares the gap; a helper-SQL extractor is new scope the spec does not ask for. Evidence: none needed; follow-up issue number recorded at T10.
+- **Q14 — trigger test positive control (T6).** Recommend: include `external_index_in_use = '1'` → hard delete enqueues exactly one row. Why: "no-marker hard delete enqueues none" passes vacuously if the hard-delete trigger is missing; the control makes spec §5 test 5 non-vacuous without changing the asserted behavior. Evidence: T6 receipt.
+- **Q15 — CT-local `area` (T4).** Recommend: carry `area` (`schema_guard.rs:58`, V30) alongside `tier`/`embed_scheme`; spec step 3 lists only the latter two (written before #352 merged). Why: dropping it fails every brain. Evidence: T4 GREEN.
+- **Q16 — new triggers vs PR-A tripwire (T6, T7).** Recommend: if any new trigger on `llm_wiki_entries` (ledger or resurrect) is an unscoped `AFTER/BEFORE UPDATE ON`, STOP and report — never edit `sso9_retype_has_no_triggers_on_retyped_columns` (`connection.rs:6563-6587`). Why: that test guards the sso9 re-type against side-effect triggers; the spec describes the enqueue trigger as `AFTER UPDATE OF deleted_at` (scoped, passes), but the resurrect trigger's clause is unverified at plan time. Evidence: trigger event clauses recorded in T7.
+- **Q17 — spec status line at closeout (T10).** Recommend: the implementer updates the spec status line to "PR-B (…): Implemented <date>" in the PR (AGENTS.md lifecycle; PR-A precedent). This plan does not edit the spec. Evidence: diff of `spec.md:3` only.
+
+## Rulings
+
+| Q | Ruling | By / date |
+|---|---|---|
+| Q1 | APPROVE recommendation: T0/T1 standalone commits (green at 8.0.2); T2–T9 local `wip(engine9):` commits; controller squashes into the single atomic commit before first push | Tessera 2026-11-25 |
+| Q2 | APPROVE reorder: extractor (T1) before bump (T2); T1's 8.0.2 dist read is valid at base (installed version matches base lock) | Tessera 2026-11-25 |
+| Q3 | APPROVE worktree-local `node_modules`: controller swaps the symlink to a real dir before T2 dispatch. Primary checkout stays 8.0.2 until merge. Post-merge: controller runs `CI=true pnpm install --frozen-lockfile` in the primary checkout to converge | Tessera 2026-11-25 |
+| Q4 | APPROVE: fixtures in `src-tauri/src/db/testdata/` captured from `git show 78160f98:…` (never node_modules); `verify_schema_with` parameterization confirmed as the seam | Tessera 2026-11-25 |
+| Q5 | APPROVE: binary fixture brain in-repo via `VACUUM INTO` from a fresh ROOTED base-build brain; size reported in `t0-capture.out` BEFORE commit; expectation <50MB | Tessera 2026-11-25 |
+| Q6 | APPROVE parity definition (name sets + normalized SQL + name-keyed col info minus cid + helper presence). Record as spec erratum **E8** in §8 at T10 | Tessera 2026-11-25 |
+| Q7 | APPROVE: single stamped step, `ENGINE9_MIRROR_VERSION = 33`, stamp gated on `MAX(version) >= 22`, helpers unstamped every-open, call site after `apply_sso9_migrations` | Tessera 2026-11-25 |
+| Q8 | APPROVE: V33 executes `LLM_WIKI_PACKAGE_DDL` inside `BEGIN IMMEDIATE`, contingent on T3 step 5 confirming every statement is `IF NOT EXISTS`; fallback named-statements otherwise | Tessera 2026-11-25 |
+| Q9 | APPROVE: `node:sqlite` `DatabaseSync` harness. Implementer MUST verify `node:sqlite` availability on the repo-pinned Node (v22.23.5 on this box; plan cites v24) and record it in T8 notes; STOP-and-ask if no exported setup() entry runs setupDatabase | Tessera 2026-11-25 |
+| Q10 | APPROVE: all new Rust tests as lib tests; controller measures the CI integration line locally at base and T10 (no local postgres — fallback path, matching the 2026-10-15 precedent log; receipts `baseline-g-integration.out` / `t10-g-integration.out`) | Tessera 2026-11-25 |
+| Q11 | APPROVE: consumption surface = three raw delete sites + no writers; NO code change; cite drift (616→634, 982→1017) recorded as spec erratum **E9** at T10 | Tessera 2026-11-25 |
+| Q12 | APPROVE: okf_migration no change; T5 re-audits at regen head + repo-wide positional-INSERT check | Tessera 2026-11-25 |
+| Q13 | APPROVE: no helper-SQL drift gate in PR-B; follow-up issue opened at T10 | Tessera 2026-11-25 |
+| Q14 | APPROVE positive control: `external_index_in_use='1'` → exactly one enqueued row | Tessera 2026-11-25 |
+| Q15 | APPROVE: carry CT-local `area` alongside `tier`/`embed_scheme` (mandatory — dropping fails every brain) | Tessera 2026-11-25 |
+| Q16 | APPROVE: STOP-and-report if the resurrect trigger is an unscoped `AFTER/BEFORE UPDATE ON llm_wiki_entries`; tripwire test never edited | Tessera 2026-11-25 |
+| Q17 | APPROVE, extended: T10 spec edit covers the status line AND §8 errata **E8** (parity definition), **E9** (delete-site line drift) | Tessera 2026-11-25 |
+
+## Tasks
+
+| Task | Status | Gate receipts | Notes |
+|---|---|---|---|
+| T0 — 8.0.2 DDL text, expectations JSON, V32 fixture brain captured from base; committed as testdata | pending | `receipts/t0-capture.out` | Q4, Q5; before any edit |
+| T1 — extractor concatenates every execAsync block in setupDatabase; two-block/one-block/split-shape tests RED→GREEN; green on 8.0.2 dist | pending | `t1-g-tauri-red.out`, `t1-g-tauri.out` | Q2; standalone commit |
+| T2 — five pin lines → 9.18.0; install, lockfile scope, `pnpm why`; tsc/vitest green; ddl_compat RED (block-2 drift) | pending | `t2-install.out`, `t2-why.out`, `t2-lockfile.out`, `t2-g-tsc.out`, `t2-g-vitest.out`, `t2-ddl-compat-red.out` | Q1, Q3; opens atomic set |
+| T3 — mechanical regen of LLM_WIKI_PACKAGE_DDL (both blocks); shape + fragmentation confirmed; package_ddl_matches_rust GREEN | pending | `t3-ddl-compat.out` | counts: CREATE TABLE _, CREATE TRIGGER _ |
+| T4 — guard 9.18.0; column sets + 3 new TableExpectations; len test; verify_schema_with; fidelity + fresh-install tests | pending | `t4-g-tauri-red.out`, `t4-g-tauri.out` | Q4, Q15 |
+| T5 — okf_migration non-conflict audit | pending | `t5-audit.out`, `t5-g-tauri.out` | Q12 |
+| T6 — V33 engine-mirror step; existing-DB, round-trip, trigger, idempotency, stamp-gating tests RED→GREEN | pending | `t6-g-tauri-red.out`, `t6-g-tauri.out` | Q7, Q8, Q10, Q14, Q16; slot N = _ |
+| T7 — helper objects as every-open apply helpers; parity + helper-presence RED→GREEN; tripwire green | pending | `t7-g-tauri-red.out`, `t7-g-tauri.out` | Q6, Q13, Q16 |
+| T8 — TS setup() over Rust-chain DB (stamped/unstamped); v17 negative control; schema dump drift test | pending | `t8-g-vitest.out`, `t8-g-tsc.out`, `t8-g-tauri.out` | Q9 |
+| T9 — delete-path disposition verified; ledger survives every delete path; §12 note drafted | pending | `t9-audit.out`, `t9-g-tauri.out` | Q11 |
+| T10 — atomic commit; full gates + clippy vs baseline; PR body; spec status; sweep | pending | `t10-atomic.out`, `t10-g-{tauri,tools,heal,vitest,tsc,clippy}.out` | Q1, Q10, Q17 |
+
+## Recorded facts (filled during implementation)
+
+- 9.18.0 dist anchors (setupDatabase line, block lines, helper names + lines): _pending — T3 step 1_
+- Trigger fragment table (package vs Rust): _pending — T3 step 3_
+- Regen counts (CREATE TABLE / CREATE TRIGGER / non-IF-NOT-EXISTS exceptions): _pending — T3 steps 4–5_
+- 8.0.2 → 9.18.0 llm_wiki column/table diff: _pending — T4_
+- Engine guard re-cites (v16/v17/v18/v19) + declared types used: _pending — T6_
+- Slot N (`ENGINE9_MIRROR_VERSION`): _pending — T6b_
+- Helper objects + trigger event clauses: _pending — T7_
+- TS entry point + meta key/value: _pending — T8_
+- Delete-site cites + §12 divergence text: _pending — T9_
+- PR-body draft (rollout, accumulation + expo-llm-wiki#487, §12, cite drift, rulings, counts): _pending — T10_
