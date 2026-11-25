@@ -1,6 +1,6 @@
 # Investigation — issue #376: engine-9.x follow-ups from the PR #375 T4 cycle
 
-**Date:** 2026-11-25 · **Status:** Draft — Fable step-0 + three delta rounds adjudicated (delta-r4 verification next)
+**Date:** 2026-11-25 · **Status:** CONVERGED after 5 review rounds (Opus med/low + Fable step-0 + 3 Fable deltas) — final Opus consistency delta pending, then spec
 **Branch:** `chore/engine9x-followups` · **Lane worktree:** `/mnt/kv-work/build/worktrees/curated-thoughts/engine9x-followups` (base: `origin/main` = `10e9b006`)
 **Upstream:** issue #376; findings originated in the PR #375 T4 Fable cycle (rounds r1–r4) and spec errata E8–E10 (spec `specs/engine-9x-adoption/spec.md` §8, landed with #375). Split-out: issue #378 (forgotten_at reader gap).
 
@@ -166,22 +166,32 @@ individual options are NOT equivalent:**
 - **Rows removal (the leak half):** add the three `DELETE FROM` statements
   to the sweep itself, WITH THE STAMP LEFT IN PLACE (delta-r3 M3's
   composition; recommended). This removes A's rows inside the clear
-  transaction — no race with concurrent `--mcp` opens (the stamp survives,
-  so no other process ever re-derives). Repopulation for B is then a
-  separate step: an explicit `rebuild_rederive(conn, new_root)` after the
-  reopen, or the Q7 post-ingest run.
+  transaction — no RE-DERIVATION race with concurrent `--mcp` opens (the
+  stamp survives, so no process re-derives A's rows back), though live
+  writers can still insert rows (delta-r4 m3: writers outside the rebuild
+  exist at `wisdom.rs:241`, `queue.rs:771`, `wisdom_deposit.rs:818`; a
+  `--mcp` process still holding root A can insert A-keyed rows after the
+  clear — see the delta-m7 live-writer question below, and note the same
+  exposure exists TODAY without any fix). Repopulation for B is a
+  separate step — timing NOT interchangeable, see delta-r4 M2 below.
 - **Root fix (the wrong-root half):** option (a) — reorder the config write
   before the reopen — or option (d) — a root-override parameter on
   `open_with_config`. CORRECTION (delta-r3 M1, verified): the earlier
   objection to (a) was WRONG — `pending_config_align_to = Some(new_path)`
   is already set in BOTH branches before the reopen (`:2282` install,
   `:2302` clear), the error path already writes that config on any later
-  failure (`:2372-2380`), and at `:2307` the old brain is never still on
+  failure (`:2373-2379`), and at `:2307` the old brain is never still on
   disk (cleared or replaced) — so a mid-switch failure ALREADY ends with
   the config naming the new vault. (a)'s real remaining costs are narrower:
   `set_vault_path` can itself fail before the reopen, and `vault_state`'s
-  in-memory value changes earlier (readers between the write and `:2330` —
-  e.g. `start_pipeline` — need a planning-time check).
+  in-memory value changes earlier (delta-r4 m1 PARTIALLY ANSWERED:
+  in-closure `run_pending` takes `(conn, db_path, now)` (`:2315`) and
+  `start_pipeline` takes `new_root`'s canonical form (`:2321-2322`) —
+  neither reads `vault_state`; the remaining unknown is concurrent readers
+  on other threads — Tauri commands, the watcher). Position pin (delta-r4
+  m2): the early config write must sit AFTER the point of no return
+  (`:2282`/`:2302`) and BEFORE `:2307` — any earlier in the restore branch
+  leaves config B over the outgoing brain on a failed install.
   (d) avoids those but adds a parameter to a ~25-call-site function.
   (c) defer-stamp-deletion is RULED OUT (delta-r2 M1: no further open
   in-session on the success path — the recovery open after a FAILURE is the
@@ -213,11 +223,27 @@ once-per-brain stamp would pin that forever — vault B's previously
 confirmed facts show unconfirmed until re-confirmed. Restore: B's entries
 are PRESENT (the backup carries them), so the entries-empty reasoning does
 not apply there — the confirmations leg would actually work if the rebuild
-ran against B's root. Options: set the rebuild stamp only after B's first
-ingest completes (in-place), re-run the confirmations leg post-ingest, or
-name it a residual.
-**Pin:** a switch-level test asserting the three tables hold B's rows (not
-just that the stamp is gone).
+ran against B's root. Options (delta-r4 M1: NO option deletes the stamp —
+it survives by design in the adopted composition; a spec author working
+from "stamp after first ingest" would reintroduce the delta-r2-M1 leak):
+(a) explicit post-ingest confirmations re-run, stamp untouched; (b) name
+the missing-stamps-in-place case a residual.
+**Repopulation timing (delta-r4 M2 — the two candidates are NOT
+interchangeable):** in-place needs TWO runs of `rebuild_rederive` — one
+between the reopen (`:2307`) and the pipeline start (`:2322`) for the three
+TABLE legs (they read only vault files, `stated_ledger.rs:366-442`; B's
+first ingest must not run with empty `queue_denials`/`stated_attestations`/
+`deposit_attribution` — verified: the queue joins
+`deposit_attribution da ON da.document_path = d.path` (`queue.rs:347`) and
+reads `queue_denials` for deny-suppression (`:361`), so empty tables mean
+wrong attribution and un-suppressed re-queuing) — and one AFTER ingest for
+the confirmations leg (needs entries; safe to re-run: the rebuild truncates
+and rebuilds). Restore branch: the sweep never runs there (`:2301` is in
+the `else`), so only the root fix acts, and only on stale backups; a
+stamped backup keeps its own backup-era rows.
+**Pin:** a switch-level test asserting the three tables hold B's rows and
+the `stated_ledger_rederived` stamp value is UNCHANGED (stamp survives by
+design).
 
 **Restore branch (delta-r2 M3 + delta-r3 M2/M3, verified):** the non-in-place branch
 (`lib.rs:2252-2292`) installs vault B's OWN backup
@@ -281,8 +307,9 @@ clear path (the `_ad` triggers touch ordinary tables; the drain is TS-side).
 **(iv) Guard test (structural):** brain-wide guard — every table in the
 schema must be cleared, partially-cleared-with-reason, or exempted-with-
 reason. Verified inventory so far — sweep tables (`queries.rs:214-303`);
-exempt: `llm_wiki_meta` (survives; BUT the (ii) fix deletes the
-`stated_ledger_rederived` row — a named exception, pinned by its own test),
+exempt: `llm_wiki_meta` (survives INTACT — including the `stated_ledger_rederived`
+stamp; delta-r4 M1 consistency: NO I4 fix deletes it — the three stated-
+ledger TABLES move into the sweep, the stamp key does not),
 `llm_wiki_outbox` (append-only, replica DELETEs are ADDED `:214-237`),
 `llm_wiki_vector_removals` (marker-gated, #213/T9),
 `llm_wiki_entity_manifests` (partial: tier vocabulary retained,
@@ -305,7 +332,18 @@ window (delta m7): the switch stops the pipeline and outbox workers first
 (`lib.rs:2208-2227`), but a concurrent `--mcp` connection is acknowledged
 (`:2296`) — the spec must state whether a live writer can insert
 vault-A-keyed rows into the three tables between the clear and the pipeline
-restart, and if so how the switch serializes against MCP opens. Caveat
+restart, and if so how the switch serializes against MCP opens.
+**Fourth residue class (delta-r4 M3, verified):** `deposit_kick_state` is
+NOT vault-independent — its `path` is the vault-RELATIVE handle
+(`wisdom_deposit.rs:1225`, "#325"), with live writers at `:261`/`:598` and
+state values including `ingested`/`failed`/`queued_watcher`
+(`connection.rs:793-799`). A vault-B deposit at the same relative path
+inherits A's state, and rows for A's documents are residue of exactly the
+(ii) class — a `DELETE FROM deposit_kick_state` belongs in the sweep
+candidate list (spec rules it; default is NOT "exempt").
+`pipeline_heartbeat.subject` and `pipeline_stalls.subject` also carry
+per-document values (`schema.rs:249`, `:261`) — same analysis needed.
+`system_strikes` alone is vault-independent (single counter row). Caveat
 (Fable M2): `librarian_evidence` is cleared only via
 `WHERE entry_id IN (SELECT id FROM llm_wiki_entries)` — pre-existing orphan
 evidence rows would survive; the spec should note whether orphans are
@@ -385,11 +423,11 @@ the drift-gate work) vs separate issue.
 | I2 | PRAGMA grouping (column loop only; hygiene, not perf) | trivial | 1 |
 | I7 | fix all three stale comments (`ci.yml:223`, `ci.yml:135`, smoke script), keep flag | trivial | 1 |
 | I6 | `.gitattributes` scoped to testdata `*.sql` + `*.db binary` | trivial | 2 |
-| I4(ii) | TWO-HALF composition: sweep adds 3 DELETEs (stamp left in place — no race) + root fix ((a) reorder — objection corrected — or (d) override) for the V22/okf steps; covers in-place AND stale-backup restore (okf `remove_file` hazard); confirmations ruling (Q7, per-branch) | medium | 2 |
+| I4(ii) | TWO-HALF composition: sweep adds 3 DELETEs (stamp left in place — no re-derivation race) + root fix ((a) early config write, positioned after point-of-no-return, or (d) override) for the V22/okf steps; repopulation TWO-RUN in-place (tables pre-pipeline, confirmations post-ingest); covers in-place AND stale-backup restore; confirmations ruling (Q7, per-branch) | medium | 2 |
 | I4(i) | source-store DELETEs (E10 fold) | trivial | 2 |
 | I3 | helper-SQL body-drift gate — (a) consts+new extractor vs (b′) TS-test SQL diff | medium | 2 |
 | I4(iii) | FTS drain window — Q6 narrowed (at-rest for CT paths; join-back check at planning) | ruling | 3 |
-| I4(iv) | brain-wide guard test with per-table dispositions | small-medium | 3 |
+| I4(iv) | brain-wide guard test with per-table dispositions (incl. `deposit_kick_state` — fourth residue class) | small-medium | 3 |
 | I8 | desktop-upgrade fixture + tests (Q5) | medium | 3 |
 | I5 | forgotten_at Rust reader | — | separate issue #378 |
 
@@ -425,10 +463,11 @@ after first ingest vs post-ingest re-run vs named residual).
    three `document_path`-keyed tables (`stated_ledger.rs:391/:420/:439`) AND
    applies confirmations to `llm_wiki_entries` (`:379-381`), but is stamped
    once-per-brain (`connection.rs:907-934`; the stamp survives the clear) →
-   live leak on in-place switch (I4(ii)). The post-clear reopen resolves the
-   vault root from the config file, which still names vault A until
-   `set_vault_path` runs later — so any stamp-deletion fix must be
-   ordering-aware (delta M1).
+   live leak on in-place switch (I4(ii)). Repopulation for B is a
+   composition decision (delta-r4 M2): table legs between reopen and
+   pipeline start, confirmations leg post-ingest — the stamp is never
+   deleted (supersedes the earlier "ordering-aware stamp-deletion"
+   framing).
 3. **D2 matrix:** surviving-rows precedent is pinned by tests
    (`queries.rs:1050-1053` schema_version watermark; `:1045-1048` tier
    vocabulary). The authoritative matrix lives in the #213 vault-switch
@@ -439,9 +478,18 @@ after first ingest vs post-ingest re-run vs named residual).
    M2 wrong-root body read is real. `okf_migrated_at` is the OKF stamp key
    (`:18`). `stall_strikes` (per-document, cleared at `queries.rs:276`) and
    `system_strikes` (single-row ledger, MIGRATION_V14) are distinct tables.
-   Remaining planning-time checks: readers of `vault_state` between the
-   early config write and `:2330` (option (a) cost); engine search
-   join-back for Q6.
+   Remaining planning-time checks: readers of `vault_state` on other
+   threads (Tauri commands, watcher) during a switch (option (a) cost);
+   engine search join-back for Q6.
+5. **delta-r4 answers:** `deposit_kick_state.path` is the vault-RELATIVE
+   handle (`wisdom_deposit.rs:1225` "#325"; writers `:261`/`:598`; states
+   at `connection.rs:793-799`) → fourth live-residue class. Queue
+   consumers verified: `queue.rs:347` joins `deposit_attribution` on
+   `document_path`; `:361` reads `queue_denials` for deny-suppression —
+   confirming delta-r4 M2's ingest-time consequence. RR3 (vault_state
+   readers outside `switch_vault`) partially answered (delta-r4 m1) —
+   remaining: concurrent threads. RR4 (dist join-back for Q6): carried to
+   planning.
 
 ## Resource-state note (lane open, per directive)
 
@@ -497,3 +545,16 @@ context.
   NO leak — rederive skips on stamp regardless of root; TWO-HALF
   composition adopted: sweep DELETEs + root fix + explicit/Q7 rebuild),
   m1–m5 — all verified and adopted. Delta-r4 verification next.
+- r7 (2026-11-25): Fable delta-r4 ($1.27/13 turns) REQUEST CHANGES — M1
+  (stale stamp-deletion text in 4 places contradicted the adopted
+  composition — consistency sweep done: I4(iv) exemption, Pin, Research
+  answer 2, Q7 options all rewritten stamp-intact), M2 (repopulation
+  timing NOT interchangeable — two-run structure for in-place stated,
+  queue-consumer consequence verified `queue.rs:347/:361`), M3
+  (`deposit_kick_state` is path-keyed vault-relative — fourth live-residue
+  class, verified `wisdom_deposit.rs:1225`), m1–m4 — all verified and
+  adopted. **INVESTIGATION CONVERGED**: all factual premises settled; the
+  remaining items are explicit spec-stage decisions (Q1–Q7) and
+  planning-time checks. Final Opus-medium consistency delta before the
+  spec; further fix-composition iteration moves into the spec + plan
+  stage where it belongs.
