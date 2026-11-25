@@ -87,8 +87,8 @@ pub struct PipelineWorker {
     status_tx: mpsc::Sender<PipelineStatusEvent>,
     heartbeat: Arc<watchdog::heartbeat::Heartbeat>,
     my_epoch: u64,
-    /// One-shot post-drain hook slot, shared with `PipelineHandle`; see
-    /// `DRAIN_PROBE`.
+    /// Post-drain hook slot, shared with `PipelineHandle`; the hook fires on
+    /// every 1→0 drain crossing. See `DRAIN_PROBE`.
     stated_confirmations: ConfirmationsSlot,
 }
 
@@ -229,14 +229,24 @@ impl PipelineWorker {
                                 // 1->0 crossing (the leg is idempotent). It is
                                 // not `Clone`, so run it under the slot guard;
                                 // it only touches `conn`.
-                                if let Ok(g) = self.stated_confirmations.lock() {
-                                    if let Some(hook) = g.as_ref() {
-                                        if let Err(e) = hook(&conn) {
-                                            eprintln!(
-                                                "[pipeline] stated confirmations hook: {e:#}"
-                                            );
+                                // A panic in the hook must not kill the worker
+                                // (an Idle pending-0 worker is never respawned);
+                                // the leg is idempotent, so the next crossing
+                                // retries.
+                                let fired =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        if let Ok(g) = self.stated_confirmations.lock() {
+                                            if let Some(hook) = g.as_ref() {
+                                                if let Err(e) = hook(&conn) {
+                                                    eprintln!(
+                                                        "[pipeline] stated confirmations hook: {e:#}"
+                                                    );
+                                                }
+                                            }
                                         }
-                                    }
+                                    }));
+                                if fired.is_err() {
+                                    eprintln!("[pipeline] confirmations hook panicked: continuing");
                                 }
                                 self.rx.recv().ok()
                             }

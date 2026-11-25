@@ -1389,7 +1389,6 @@ mod clear_vault_tables_tests {
         /// loop below cannot see them; on real brains the engine owns them:
         /// `llm_wiki_entries_fts{,_config,_content,...}` and the
         /// `llm_wiki_source_passages_fts*` tables.
-        #[allow(dead_code)]
         const FTS_FAMILY: &[&str] = &["llm_wiki_entries_fts", "llm_wiki_source_passages_fts"];
         const EXEMPT: &[&str] = &[
             // Survives INTACT (incl. the rederive stamp); only the
@@ -1413,16 +1412,38 @@ mod clear_vault_tables_tests {
                 .unwrap();
             assert_eq!(n, 0, "{t} is listed as SWEPT but holds rows after the sweep");
         }
+        let disposition_of = |name: &str| -> Result<&'static str, String> {
+            if SWEPT.contains(&name) {
+                Ok("swept")
+            } else if PARTIAL.contains(&name) {
+                Ok("partial")
+            } else if EXEMPT.contains(&name) {
+                Ok("exempt")
+            } else {
+                Err(format!(
+                    "table {name} has no switch disposition — sweep it or add it with a reason (spec §2 S6)"
+                ))
+            }
+        };
         for t in &tables {
+            if let Err(msg) = disposition_of(t) {
+                panic!("{msg}");
+            }
+            // (a) rust in-memory brains lack the engine-owned FTS family.
             assert!(
-                SWEPT.contains(&t.as_str())
-                    || PARTIAL.contains(&t.as_str())
-                    || EXEMPT.contains(&t.as_str()),
-                "table {t} has no switch disposition — sweep it or add it with a reason (spec §2 S6)"
+                !FTS_FAMILY.iter().any(|root| t.starts_with(root)),
+                "table {t} belongs to the engine-owned FTS family"
             );
         }
-        // Negative control: a future table fails this test by construction.
-        assert!(SWEPT.contains(&"llm_wiki_entries"));
+        // (b) an engine-only FTS root cannot also be swept/partial/exempt.
+        for root in FTS_FAMILY {
+            assert!(
+                disposition_of(root).is_err(),
+                "FTS root {root} must not carry a switch disposition"
+            );
+        }
+        // Negative control: a future table is rejected by construction.
+        assert!(disposition_of("future_table_placeholder").is_err());
     }
 }
 
