@@ -476,7 +476,7 @@ git commit -m "fix(vault): write config before the post-sweep reopen — root-de
 - Produces: `pub fn apply_stored_confirmations(conn: &Connection, vault_root: &Path) -> Result<usize>` — reads `stated/.confirmations.jsonl`, runs `apply_confirmations_by_hash` over it, returns applied count. (Run 2 uses this; `rebuild_rederive` is NOT re-entered.)
 - Produces: worker field `confirmations_hook: Option<(Arc<PathBuf-pair>, Arc<AtomicBool>)>` — set via `new_with_vault` callers; simpler concrete shape: `stated_confirmations: Option<Arc<dyn Fn(&Connection) -> Result<()> + Send>>` installed by `start_pipeline` when a switch requested it (set ONCE per epoch by switch_vault via the handle before respawn; cleared after first fire). Keep the concrete shape simple and local.
 
-- [ ] **Step 1: Write the failing test** for `apply_stored_confirmations`:
+- [x] **Step 1: Write the failing test** for `apply_stored_confirmations`:
 
 ```rust
     #[test]
@@ -490,16 +490,16 @@ git commit -m "fix(vault): write config before the post-sweep reopen — root-de
     }
 ```
 
-- [ ] **Step 2: Implement** `apply_stored_confirmations` — mirror rebuild step 1 (`:375-381`): read `CONFIRMATIONS_LEDGER`, open `unchecked_transaction`, `apply_confirmations_by_hash(&tx, &lines)`, commit, return applied.
+- [x] **Step 2: Implement** `apply_stored_confirmations` — mirror rebuild step 1 (`:375-381`): read `CONFIRMATIONS_LEDGER`, open `unchecked_transaction`, `apply_confirmations_by_hash(&tx, &lines)`, commit, return applied.
 
-- [ ] **Step 3: Write the failing worker test** — construct a `PipelineWorker` via `new_with_vault` with an in-memory channel pair, install the hook closure counting invocations, drive one `Ingest` job to completion with `pending` reaching 0 and an empty channel; assert the hook fired exactly once and `pending`-nonzero crossings don't fire it.
+- [x] **Step 3: Write the failing worker test** — construct a `PipelineWorker` via `new_with_vault` with an in-memory channel pair, install the hook closure counting invocations, drive one `Ingest` job to completion with `pending` reaching 0 and an empty channel; assert the hook fired exactly once and `pending`-nonzero crossings don't fire it.
 
-- [ ] **Step 4: Implement the drain hook** in the worker loop: after the counted-job decrement, when `pending.load() == 0`, replace the next blocking `self.rx.recv()` with `self.rx.recv_timeout(DRAIN_PROBE)` (const `DRAIN_PROBE: Duration = Duration::from_millis(250)`):
+- [x] **Step 4: Implement the drain hook** in the worker loop: after the counted-job decrement, when `pending.load() == 0`, replace the next blocking `self.rx.recv()` with `self.rx.recv_timeout(DRAIN_PROBE)` (const `DRAIN_PROBE: Duration = Duration::from_millis(250)`):
   - `Err(RecvTimeoutError::Timeout)` → channel empty during the probe → fire the installed hook once (on a connection opened the same way `run_inner` opens it), clear it, continue the loop with blocking recv.
   - `Ok(job)` → keep it as `next_job` and loop (no fire).
-- [ ] **Step 5: Wire the install** — `switch_vault`'s in-place branch sets the hook on the fresh `PipelineHandle` right after `start_pipeline` (`:2321-2322`), closing over the new vault root; `start_pipeline` itself stays unchanged.
-- [ ] **Step 6: Run all pipeline + stated_ledger tests — expect PASS** (record pinned counts).
-- [ ] **Step 7: Commit**:
+- [x] **Step 5: Wire the install** — `switch_vault`'s in-place branch sets the hook on the fresh `PipelineHandle` right after `start_pipeline` (`:2321-2322`), closing over the new vault root; `start_pipeline` itself stays unchanged.
+- [x] **Step 6: Run all pipeline + stated_ledger tests — expect PASS** (record pinned counts).
+- [x] **Step 7: Commit**:
 
 ```bash
 git add src-tauri/src/db/stated_ledger.rs src-tauri/src/pipeline/mod.rs
@@ -508,6 +508,17 @@ git commit -m "fix(pipeline): stated-ledger repopulation — rebuild at switch, 
 
 ---
 
+
+> **Task 7 closeout (controller, 2026-11-25):** commit `bf364efd` —
+> `apply_stored_confirmations` (stated_ledger.rs:452, test :1106), worker drain hook with
+> `ConfirmationsSlot` shared handle/worker, `recv_timeout(DRAIN_PROBE)` probe replacing only
+> the blocking wait (probe flag recomputed per iteration; try_recv batch path never probes),
+> switch wiring at lib.rs:2363 closing over the canonical new root. Gates: apply_stored 1,
+> stated_ledger 14, pipeline 73, clippy ×2 — controller re-ran the drain-hook pair.
+> DEVIATION ruled: implementer wrote tests after the implementation (no RED captured);
+> controller ran the NEGATIVE CONTROL instead — probe neutralized locally → both drain-hook
+> tests FAIL (0 passed, 2 failed, exit 101), reverted → 2 passed green. Tests genuinely pin
+> the barrier; disproof-equivalent of RED. Scratch t7_edit.py removed by controller.
 ### Task 8: S6 — brain-wide sweep guard test
 
 **Files:**
