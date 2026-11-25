@@ -132,7 +132,8 @@ jobs:
       # core-llm-wiki — a future engine bump whose selector re-matches CT
       # tokens must fail here, not ship green while the hand-transcribed
       # `engine_would_rewrite` still says false. setup-node-pnpm provides
-      # node 22.x (>= 22.5, built-in sqlite).
+      # node 22.x (>= 22.13 unflagged; shipped behind the flag in 22.5).
+      # node:sqlite shipped behind `--experimental-sqlite` in 22.5.0 and was unflagged in 22.13.0 (nodejs/node#55890); the flag is a harmless no-op on current 22.x and kept to avoid churning a working invocation.
       - name: Engine source_ref acceptance gate
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server --test engine_source_ref_gate -- --ignored --test-threads=1
 
@@ -220,7 +221,7 @@ jobs:
 
       # Unmocked engine sentinel: every vitest suite mocks core-llm-wiki, so
       # this is the only check that runs the REAL installed engine (FTS state
-      # machine, migration gate). Node 22 needs --experimental-sqlite.
+      # machine, migration gate). node:sqlite shipped behind `--experimental-sqlite` in 22.5.0 and was unflagged in 22.13.0 (nodejs/node#55890); the flag is a harmless no-op on current 22.x and kept to avoid churning a working invocation.
       - name: core-llm-wiki runtime smoke (unmocked)
         run: node --experimental-sqlite scripts/runtime-smoke-clw.mjs
 

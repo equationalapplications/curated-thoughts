@@ -14,8 +14,7 @@
  *
  * Exit 0 = sentinel green. Any failure exits non-zero with the error.
  *
- * Node >= 22.5: run plain (node:sqlite stable behind no flag on 23+; on the
- * 22.x CI line pass --experimental-sqlite).
+ * node:sqlite shipped behind `--experimental-sqlite` in 22.5.0 and was unflagged in 22.13.0 (nodejs/node#55890); the flag is a harmless no-op on current 22.x and kept to avoid churning a working invocation.
  */
 import { DatabaseSync } from 'node:sqlite';
 import { createWiki } from '@equationalapplications/react-llm-wiki';
