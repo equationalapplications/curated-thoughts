@@ -87,7 +87,20 @@ pub struct PipelineWorker {
     status_tx: mpsc::Sender<PipelineStatusEvent>,
     heartbeat: Arc<watchdog::heartbeat::Heartbeat>,
     my_epoch: u64,
+    /// One-shot post-drain hook slot, shared with `PipelineHandle`; see
+    /// `DRAIN_PROBE`.
+    stated_confirmations: ConfirmationsSlot,
 }
+
+/// Hook run on the worker's own connection once the queue has drained.
+pub type ConfirmationsHook = Box<dyn Fn(&Connection) -> Result<()> + Send>;
+/// Shared install slot between `PipelineHandle` and its worker.
+pub type ConfirmationsSlot = Arc<std::sync::Mutex<Option<ConfirmationsHook>>>;
+
+/// After a counted job leaves `pending` at 0, the worker waits this long for
+/// a straggler before treating the queue as drained (`PendingCount(0)` alone
+/// cannot see jobs still in the channel).
+const DRAIN_PROBE: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl PipelineWorker {
     #[allow(dead_code)]
@@ -106,6 +119,7 @@ impl PipelineWorker {
             status_tx,
             my_epoch: heartbeat.epoch(),
             heartbeat,
+            stated_confirmations: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -125,7 +139,14 @@ impl PipelineWorker {
             status_tx,
             my_epoch: heartbeat.epoch(),
             heartbeat,
+            stated_confirmations: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Share an install slot with the owning handle (set before `run`).
+    pub fn with_confirmations_slot(mut self, slot: ConfirmationsSlot) -> Self {
+        self.stated_confirmations = slot;
+        self
     }
 
     /// Publish a stage transition, returning `false` if this worker has been
@@ -187,7 +208,41 @@ impl PipelineWorker {
         let mut pending_linkers = HashSet::new();
         let mut next_job: Option<PipelineJob> = None;
 
-        while let Some(job) = next_job.take().or_else(|| self.rx.recv().ok()) {
+        let mut probe_next = false;
+        loop {
+            let probe = std::mem::take(&mut probe_next);
+            let job = match next_job.take() {
+                Some(j) => j,
+                None => {
+                    let hook_installed =
+                        probe && self.stated_confirmations.lock().is_ok_and(|g| g.is_some());
+                    let received = if hook_installed {
+                        match self.rx.recv_timeout(DRAIN_PROBE) {
+                            Ok(j) => Some(j),
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                let hook = self
+                                    .stated_confirmations
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut g| g.take());
+                                if let Some(hook) = hook {
+                                    if let Err(e) = hook(&conn) {
+                                        eprintln!("[pipeline] stated confirmations hook: {e:#}");
+                                    }
+                                }
+                                self.rx.recv().ok()
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => None,
+                        }
+                    } else {
+                        self.rx.recv().ok()
+                    };
+                    match received {
+                        Some(j) => j,
+                        None => break,
+                    }
+                }
+            };
             let job_path = match &job {
                 PipelineJob::Ingest { path, .. } => path.clone(),
             };
@@ -338,6 +393,7 @@ impl PipelineWorker {
                     .status_tx
                     .send(PipelineStatusEvent::PendingCount(current));
             }
+            probe_next = self.pending.load(Ordering::SeqCst) == 0;
 
             // The closure publishes a Linking transition per entity (spec §2.2
             // budgets Linking per entity, not per batch, because the batch size
@@ -1301,6 +1357,7 @@ pub struct PipelineHandle {
     db_path: PathBuf,
     vault_root: Option<PathBuf>,
     status_tx: mpsc::Sender<PipelineStatusEvent>,
+    stated_confirmations: ConfirmationsSlot,
 }
 
 /// Channel depth. Shared by `start_pipeline` and `respawn_worker` so a
@@ -1308,6 +1365,13 @@ pub struct PipelineHandle {
 pub const PIPELINE_CHANNEL_CAPACITY: usize = 256;
 
 impl PipelineHandle {
+    /// Install the one-shot post-drain hook (cleared after it fires).
+    pub fn install_stated_confirmations(&self, hook: ConfirmationsHook) {
+        if let Ok(mut g) = self.stated_confirmations.lock() {
+            *g = Some(hook);
+        }
+    }
+
     /// Rebuild the channel and spawn a replacement worker, returning the new
     /// sender.
     ///
@@ -1329,7 +1393,8 @@ impl PipelineHandle {
             self.vault_root.clone(),
             self.status_tx.clone(),
             self.heartbeat.clone(),
-        );
+        )
+        .with_confirmations_slot(self.stated_confirmations.clone());
         let join = std::thread::Builder::new()
             .name("pipeline-worker".to_string())
             .spawn(move || worker.run())
@@ -1348,6 +1413,7 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
     let (status_tx, status_rx) = mpsc::channel();
     let pending = Arc::new(AtomicUsize::new(0));
     let heartbeat = Arc::new(watchdog::heartbeat::Heartbeat::new());
+    let stated_confirmations: ConfirmationsSlot = Arc::new(std::sync::Mutex::new(None));
     let worker = PipelineWorker::new_with_vault(
         db_path.clone(),
         rx,
@@ -1355,7 +1421,8 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
         vault_root.clone(),
         status_tx.clone(),
         heartbeat.clone(),
-    );
+    )
+    .with_confirmations_slot(stated_confirmations.clone());
     let join = std::thread::Builder::new()
         .name("pipeline-worker".to_string())
         .spawn(move || worker.run())
@@ -1369,6 +1436,7 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
         db_path,
         vault_root,
         status_tx,
+        stated_confirmations,
     }
 }
 
@@ -1737,6 +1805,80 @@ mod watchdog_integration_tests {
                 );
             },
         );
+    }
+
+    /// Drive `n_jobs` counted ingests (all queued before the worker starts)
+    /// with a hook installed; returns the document counts the hook observed
+    /// on the worker's connection, one entry per invocation.
+    fn run_drain_hook(n_jobs: usize) -> Vec<i64> {
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        let mut seen = Vec::new();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+                ("CURATED_EMBED_STUB", Some("constant8")),
+            ],
+            || {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let db_path = tmp.path().join("brain.db");
+                crate::db::connection::open_app_db(&db_path, None).unwrap();
+
+                let (tx, rx) = sync_channel::<PipelineJob>(8);
+                let heartbeat = Arc::new(Heartbeat::new());
+                let pending = Arc::new(AtomicUsize::new(0));
+                let (status_tx, _status_rx) = mpsc::channel();
+                let worker = PipelineWorker::new_with_vault(
+                    db_path,
+                    rx,
+                    pending,
+                    None,
+                    status_tx,
+                    heartbeat,
+                );
+
+                let (fired_tx, fired_rx) = mpsc::channel::<i64>();
+                *worker.stated_confirmations.lock().unwrap() = Some(Box::new(move |conn| {
+                    let n: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+                    let _ = fired_tx.send(n);
+                    Ok(())
+                }));
+
+                for i in 0..n_jobs {
+                    let doc = tmp.path().join("documents").join(format!("d{i}.md"));
+                    std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+                    std::fs::write(&doc, format!("hello world {i}")).unwrap();
+                    tx.send(PipelineJob::ingest_counted(
+                        doc.to_string_lossy().to_string(),
+                    ))
+                    .unwrap();
+                }
+                let join = std::thread::spawn(move || worker.run());
+
+                // The probe timeout is the synchronization: the first fire
+                // arrives only after the queue drained.
+                seen.push(fired_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap());
+                drop(tx);
+                join.join().unwrap();
+                seen.extend(fired_rx.try_iter());
+            },
+        );
+        seen
+    }
+
+    #[test]
+    fn drain_hook_fires_once_after_queue_drains() {
+        assert_eq!(run_drain_hook(1), vec![1]);
+    }
+
+    #[test]
+    fn drain_hook_does_not_fire_while_a_job_is_queued() {
+        // Two queued jobs: the 1->0 crossing after job 1 has job 2 waiting,
+        // so the hook must fire exactly once, after BOTH are ingested.
+        assert_eq!(run_drain_hook(2), vec![2]);
     }
 }
 

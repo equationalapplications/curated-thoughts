@@ -443,6 +443,21 @@ pub fn rebuild_rederive(conn: &Connection, vault_root: &Path) -> Result<RebuildR
     Ok(report)
 }
 
+/// Confirmations-only re-application (spec §2 S5 Run 2): re-stamp
+/// `user_confirmed` from `stated/.confirmations.jsonl` for facts that
+/// arrived after the switch-time rebuild. Mirrors rebuild step 1 in its own
+/// transaction; the attestation/denial table legs and the stamp are NOT
+/// touched. Idempotent (dedup by hash; already-stamped rows are no-ops).
+/// Returns the number of hash-matched rows stamped.
+pub fn apply_stored_confirmations(conn: &Connection, vault_root: &Path) -> Result<usize> {
+    let confirmations: Vec<ConfirmationLine> =
+        read_lines(&vault_root.join(STATED_DIR).join(CONFIRMATIONS_LEDGER))?;
+    let tx = conn.unchecked_transaction()?;
+    let applied = apply_confirmations_by_hash(&tx, &confirmations)?;
+    tx.commit()?;
+    Ok(applied)
+}
+
 /// Walk the vault for markdown files carrying attribution frontmatter and
 /// repopulate `deposit_attribution` keyed by the watcher's virtual-absolute
 /// `documents.path` form (`virtual_path_key`, defect B1) — the same key the
@@ -1087,6 +1102,23 @@ mod tests {
 
     /// Event-once idempotence (D1-v2): a second rebuild over the same ledger
     /// emits NO new outbox rows or events — the shared helper's
+    #[test]
+    fn apply_stored_confirmations_stamps_without_touching_table_legs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_root = tmp.path();
+        let conn = open_in_memory().unwrap();
+        seed_fact(&conn, "f1", "Alpha", "Alpha body");
+        let h = confirmation_content_hash("Alpha", "Alpha body");
+        append_confirmation_line(vault_root, "f1", &h, "human:kurt", "2026-10-21T00:00:00Z");
+
+        let applied = apply_stored_confirmations(&conn, vault_root).unwrap();
+        assert_eq!(applied, 1);
+        let attestations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM stated_attestations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attestations, 0, "table legs must stay untouched");
+    }
+
     /// `NOT (fully stamped)` guard makes an already-stamped row a no-op
     /// (spec §4). Re-run cleanliness is the property that keeps rebuild
     /// re-runs clean.
