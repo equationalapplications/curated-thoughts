@@ -538,7 +538,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
                     || report.purged > 0
                     || report.skipped_destructive
                 {
-                    println!(
+                    eprintln!(
                         "[ct::regrade] #186 V20: regraded_anchored={} exported={} purged={} skipped_destructive={}",
                         report.regraded_anchored,
                         report.exported,
@@ -691,7 +691,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
             }
             Some(roots) => {
                 let report = v22_unify_documents_path(conn, &roots.configured, &roots.canonical)?;
-                println!(
+                eprintln!(
                     "[ct::repair] #204 V22: rewritten={} deleted={} (canonical-path \
                      rows unified to configured-root form)",
                     report.rewritten, report.deleted
@@ -915,7 +915,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         if already.is_none() {
             match crate::db::stated_ledger::rebuild_rederive(conn, Path::new(&roots.canonical)) {
                 Ok(report) => {
-                    println!(
+                    eprintln!(
                         "[ct::repair] #294 §8 rederive: confirmations read={} applied={} \
                          attestations read={} dropped={} denials={} deposits={} (once per \
                          brain; derived state re-derived from stated/ ledgers)",
