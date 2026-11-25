@@ -1,6 +1,6 @@
 # Investigation — issue #376: engine-9.x follow-ups from the PR #375 T4 cycle
 
-**Date:** 2026-11-25 · **Status:** Draft — Fable step-0 + delta adjudicated (delta M1/M2 folded; delta-r2 verification next)
+**Date:** 2026-11-25 · **Status:** Draft — Fable step-0 + two delta rounds adjudicated (delta-r3 verification next)
 **Branch:** `chore/engine9x-followups` · **Lane worktree:** `/mnt/kv-work/build/worktrees/curated-thoughts/engine9x-followups` (base: `origin/main` = `10e9b006`)
 **Upstream:** issue #376; findings originated in the PR #375 T4 Fable cycle (rounds r1–r4) and spec errata E8–E10 (spec `specs/engine-9x-adoption/spec.md` §8, landed with #375). Split-out: issue #378 (forgotten_at reader gap).
 
@@ -10,7 +10,9 @@ Every premise in issue #376 was re-verified against the live tree at `10e9b006`
 by direct read of the named code paths. Review findings at each tier (Opus
 medium REQUEST CHANGES → Opus-low delta APPROVE WITH NITS → Fable step-0
 REQUEST CHANGES) were each re-verified against the tree and the installed
-9.18.0 engine dist before folding. Premise verdicts: **7 REAL, 1
+9.18.0 engine dist before folding (dist cited from the PRIMARY checkout's
+node_modules — the lane worktree's `node_modules` is a symlink into it:
+`~/code/github/equationalapplications/curated-thoughts/node_modules/.pnpm/@equationalapplications+core-llm-wiki@9.18.0/.../dist/index.js`). Premise verdicts: **7 REAL, 1
 REAL-but-out-of-scope** (#378). The Fable step-0 pass ESCALATED I4: two of its
 MAJORs describe leaks that are live today, not gated-future debts.
 
@@ -44,7 +46,8 @@ test calls `existing_columns` directly and does not constrain the restructure.
 **Fix direction:** group by table; one `existing_columns` call per distinct
 table, return shape kept. Scope honesty (r2-m3, expanded per Fable m3): other
 every-open PRAGMA readers are `okf_ddl.rs:325` (v13), `:356` (okf_v02),
-`:384` (events partial index), `:402`/`:410` (source store), and
+`:384` (events partial index), `:402`/`:410` (source store), `:443`
+(resurrect trigger helper), and
 `engine9_missing`'s own `sqlite_master` COUNT-per-object loop (`:1503-1512`;
 the object LIST comes from `package_ddl_objects` at `:1470`, which issues no
 SQL). The I2 fix saves 2 of roughly 10 per-open PRAGMA reads — a hygiene fix,
@@ -58,7 +61,7 @@ NOT a hot-path win; presented as such. The object loop is left unchanged.
 Rust-generated dump — and asserts `dropped == []` / `added == FTS_FAMILY`.
 Its own comment claims it catches `okf_ddl.rs` mirror drift, and for
 **add / rename / drop** it does. But the comparison basis is `type:name` only
-(`schemaObjects`, `:132`): a **same-name SQL-body change** passes, because
+(`schemaObjects`, defined `:128`, `type:name` projection `:135`): a **same-name SQL-body change** passes, because
 `CREATE INDEX IF NOT EXISTS` no-ops over the Rust-made object. Also
 uncovered: the v12 `DROP INDEX` behavior, the column-existence guards, and
 resurrect-trigger body levels 0/1. So the real gap is narrower than earlier
@@ -93,8 +96,19 @@ the Rust-chain brain and a fresh engine-only brain, in the same harness
 (`rustChainDb()` + `engine(db).setup()` already exist). EXCLUDE tables —
 ALTER-added columns change stored `CREATE TABLE` text on migrated fixtures.
 Re-sized **medium**: no new extractor, harness exists.
-(c) the earlier runtime-diff option is SUPERSEDED by (b′) and never covered
-the v12 DROP or trigger levels 0/1 anyway — dropped.
+(c) the earlier runtime-diff option is SUPERSEDED by (b′) — dropped.
+**Coverage honesty (delta-r2 M4):** (b′) diffs steady-state
+`sqlite_master.sql` between two FULLY BUILT brains, so like the dropped (c)
+it sees only the FIRST gap class. Coverage matrix against the three gap
+classes: (1) same-name SQL-body drift of surviving objects — (b′) YES,
+(a) YES; (2) drop behavior (v12 `DROP INDEX`) — (b′) NO (the dropped object
+is absent from steady state on both sides), (a) YES (compares the engine
+source text); (3) conditional branches (column-existence guards, resurrect
+trigger levels 0/1 — only the built variant exists in any given brain) —
+(b′) NO for the unbuilt variants, (a) YES. So (b′) must either accept the
+residual explicitly (drop + guard/variant drift stays uncaught) or pair
+with dedicated assertions for class 2/3; (a) covers everything but costs
+the inline-SQL refactor + a new extractor.
 
 **Open question Q1:** comparison depth — normalized per-statement identity
 (template-gate precedent) vs raw text. **Open question Q2 (now: which
@@ -120,8 +134,10 @@ both tables exist, which holds because the every-open V33 chain runs at app
 start before a switch can be driven; state it in the spec.
 
 **(ii) Stated-ledger derived tables (LIVE leak — verified; fix needs ordering care per Fable-delta M1/M2):**
-`stated_attestations` (migrations/0002:12), `queue_denials` (`:19`), and
-`deposit_attribution` (0001:13) are `document_path`-keyed indexes derived
+`stated_attestations`
+(`src-tauri/src/db/migrations/0002_stated_verification.sql:12`),
+`queue_denials` (`:19`), and `deposit_attribution`
+(`src-tauri/src/db/migrations/0001_deposit_attribution.sql:13`) are `document_path`-keyed indexes derived
 FROM THE VAULT. `rebuild_rederive` (`stated_ledger.rs:356`) is their only
 re-derivation writer and truncates+rebuilds all three from the vault's
 ledger/deposit files (`:391 DELETE FROM stated_attestations`, `:420 DELETE
@@ -145,12 +161,38 @@ moment: the reopen is `lib.rs:2307`, while `vault_state.set_vault_path(&new_path
 — which writes the config (`vault/config.rs:85-91`, `config.write`) — only
 runs later (`lib.rs:2325-2330`, after `pending_config_align_to` handling).
 So the naive fix re-derives the OUTGOING vault and re-stamps: the leak comes
-back, permanent. **Fix directions (each is new machinery; I4(ii) re-sized
-medium):**
-(a) reorder the config write before the reopen in `switch_vault`;
-(b) call `rebuild_rederive(conn, new_root)` explicitly in `switch_vault`
-after the aligned reopen;
-(c) defer the stamp deletion until the config is aligned.
+back, permanent. **Fix directions — NOT equivalent (delta-r2 M1/M2):**
+(a) reorder the config write before the reopen — fixes EVERY root-dependent
+step of the `:2307` open (see below), but changes the failure semantics
+`pending_config_align_to` exists to protect (`lib.rs:2302`, `:2332`: the
+config must align to the installed file "however the rest of the switch
+goes"; with (a), a mid-switch failure leaves the config pointing at the NEW
+vault while the old brain may still be on disk);
+(b) explicit `rebuild_rederive(conn, new_root)` after the reopen — fixes
+ONLY the stated-ledger tables; the other root-dependent steps still run on
+vault A;
+(c) defer the stamp deletion until the config is aligned — RULED OUT
+standalone (delta-r2 M1): the rederive runs only inside `migrate()` on an
+open (`connection.rs:907-916`), and no further open happens in-session after
+`:2330`, so the tables stay stale until the next app start — the
+"tables hold B's rows" pin test fails; ALSO, any stamp-deleting variant has
+an MCP-open race (delta-r2 M1): a concurrent `--mcp` `AppDb::open` between
+stamp deletion and config alignment reads a config naming vault A and
+re-derives A. Option (b) WITH THE STAMP LEFT IN PLACE avoids that race (a
+concurrent open then never re-derives).
+(d) NEW (recommended for the spec): make the `:2307` reopen resolve the NEW
+root explicitly — e.g., a root-override parameter on `open_with_config` that
+`switch_vault` passes — leaving config alignment where it is. This fixes all
+root-dependent steps without touching `pending_config_align_to` semantics.
+**Root-dependent steps of the `:2307` open (delta-r2 M2, verified):**
+`migrate()`'s V22 `v22_unify_documents_path` (rewrites `documents.path` to
+root form — no-op on a cleared brain, which has no `documents` rows); the
+stated-ledger rederive (`:916`, stamp-gated); and
+`run_okf_migration(conn, vault_path)` (`connection.rs:3046-3049`), which is
+a no-op once `okf_migration_complete` is stamped but on a not-yet-migrated
+brain walks VAULT A's files (`preload_approved_pages`, okf_migration.rs:394+)
+and writes A's wiki-page content into the brain. The discriminator: (a)/(d)
+fix all of these; (b) fixes only the rederive.
 **Confirmations ruling (delta M2, open question Q7):** at switch time
 `llm_wiki_entries` is empty (cleared; B not yet ingested), so the
 confirmations leg applies 0 stamps and the once-per-brain stamp would pin
@@ -161,6 +203,19 @@ completes, or re-run the confirmations leg post-ingest, or name it a
 residual. Drop any "re-derives everything / no new machinery" claim.
 **Pin:** a switch-level test asserting the three tables hold B's rows (not
 just that the stamp is gone).
+
+**Restore branch (delta-r2 M3, verified):** the non-in-place branch
+(`lib.rs:2255-2293`) installs vault B's OWN backup
+(`new_root/.brain/brain.db.bak` → `commit_staged_backup`) as the brain file
+BEFORE the shared `:2307` reopen, and the config still names vault A then
+(`set_vault_path` at `:2325` is shared, post-reopen). So the `:2307` open
+runs against B's brain with A's roots in both branches. For B brains that
+carry the V22 + rederive stamps (any backup taken since those migrations),
+the open is a no-op — fine. For a STALE backup lacking the stamps, the open
+runs V22's `documents.path` rewrite and the rederive with A's roots over
+B's rows — path corruption plus A's derived rows written into B's brain,
+today, with no fix applied. I4(ii) must cover this branch; the pin test
+needs a second case (stale-backup restore).
 
 **(iii) FTS family (LIVE residue — mechanism verified in engine dist):**
 the raw `DELETE FROM llm_wiki_entries` fires the engine's `*_fts_ad`
@@ -175,6 +230,11 @@ real but different layers — `drainTurn` wrapper `:6177-6240`; strategy
 A's indexed text remains in the FTS shadow tables until the engine's next
 drain turn reconciles the emptied `llm_wiki_entries` against the pending
 queue; `secure_delete=ON` zeroes at drain time, but the WINDOW exists.
+**Bound note (delta-r2 m6):** if no engine operation runs against the
+desktop brain after a switch, the at-rest residue is UNBOUNDED — the doc
+must name which process (if any) runs the engine against the production
+brain before Q6 is ruled on (planning-time check; CT's Rust paths never
+trigger a drain).
 **Blast radius (delta m4, verified):** CT's Rust paths — the production
 search/recall implementation — reference NO FTS objects at all (repo-wide
 grep over non-test Rust for `entries_fts`/`fts_map` is empty), so for CT the
@@ -183,7 +243,7 @@ search ranks via `bm25` MATCH over the FTS tables (`dist:7076-7078`,
 `:7517-7519`, keyed by entity_id carried in the FTS columns); whether stale
 hits surface depends on the join-back to `llm_wiki_entries` — planning-time
 check before Q6 goes to the owner. Complete engine-created FTS inventory (verified against
-FTS_FAMILY, `engine9-setup-compat.test.ts:190-215`): `llm_wiki_entries_fts`
+FTS_FAMILY, `engine9-setup-compat.test.ts:188-215`): `llm_wiki_entries_fts`
 + `_content/_data/_docsize/_idx/_config`, `llm_wiki_fts_map`,
 `llm_wiki_fts_pending`, triggers `*_fts_ad/_ai/_au`, and the same family
 for `llm_wiki_source_passages_fts` (+ `_fts_map`, `_fts_pending`,
@@ -212,7 +272,9 @@ Fable M2 named for disposition: `pipeline_heartbeat` (`schema.rs:244`),
 vault-independent/operator-facing, but the guard cannot assume.
 `wiki_pages_new` (delta m3) is TRANSIENT — created, populated, and RENAMED
 to `wiki_pages` inside one migration (`schema.rs:87-99`), so it is absent at
-steady state; the guard's static-inventory wording must say so. Live-writer
+steady state; the guard's static-inventory wording must say so (same
+transient class: `documents_v15`, created `schema.rs:315`, renamed to
+`documents` at `:338` — delta-r2 m3). Live-writer
 window (delta m7): the switch stops the pipeline and outbox workers first
 (`lib.rs:2208-2227`), but a concurrent `--mcp` connection is acknowledged
 (`:2296`) — the spec must state whether a live writer can insert
@@ -263,14 +325,18 @@ Verified (nodejs.org v22.13.0 release notes — "unflag sqlite module",
 nodejs/node#55890 — and the node:sqlite API history): flagged in 22.5.0,
 unflagged in 22.13.0. CI installs floating `node-version: "22"` via
 `.github/actions/setup-node-pnpm` (no `.nvmrc`, no `engines`), so CI always
-gets ≥22.13.
+gets ≥22.13. THREE stale comments to fix (delta-r2 m4): `ci.yml:223-225`,
+`scripts/runtime-smoke-clw.mjs:18`, AND `ci.yml:135` ("node 22.x (>= 22.5,
+built-in sqlite)" — true for the built-in, but 22.5 was still flag-gated;
+say ≥22.13 or "22.x current").
 
-**Fix direction (Fable m4 corrected):** KEEP the flag (harmless no-op on
-≥22.13) and fix BOTH stale comments — `ci.yml:223` AND
-`scripts/runtime-smoke-clw.mjs:18` (same stale wording; accurate text exists
-at `engine9-setup-compat.test.ts:28-30`). Honest rationale: the flag
-protects nobody in CI (contributors do not execute ci.yml); it is kept
-purely to avoid churning a working invocation, not as protection.
+**Fix direction (updated per delta-r2 m4):** KEEP the flag (harmless no-op
+on ≥22.13) and fix all THREE stale comments — `ci.yml:223-225`,
+`scripts/runtime-smoke-clw.mjs:18`, and `ci.yml:135` — stating the true
+history (flag needed 22.5–22.12; unflagged 22.13+; accurate text exists at
+`engine9-setup-compat.test.ts:28-30`). Honest rationale: the flag protects
+nobody in CI (contributors do not execute ci.yml); it is kept purely to
+avoid churning a working invocation, not as protection.
 
 ### I8 — desktop-upgrade-path test coverage gap (REAL, medium, test-only)
 
@@ -291,9 +357,9 @@ the drift-gate work) vs separate issue.
 |---|------|------|----------|
 | I1 | stdout → stderr ×3 | trivial | 1 |
 | I2 | PRAGMA grouping (column loop only; hygiene, not perf) | trivial | 1 |
-| I7 | fix both stale comments, keep flag | trivial | 1 |
+| I7 | fix all three stale comments (`ci.yml:223`, `ci.yml:135`, smoke script), keep flag | trivial | 1 |
 | I6 | `.gitattributes` scoped to testdata `*.sql` + `*.db binary` | trivial | 2 |
-| I4(ii) | stated-ledger leak fix — ordering-aware (config write vs reopen) + confirmations ruling (Q7) | medium | 2 |
+| I4(ii) | stated-ledger + wrong-root fix — reopen must resolve the NEW root (option (d) root-override recommended); covers in-place AND stale-backup restore branches; confirmations ruling (Q7) | medium | 2 |
 | I4(i) | source-store DELETEs (E10 fold) | trivial | 2 |
 | I3 | helper-SQL body-drift gate — (a) consts+new extractor vs (b′) TS-test SQL diff | medium | 2 |
 | I4(iii) | FTS drain window — Q6 narrowed (at-rest for CT paths; join-back check at planning) | ruling | 3 |
@@ -376,4 +442,14 @@ context.
   transient), m4 (FTS blast radius: CT Rust search has no FTS references —
   Q6 narrowed), m5 (table row), m6 (revision labels), m7 (live-writer
   window) — all verified and adopted; I4(ii) re-sized medium. Fable delta-r2
+  verification next.
+- r5 (2026-11-25): Fable delta-r2 ($1.47/19 turns) REQUEST CHANGES — M1
+  (option (c) ruled out standalone; MCP-open race on stamp-deleting variants;
+  (b)-with-stamp-left avoids the race), M2 (root-dependent steps of the
+  `:2307` open enumerated — V22 no-op on cleared brain, okf_migration walks
+  vault A on pre-migration brains; (a)-vs-(b) discriminator), M3 (restore
+  branch: stale backup lacking stamps gets A's roots applied to B's rows
+  TODAY — second pin-test case), M4 (I3 coverage matrix: (b′) sees only gap
+  class 1), m1–m7 — all verified against the tree and adopted; option (d)
+  (root-override reopen) added as the recommended fix direction. Delta-r3
   verification next.
