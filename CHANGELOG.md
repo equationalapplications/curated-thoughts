@@ -1,3 +1,27 @@
+## [3.15.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.14.2...v3.15.0) (2026-11-25)
+
+### Features
+
+* **entity-gate:** EA_SEED_TYPES 20-slug re-pin + aliases + epoch (plan T3) ([8816534](https://github.com/equationalapplications/curated-thoughts/commit/881653415927c4cb519d514a382bb0e7cb840787))
+* **migrations:** sso9 manifest MERGE refresh (plan T4) ([390dde9](https://github.com/equationalapplications/curated-thoughts/commit/390dde937aedaf9659e7063bc03371e00cae0887))
+* **migrations:** sso9 re-type + edge dispositions (plan T5) ([c772171](https://github.com/equationalapplications/curated-thoughts/commit/c772171d8d0307fb6663acff5af9656435965f22))
+* **ontology:** sso 9.18.0 pin + 9.x contract tests + copy (plan T1+T2) ([9e3bca1](https://github.com/equationalapplications/curated-thoughts/commit/9e3bca1ae7ec59506f6c8f492fab7e58f5ae3e6b))
+
+### Bug Fixes
+
+* **migrations:** allowlist connection.rs base-table reads for the sso9 migrations (R2.7.5) ([848bd46](https://github.com/equationalapplications/curated-thoughts/commit/848bd462494643b9617f0500f9b55db9b8492fde))
+* **migrations:** fold impl-review findings 1+7 — statement-target remap removed; kept_declared_about bucket ([b85c9d2](https://github.com/equationalapplications/curated-thoughts/commit/b85c9d240950701eae4806cbba13c28f95c32a8f))
+* **sso9:** edge_writer_gate fixture baseline 7 -> 8 (slx2 trailing-space fixture) ([62632da](https://github.com/equationalapplications/curated-thoughts/commit/62632da66b7478dff6619bfb6c25a20525a9c303))
+* **sso9:** fold CodeRabbit round on fa887299 — 5 findings (4 folded, 1 doc-only) ([677e190](https://github.com/equationalapplications/curated-thoughts/commit/677e19083856661006ca8f968e91a9fc09020245))
+* **sso9:** fold CodeRabbit round-4 + T1.5 rung-2 findings — ungated keep, verbatim resolver, abort on unreadable manifests, backup prune ([b141e47](https://github.com/equationalapplications/curated-thoughts/commit/b141e476a8de595942a979316d3cf9f2c5aa9986))
+* **sso9:** fold fresh-round t93k+t93c — malformed owner rows fall through like the gate; NULL-endpoint drops counted separately ([acc5901](https://github.com/equationalapplications/curated-thoughts/commit/acc59017a20f05ef86d75ca09118710fc7b364e7))
+* **sso9:** fold T1.5 rung-1 nits 1+3, dismiss 2+4 with receipts; archive round-3 dispositions ([70ad5e7](https://github.com/equationalapplications/curated-thoughts/commit/70ad5e71b1e3c750859040cda7d8a72f75647623))
+* **sso9:** fold T1.5 rung-3 BLOCKER — the about arm consults the applicable manifest too ([c772a0f](https://github.com/equationalapplications/curated-thoughts/commit/c772a0fa11cf993b63d5f8f954ce02bc12218710))
+* **sso9:** fold T3 MAJOR — parent-aware declared-shape matching; record pending rulings ([5e1c61f](https://github.com/equationalapplications/curated-thoughts/commit/5e1c61f4c730a681337f011d5ac1c0db29fe9fd7))
+* **sso9:** impl-review round 3 — per-row backup verification, inherited manifests, reservation bail ([16bde2d](https://github.com/equationalapplications/curated-thoughts/commit/16bde2d090d66313c660f9150bf778c331d475ff))
+* **sso9:** impl-review round-2 — fold all 8 CodeRabbit findings + fix both red CI jobs ([2294df0](https://github.com/equationalapplications/curated-thoughts/commit/2294df049e88cf9ddad58e92e89a274d7ae074f6))
+* **sso9:** owner ruling — NULL-endpoint parent edges are KEPT (spec errata E5-E7) ([fa88729](https://github.com/equationalapplications/curated-thoughts/commit/fa8872994146043d26eaf05573f0700c49eaa6e2))
+
 ## [3.14.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.14.1...v3.14.2) (2026-11-24)
 
 ### Bug Fixes
