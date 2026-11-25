@@ -527,7 +527,7 @@ git commit -m "fix(pipeline): stated-ledger repopulation — rebuild at switch, 
 **Interfaces:**
 - Consumes: the static disposition const defined in the test; `sqlite_master` of an `open_in_memory` brain seeded via `seed_full_vault`.
 
-- [ ] **Step 1: Write the guard test** (this one is the deliverable — write it first, it should PASS only after the dispositions list is complete; if it fails on Day 1 that IS the point):
+- [x] **Step 1: Write the guard test** (this one is the deliverable — write it first, it should PASS only after the dispositions list is complete; if it fails on Day 1 that IS the point):
 
 ```rust
     /// Brain-wide guard: every table must be swept, partially-cleared-with-
@@ -578,8 +578,8 @@ git commit -m "fix(pipeline): stated-ledger repopulation — rebuild at switch, 
     }
 ```
 
-- [ ] **Step 2: Reconcile the list against the ACTUAL sweep** (`queries.rs:214-303`) — every table in the sweep goes under SWEPT; resolve mismatches by fixing the LIST, not the sweep. Also seed any table the default `open_in_memory` chain creates but `seed_full_vault` doesn't (the sqlite_master query must see them — if a table only exists post-V33 on real brains, seed it explicitly or use the V33 fixture brain helper).
-- [ ] **Step 3: Run — expect PASS** with the final list.
+- [x] **Step 2: Reconcile the list against the ACTUAL sweep** (`queries.rs:214-303`) — every table in the sweep goes under SWEPT; resolve mismatches by fixing the LIST, not the sweep. Also seed any table the default `open_in_memory` chain creates but `seed_full_vault` doesn't (the sqlite_master query must see them — if a table only exists post-V33 on real brains, seed it explicitly or use the V33 fixture brain helper).
+- [x] **Step 3: Run — expect PASS** with the final list.
 - [x] **Step 4: Commit**:
 
 ```bash
@@ -589,6 +589,17 @@ git commit -m "test(db): brain-wide guard — every table has an explicit vault-
 
 ---
 
+
+> **Task 8 closeout (controller, 2026-11-25):** commit `7a4291fb` — guard test green
+> (1 passed, controller re-run), clippy ×2 exit 0, origin read back. SWEPT = 30 tables
+> (folder_rules/documents/wiki_pages re-listed per the plan's own note); PARTIAL =
+> entity_manifests; EXEMPT = 9 with reasons. Controller verified all EXEMPT tables live in
+> the guard's view (schema.rs base DDL = every-open, incl. in-memory) — the child's
+> uncertainty resolved. Known LIMIT (spec-consistent): the guard sees only tables present
+> in the in-memory chain — FTS family (rust chains never create it) and V25 kick_state on
+> rootless brains are invisible here; the S8/S9 TS-side fixtures cover the real-brain
+> shapes. No RED by design (the negative control is structural: an undispositioned ACTUAL
+> table trips the assert).
 ### Task 9: S8 — TS normalized-SQL drift gate with engine-ownership filter
 
 **Files:**
