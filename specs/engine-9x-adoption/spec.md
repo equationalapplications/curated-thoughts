@@ -244,8 +244,9 @@ PR-A tests:
 - **E9 (PR-B delete-site line drift — controller ruling Q11, 2026-11-25):**
   the §3 PR-B step-6 cites drifted with #369's merge: `commit.rs:616` →
   `:634`; `bundle_apply.rs:982` → `:1017`. `queries.rs:227` matches.
-- **E10 (PR-B test-fixture form + vault-switch debt — T4 r2 m5/m3,
-  2026-11-25):** spec §5 test 3 described building the fixture DB at test
+- **E10 (PR-B test-fixture form + vault-switch debt — Fable T4 round 2 of
+  the owner-directed post-implementation cycle, 2026-11-25; tracked by
+  issue #376):** spec §5 test 3 described building the fixture DB at test
   time from an 8.0.2 DDL text snapshot. As shipped, the fixture is a frozen
   binary brain (`ct-brain-v32-core-8.0.2.db`, provenance + regeneration
   recipe in `src-tauri/src/db/testdata/README.md`); the DDL-text-snapshot
@@ -264,5 +265,5 @@ PR-A tests:
   values); (d) `llm_wiki_vector_removals` deliberately stays OUT of the
   vault-clear list: with the marker unset the hard-delete trigger empties
   it, and with `external_index_in_use` set the outgoing vault's rows
-  survive the switch BY DESIGN (pinned by the T9 tests) — recorded here as
-  the #213 decision.
+  survive the switch BY DESIGN (pinned by the raw-delete-path tests in
+  `src-tauri/src/db/connection.rs`) — recorded here as the #213 decision.

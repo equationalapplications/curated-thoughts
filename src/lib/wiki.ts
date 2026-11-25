@@ -429,7 +429,7 @@ let _outboxEnabled = false;
 let _wikiUpdateGeneration = 0;
 
 // --- Keyword-index convergence (core-llm-wiki host contract; introduced
-// 7.13.0, reverified on 8.0.2) ------------------------------------------
+// 7.13.0, reverified on 8.0.2 and 9.18.0) ------------------------------------------
 //
 // The engine bounds FTS (re)build work per setup()/syncSearchIndex() quantum
 // (config.setupBudgetMs, default 1500 ms). On an existing vault the first open
@@ -517,7 +517,7 @@ async function rebuildWiki(): Promise<void> {
   await updatedWiki.setup();
   if (gen !== _wikiUpdateGeneration) return;
   wiki = updatedWiki;
-  // core-llm-wiki host contract (introduced 7.13.0, reverified 8.0.2):
+  // core-llm-wiki host contract (introduced 7.13.0, reverified 8.0.2 and 9.18.0):
   // converge a rebuilding FTS index after
   // the bounded setup quantum (see scheduleSearchIndexCatchup).
   scheduleSearchIndexCatchup(updatedWiki);
@@ -579,7 +579,7 @@ export async function setupWiki() {
   }
   if (_wikiUpdateGeneration === genAtStart) {
     wiki = newWiki;
-    // core-llm-wiki host contract (introduced 7.13.0, reverified 8.0.2):
+    // core-llm-wiki host contract (introduced 7.13.0, reverified 8.0.2 and 9.18.0):
     // converge a rebuilding FTS index
     // after the bounded setup quantum (see scheduleSearchIndexCatchup). A
     // superseded instance is owned by rebuildWiki, which schedules its own.

@@ -1440,10 +1440,11 @@ pub(crate) const SSO9_REFRESH_VERSION: i64 = 31;
 pub(crate) const SSO9_RETYPE_VERSION: i64 = SSO9_REFRESH_VERSION + 1;
 
 /// Slot of the engine-9x mirror step: (highest stamped
-/// slot on this branch = `SSO9_RETYPE_VERSION` = 32) + 1. A literal, not an
-/// expression, so a renumber is one visible edit (V27 renumber precedent):
-/// if another lane takes 33 before merge, bump this const — every stamp,
-/// test and log line reads it.
+/// slot = `SSO9_RETYPE_VERSION` = 32) + 1. A literal, not an
+/// expression, so a renumber is one visible edit here (V27 renumber
+/// precedent): if another lane takes 33, bump this const — every stamp,
+/// test and log line reads it. NOTE: the schema_guard fresh-brain test
+/// additionally pins 31/32/33 as literals, as historical fact.
 pub(crate) const ENGINE9_MIRROR_VERSION: i64 = 33;
 
 /// Columns the 9.18.0 engine adds by `ALTER TABLE` in migrations v16/v18/v19
@@ -1454,7 +1455,8 @@ pub(crate) const ENGINE9_MIRROR_VERSION: i64 = 33;
 /// `:2863` `ADD COLUMN derived_events TEXT`; v19 `addEventsForgottenAtColumn`
 /// `:2841` `ADD COLUMN forgotten_at INTEGER`. They equal the `setupDatabase`
 /// template's own declarations (`LLM_WIKI_PACKAGE_DDL`), so fresh and
-/// migrated brains agree on `PRAGMA table_info` (T7 parity).
+/// migrated brains agree on `PRAGMA table_info` (parity with the
+/// verbatim template).
 const ENGINE9_MIRROR_COLUMNS: &[(&str, &str, &str)] = &[
     ("llm_wiki_entries", "source_pointer", "TEXT"),
     ("llm_wiki_entries", "prior_valid_to", "INTEGER"),
@@ -1518,7 +1520,7 @@ fn engine9_missing(conn: &Connection) -> Result<(Vec<String>, Vec<String>)> {
 /// `llm_wiki_source_passages`), the vector-removal ledger
 /// (`llm_wiki_vector_removals` + its pending index) and the two ledger
 /// triggers, by re-executing `LLM_WIKI_PACKAGE_DDL` itself (every statement
-/// `IF NOT EXISTS`, T3) — verbatim by construction, no duplicated SQL.
+/// `IF NOT EXISTS`) — verbatim by construction, no duplicated SQL.
 ///
 /// Engine guards mirrored (core-llm-wiki 9.18.0 `dist/index.js`): v16
 /// `:2759-2768` adds `source_pointer` only when `PRAGMA table_info` lacks it;
@@ -1528,7 +1530,7 @@ fn engine9_missing(conn: &Connection) -> Result<(Vec<String>, Vec<String>)> {
 /// columns and ZERO rows — CT therefore adds no CT-local column to, and writes
 /// no row into, either table, so a later engine `setup()` passes v17. The
 /// migration-only partial indexes (v18 `entries_deleted_idx`, v19
-/// `events_forgotten_idx`) and the `setupDatabase` helper objects are T7's
+/// `events_forgotten_idx`) and the `setupDatabase` helper objects are the
 /// every-open helpers, not part of this step.
 ///
 /// Shape (V24/V30 pattern): ungated on every open — the every-open guard
@@ -7821,7 +7823,7 @@ mod tests {
 
     // ── V33 engine-mirror step tests ─────────────────────
     //
-    // Every test works on a tempdir COPY of the T0 fixture brain (a V32-stamped
+    // Every test works on a tempdir COPY of the base-capture fixture brain (a V32-stamped
     // brain created under the core-llm-wiki 8.0.2 DDL); the checked-in file is
     // never migrated.
 

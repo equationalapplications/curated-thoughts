@@ -1039,7 +1039,7 @@ mod tests {
     use crate::okf::bundle_read::{ParsedBundle, ParsedEntity, ParsedEvent};
     use crate::okf::types::WikiFact;
 
-    /// engine-9x PR-B Task 9 (spec §3 step 6, Q11): the raw entity wipe
+    /// engine-9x PR-B (spec §3 step 6): the raw entity wipe
     /// (`clear_one_entity_content`, `DELETE FROM llm_wiki_entries WHERE
     /// entity_id=?1`) must not bypass the vector-removal ledger triggers —
     /// over a migrated 8.0.2 fixture copy, unmarked live hard deletes enqueue

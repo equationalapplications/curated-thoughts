@@ -279,7 +279,8 @@ pub(crate) fn verify_schema_with(conn: &Connection, expects: &[TableExpectation<
 }
 
 /// `TableExpectation`s for core-llm-wiki 8.0.2 (CT-local columns included),
-/// loaded from the T0 fixture captured at base `78160f98`. Test-only; the
+/// loaded from the fixture captured at base `78160f98` (see
+/// `testdata/README.md`). Test-only; the
 /// parsed data is leaked to obtain `'static` borrows.
 #[cfg(test)]
 pub(crate) fn core_llm_wiki_8_0_2_expectations() -> Vec<TableExpectation<'static>> {
@@ -358,7 +359,7 @@ mod tests {
         assert_eq!(guard, ddl, "guard table names must equal the package DDL's");
     }
 
-    /// Raw (no migrate) open of a tempdir copy of the T0 fixture brain —
+    /// Raw (no migrate) open of a tempdir copy of the base-capture fixture brain —
     /// a V32-stamped brain created under the core-llm-wiki 8.0.2 DDL.
     fn open_raw_8_0_2_fixture_copy(tmp: &tempfile::TempDir) -> Connection {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

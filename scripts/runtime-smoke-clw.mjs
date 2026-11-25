@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Unmocked runtime smoke for the core-llm-wiki engine (7.13.0 host contract).
+ * Unmocked runtime smoke for the core-llm-wiki engine (7.13.0 host
+ * contract; reverified on 8.0.2 and 9.18.0).
  *
  * Every vitest suite mocks the engine package, so nothing else exercises real
  * runtime lines. This script drives the REAL installed engine in Node over
