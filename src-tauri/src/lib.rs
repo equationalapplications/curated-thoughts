@@ -2114,6 +2114,13 @@ fn recover_after_failed_switch_vault(
     true
 }
 
+/// The post-sweep / post-install reopen of `switch_vault`. A seam so the pin
+/// tests drive the SAME open the switch uses: the open resolves the vault root
+/// from `config_path`, so the config must already name the new vault (S5b).
+pub(crate) fn switch_reopen_paths(db_path: &Path, config_path: &Path) -> anyhow::Result<AppDb> {
+    AppDb::open_with_config(db_path, config_path)
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn switch_vault(
@@ -2232,6 +2239,8 @@ async fn switch_vault(
     // unpublished capture is the only record of what the replica is owed, so
     // the error path must not throw it away.
     let mut restore_installed = false;
+    // Whether the in-place branch swept the vault-scoped tables (Run 1 follows).
+    let mut swept = false;
 
     let switch_result = (|| -> Result<(), String> {
         let backup_path = new_root.join(".brain").join("brain.db.bak");
@@ -2290,6 +2299,15 @@ async fn switch_vault(
             // have both done their job.
             db::restore_sync::discard_outgoing_wal(&db_path);
             db::restore_sync::clear_install_marker(&db_path);
+            // S5b: the config must name the NEW vault BEFORE the reopen —
+            // every root-dependent step of the open resolves its root from it.
+            vault_state
+                .0
+                .lock()
+                .unwrap()
+                .set_vault_path(&new_path)
+                .map_err(|e| e.to_string())?;
+            pending_config_align_to = None;
         } else {
             // No file replacement happens here, so the journals are NOT
             // removed: deleting the -wal would silently drop rows committed
@@ -2299,12 +2317,31 @@ async fn switch_vault(
             // connection recovers the -wal natively.
             let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
             db::clear_vault_tables(&mut conn, now).map_err(|e| e.to_string())?;
-            pending_config_align_to = Some(new_path.clone());
+            // S5b: config names the NEW vault before the reopen (see above).
+            vault_state
+                .0
+                .lock()
+                .unwrap()
+                .set_vault_path(&new_path)
+                .map_err(|e| e.to_string())?;
+            pending_config_align_to = None;
+            swept = true;
         }
 
         {
             let mut guard = db_state.0.lock().unwrap();
-            *guard = AppDb::open_with_config(&db_path, &config_path).map_err(|e| e.to_string())?;
+            *guard = switch_reopen_paths(&db_path, &config_path).map_err(|e| e.to_string())?;
+        }
+
+        // Run 1: the sweep emptied the stated-ledger tables; repopulate them
+        // from the NEW vault's ledgers on the reopened connection.
+        if swept {
+            let canonical_new_root = new_root.canonicalize().unwrap_or_else(|_| new_root.clone());
+            let guard = db_state.0.lock().unwrap();
+            match db::stated_ledger::rebuild_rederive(&guard.0, &canonical_new_root) {
+                Ok(report) => eprintln!("[ct::switch] stated-ledger rederive after sweep: {report:?}"),
+                Err(e) => eprintln!("[ct::switch] stated-ledger rederive after sweep failed: {e}"),
+            }
         }
 
         // Spec D3: sync on the reopened file, before the outbox worker
@@ -2321,15 +2358,6 @@ async fn switch_vault(
             let canon_root = new_root.canonicalize().unwrap_or_else(|_| new_root.clone());
             *g = Some(start_pipeline(db_path.clone(), Some(canon_root)));
         }
-
-        vault_state
-            .0
-            .lock()
-            .unwrap()
-            .set_vault_path(&new_path)
-            .map_err(|e| e.to_string())?;
-
-        pending_config_align_to = None;
 
         let _ = app.emit("vault-switched", &new_path);
 
