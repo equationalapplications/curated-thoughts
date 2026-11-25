@@ -216,4 +216,63 @@ describe.skipIf(!DatabaseSync && !process.env.CI)(
     expect(dropped).toEqual([]);
     expect(added.sort()).toEqual(FTS_FAMILY);
   });
+
+  it("helper-SQL drift gate: normalized index/trigger bodies match a fresh engine brain (engine-ownership filter)", async () => {
+    // Rust chains never create FTS; at-rest FTS is engine-owned on real desktop brains.
+    // The four source_passages entries: source-passages FTS5 subsystem (dist 2432-2451) —
+    // rust chains never create any FTS.
+    const FTS_FAMILY = new Set([
+      "trigger:llm_wiki_source_passages_fts_ai",
+      "trigger:llm_wiki_source_passages_fts_ad",
+      "index:llm_wiki_source_passages_fts_map_doc",
+      "index:llm_wiki_source_passages_fts_pending_doc",
+      "trigger:llm_wiki_entries_fts_ai",
+      "trigger:llm_wiki_entries_fts_au",
+      "trigger:llm_wiki_entries_fts_ad",
+      "index:llm_wiki_fts_map_entity",
+      "index:llm_wiki_fts_pending_entity",
+      "index:llm_wiki_fts_pending_id",
+    ]);
+    // Present in fresh 8.0.2 + 9.18.0 engines but absent from the dump (source brain built by
+    // CT's Rust open path, which never runs engine setup); replay reconciliation is engine-owned.
+    const RUST_CHAIN_LIMITS = new Set(["index:llm_wiki_entries_legacy_source_type_idx"]);
+    // Rust-side llm_wiki_* objects the engine brain does not carry; an unlisted rust-only object fails.
+    const CT_OWNED = new Set([
+      "index:llm_wiki_vector_removals_pending",
+      "trigger:llm_wiki_vector_removals_enqueue",
+      "trigger:llm_wiki_vector_removals_hard_delete",
+      "trigger:llm_wiki_vector_removals_resurrect",
+      "index:llm_wiki_idx_source_passages_doc",
+      "index:llm_wiki_idx_source_passages_entity",
+      "index:llm_wiki_entries_deleted_idx",
+      "index:llm_wiki_events_forgotten_idx",
+    ]);
+    const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
+    const bodies = (db: DatabaseSync) => {
+      const rows = db
+        .prepare(
+          "SELECT type, name, sql FROM sqlite_master WHERE type IN ('index','trigger') AND sql IS NOT NULL",
+        )
+        .all() as { type: string; name: string; sql: string }[];
+      return new Map(rows.map((r) => [`${r.type}:${r.name}`, normalize(r.sql)]));
+    };
+    const rust = bodies(rustChainDb());
+    const fresh = new DatabaseSync(":memory:");
+    await engine(fresh).setup();
+    const eng = bodies(fresh);
+
+    const problems: string[] = [];
+    for (const [key, body] of eng) {
+      if (!key.split(":")[1].startsWith("llm_wiki_")) continue;
+      if (FTS_FAMILY.has(key) || RUST_CHAIN_LIMITS.has(key)) continue;
+      const r = rust.get(key);
+      if (r === undefined) problems.push(`engine-only, missing in rust chain: ${key}`);
+      else if (r !== body) problems.push(`body drift: ${key}\n  rust:   ${r}\n  engine: ${body}`);
+    }
+    for (const key of rust.keys()) {
+      if (!key.split(":")[1].startsWith("llm_wiki_")) continue;
+      if (!eng.has(key) && !CT_OWNED.has(key)) problems.push(`rust-only, not CT_OWNED: ${key}`);
+    }
+    expect(problems).toEqual([]);
+  });
 });
