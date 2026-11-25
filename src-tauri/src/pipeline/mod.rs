@@ -220,14 +220,22 @@ impl PipelineWorker {
                         match self.rx.recv_timeout(DRAIN_PROBE) {
                             Ok(j) => Some(j),
                             Err(mpsc::RecvTimeoutError::Timeout) => {
-                                let hook = self
-                                    .stated_confirmations
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut g| g.take());
-                                if let Some(hook) = hook {
-                                    if let Err(e) = hook(&conn) {
-                                        eprintln!("[pipeline] stated confirmations hook: {e:#}");
+                                // Superseded workers must not touch the DB or
+                                // steal the live worker's fire.
+                                if self.heartbeat.epoch() != self.my_epoch {
+                                    return Ok(());
+                                }
+                                // The hook stays installed: it fires on every
+                                // 1->0 crossing (the leg is idempotent). It is
+                                // not `Clone`, so run it under the slot guard;
+                                // it only touches `conn`.
+                                if let Ok(g) = self.stated_confirmations.lock() {
+                                    if let Some(hook) = g.as_ref() {
+                                        if let Err(e) = hook(&conn) {
+                                            eprintln!(
+                                                "[pipeline] stated confirmations hook: {e:#}"
+                                            );
+                                        }
                                     }
                                 }
                                 self.rx.recv().ok()
@@ -1365,7 +1373,8 @@ pub struct PipelineHandle {
 pub const PIPELINE_CHANNEL_CAPACITY: usize = 256;
 
 impl PipelineHandle {
-    /// Install the one-shot post-drain hook (cleared after it fires).
+    /// Install the post-drain hook. Installed once per switch epoch; it fires
+    /// on every 1→0 drain crossing until the worker is superseded.
     pub fn install_stated_confirmations(&self, hook: ConfirmationsHook) {
         if let Ok(mut g) = self.stated_confirmations.lock() {
             *g = Some(hook);
@@ -1811,6 +1820,12 @@ mod watchdog_integration_tests {
     /// with a hook installed; returns the document counts the hook observed
     /// on the worker's connection, one entry per invocation.
     fn run_drain_hook(n_jobs: usize) -> Vec<i64> {
+        run_drain_waves(&[n_jobs])
+    }
+
+    /// Like `run_drain_hook`, but drives one wave per entry: queue that many
+    /// counted jobs, wait for the fire, then start the next wave.
+    fn run_drain_waves(waves: &[usize]) -> Vec<i64> {
         let brain_tmp = tempfile::TempDir::new().unwrap();
         let brain = brain_tmp.path().to_string_lossy().into_owned();
         let mut seen = Vec::new();
@@ -1839,29 +1854,45 @@ mod watchdog_integration_tests {
                     heartbeat,
                 );
 
+                let mut worker_slot = Some(worker);
                 let (fired_tx, fired_rx) = mpsc::channel::<i64>();
-                *worker.stated_confirmations.lock().unwrap() = Some(Box::new(move |conn| {
+                let slot = worker_slot.as_ref().unwrap().stated_confirmations.clone();
+                *slot.lock().unwrap() = Some(Box::new(move |conn| {
                     let n: i64 =
                         conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                     let _ = fired_tx.send(n);
                     Ok(())
                 }));
 
-                for i in 0..n_jobs {
-                    let doc = tmp.path().join("documents").join(format!("d{i}.md"));
-                    std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
-                    std::fs::write(&doc, format!("hello world {i}")).unwrap();
-                    tx.send(PipelineJob::ingest_counted(
-                        doc.to_string_lossy().to_string(),
-                    ))
-                    .unwrap();
+                let mut doc_i = 0;
+                let mut join = None;
+                for &n_jobs in waves {
+                    for _ in 0..n_jobs {
+                        let i = doc_i;
+                        doc_i += 1;
+                        let doc = tmp.path().join("documents").join(format!("d{i}.md"));
+                        std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+                        std::fs::write(&doc, format!("hello world {i}")).unwrap();
+                        tx.send(PipelineJob::ingest_counted(
+                            doc.to_string_lossy().to_string(),
+                        ))
+                        .unwrap();
+                    }
+                    if join.is_none() {
+                        // Start after the first wave is fully queued.
+                        let w = worker_slot.take().unwrap();
+                        join = Some(std::thread::spawn(move || w.run()));
+                    }
+                    // The probe timeout is the synchronization: a fire
+                    // arrives only after the queue drained.
+                    seen.push(
+                        fired_rx
+                            .recv_timeout(std::time::Duration::from_secs(30))
+                            .unwrap(),
+                    );
                 }
-                let join = std::thread::spawn(move || worker.run());
-
-                // The probe timeout is the synchronization: the first fire
-                // arrives only after the queue drained.
-                seen.push(fired_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap());
                 drop(tx);
+                let join = join.unwrap();
                 join.join().unwrap();
                 seen.extend(fired_rx.try_iter());
             },
@@ -1870,8 +1901,9 @@ mod watchdog_integration_tests {
     }
 
     #[test]
-    fn drain_hook_fires_once_after_queue_drains() {
-        assert_eq!(run_drain_hook(1), vec![1]);
+    fn drain_hook_fires_on_every_drain_crossing() {
+        // job -> full drain -> job -> full drain: two fires, no third.
+        assert_eq!(run_drain_waves(&[1, 1]), vec![1, 2]);
     }
 
     #[test]
