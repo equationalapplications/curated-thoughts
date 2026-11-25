@@ -271,7 +271,18 @@ git commit -m "chore: pin testdata fixtures to LF — byte-compare is autocrlf-f
 - Consumes: `open_in_memory` (`crate::db::connection`), existing `count` helper.
 - Produces: sweep covers `llm_wiki_source_documents`, `llm_wiki_source_passages`, `stated_attestations`, `queue_denials`, `deposit_attribution`, `deposit_kick_state`. The `stated_ledger_rederived` row in `llm_wiki_meta` MUST survive (asserted).
 
-- [ ] **Step 1: Write the failing tests** — append to the test module in `queries.rs`:
+- [x] **Step 1: Write the failing tests** — append to the test module in `queries.rs`:
+
+> **Task 5 closeout (controller, 2026-11-25):** implementer BLOCKED honestly on a REAL plan
+> defect — `deposit_kick_state` is V25 root-gated (parks on rootless opens, `open_in_memory`
+> migrates rootless) so the plain DELETE breaks 4 rootless sweep tests and the RED seed.
+> RULING: existence-guard ONLY the kick_state DELETE (a brain without the table never had a
+> rooted session — skipping is a semantic no-op); other five DELETEs stay plain (every-open
+> DDL); test seeds V25's exact shape first. Implemented on the SAME session `d4d00fcb`;
+> GREEN 7 passed (controller re-run), clippy ×2 exit 0, origin read back. RED caveat: the
+> captured RED fails on the kick_state assertion (WIP carried the other five DELETEs when
+> re-run); the pristine stated_attestations-first RED was not re-captured — accepted,
+> mechanism proven.
 
 ```rust
     #[test]
@@ -338,7 +349,7 @@ git commit -m "chore: pin testdata fixtures to LF — byte-compare is autocrlf-f
 
 (Adjust the `deposit_attribution`/`stated_attestations`/`queue_denials` INSERT column lists to the exact schemas in `src-tauri/src/db/migrations/0001_deposit_attribution.sql:13` and `0002_stated_verification.sql:12/:19` — read them first; the shapes above are from the migration bodies.)
 
-- [ ] **Step 2: Run — expect FAIL** (tables not swept):
+- [x] **Step 2: Run — expect FAIL** (tables not swept):
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server \
@@ -347,7 +358,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server
 
 Expected: new test FAILS on `stated_attestations must be swept`.
 
-- [ ] **Step 3: Implement** — inside `clear_vault_tables`'s `execute_batch` (children-before-parents order is free; no FKs), after the existing DELETEs and before the `llm_wiki_meta` cleanup block:
+- [x] **Step 3: Implement** (with the kick_state existence-guard ruling) — inside `clear_vault_tables`'s `execute_batch` (children-before-parents order is free; no FKs), after the existing DELETEs and before the `llm_wiki_meta` cleanup block:
 
 ```sql
          DELETE FROM stated_attestations;
@@ -367,9 +378,9 @@ until the engine's next drain (`*_fts_ad` only enqueues into `*_fts_pending`,
 dist-verified); accepted as at-rest-only for CT (owner Q6 ruling 2026-11-25;
 production Rust search never reads FTS) — engine-owned boundary per #213.
 
-- [ ] **Step 4: Run — expect PASS** (same command as Step 2). All pre-existing `clear_vault_tables*` tests must stay green.
+- [x] **Step 4: Run — expect PASS** (same command as Step 2). All pre-existing `clear_vault_tables*` tests must stay green. VERIFIED: 7 passed / 0 failed.
 
-- [ ] **Step 5: Commit**:
+- [x] **Step 5: Commit**:
 
 ```bash
 git add src-tauri/src/db/queries.rs
@@ -435,7 +446,7 @@ via a `deposit_attribution` row whose document_path resolves under B.)
 
 - [ ] **Step 4: Run — expect PASS.** All `restore_sync` and existing lib tests stay green.
 
-- [ ] **Step 5: Commit**:
+- [x] **Step 5: Commit**:
 
 ```bash
 git add src-tauri/src/lib.rs src-tauri/src/db/switch_pin_tests.rs src-tauri/src/db/mod.rs

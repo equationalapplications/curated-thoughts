@@ -22,3 +22,4 @@ Execution: SDD controller loop, implementers = Claude Code sonnet/low (default-i
 | 2 — S2 PRAGMA grouping | DONE | `50849454` | engine9 12 passed (unchanged, controller re-run) | Deviation accepted: `*t == table` deref (mechanical type fix, behavior identical) |
 | 3 — S3 CI comments | DONE | `1e28cbf5` | grep verified (4 lines = site-2 double text, intentional) | — |
 | 4 — S4 .gitattributes | DONE | `0658ef0d` | check-attr verified (sql: text/eol=lf; db: binary macro → diff unset); no w/crlf | Child hit grant gaps (check-attr, ls-remote) — improvised correctly; controller re-verified |
+| 5 — S5a sweep DELETEs | DONE | `d4d00fcb` | clear_vault_tables 7 passed (controller re-run); clippy ×2 exit 0 | Plan defect ruled: deposit_kick_state V25 root-gated → existence-guarded DELETE (semantic no-op when absent); other 5 plain; test seeds V25 shape. Implementer $0.22 initial (honest BLOCKED) + $0.37 resume leg. RED caveat ledgered (partial RED accepted) |
