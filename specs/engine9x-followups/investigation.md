@@ -1,6 +1,6 @@
 # Investigation — issue #376: engine-9.x follow-ups from the PR #375 T4 cycle
 
-**Date:** 2026-11-25 · **Status:** Draft — r1 Fable step-0 adjudicated (3 MAJOR + 8 minors, verified and folded)
+**Date:** 2026-11-25 · **Status:** Draft — Fable step-0 + delta adjudicated (delta M1/M2 folded; delta-r2 verification next)
 **Branch:** `chore/engine9x-followups` · **Lane worktree:** `/mnt/kv-work/build/worktrees/curated-thoughts/engine9x-followups` (base: `origin/main` = `10e9b006`)
 **Upstream:** issue #376; findings originated in the PR #375 T4 Fable cycle (rounds r1–r4) and spec errata E8–E10 (spec `specs/engine-9x-adoption/spec.md` §8, landed with #375). Split-out: issue #378 (forgotten_at reader gap).
 
@@ -119,27 +119,48 @@ connection anyway). Tables-exist invariant (Fable m6): the DELETEs assume
 both tables exist, which holds because the every-open V33 chain runs at app
 start before a switch can be driven; state it in the spec.
 
-**(ii) Stated-ledger derived tables (LIVE leak — verified):**
+**(ii) Stated-ledger derived tables (LIVE leak — verified; fix needs ordering care per Fable-delta M1/M2):**
 `stated_attestations` (migrations/0002:12), `queue_denials` (`:19`), and
 `deposit_attribution` (0001:13) are `document_path`-keyed indexes derived
 FROM THE VAULT. `rebuild_rederive` (`stated_ledger.rs:356`) is their only
 re-derivation writer and truncates+rebuilds all three from the vault's
-ledger/deposit files (`:409 DELETE FROM stated_attestations`, `:431 DELETE
-FROM queue_denials`, `:439 DELETE FROM deposit_attribution`). But it is
-wired at `connection.rs:916` to run **ONCE per brain lifetime**, stamped
-`stated_ledger_rederived` in `llm_wiki_meta` (`:934`) — and `llm_wiki_meta`
-deliberately SURVIVES the clear. Therefore, on an in-place vault switch (the
-non-file-replacement branch, `lib.rs:2297-2301`), all three tables keep
-VAULT A's rows while vault B is active: attestations, denials (which "pin
-suppression"), and deposit attribution of the outgoing vault leak into the
-incoming session. Fix direction: clear the three tables in
-`clear_vault_tables` AND delete the `stated_ledger_rederived` stamp row from
-`llm_wiki_meta`, so the next rooted open re-derives everything from the NEW
-vault's files — the existing once-per-brain mechanism then does the rebuild;
-no new machinery. Keep-rows precedent: `schema_version` survival is pinned
-by test (`queries.rs:1050-1053`); the three tables take
-cleared-with-everything dispositions under the same #213 per-vault rule as
-proposals.
+ledger/deposit files (`:391 DELETE FROM stated_attestations`, `:420 DELETE
+FROM queue_denials`, `:439 DELETE FROM deposit_attribution`) — and has a
+FOURTH output (delta M2): the confirmations leg (`:379-381`) applies
+`stated/.confirmations.jsonl` as `user_confirmed` stamps on
+`llm_wiki_entries` rows matched by content hash; no ingest path applies
+confirmations (the only other caller is the live confirm path, `:270`).
+Today the three tables leak: the rebuild is stamped once-per-brain
+(`connection.rs:907-934`; stamp insert at `:929-933`) and the stamp survives
+the clear (only `alias_remap_completed` is deleted from `llm_wiki_meta`,
+`queries.rs:300-303`), so on an in-place switch vault A's attestations,
+denials, and deposit attribution stay visible under vault B.
+
+**Why the naive fix is WRONG (delta M1, verified):** deleting the stamp in
+`clear_vault_tables` would make the FIRST rooted open after the clear re-run
+`rebuild_rederive` — but `open_with_config` (`connection.rs:3020`) resolves
+the vault root from the CONFIG FILE (`VaultConfig::new(config_path).vault_root()`),
+and in the in-place branch the config is still pointing at vault A at that
+moment: the reopen is `lib.rs:2307`, while `vault_state.set_vault_path(&new_path)`
+— which writes the config (`vault/config.rs:85-91`, `config.write`) — only
+runs later (`lib.rs:2325-2330`, after `pending_config_align_to` handling).
+So the naive fix re-derives the OUTGOING vault and re-stamps: the leak comes
+back, permanent. **Fix directions (each is new machinery; I4(ii) re-sized
+medium):**
+(a) reorder the config write before the reopen in `switch_vault`;
+(b) call `rebuild_rederive(conn, new_root)` explicitly in `switch_vault`
+after the aligned reopen;
+(c) defer the stamp deletion until the config is aligned.
+**Confirmations ruling (delta M2, open question Q7):** at switch time
+`llm_wiki_entries` is empty (cleared; B not yet ingested), so the
+confirmations leg applies 0 stamps and the once-per-brain stamp would pin
+that forever — vault B's previously confirmed facts show unconfirmed until
+re-confirmed. Today's behavior has the same hole (no rederive runs on
+switch at all). Options: set the rebuild stamp only after B's first ingest
+completes, or re-run the confirmations leg post-ingest, or name it a
+residual. Drop any "re-derives everything / no new machinery" claim.
+**Pin:** a switch-level test asserting the three tables hold B's rows (not
+just that the stamp is gone).
 
 **(iii) FTS family (LIVE residue — mechanism verified in engine dist):**
 the raw `DELETE FROM llm_wiki_entries` fires the engine's `*_fts_ad`
@@ -148,11 +169,20 @@ synchronous purge of `llm_wiki_entries_fts_content` or `llm_wiki_fts_map`.
 The engine drains the pending ledger in `drainTurn` chunks (dist
 `:6177-6240`; `drain`/`drainPassages` at `:6117`/`:7010`) during engine
 operations — not visibly gated on `setup()` (setup sets `secure_delete=ON`
-and does not gate on drain). After a switch, vault A's indexed text remains
-in the FTS shadow tables until the engine's next drain turn reconciles the
-emptied `llm_wiki_entries` against the pending queue; `secure_delete=ON`
-zeroes at drain time, but the WINDOW exists and a search in it can serve
-stale hits. Complete engine-created FTS inventory (verified against
+and does not gate on drain). Citation note (delta m2): both earlier cites are
+real but different layers — `drainTurn` wrapper `:6177-6240`; strategy
+`drain` implementations `:6117`/`:7010`/`:7210-7291`. After a switch, vault
+A's indexed text remains in the FTS shadow tables until the engine's next
+drain turn reconciles the emptied `llm_wiki_entries` against the pending
+queue; `secure_delete=ON` zeroes at drain time, but the WINDOW exists.
+**Blast radius (delta m4, verified):** CT's Rust paths — the production
+search/recall implementation — reference NO FTS objects at all (repo-wide
+grep over non-test Rust for `entries_fts`/`fts_map` is empty), so for CT the
+residue is AT-REST only unless the engine's own search APIs run. Engine-side
+search ranks via `bm25` MATCH over the FTS tables (`dist:7076-7078`,
+`:7517-7519`, keyed by entity_id carried in the FTS columns); whether stale
+hits surface depends on the join-back to `llm_wiki_entries` — planning-time
+check before Q6 goes to the owner. Complete engine-created FTS inventory (verified against
 FTS_FAMILY, `engine9-setup-compat.test.ts:190-215`): `llm_wiki_entries_fts`
 + `_content/_data/_docsize/_idx/_config`, `llm_wiki_fts_map`,
 `llm_wiki_fts_pending`, triggers `*_fts_ad/_ai/_au`, and the same family
@@ -179,7 +209,15 @@ the engine FTS family (see (iii) ruling), and the CT operational tables
 Fable M2 named for disposition: `pipeline_heartbeat` (`schema.rs:244`),
 `pipeline_stalls` (`:256`), `system_strikes` (`:286`), `deposit_kick_state`
 (`connection.rs:793`) — each needs an explicit ruling; they look
-vault-independent/operator-facing, but the guard cannot assume. Caveat
+vault-independent/operator-facing, but the guard cannot assume.
+`wiki_pages_new` (delta m3) is TRANSIENT — created, populated, and RENAMED
+to `wiki_pages` inside one migration (`schema.rs:87-99`), so it is absent at
+steady state; the guard's static-inventory wording must say so. Live-writer
+window (delta m7): the switch stops the pipeline and outbox workers first
+(`lib.rs:2208-2227`), but a concurrent `--mcp` connection is acknowledged
+(`:2296`) — the spec must state whether a live writer can insert
+vault-A-keyed rows into the three tables between the clear and the pipeline
+restart, and if so how the switch serializes against MCP opens. Caveat
 (Fable M2): `librarian_evidence` is cleared only via
 `WHERE entry_id IN (SELECT id FROM llm_wiki_entries)` — pre-existing orphan
 evidence rows would survive; the spec should note whether orphans are
@@ -255,10 +293,10 @@ the drift-gate work) vs separate issue.
 | I2 | PRAGMA grouping (column loop only; hygiene, not perf) | trivial | 1 |
 | I7 | fix both stale comments, keep flag | trivial | 1 |
 | I6 | `.gitattributes` scoped to testdata `*.sql` + `*.db binary` | trivial | 2 |
-| I4(ii) | clear 3 stated-ledger tables + delete rebuild stamp — LIVE leak | small-medium | 2 |
+| I4(ii) | stated-ledger leak fix — ordering-aware (config write vs reopen) + confirmations ruling (Q7) | medium | 2 |
 | I4(i) | source-store DELETEs (E10 fold) | trivial | 2 |
 | I3 | helper-SQL body-drift gate — (a) consts+new extractor vs (b′) TS-test SQL diff | medium | 2 |
-| I4(iii) | FTS drain window — ruling needed (Q6) | ruling | 3 |
+| I4(iii) | FTS drain window — Q6 narrowed (at-rest for CT paths; join-back check at planning) | ruling | 3 |
 | I4(iv) | brain-wide guard test with per-table dispositions | small-medium | 3 |
 | I8 | desktop-upgrade fixture + tests (Q5) | medium | 3 |
 | I5 | forgotten_at Rust reader | — | separate issue #378 |
@@ -266,8 +304,10 @@ the drift-gate work) vs separate issue.
 Open questions: Q1 (I3 comparison depth), Q2 (I3 object coverage incl. the
 migration-only v18/v19 indexes under (b′)), Q3 (guard inventory: runtime
 sqlite_master + engine-FTS second source vs static list), Q4 — RESOLVED
-(scoped), Q5 (I8 in-lane?), Q6 (FTS window: accept+document vs force
-reconciliation).
+(scoped), Q5 (I8 in-lane?), Q6 (FTS window — NARROWED by the m4 blast-radius
+finding: at-rest for CT production paths; finalize after the planning-time
+join-back check), Q7 (NEW, delta M2: confirmations leg at switch — stamp
+after first ingest vs post-ingest re-run vs named residual).
 
 ## Out of scope
 
@@ -282,15 +322,21 @@ reconciliation).
 
 1. **FTS trigger bodies / drain:** `_ad` triggers enqueue into
    `*_fts_pending` only (dist `:2349-2350`); no synchronous purge of
-   `_fts_content`/`fts_map`. Drain runs in engine `drainTurn` chunks during
-   engine operations (`:6117/:7010/:7210-7291`); not visibly gated on
-   `setup()`. rusqlite FTS5 irrelevant to the clear path (triggers touch
-   ordinary tables; drain is TS-side).
-2. **Stated-ledger lifecycle:** `rebuild_rederive` truncates+rebuilds all
-   three `document_path`-keyed tables from vault files
-   (`stated_ledger.rs:409/:431/:439`) but is stamped once-per-brain
-   (`connection.rs:916`; the stamp survives the clear) → live leak on
-   in-place switch (I4(ii)).
+   `_fts_content`/`fts_map`. Drain runs via the `drainTurn` wrapper
+   (`:6177-6240`) into the strategy `drain` implementations
+   (`:6117/:7010/:7210-7291`) during engine operations; not visibly gated on
+   `setup()`. Engine search = `bm25` MATCH over the FTS tables
+   (`:7076-7078`, `:7517-7519`); CT's Rust search paths reference no FTS
+   objects (grep-verified). rusqlite FTS5 irrelevant to the clear path
+   (triggers touch ordinary tables; drain is TS-side).
+2. **Stated-ledger lifecycle:** `rebuild_rederive` truncates+rebuilds the
+   three `document_path`-keyed tables (`stated_ledger.rs:391/:420/:439`) AND
+   applies confirmations to `llm_wiki_entries` (`:379-381`), but is stamped
+   once-per-brain (`connection.rs:907-934`; the stamp survives the clear) →
+   live leak on in-place switch (I4(ii)). The post-clear reopen resolves the
+   vault root from the config file, which still names vault A until
+   `set_vault_path` runs later — so any stamp-deletion fix must be
+   ordering-aware (delta M1).
 3. **D2 matrix:** surviving-rows precedent is pinned by tests
    (`queries.rs:1050-1053` schema_version watermark; `:1045-1048` tier
    vocabulary). The authoritative matrix lives in the #213 vault-switch
@@ -321,3 +367,13 @@ context.
   verified against tree + 9.18.0 dist and adopted; RESEARCH_REQUESTs answered
   (section above); I4 escalated small → medium; Q4 resolved; Q6 added. Fable
   delta next.
+- r4 (2026-11-25): Fable delta ($1.29/16 turns) REQUEST CHANGES — M1 (naive
+  stamp-deletion fix RE-DERIVES VAULT A: `open_with_config` reads the config,
+  which still names vault A at the `lib.rs:2307` reopen; `set_vault_path`
+  writes it only at `:2325` — VERIFIED), M2 (confirmations leg is a fourth
+  rebuild output; entries empty at switch → Q7 opened), m1 (line cites
+  :391/:420/:929-933), m2 (drain cite layers), m3 (`wiki_pages_new`
+  transient), m4 (FTS blast radius: CT Rust search has no FTS references —
+  Q6 narrowed), m5 (table row), m6 (revision labels), m7 (live-writer
+  window) — all verified and adopted; I4(ii) re-sized medium. Fable delta-r2
+  verification next.
