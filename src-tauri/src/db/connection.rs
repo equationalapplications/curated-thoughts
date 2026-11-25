@@ -2185,28 +2185,43 @@ fn run_sso9_retype_txn(conn: &Connection, backup: &Path) -> Result<Option<Sso9Di
     }
 }
 
-/// R1 shape check: one refreshed row's stored manifest equals the planner's
-/// captured `new_json` (parsed-Value compare, F6). `None` = passes (also
-/// vacuously when nothing was refreshed). `Some(why)` = failed.
-fn sso9_shape_check(conn: &Connection, refreshed: &[(String, String)]) -> Option<String> {
-    let (entity_id, new_json) = refreshed.first()?;
-    let stored: rusqlite::Result<String> = conn.query_row(
-        "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
-        [entity_id],
-        |r| r.get(0),
-    );
-    let stored = match stored {
-        Ok(s) => s,
-        Err(e) => return Some(format!("shape check: cannot read {entity_id}: {e}")),
-    };
-    let a = serde_json::from_str::<serde_json::Value>(&stored);
-    let b = serde_json::from_str::<serde_json::Value>(new_json);
-    match (a, b) {
-        (Ok(a), Ok(b)) if a == b => None,
-        _ => Some(format!(
-            "shape check: stored manifest for {entity_id} differs from the planned refresh"
-        )),
+/// R1 shape check: EVERY refreshed row's stored manifest equals the
+/// planner's captured `new_json` (parsed-Value compare, F6; T1.5 rung 1
+/// nit 1 — all rows, not just the first). `Ok(None)` = passes (also
+/// vacuously when nothing was refreshed). `Ok(Some(why))` = failed.
+fn sso9_shape_check(conn: &Connection, refreshed: &[(String, String)]) -> Result<Option<String>> {
+    // Impl-review (T1.5 rung 1 nit 1): verify EVERY refreshed row, not just
+    // the first — the check's whole purpose is post-commit drift detection,
+    // and a tamper or write in a second refreshed manifest previously went
+    // unseen. One SELECT per refreshed row (the refresh touches a handful).
+    let mut failures = Vec::new();
+    for (entity_id, new_json) in refreshed {
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT manifest_json FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
+                [entity_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let ok = match stored {
+            Some(stored) => {
+                let a = serde_json::from_str::<serde_json::Value>(&stored);
+                let b = serde_json::from_str::<serde_json::Value>(new_json);
+                matches!((a, b), (Ok(a), Ok(b)) if a == b)
+            }
+            None => false,
+        };
+        if !ok {
+            failures.push(format!(
+                "shape check: stored manifest for {entity_id} differs from the planned refresh"
+            ));
+        }
     }
+    Ok(if failures.is_empty() {
+        None
+    } else {
+        Some(failures.join("; "))
+    })
 }
 
 /// Post-commit verification (plan Task 5 step 10): returns the failed checks.
@@ -2365,7 +2380,7 @@ fn apply_sso9_migrations(conn: &Connection) -> Result<()> {
         #[cfg(test)]
         sso9_run_hook(&SSO9_AFTER_REFRESH_COMMIT, conn);
         // R1: the shape check sits BETWEEN the COMMIT and the ensure loop.
-        shape_failure = sso9_shape_check(conn, &refreshed);
+        shape_failure = sso9_shape_check(conn, &refreshed)?;
         for (entity_id, _) in &refreshed {
             // The ensure opens its own transaction, so it runs only after
             // COMMIT. Best-effort: a per-row failure is logged, never fatal.
@@ -6757,6 +6772,55 @@ mod tests {
         );
         // The lowercase twin keeps adjudicating as declared (unchanged).
         assert_eq!(etype(&conn, "e_supersedes").as_deref(), Some("supersedes"));
+    }
+
+    #[test]
+    fn sso9_shape_check_covers_every_refreshed_row() {
+        let (_tmp, conn) = sso9_rewound_brain();
+        // Impl-review (T1.5 rung 1 nit 1): the shape check verifies the
+        // COMMIT against drift; inspecting only `refreshed.first()` left
+        // every other refreshed manifest unchecked — drift or a tamper in
+        // row two went unseen. The first row must pass while the second
+        // row's drift is caught.
+        let planned = vec![
+            (
+                "tier_fact".to_string(),
+                r#"{"node_types":[],"edge_types":[]}"#.to_string(),
+            ),
+            (
+                "tier_wisdom".to_string(),
+                r#"{"node_types":["person"]}"#.to_string(),
+            ),
+        ];
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_fact', 'strict', '{\"node_types\":[],\"edge_types\":[]}', 1)",
+            [],
+        )
+        .unwrap();
+        // Stored content DIFFERS from the planned `new_json` for row two.
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('tier_wisdom', 'strict', '{\"node_types\":[\"person\",\"drifted\"]}', 1)",
+            [],
+        )
+        .unwrap();
+        let failure = sso9_shape_check(&conn, &planned).unwrap();
+        assert!(
+            failure
+                .as_deref()
+                .map(|f| f.contains("tier_wisdom"))
+                .unwrap_or(false),
+            "the second refreshed row's drift must be caught: {failure:?}"
+        );
+        // The passing first row contributes no failure text.
+        assert!(
+            failure
+                .as_deref()
+                .map(|f| !f.contains("tier_fact"))
+                .unwrap_or(false),
+            "the matching first row must not be flagged: {failure:?}"
+        );
     }
 
     #[test]

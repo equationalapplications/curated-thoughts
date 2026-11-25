@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { schemaOrgWarmAgentManifest } from '@equationalapplications/schema-org-llm-wiki';
 import { schemaSoftwareOrgManifest } from '@equationalapplications/schema-software-org';
@@ -10,7 +12,15 @@ type EdgeType = { type: string; source_type?: string; target_type?: string };
 const nodes = schemaSoftwareOrgManifest.node_types as unknown as NodeType[];
 const edges = schemaSoftwareOrgManifest.edge_types as unknown as EdgeType[];
 
-const VENDORED_PATH = 'src-tauri/src/db/vendored/schema-software-org-9.18.0.manifest.json';
+// Impl-review (T1.5 rung 1 nit 3): resolve the vendored snapshot from THIS
+// file, not the process cwd — vitest can be launched from a subdirectory or
+// an IDE runner with a different cwd. Plain string/URL resolution, NOT the
+// `new URL(rel, import.meta.url)` pattern: Vite rewrites that as ASSET
+// resolution and a dynamic first argument silently yields `undefined`.
+// The repo-relative spelling stays the message's runnable command (it
+// assumes the repo root, where pnpm runs).
+const VENDORED_REL = 'src-tauri/src/db/vendored/schema-software-org-9.18.0.manifest.json';
+const VENDORED_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '../../', VENDORED_REL);
 
 const childrenOf = (parent: string) =>
   nodes
@@ -63,9 +73,9 @@ describe('schema packages', () => {
     const vendored = JSON.parse(readFileSync(VENDORED_PATH, 'utf8'));
     expect(
       schemaSoftwareOrgManifest,
-      `schema-software-org drifted from ${VENDORED_PATH}. Regenerate it: ` +
+      `schema-software-org drifted from ${VENDORED_REL}. Regenerate it: ` +
         `node --input-type=module -e "import {schemaSoftwareOrgManifest as m} from '@equationalapplications/schema-software-org'; ` +
-        `import fs from 'fs'; fs.writeFileSync('${VENDORED_PATH}', JSON.stringify(m,null,2)+'\\n')"`,
+        `import fs from 'fs'; fs.writeFileSync('${VENDORED_REL}', JSON.stringify(m,null,2)+'\\n')"`,
     ).toEqual(vendored);
   });
 
