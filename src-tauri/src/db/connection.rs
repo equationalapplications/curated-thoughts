@@ -1692,6 +1692,10 @@ struct Sso9EdgePlan {
     /// Step 4: parent-family edges touching a re-typed row with an
     /// undeclared re-typed shape.
     parent_drop: Vec<Sso9Edge>,
+    /// Impl-review (t93c): the subset of `parent_drop` whose verdict was
+    /// `UnresolvedEndpoint` — the owner's NULL-endpoint ruling needs the
+    /// actual affected-edge count, not the 1,436-NULL-row figure.
+    parent_drop_unresolved_endpoint: usize,
     /// Impl-review (owxi): parent-family edges whose POST-re-type shape is
     /// DECLARED in the entity's refreshed manifest — kept, never dropped.
     kept_declared_parent: Vec<Sso9Edge>,
@@ -1784,7 +1788,10 @@ fn sso9_resolve_type(
 /// entity's own strict manifest wins; WITHOUT one, a curated entity inherits
 /// the canonical `tier_fact` partition manifest (the typical production
 /// case). Non-strict rows fall through to the partition leg (the gate's
-/// leg semantics); an UNREADABLE row aborts the re-type (slyA).
+/// leg semantics); an unreadable APPLICABLE (partition) manifest aborts
+/// the re-type (slyA, refined t93k: a malformed OWNER row falls through
+/// exactly like the gate, because the mode is unreadable along with the
+/// shapes).
 type Sso9DeclaredEdgeSet = crate::db::entity_gate::ManifestDeclaredEdges;
 type Sso9DeclaredEdgeCache = std::collections::HashMap<String, Option<Sso9DeclaredEdgeSet>>;
 
@@ -1797,7 +1804,7 @@ fn sso9_declared_edges(
         return Ok(hit.clone());
     }
     let mut set = None;
-    for lookup in [entity_id, "tier_fact"] {
+    for (leg, lookup) in [entity_id, "tier_fact"].into_iter().enumerate() {
         match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
             Ok(o) if o.mode == "strict" => {
                 set = o.manifest.as_ref().map(crate::db::entity_gate::manifest_declared_edges);
@@ -1806,17 +1813,26 @@ fn sso9_declared_edges(
             // Present but not strict (or no row): fall through to the next
             // lookup id — the gate's leg semantics.
             Ok(_) => {}
-            // Impl-review (slyA): an UNREADABLE manifest is not an undeclared
-            // shape. The gate falls through on Err because it only accepts or
-            // rejects a write; the re-type DELETES on "undeclared" and the
-            // backup is removed after its checks pass, so a wrong drop is
-            // irreversible. Abort the re-type before any write instead — the
-            // transaction rolls back, the backup is retained for retry, and
-            // the operator repairs the manifest. (The gate's fall-through is
-            // deliberately untouched.)
+            // Impl-review (slyA, refined by the fresh round's t93k finding):
+            // an unreadable manifest must not classify shapes as undeclared
+            // — the re-type DELETES on "undeclared" and the backup is
+            // removed after its checks pass. But the gate's own Err leg
+            // FALLS THROUGH, because `wiki_get_ontology` parses the JSON
+            // before it reads the mode: a malformed owner row is
+            // indistinguishable from a non-strict one, and for the gate the
+            // PARTITION manifest then governs. Mirror that exactly — an
+            // owner-row read error falls through to `tier_fact`; only the
+            // APPLICABLE manifest's leg (the partition fallback) aborts the
+            // re-type, keeping the backup for retry (operator repairs).
+            Err(e) if leg == 0 => {
+                sso9_log!(
+                    "[ct::migrate WARN] sso9 retype: unreadable manifest for {lookup} \
+                     ({e}); the partition fallback governs, mirroring the gate"
+                );
+            }
             Err(e) => anyhow::bail!(
                 "sso9 retype: cannot read the manifest for {lookup} — an unreadable \
-                 manifest must not classify shapes as undeclared: {e}"
+                 applicable manifest must not classify shapes as undeclared: {e}"
             ),
         }
     }
@@ -1824,7 +1840,19 @@ fn sso9_declared_edges(
     Ok(set)
 }
 
-/// True when the edge's POST-re-type shape (types resolved VERBATIM from the
+/// Verdict of the declared-shape consult. `UnresolvedEndpoint` is reported
+/// separately in the plan so the census can count candidate drops caused by
+/// an endpoint whose type resolves to nothing (t93c: the owner's
+/// NULL-endpoint ruling needs the actual affected-edge count, not the
+/// 1,436-NULL-row figure).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sso9ShapeVerdict {
+    Declared,
+    Undeclared,
+    UnresolvedEndpoint,
+}
+
+/// Consult the edge's POST-re-type shape (types resolved VERBATIM from the
 /// OLD rows, then mapped through `SSO9_RETYPE_MAP`) is declared in the
 /// owning entity's applicable manifest — or when the entity is UNGATED
 /// (no applicable strict manifest on either leg, or a strict manifest whose
@@ -1836,7 +1864,7 @@ fn sso9_parent_shape_declared(
     declared_cache: &mut Sso9DeclaredEdgeCache,
     type_cache: &mut std::collections::HashMap<String, Option<String>>,
     e: &Sso9Edge,
-) -> Result<bool> {
+) -> Result<Sso9ShapeVerdict> {
     let Some(declared) = sso9_declared_edges(conn, declared_cache, &e.entity_id)? else {
         // Impl-review (T1.5 rung 2 MAJOR 1): ungated — keep. POLICY (T3
         // MINOR 2, pending the owner's ruling + spec erratum): the
@@ -1844,13 +1872,13 @@ fn sso9_parent_shape_declared(
         // NAMES only, never endpoint shapes); the criterion is spec
         // change-6's shape-level declaration, with ungated entities — where
         // no shape can be declared — exempt from the drop by ruling.
-        return Ok(true);
+        return Ok(Sso9ShapeVerdict::Declared);
     };
     if declared.is_empty() {
         // Strict manifest with an EMPTY edge vocabulary: `ontology_leg`
         // returns Strict(None) and disarms the gate ("a strict manifest that
         // declares no edge types" is treated as most permissive) — mirror it.
-        return Ok(true);
+        return Ok(Sso9ShapeVerdict::Declared);
     }
     let post_retype = |t: Option<String>| -> Option<String> {
         t.map(|x| {
@@ -1864,16 +1892,23 @@ fn sso9_parent_shape_declared(
     let src = post_retype(sso9_resolve_type(conn, type_cache, &e.source_id)?);
     let tgt = post_retype(sso9_resolve_type(conn, type_cache, &e.target_id)?);
     match (src, tgt) {
-        (Some(s), Some(t)) => Ok(declared.contains(
-            &crate::db::entity_gate::NodeVocabulary::key(&e.edge_type),
-            &crate::db::entity_gate::NodeVocabulary::key(&s),
-            &crate::db::entity_gate::NodeVocabulary::key(&t),
-        )),
+        (Some(s), Some(t)) => {
+            if declared.contains(
+                &crate::db::entity_gate::NodeVocabulary::key(&e.edge_type),
+                &crate::db::entity_gate::NodeVocabulary::key(&s),
+                &crate::db::entity_gate::NodeVocabulary::key(&t),
+            ) {
+                Ok(Sso9ShapeVerdict::Declared)
+            } else {
+                Ok(Sso9ShapeVerdict::Undeclared)
+            }
+        }
         // An unresolvable endpoint: the shape cannot be verified — drop
-        // (status quo). OPEN QUESTION (rung 3 / T3 MINOR 3): the live gate
-        // climbs endpoints by OWNING ENTITY and never reads okf_type
-        // NULLness; ~1,436 live rows carry NULL okf_type. Ruling pending.
-        _ => Ok(false),
+        // (status quo), counted separately. OPEN QUESTION (rung 3 / T3
+        // MINOR 3 / t93c): the live gate climbs endpoints by OWNING ENTITY
+        // and never reads okf_type NULLness; ~1,436 live rows carry NULL
+        // okf_type. Ruling pending.
+        _ => Ok(Sso9ShapeVerdict::UnresolvedEndpoint),
     }
 }
 
@@ -1928,10 +1963,13 @@ fn sso9_plan_edges(
                 // dropping; a custom manifest may still declare the re-typed
                 // shape (e.g. author(decision, person)).
                 "author" | "publisher" | "supersedes" => {
-                    if sso9_parent_shape_declared(conn, &mut declared_cache, &mut cache, &e)? {
-                        plan.kept_declared_parent.push(e);
-                    } else {
-                        plan.parent_drop.push(e);
+                    match sso9_parent_shape_declared(conn, &mut declared_cache, &mut cache, &e)? {
+                        Sso9ShapeVerdict::Declared => plan.kept_declared_parent.push(e),
+                        Sso9ShapeVerdict::Undeclared => plan.parent_drop.push(e),
+                        Sso9ShapeVerdict::UnresolvedEndpoint => {
+                            plan.parent_drop.push(e);
+                            plan.parent_drop_unresolved_endpoint += 1;
+                        }
                     }
                 }
                 "about" if src_in => {
@@ -1949,15 +1987,20 @@ fn sso9_plan_edges(
                             // custom-declared brains keep edges the live
                             // gate admits, and the success path deletes the
                             // backup, so a wrong drop is irreversible.
-                            if sso9_parent_shape_declared(
+                            match sso9_parent_shape_declared(
                                 conn,
                                 &mut declared_cache,
                                 &mut cache,
                                 &e,
                             )? {
-                                plan.kept_declared_parent.push(e);
-                            } else {
-                                plan.parent_drop.push(e);
+                                Sso9ShapeVerdict::Declared => {
+                                    plan.kept_declared_parent.push(e);
+                                }
+                                Sso9ShapeVerdict::Undeclared => plan.parent_drop.push(e),
+                                Sso9ShapeVerdict::UnresolvedEndpoint => {
+                                    plan.parent_drop.push(e);
+                                    plan.parent_drop_unresolved_endpoint += 1;
+                                }
                             }
                         }
                         Some("organization") => plan.kept_about_org += 1,
@@ -2195,11 +2238,13 @@ fn run_sso9_retype_txn(conn: &Connection, backup: &Path) -> Result<Option<Sso9Di
         sso9_log!(
             "[ct::migrate] sso9 retype: parent-family edges dropped by type={} \
              (about->organization kept={}, declared about->sa/area kept={}, \
-             parent edges kept as declared post-retype={})",
+             parent edges kept as declared post-retype={}, \
+             parent drops with an unresolved endpoint={})",
             sso9_fmt_map(&by_type),
             plan.kept_about_org,
             plan.kept_declared_about,
-            plan.kept_declared_parent.len()
+            plan.kept_declared_parent.len(),
+            plan.parent_drop_unresolved_endpoint
         );
         // 5. everything else: untouched, counted.
         sso9_log!(
@@ -6978,15 +7023,17 @@ mod tests {
     }
 
     #[test]
-    fn sso9_retype_unreadable_owner_manifest_aborts_the_retype() {
+    fn sso9_retype_unreadable_partition_manifest_aborts_the_retype() {
         let (tmp, conn) = sso9_retype_brain();
-        // Impl-review (slyA): an UNREADABLE manifest must not classify shapes
-        // as undeclared. The gate's fall-through only accepts or rejects
-        // writes; the re-type DELETES on "undeclared" and the backup is
-        // removed after its checks pass, so the loss would be irreversible.
-        // Corrupt ent1's manifest and rely on the fixture's strict tier_fact
-        // manifest (which declares no author(decision, person) shape): the
-        // re-type must ABORT, not delete.
+        // Impl-review (slyA, refined by the fresh round's t93k finding): an
+        // unreadable APPLICABLE manifest must not classify shapes as
+        // undeclared — the re-type deletes on "undeclared" and the backup is
+        // removed after its checks pass. A malformed OWNER row is
+        // indistinguishable from a non-strict one (the JSON is parsed before
+        // the mode is read), so the gate's own Err leg falls through and the
+        // PARTITION manifest governs — mirror that. Corrupt ent1's manifest:
+        // the re-type must SUCCEED with tier_fact governing; then corrupt
+        // tier_fact itself: the re-type must ABORT, not delete.
         conn.execute(
             "INSERT INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
              VALUES ('ent1', 'strict', 'not json at all', 1)",
@@ -6994,40 +7041,54 @@ mod tests {
         )
         .unwrap();
         sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
+        assert_eq!(
+            etype(&conn, "e_author"),
+            None,
+            "the partition manifest governs a malformed owner row (gate-mirrored)"
+        );
+        // Now corrupt the APPLICABLE partition manifest and re-open the
+        // migration (slots already stamped — clear them to force a retry).
+        conn.execute(
+            "UPDATE llm_wiki_entity_manifests SET manifest_json = 'still not json' WHERE entity_id = 'tier_fact'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM schema_version WHERE version = ?1 OR version = ?2",
+            [SSO9_REFRESH_VERSION, SSO9_RETYPE_VERSION],
+        )
+        .unwrap();
+        // Phase 1 dropped every parent-family edge AND retyped every
+        // handoff/session_recap row (the snapshot is empty) — re-seed a
+        // handoff-typed entry with an author edge so the plan actually
+        // consults the (now corrupt) applicable manifest.
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at, okf_type, deleted_at, ontology_checked_at, heal_checked_at)
+             VALUES ('h2','ent1','t','b',1,77,'handoff',NULL,88,99)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('e_author2','ent1','h2','per1','author',1)",
+            [],
+        )
+        .unwrap();
+        sso9_clear_log();
         let result = sso9_migrate(&conn, tmp.path());
-        let err = result.expect_err("an unreadable owner manifest must abort the re-type");
+        let err = result.expect_err("an unreadable partition manifest must abort the re-type");
         assert!(
-            format!("{err:#}").contains("cannot read the manifest for ent1"),
+            format!("{err:#}")
+                .contains("cannot read the manifest for tier_fact"),
             "{err:#}"
         );
         assert!(
             !sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap(),
             "re-type slot unstamped"
         );
-        assert!(
-            sso9_version_stamped(&conn, SSO9_REFRESH_VERSION).unwrap(),
-            "the refresh committed before the abort"
-        );
         assert_eq!(sso9_backups(tmp.path()).len(), 1, "backup preserved");
-        assert!(
-            etype(&conn, "e_author").is_some(),
-            "no delete happened"
-        );
-        // Repair the manifest (valid strict, WITHOUT the custom shape) and the
-        // next open retries cleanly: the author edge is now genuinely
-        // undeclared and drops.
-        conn.execute(
-            "UPDATE llm_wiki_entity_manifests SET manifest_json = ?1 WHERE entity_id = 'ent1'",
-            [SSO8_MANIFEST],
-        )
-        .unwrap();
-        sso9_migrate(&conn, tmp.path()).unwrap();
-        assert!(sso9_version_stamped(&conn, SSO9_RETYPE_VERSION).unwrap());
-        assert_eq!(
-            etype(&conn, "e_author"),
-            None,
-            "genuinely undeclared shapes still drop after the repair"
-        );
     }
 
     #[test]

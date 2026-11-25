@@ -87,3 +87,12 @@ Open questions (reviewer "could not confirm" → action items):
 ## CI incident on 5e1c61f4 (process lesson)
 
 rust-ubuntu/rust-macos failed: edge_writer_gate found 8 vs expected 7. The 8th fixture INSERT (e_sup_sp) entered with the slx2 fold at b141e476; after that commit the gate was re-verified only via --lib + clippy, which compile but do not RUN the integration gate. Lesson recorded: after EVERY fold commit, re-run edge_writer_gate explicitly alongside --lib. Fixed in 62632da6 (baseline 7 → 8, fixtures only).
+
+## Fresh CodeRabbit round on 5e1c61f4/62632da6 (2 findings, both REAL, both folded)
+
+| Thread | Sev | Finding | Verdict |
+|---|---|---|---|
+| PRRT_kwDOSVmXas67t93k | MAJOR | A malformed NON-strict owner row aborted the re-type before tier_fact was consulted — `wiki_get_ontology` parses JSON before reading mode, so the gate's own Err leg falls through and the PARTITION manifest governs | FIXED: owner-row Err now falls through (WARN, gate-mirrored); only the APPLICABLE partition leg aborts. Tests: `sso9_retype_unreadable_partition_manifest_aborts_the_retype` (corrupt owner → succeeds via tier_fact; corrupt tier_fact → abort, backup preserved), RED-verified |
+| PRRT_kwDOSVmXas67t93c | Minor | The promised NULL-endpoint census doesn't exist — planned_parent_family_drop mixes undeclared-resolved with unresolved endpoints; the 1,436-NULL-row figure is not the affected-edge count | FIXED: `Sso9ShapeVerdict::UnresolvedEndpoint` now counted separately (`parent_drop_unresolved_endpoint`) and reported in the retype log (`parent drops with an unresolved endpoint=N`) — the owner sees the actual affected-edge count at first open |
+
+Process note: the edge_writer_gate baseline was stale twice during this round (7→8→9); root cause each time was re-verifying via --lib + clippy only, which compile but do not RUN the integration gate. Every future fold re-runs the gate explicitly.
