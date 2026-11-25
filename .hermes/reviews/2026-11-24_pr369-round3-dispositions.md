@@ -56,3 +56,18 @@ Reviewer "unverified" items, controller-verified: edge_writer_gate connection.rs
 4. **Receipt .json isn't JSON (MINOR) — FIXED**: renamed to `-verdict.md` (tool writes markdown).
 
 Rung-2 "checked and clean" receipts: eligibility/idempotency, refresh node-set (statement excluded from EA_SEED_TYPES → 20 slugs), ensure-fold memo transactionality, empty-file VACUUM INTO target, unique-collision UPDATE OR IGNORE + per-id DELETE, DDL columns, redirect_scan allowlist, TS vendored-drift + VENDORED_PATH resolution.
+
+## T1.5 rung 3 (claude-haiku-5-5, review-depth max @ b141e476) — REQUEST CHANGES
+
+**Cost $0.1328** (24 turns). 1 BLOCKER + 3 MINOR + 2 open questions:
+
+1. **BLOCKER — about→person/place/event arm hard-codes drops without the ungated/declared consult — FIXED.** Same irreversible-deletion class as the rung-2 MAJOR (ungated and custom-declared brains lose edges the live gate admits; backup removed on success). The arm now routes through `sso9_parent_shape_declared` exactly like the author/publisher/supersedes arms; the ratified default brain still drops (its refreshed manifest declares no about(decision|lesson, person|place|event) shape — verified against the vendored 9.18.0 snapshot). RED-first: `sso9_retype_ungated_entity_keeps_parent_family_edges` extended with the `e_about_person` assertion, verified failing against the hard-coded drop, green after the fix.
+2. **MINOR — post-VACUUM sanity count can false-abort under a concurrent write — DISMISSED (design note).** The reviewer's own text concedes fail-closed/no-loss/retry. Downgrading to WARN-keep would weaken the S2/S3 backup-sanity guarantee; retry-once adds paths to a safety-critical step for a millisecond-window flake whose worst case is one delayed open (stale backups now pruned by the rung-2 fold, so no accumulation).
+3. **MINOR — a malformed manifest blocks every open — POLICY CONFIRMED WITH OWNER PENDING.** This is the slyA fold working as designed (fail-closed beats irreversible loss); the reviewer calls it defensible and asks for owner sign-off. Surfaced in the merge ask.
+4. **MINOR — review artifacts in the product repo — DISMISSED with precedent.** `.hermes/reviews/` is tracked on purpose: the PR228 archive (2026-09-24_pr228-*) established the convention on main.
+
+Open questions (reviewer "could not confirm" → action items):
+- **NULL-typed endpoints drop parent edges.** Controller code-truth: the live gate's endpoint ladder resolves endpoints by OWNING ENTITY (climbing to rung 4 = tier_fact; unmarked → None = ungated) — it never reads okf_type NULLness. The migration's unresolved-endpoint `_` arm returns false → drop, which is status-quo-conservative but potentially asymmetric with the gate for gated brains. Recorded as an OPEN QUESTION for Kurt + Opus T3; the retype census log will surface the actual affected count on the live brain before merge. No behavior change without a ruling.
+- **Lockfile integrity hash** — unverified by runners; CI's frontend job and the trial-install recorded in the spec cover it.
+
+"Checked and clean" receipts: step ordering/stamps, EA_SEED_TYPES 20-slug rule, TS vendored-drift test, ct_heal seed switch, backup-deleted-only-after-verification.

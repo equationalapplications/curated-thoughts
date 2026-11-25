@@ -1934,7 +1934,28 @@ fn sso9_plan_edges(
                     let tt = sso9_resolve_type(conn, &mut cache, &e.target_id)?
                         .map(|t| t.trim().to_lowercase());
                     match tt.as_deref() {
-                        Some("person") | Some("place") | Some("event") => plan.parent_drop.push(e),
+                        Some("person") | Some("place") | Some("event") => {
+                            // Impl-review (T1.5 rung 3 BLOCKER 1): same rule
+                            // as the parent-family arms — consult the
+                            // applicable manifest (ungated/declared keeps)
+                            // instead of a hard-coded drop. The ratified
+                            // default brain still drops here (its refreshed
+                            // manifest declares no about(decision|lesson,
+                            // person|place|event) shape); ungated and
+                            // custom-declared brains keep edges the live
+                            // gate admits, and the success path deletes the
+                            // backup, so a wrong drop is irreversible.
+                            if sso9_parent_shape_declared(
+                                conn,
+                                &mut declared_cache,
+                                &mut cache,
+                                &e,
+                            )? {
+                                plan.kept_declared_parent.push(e);
+                            } else {
+                                plan.parent_drop.push(e);
+                            }
+                        }
                         Some("organization") => plan.kept_about_org += 1,
                         // U-review finding 7: after the re-type these become
                         // DECLARED statement→sa/area shapes — not unhandled.
@@ -7031,6 +7052,15 @@ mod tests {
             etype(&conn, "e_publisher").as_deref(),
             Some("publisher"),
             "ungated brain keeps parent-family edges"
+        );
+        // Impl-review (T1.5 rung 3 BLOCKER 1): the about arm gets the same
+        // ungated consult — a person-target about edge is kept on an ungated
+        // brain (the ratified default brain still drops it: its refreshed
+        // manifest declares no about(decision|lesson, person) shape).
+        assert_eq!(
+            etype(&conn, "e_about_person").as_deref(),
+            Some("about"),
+            "ungated brain keeps about edges to person endpoints too"
         );
         // The handoffFor dispositions are NOT manifest-gated and still run.
         assert_eq!(
