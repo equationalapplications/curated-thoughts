@@ -1488,15 +1488,29 @@ fn package_ddl_objects() -> Vec<(&'static str, String)> {
     out
 }
 
+/// Distinct tables in ENGINE9_MIRROR_COLUMNS, first-appearance order.
+/// One PRAGMA table_info per DISTINCT table instead of per column.
+fn grouped_mirror_tables() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for (table, _, _) in ENGINE9_MIRROR_COLUMNS {
+        if !out.contains(table) {
+            out.push(table);
+        }
+    }
+    out
+}
+
 /// What the V33 step would add right now: missing mirror columns (only on
 /// tables that exist — an absent table is created by the DDL re-run with the
 /// columns inline) and missing package-DDL objects.
 fn engine9_missing(conn: &Connection) -> Result<(Vec<String>, Vec<String>)> {
     let mut columns = Vec::new();
-    for (table, column, _) in ENGINE9_MIRROR_COLUMNS {
+    for table in grouped_mirror_tables() {
         let existing = crate::db::ddl_compat::existing_columns(conn, table)?;
-        if !existing.is_empty() && !existing.iter().any(|c| c == column) {
-            columns.push(format!("{table}.{column}"));
+        for (t, column, _) in ENGINE9_MIRROR_COLUMNS {
+            if *t == table && !existing.is_empty() && !existing.iter().any(|c| c == column) {
+                columns.push(format!("{table}.{column}"));
+            }
         }
     }
     let mut objects = Vec::new();
