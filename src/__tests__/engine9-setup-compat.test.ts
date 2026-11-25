@@ -1,6 +1,6 @@
 /**
  * Engine-side compatibility proof (engine-9x PR-B, spec §5 test 2 TS half;
- * ruling Q9): the REAL core-llm-wiki 9.18.0 `setup()` — `createWiki(db).setup()`,
+ * spec §5 TS-side proof): the REAL core-llm-wiki 9.18.0 `setup()` — `createWiki(db).setup()`,
  * the package's exported entry that runs `setupDatabase` + the v1–v19
  * migrations — completes over a DB built from exactly what CT's Rust chain
  * produces for an existing 8.0.2-era brain.
@@ -22,7 +22,7 @@ import { resolve } from "node:path";
 // (jsdom) externalization and fails the transform with "Cannot bundle Node.js
 // built-in node:sqlite" on a cold cache. `getBuiltinModule` is a runtime call
 // the bundler never sees. Optional + skipped on Node < 22.5 (or 22.5–22.12
-// without --experimental-sqlite) where the module is absent (T4 r1 M7); CI
+// without --experimental-sqlite) where the module is absent; CI
 // pins Node 22 latest, which has it unflagged.
 const sqliteModule = process.getBuiltinModule?.("node:sqlite");
 const DatabaseSync = sqliteModule?.DatabaseSync;
@@ -121,9 +121,20 @@ function engineVersion(db: DatabaseSync): string | undefined {
   return row?.value;
 }
 
+function schemaObjects(db: DatabaseSync): string[] {
+  return (
+    db
+      .prepare(
+        "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+      )
+      .all() as { type: string; name: string }[]
+  ).map((r) => `${r.type}:${r.name}`);
+}
+
 // Skipped (not failed) on Node runtimes without node:sqlite — see the
-// module doc above (T4 r1 M7).
-describe.skipIf(!DatabaseSync)(
+// module doc above — but a HARD failure under CI: the CI Node must have the
+// builtin, and a silent skip there would vacate the proof.
+describe.skipIf(!DatabaseSync && !process.env.CI)(
     "core-llm-wiki 9.18.0 setup() over the Rust-chain (V33-migrated) schema",
     () => {
   it("completes from the 8.0.2-era engine version (v16–v19 run their guards)", async () => {
@@ -151,5 +162,54 @@ describe.skipIf(!DatabaseSync)(
     await expect(engine(db).setup()).rejects.toThrow(
       /Migration v17 \(add_source_store\) failed/,
     );
+  });
+
+  it("setup() leaves the schema unchanged modulo the FTS family allow-list", async () => {
+    // Pins that the REAL setup() adds ONLY the lazy FTS infrastructure
+    // (virtual tables + shadow tables + sync indexes + sync triggers —
+    // verified against the installed 9.18.0 dist) and nothing else, so a
+    // future engine bump that changes schema anywhere else (including the
+    // helper mirrors in okf_ddl.rs, which sit outside ddl_compat) fails
+    // HERE instead of drifting silently.
+    const db = rustChainDb();
+    db.prepare("INSERT INTO llm_wiki_meta (key, value) VALUES ('schema_version', ?)").run(
+      ENGINE_8_0_2_SCHEMA_VERSION,
+    );
+    const before = schemaObjects(db);
+    await engine(db).setup();
+    const after = schemaObjects(db);
+    const beforeSet = new Set(before);
+    const added = after.filter((n) => !beforeSet.has(n));
+    const dropped = before.filter((n) => !after.includes(n));
+    const FTS_FAMILY = [
+      "index:llm_wiki_fts_map_entity",
+      "index:llm_wiki_fts_pending_entity",
+      "index:llm_wiki_fts_pending_id",
+      "index:llm_wiki_source_passages_fts_map_doc",
+      "index:llm_wiki_source_passages_fts_pending_doc",
+      "table:llm_wiki_entries_fts",
+      "table:llm_wiki_entries_fts_config",
+      "table:llm_wiki_entries_fts_content",
+      "table:llm_wiki_entries_fts_data",
+      "table:llm_wiki_entries_fts_docsize",
+      "table:llm_wiki_entries_fts_idx",
+      "table:llm_wiki_fts_map",
+      "table:llm_wiki_fts_pending",
+      "table:llm_wiki_source_passages_fts",
+      "table:llm_wiki_source_passages_fts_config",
+      "table:llm_wiki_source_passages_fts_content",
+      "table:llm_wiki_source_passages_fts_data",
+      "table:llm_wiki_source_passages_fts_docsize",
+      "table:llm_wiki_source_passages_fts_idx",
+      "table:llm_wiki_source_passages_fts_map",
+      "table:llm_wiki_source_passages_fts_pending",
+      "trigger:llm_wiki_entries_fts_ad",
+      "trigger:llm_wiki_entries_fts_ai",
+      "trigger:llm_wiki_entries_fts_au",
+      "trigger:llm_wiki_source_passages_fts_ad",
+      "trigger:llm_wiki_source_passages_fts_ai",
+    ];
+    expect(dropped).toEqual([]);
+    expect(added.sort()).toEqual(FTS_FAMILY);
   });
 });

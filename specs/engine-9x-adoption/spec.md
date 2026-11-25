@@ -1,6 +1,6 @@
 # Spec: engine 9.x adoption (expo-llm-wiki 8.0.2 → 9.18.0)
 
-Status: Approved 2026-11-24 (Kurt — all three disclosed items accepted; unbounded vector_removals follow-up: expo-llm-wiki#487). PR-A (sso 9.x readiness): Implemented 2026-11-24 on chore/sso-9x-readiness. PR-B (core bump + DDL regen + ddl_compat extractor): Implemented 2026-11-25 on chore/engine-9x-prb.
+Status: Implemented 2026-11-25 (approved 2026-11-24 — Kurt accepted all three disclosed items; unbounded vector_removals follow-up: expo-llm-wiki#487). PR-A (sso 9.x readiness): Implemented 2026-11-24 on chore/sso-9x-readiness. PR-B (core bump + DDL regen + ddl_compat extractor): Implemented 2026-11-25 on chore/engine-9x-prb.
 Owner: Kurt VanDusen / Hermes Agent
 Date: 2026-11-24
 Related issues: #342 (vector_removals ledger, non-blocking), #348 (sso 9.x node types, blocking), #353 (source_pointer mirror, blocking for the guard).
@@ -244,3 +244,15 @@ PR-A tests:
 - **E9 (PR-B delete-site line drift — controller ruling Q11, 2026-11-25):**
   the §3 PR-B step-6 cites drifted with #369's merge: `commit.rs:616` →
   `:634`; `bundle_apply.rs:982` → `:1017`. `queries.rs:227` matches.
+- **E10 (PR-B test-fixture form + vault-switch debt — T4 r2 m5/m3,
+  2026-11-25):** spec §5 test 3 described building the fixture DB at test
+  time from an 8.0.2 DDL text snapshot. As shipped, the fixture is a frozen
+  binary brain (`ct-brain-v32-core-8.0.2.db`, provenance + regeneration
+  recipe in `src-tauri/src/db/testdata/README.md`); the DDL-text-snapshot
+  artifact was dropped as unused (the drift anchor is the Rust-generated
+  `ct-engine9-migrated.llm_wiki.schema.sql`, drift-tested every gate run).
+  Recorded debt: `clear_vault_tables` (`queries.rs`) does not yet clear the
+  new `llm_wiki_source_documents` / `llm_wiki_source_passages` tables —
+  latent until a `storeSource` consumer is adopted; MUST be added when that
+  happens, or vault switches would leak verbatim source text across vaults
+  (#213 per-vault rule).

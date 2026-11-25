@@ -421,8 +421,9 @@ mod tests {
                 .unwrap();
             rows
         };
-        // Membership, not MAX: `>= 32` would pass even if 31/32 never stamped
-        // (T4 r1 M6).
+        // Membership, not MAX: `>= 32` would pass even if 31/32 never
+        // stamped. The literals 31/32/33 intentionally pin the historical
+        // ladder tail (sso9 pair + the engine-9x mirror slot) as fact.
         for v in [31, 32, 33] {
             assert!(stamped.contains(&v), "rooted fresh brain must stamp V{v}");
         }

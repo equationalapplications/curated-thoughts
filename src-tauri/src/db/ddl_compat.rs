@@ -93,7 +93,7 @@ pub fn package_ddl_matches_rust() -> Result<(), String> {
     let rust_stmts = split_ddl_statements(LLM_WIKI_PACKAGE_DDL);
 
     // Order-SENSITIVE comparison: trigger bodies fragment into
-    // order-dependent statements (T4 r1 M1 — swapping the enqueue
+    // order-dependent statements (swapping the enqueue
     // trigger's DELETE/INSERT or moving a body between triggers must
     // FAIL this gate). The extractor returns dist order and the const is
     // verbatim dist order, so identity holds when there is no drift.

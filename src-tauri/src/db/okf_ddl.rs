@@ -421,7 +421,7 @@ pub fn apply_llm_wiki_source_store_indexes(conn: &rusqlite::Connection) -> rusql
 /// Mirror of core-llm-wiki 9.18.0 `setupDatabase`'s `createResurrectTrigger`
 /// (`dist/index.js:2219-2246`, level ladder `resurrectLevel` `:2215`):
 /// `llm_wiki_vector_removals_resurrect`, `AFTER UPDATE OF deleted_at ON
-/// llm_wiki_entries` (column-scoped — the PR-A re-type tripwire holds, Q16).
+/// llm_wiki_entries` (column-scoped — the PR-A re-type tripwire holds).
 /// Body level: 0 = no vector columns (only drops the ledger row); 1 = also
 /// clears `embedding_blob`/`embedding` when the removal was confirmed; 2 =
 /// also resets the embed-failure marker columns. An existing trigger at a

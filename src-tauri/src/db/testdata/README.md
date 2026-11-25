@@ -20,10 +20,11 @@ mirror + helpers. Regenerated and drift-tested at every gate run by
 edit. Consumed by `src/__tests__/engine9-setup-compat.test.ts`.
 
 ## `core-llm-wiki-8.0.2.expectations.json`
-Column expectations captured from the installed core-llm-wiki **8.0.2**
-package (T0, from `git show 78160f98:` package content, never node_modules).
-Loaded by the `schema_guard` `verify_schema_with` parameterization tests
-(9.18.0 guard must reject the 8.0.2 shape).
+Column expectations as CT's `schema_guard::LLM_WIKI_TABLES` described them at
+base `78160f98` (captured via T0 from that tree's guard — so it INCLUDES the
+CT-local `tier`/`embed_scheme`/`area` columns, not just the engine's). It is
+the "8.0.2 shape" input the 9.18.0 `verify_schema_with` parameterization
+rejects.
 
 ## `schema-software-org-8.0.2.manifest.json`
 Frozen sso 8.0.2 manifest captured during the PR-A lane (#369, T1 step 1);

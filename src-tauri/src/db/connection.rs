@@ -866,7 +866,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // gated on V22 + exact stamp membership; skipped (unstamped) on in-memory
     // opens.
     apply_sso9_migrations(conn)?;
-    // V33 engine-9x mirror (PR-B plan Task 6, Q7/Q8): core-llm-wiki 9.18.0
+    // V33 engine-9x mirror: core-llm-wiki 9.18.0
     // engine v16–v19 columns, source store, vector-removal ledger + its
     // triggers. Ungated shape on every open; stamp gated on V22. Called
     // right after `apply_sso9_migrations` so the mirror evaluates the
@@ -874,7 +874,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // invariant: on deferred-V22 opens the re-type can run with the
     // triggers already present, which is harmless because both triggers
     // are column-scoped (`AFTER UPDATE OF deleted_at` / `AFTER DELETE`)
-    // and the re-type UPDATEs neither (T4 r1 M3).
+    // and the re-type UPDATEs neither.
     apply_engine9_mirror(conn)?;
 
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
@@ -1439,7 +1439,7 @@ pub(crate) const SSO9_REFRESH_VERSION: i64 = 31;
 /// Slot of the sso9 okf_type/edge re-type step (plan Task 5).
 pub(crate) const SSO9_RETYPE_VERSION: i64 = SSO9_REFRESH_VERSION + 1;
 
-/// Slot of the engine-9x mirror step (PR-B plan Task 6): (highest stamped
+/// Slot of the engine-9x mirror step: (highest stamped
 /// slot on this branch = `SSO9_RETYPE_VERSION` = 32) + 1. A literal, not an
 /// expression, so a renumber is one visible edit (V27 renumber precedent):
 /// if another lane takes 33 before merge, bump this const — every stamp,
@@ -1511,8 +1511,7 @@ fn engine9_missing(conn: &Connection) -> Result<(Vec<String>, Vec<String>)> {
     Ok((columns, objects))
 }
 
-/// V33 body (engine-9x PR-B plan Task 6, spec §3 PR-B step 5; rulings Q7,
-/// Q8): mirror core-llm-wiki 9.18.0 engine migrations v16–v19 onto brains
+/// V33 body (spec §3 PR-B step 5): mirror core-llm-wiki 9.18.0 engine migrations v16–v19 onto brains
 /// created under an older DDL — the guarded `ALTER`s for `source_pointer`,
 /// `prior_valid_to`, `derived_events` (entries) and `forgotten_at` (events),
 /// then the source store (`llm_wiki_source_documents`,
@@ -1538,13 +1537,13 @@ fn engine9_missing(conn: &Connection) -> Result<(Vec<String>, Vec<String>)> {
 /// under the lock (the concurrent desktop/`--mcp` open race), apply,
 /// `COMMIT`; any error rolls back and propagates. The stamp is written on
 /// every open once `MAX(version) >= 22`, outside the add branch (V30
-/// reasoning). Placed right after `apply_sso9_migrations` (Q7/Q16) to
+/// reasoning). Placed right after `apply_sso9_migrations` to
 /// evaluate the mirror on the fully-retyped shape. Do NOT read a
 /// re-type-vs-triggers ordering invariant into that placement: on
 /// deferred-V22 opens the re-type runs with the ledger triggers already
 /// present, and that is safe because the triggers are column-scoped
 /// (`AFTER UPDATE OF deleted_at` / `AFTER DELETE`) while the re-type
-/// UPDATEs neither column and never hard-deletes entries (T4 r1 M3).
+/// UPDATEs neither column and never hard-deletes entries.
 fn apply_engine9_mirror(conn: &Connection) -> Result<()> {
     let (cols, objs) = engine9_missing(conn)?;
     if !cols.is_empty() || !objs.is_empty() {
@@ -1570,7 +1569,9 @@ fn apply_engine9_mirror(conn: &Connection) -> Result<()> {
         }) {
             Ok((cols, objs)) => {
                 if !cols.is_empty() || !objs.is_empty() {
-                    println!(
+                    // stderr: under `--mcp` stdout is the JSON-RPC channel
+                    // (mcp_server.rs "All tracing/logging must go to stderr").
+                    eprintln!(
                         "[ct::migrate] engine9 mirror (slot {ENGINE9_MIRROR_VERSION}): added \
                          columns [{}]; objects [{}]",
                         cols.join(", "),
@@ -7812,7 +7813,7 @@ mod tests {
         );
     }
 
-    // ── engine-9x PR-B Task 6: V33 engine-mirror step ─────────────────────
+    // ── V33 engine-mirror step tests ─────────────────────
     //
     // Every test works on a tempdir COPY of the T0 fixture brain (a V32-stamped
     // brain created under the core-llm-wiki 8.0.2 DDL); the checked-in file is
@@ -7927,7 +7928,7 @@ mod tests {
         }
     }
 
-    /// Spec §5 test 5 + Q14 positive control: the ledger triggers survive
+    /// Spec §5 test 5 positive control: the ledger triggers survive
     /// migration and fire as the engine defines them.
     #[test]
     fn engine9_ledger_triggers_enqueue_on_soft_delete_and_marked_hard_delete_only() {
@@ -7951,7 +7952,7 @@ mod tests {
         conn.execute("DELETE FROM llm_wiki_entries WHERE id = 'e9_hard'", [])
             .unwrap();
         assert_eq!(total(&conn), before, "unmarked hard delete enqueues nothing");
-        // Positive control (Q14): with the marker set, a live hard delete
+        // Positive control: with the marker set, a live hard delete
         // enqueues exactly one row — proves the hard-delete trigger exists.
         conn.execute(
             "INSERT OR REPLACE INTO llm_wiki_meta (key, value) VALUES ('external_index_in_use', '1')",
@@ -7991,7 +7992,7 @@ mod tests {
         assert_eq!(snapshot(&conn), first);
     }
 
-    /// Stamp gating (Q7): a rootless open (V22 deferred) still gets the
+    /// Stamp gating: a rootless open (V22 deferred) still gets the
     /// columns, tables, and ledger triggers — the every-open guard demands
     /// them — but never the V33 stamp.
     #[test]
@@ -8017,14 +8018,19 @@ mod tests {
 
     /// The step adds what an 8.0.2-shape brain lacks even with the stamp
     /// present (stamp is not a skip gate) — exercised on a raw fixture copy
-    /// pre-stamped with V33 (T4 r1 M6: a raw copy is V32-stamped, so
+    /// pre-stamped with V33 (a raw copy is V32-stamped, so
     /// inserting 33 first is what actually pins "stamp is not a skip gate").
     #[test]
     fn engine9_mirror_body_adds_columns_tables_and_triggers_on_raw_fixture() {
         let (_tmp, conn) = engine9_fixture_copy();
         assert_eq!(engine9_master_count(&conn, "table", "llm_wiki_vector_removals"), 0);
-        conn.execute("INSERT INTO schema_version (version) VALUES (33);", [])
-            .unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO schema_version (version) VALUES ({ENGINE9_MIRROR_VERSION});"
+            ),
+            [],
+        )
+        .unwrap();
         apply_engine9_mirror(&conn).unwrap();
         let entries = crate::db::ddl_compat::existing_columns(&conn, "llm_wiki_entries").unwrap();
         for col in ["source_pointer", "prior_valid_to", "derived_events"] {
@@ -8038,7 +8044,7 @@ mod tests {
         assert!(engine9_v33_stamped(&conn), "V32 fixture is past V22 → stamps");
     }
 
-    /// T4 r1 M2: V33's snapshot → BEGIN IMMEDIATE → re-inspect → apply
+    /// V33's snapshot → BEGIN IMMEDIATE → re-inspect → apply
     /// sequence is the only guard against the desktop/`--mcp` double-open
     /// race. Four concurrent opens race `apply_engine9_mirror` on a raw
     /// V32 fixture; every open must succeed (serialized by the write lock)
@@ -8085,7 +8091,7 @@ mod tests {
         }
     }
 
-    // ── engine-9x PR-B Task 7: helper objects + fresh/migrated parity ─────
+    // ── helper objects + fresh/migrated parity tests ─────
 
     /// Objects the 9.18.0 engine creates OUTSIDE the `setupDatabase` template
     /// (helpers called at the end of `setupDatabase`, plus the v18/v19
@@ -8169,7 +8175,7 @@ mod tests {
         (master, cols)
     }
 
-    /// Spec §5 test 6, parity definition per ruling Q6: a fresh rooted brain
+    /// Spec §5 test 6, parity definition per erratum E8: a fresh rooted brain
     /// and a migrated 8.0.2 fixture brain have equal table/index/trigger
     /// NAME sets; equal normalized index + trigger SQL; equal name-keyed
     /// `PRAGMA table_info` (cid excluded — ALTER appends after CT-local
@@ -8265,7 +8271,7 @@ mod tests {
         assert_eq!(emb.as_deref(), Some("v"), "unconfirmed removal keeps the vector");
     }
 
-    // ── engine-9x PR-B Task 8: schema dump for the TS setup() proof ───────
+    // ── schema dump for the TS setup() proof tests ───────
 
     /// Render the migrated 8.0.2 fixture's `llm_wiki_*` objects as the dump
     /// `src/__tests__/engine9-setup-compat.test.ts` loads. One `-- object:`
@@ -8315,9 +8321,9 @@ mod tests {
         );
     }
 
-    // ── engine-9x PR-B Task 9: CT's raw delete paths vs the ledger ────────
+    // ── CT's raw delete paths vs the ledger tests ────────
     //
-    // Spec §3 step 6 / ruling Q11: the raw delete sites stay raw; the
+    // Spec §3 step 6: the raw delete sites stay raw; the
     // obligation is that they never bypass the ledger triggers. Each path is
     // driven over a migrated fixture copy seeded with a soft-deleted fact (a
     // pre-existing ledger row) and a live fact in entity `ent_t9`.
