@@ -1,6 +1,6 @@
 # Investigation — issue #376: engine-9.x follow-ups from the PR #375 T4 cycle
 
-**Date:** 2026-11-25 · **Status:** Draft — Fable step-0 + two delta rounds adjudicated (delta-r3 verification next)
+**Date:** 2026-11-25 · **Status:** Draft — Fable step-0 + three delta rounds adjudicated (delta-r4 verification next)
 **Branch:** `chore/engine9x-followups` · **Lane worktree:** `/mnt/kv-work/build/worktrees/curated-thoughts/engine9x-followups` (base: `origin/main` = `10e9b006`)
 **Upstream:** issue #376; findings originated in the PR #375 T4 Fable cycle (rounds r1–r4) and spec errata E8–E10 (spec `specs/engine-9x-adoption/spec.md` §8, landed with #375). Split-out: issue #378 (forgotten_at reader gap).
 
@@ -161,61 +161,83 @@ moment: the reopen is `lib.rs:2307`, while `vault_state.set_vault_path(&new_path
 — which writes the config (`vault/config.rs:85-91`, `config.write`) — only
 runs later (`lib.rs:2325-2330`, after `pending_config_align_to` handling).
 So the naive fix re-derives the OUTGOING vault and re-stamps: the leak comes
-back, permanent. **Fix directions — NOT equivalent (delta-r2 M1/M2):**
-(a) reorder the config write before the reopen — fixes EVERY root-dependent
-step of the `:2307` open (see below), but changes the failure semantics
-`pending_config_align_to` exists to protect (`lib.rs:2302`, `:2332`: the
-config must align to the installed file "however the rest of the switch
-goes"; with (a), a mid-switch failure leaves the config pointing at the NEW
-vault while the old brain may still be on disk);
-(b) explicit `rebuild_rederive(conn, new_root)` after the reopen — fixes
-ONLY the stated-ledger tables; the other root-dependent steps still run on
-vault A;
-(c) defer the stamp deletion until the config is aligned — RULED OUT
-standalone (delta-r2 M1): the rederive runs only inside `migrate()` on an
-open (`connection.rs:907-916`), and no further open happens in-session after
-`:2330`, so the tables stay stale until the next app start — the
-"tables hold B's rows" pin test fails; ALSO, any stamp-deleting variant has
-an MCP-open race (delta-r2 M1): a concurrent `--mcp` `AppDb::open` between
-stamp deletion and config alignment reads a config naming vault A and
-re-derives A. Option (b) WITH THE STAMP LEFT IN PLACE avoids that race (a
-concurrent open then never re-derives).
-(d) NEW (recommended for the spec): make the `:2307` reopen resolve the NEW
-root explicitly — e.g., a root-override parameter on `open_with_config` that
-`switch_vault` passes — leaving config alignment where it is. This fixes all
-root-dependent steps without touching `pending_config_align_to` semantics.
-**Root-dependent steps of the `:2307` open (delta-r2 M2, verified):**
-`migrate()`'s V22 `v22_unify_documents_path` (rewrites `documents.path` to
-root form — no-op on a cleared brain, which has no `documents` rows); the
-stated-ledger rederive (`:916`, stamp-gated); and
-`run_okf_migration(conn, vault_path)` (`connection.rs:3046-3049`), which is
-a no-op once `okf_migration_complete` is stamped but on a not-yet-migrated
-brain walks VAULT A's files (`preload_approved_pages`, okf_migration.rs:394+)
-and writes A's wiki-page content into the brain. The discriminator: (a)/(d)
-fix all of these; (b) fixes only the rederive.
-**Confirmations ruling (delta M2, open question Q7):** at switch time
-`llm_wiki_entries` is empty (cleared; B not yet ingested), so the
-confirmations leg applies 0 stamps and the once-per-brain stamp would pin
-that forever — vault B's previously confirmed facts show unconfirmed until
-re-confirmed. Today's behavior has the same hole (no rederive runs on
-switch at all). Options: set the rebuild stamp only after B's first ingest
-completes, or re-run the confirmations leg post-ingest, or name it a
-residual. Drop any "re-derives everything / no new machinery" claim.
+back, permanent. **Fix directions — a COMPOSITION is required (delta-r3 M3);
+individual options are NOT equivalent:**
+- **Rows removal (the leak half):** add the three `DELETE FROM` statements
+  to the sweep itself, WITH THE STAMP LEFT IN PLACE (delta-r3 M3's
+  composition; recommended). This removes A's rows inside the clear
+  transaction — no race with concurrent `--mcp` opens (the stamp survives,
+  so no other process ever re-derives). Repopulation for B is then a
+  separate step: an explicit `rebuild_rederive(conn, new_root)` after the
+  reopen, or the Q7 post-ingest run.
+- **Root fix (the wrong-root half):** option (a) — reorder the config write
+  before the reopen — or option (d) — a root-override parameter on
+  `open_with_config`. CORRECTION (delta-r3 M1, verified): the earlier
+  objection to (a) was WRONG — `pending_config_align_to = Some(new_path)`
+  is already set in BOTH branches before the reopen (`:2282` install,
+  `:2302` clear), the error path already writes that config on any later
+  failure (`:2372-2380`), and at `:2307` the old brain is never still on
+  disk (cleared or replaced) — so a mid-switch failure ALREADY ends with
+  the config naming the new vault. (a)'s real remaining costs are narrower:
+  `set_vault_path` can itself fail before the reopen, and `vault_state`'s
+  in-memory value changes earlier (readers between the write and `:2330` —
+  e.g. `start_pipeline` — need a planning-time check).
+  (d) avoids those but adds a parameter to a ~25-call-site function.
+  (c) defer-stamp-deletion is RULED OUT (delta-r2 M1: no further open
+  in-session on the success path — the recovery open after a FAILURE is the
+  exception, `:2384`, delta-r3 m2 — and the MCP-open race stands).
+- Why BOTH halves: (rows-only) leaves the V22/okf wrong-root steps running
+  on A; (root-only) fixes no leak at all — the rederive is skipped whenever
+  the stamp exists regardless of root (`:907-915`), so (d) or (a) alone
+  fails the pin test (delta-r3 M3).
+**Root-dependent steps of the `:2307` open (delta-r2 M2 + delta-r3 M2
+corrections, verified):** `migrate()`'s V22 `v22_unify_documents_path`
+(rewrites `documents.path` to root form — no-op on a cleared brain, which
+has no `documents` rows); the stated-ledger rederive (`:916`, stamp-gated —
+skipped when the stamp exists, WHATEVER root is passed); and
+`run_okf_migration(conn, vault_path)` — CORRECTED: it is DB-ROW-driven, not
+a blind vault walk. In-place: `wiki_pages` is cleared (`queries.rs:274`), so
+no rows → no-op. Restore branch with a stale backup predating the OKF
+migration: B's `approved` `wiki_pages` rows are resolved against A's root —
+`read_wiki_page_body` joins the RELATIVE page path onto the root
+(`okf_migration.rs:59-71`, verified), so a same-named file under A supplies
+A's text and missing files migrate with "(file missing)" bodies; worse,
+`drop_pending_wiki_proposals` builds `remove_file` targets as
+`A/.brain/proposed/<path>` (`:285-315`) — deleting files in the OUTGOING
+vault — and the migration then stamps (`okf_migrated_at`, `:18`), making it
+permanent.
+**Confirmations ruling (delta M2, open question Q7 — PER BRANCH per
+delta-r3 m3):** in-place: `llm_wiki_entries` is empty at switch (cleared; B
+not yet ingested), so the confirmations leg applies 0 stamps and the
+once-per-brain stamp would pin that forever — vault B's previously
+confirmed facts show unconfirmed until re-confirmed. Restore: B's entries
+are PRESENT (the backup carries them), so the entries-empty reasoning does
+not apply there — the confirmations leg would actually work if the rebuild
+ran against B's root. Options: set the rebuild stamp only after B's first
+ingest completes (in-place), re-run the confirmations leg post-ingest, or
+name it a residual.
 **Pin:** a switch-level test asserting the three tables hold B's rows (not
 just that the stamp is gone).
 
-**Restore branch (delta-r2 M3, verified):** the non-in-place branch
-(`lib.rs:2255-2293`) installs vault B's OWN backup
-(`new_root/.brain/brain.db.bak` → `commit_staged_backup`) as the brain file
+**Restore branch (delta-r2 M3 + delta-r3 M2/M3, verified):** the non-in-place branch
+(`lib.rs:2252-2292`) installs vault B's OWN backup
+(`new_root/.brain/brain.db.bak` → `commit_staged_backup` at `:2274`) as the brain file
 BEFORE the shared `:2307` reopen, and the config still names vault A then
 (`set_vault_path` at `:2325` is shared, post-reopen). So the `:2307` open
 runs against B's brain with A's roots in both branches. For B brains that
-carry the V22 + rederive stamps (any backup taken since those migrations),
-the open is a no-op — fine. For a STALE backup lacking the stamps, the open
-runs V22's `documents.path` rewrite and the rederive with A's roots over
-B's rows — path corruption plus A's derived rows written into B's brain,
-today, with no fix applied. I4(ii) must cover this branch; the pin test
-needs a second case (stale-backup restore).
+carry the stamps — V22 is a `schema_version` row (`connection.rs:699-700`),
+the rederive is the `stated_ledger_rederived` `llm_wiki_meta` key, and the
+OKF migration is the `okf_migrated_at` meta key (three separate mechanisms,
+delta-r3 m5) — the open is a no-op — fine. For a STALE backup lacking the
+stamps, the open runs with A's roots over B's rows: V22's `documents.path`
+rewrite, the rederive (writes A's derived rows into B's brain), AND the
+OKF migration (delta-r3 M2: reads A's wiki bodies for B's approved-page
+rows and `remove_file`s A's `.brain/proposed/` files — deleting outgoing-
+vault files — then stamps permanently). Today, no fix applied. I4(ii) must
+cover this branch; the pin test needs these cases: (1) stale-backup
+restore (V22 + rederive stamps absent), (2) the same backup also predating
+the OKF migration, with an `approved` row AND a `pending_review` row
+(delta-r3 M2 fix instruction).
 
 **(iii) FTS family (LIVE residue — mechanism verified in engine dist):**
 the raw `DELETE FROM llm_wiki_entries` fires the engine's `*_fts_ad`
@@ -265,9 +287,13 @@ exempt: `llm_wiki_meta` (survives; BUT the (ii) fix deletes the
 `llm_wiki_vector_removals` (marker-gated, #213/T9),
 `llm_wiki_entity_manifests` (partial: tier vocabulary retained,
 `queries.rs:1045-1048`), `schema_version` (watermark, `queries.rs:1050`),
-the engine FTS family (see (iii) ruling), and the CT operational tables
-Fable M2 named for disposition: `pipeline_heartbeat` (`schema.rs:244`),
-`pipeline_stalls` (`:256`), `system_strikes` (`:286`), `deposit_kick_state`
+`stall_strikes` (per-document strike ledger — ALREADY cleared,
+`queries.rs:276`; delta-r3 m4), the engine FTS family (see (iii) ruling),
+and the CT operational tables Fable M2 named for disposition:
+`pipeline_heartbeat` (`schema.rs:244`), `pipeline_stalls` (`:256`),
+`system_strikes` (`:286` — a DIFFERENT table from `stall_strikes`: the
+single-row unattributed-strikes ledger, MIGRATION_V14; still needs an
+explicit disposition), `deposit_kick_state`
 (`connection.rs:793`) — each needs an explicit ruling; they look
 vault-independent/operator-facing, but the guard cannot assume.
 `wiki_pages_new` (delta m3) is TRANSIENT — created, populated, and RENAMED
@@ -359,7 +385,7 @@ the drift-gate work) vs separate issue.
 | I2 | PRAGMA grouping (column loop only; hygiene, not perf) | trivial | 1 |
 | I7 | fix all three stale comments (`ci.yml:223`, `ci.yml:135`, smoke script), keep flag | trivial | 1 |
 | I6 | `.gitattributes` scoped to testdata `*.sql` + `*.db binary` | trivial | 2 |
-| I4(ii) | stated-ledger + wrong-root fix — reopen must resolve the NEW root (option (d) root-override recommended); covers in-place AND stale-backup restore branches; confirmations ruling (Q7) | medium | 2 |
+| I4(ii) | TWO-HALF composition: sweep adds 3 DELETEs (stamp left in place — no race) + root fix ((a) reorder — objection corrected — or (d) override) for the V22/okf steps; covers in-place AND stale-backup restore (okf `remove_file` hazard); confirmations ruling (Q7, per-branch) | medium | 2 |
 | I4(i) | source-store DELETEs (E10 fold) | trivial | 2 |
 | I3 | helper-SQL body-drift gate — (a) consts+new extractor vs (b′) TS-test SQL diff | medium | 2 |
 | I4(iii) | FTS drain window — Q6 narrowed (at-rest for CT paths; join-back check at planning) | ruling | 3 |
@@ -408,6 +434,14 @@ after first ingest vs post-ingest re-run vs named residual).
    vocabulary). The authoritative matrix lives in the #213 vault-switch
    spec; the I4(iv) guard enumerates dispositions table-by-table for ladder
    review rather than re-litigating the matrix.
+4. **delta-r3 answers:** `read_wiki_page_body` joins the RELATIVE
+   `wiki_pages.path` onto the vault root (`okf_migration.rs:59-71`) — the
+   M2 wrong-root body read is real. `okf_migrated_at` is the OKF stamp key
+   (`:18`). `stall_strikes` (per-document, cleared at `queries.rs:276`) and
+   `system_strikes` (single-row ledger, MIGRATION_V14) are distinct tables.
+   Remaining planning-time checks: readers of `vault_state` between the
+   early config write and `:2330` (option (a) cost); engine search
+   join-back for Q6.
 
 ## Resource-state note (lane open, per directive)
 
@@ -453,3 +487,13 @@ context.
   class 1), m1–m7 — all verified against the tree and adopted; option (d)
   (root-override reopen) added as the recommended fix direction. Delta-r3
   verification next.
+- r6 (2026-11-25): Fable delta-r3 ($1.36/15 turns) REQUEST CHANGES — M1
+  (option (a) objection CORRECTED: `pending_config_align_to` is already set
+  pre-reopen and the error path already aligns the config — verified
+  `lib.rs:2282/:2302/:2372-2380`), M2 (okf migration is DB-row-driven;
+  in-place no-op; restore-stale-backup reads A's wiki bodies via the
+  relative-path join and `remove_file`s A's `.brain/proposed/` files —
+  verified `okf_migration.rs:59-71/:285-315`), M3 (option (d)/(a) alone fix
+  NO leak — rederive skips on stamp regardless of root; TWO-HALF
+  composition adopted: sweep DELETEs + root fix + explicit/Q7 rebuild),
+  m1–m5 — all verified and adopted. Delta-r4 verification next.
