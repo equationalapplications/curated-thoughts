@@ -33,3 +33,10 @@ Execution: SDD controller loop, implementers = Claude Code sonnet/low (default-i
 - Wrapped gate chain (heavy-build, task11-gates.log): clippy ×2 EXIT 0; src-tauri full suite **lib 1744/0** (base 1735, net +9 = exactly the landed tests); 108 result lines all ok; vitest **631 passed + 1 skipped** (base 629+1, net +2); tsc EXIT 0.
 - Range under review: `9f266816..HEAD` (all code commits; spec+plan already reviewed in planning).
 - Ladder per plan Task 11 Step 4: Opus (T3) → Fable (T4); CodeRabbit active on PR #379. SoR remains suspended (Kurt 2026-11-14).
+
+## Stage-close review round 1 — T3 Opus (2026-11-25): REQUEST_CHANGES → fixed
+- 1 MAJOR + 5 MINOR + 4 NIT. All findings adjudicated ACCEPT (F1's MAJOR = spec.md:107-109 every-crossing rule, owner's own S5 ruling; plan's "cleared after first fire" was the divergence).
+- Fix-A `5db755c0`: every-crossing fire (no take()), epoch-guarded probe arm, two-crossing test replaces once-test (drain_hook 2/0 controller re-run; pipeline 73/73).
+- Fix-B `6c0d62d5` + `d086e554`: open-time root-derived pins (stamp-cleared so the OPEN's rederive runs — no hand-passed root); Run 1 failure surfaces via write_error_log (no invented diagnostics flag); S6 guard proves swept tables empty post-sweep + FTS family-roots const; align net restored in-place (align before the config write); librarian_evidence → PARTIAL; README recipe non-destructive. Gates: pins 3/0, switch 5/0, guard 1/0, clippy ×2 — controller re-ran.
+- Wontfix: NIT 10 (CI comment duplication) — plan-intentional, ledgered. Known gap flagged for T4: no test fires the hook after a supersede (needs a stall/epoch harness).
+- Epoch-fire test skipped (harness absent) — T4 to weigh.
