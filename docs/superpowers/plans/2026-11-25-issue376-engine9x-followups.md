@@ -179,7 +179,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --features test-utils,mcp-server
 
 Expected: all `engine9*` tests pass, same counts as base (record them).
 
-- [ ] **Step 3: Commit**:
+- [x] **Step 3: Commit**:
 
 ```bash
 git add src-tauri/src/db/connection.rs
@@ -193,9 +193,9 @@ git commit -m "perf(db): engine9_missing reads PRAGMA table_info once per table 
 **Files:**
 - Modify: `.github/workflows/ci.yml:223-225`, `.github/workflows/ci.yml:135`, `scripts/runtime-smoke-clw.mjs:18`
 
-- [ ] **Step 1: Rewrite the three comments** to: "node:sqlite shipped behind `--experimental-sqlite` in 22.5.0 and was unflagged in 22.13.0 (nodejs/node#55890); the flag is a harmless no-op on current 22.x and kept to avoid churning a working invocation." In `ci.yml:135`, additionally correct ">= 22.5, built-in sqlite" → ">= 22.13 unflagged; shipped behind the flag in 22.5".
+- [x] **Step 1: Rewrite the three comments** to: "node:sqlite shipped behind `--experimental-sqlite` in 22.5.0 and was unflagged in 22.13.0 (nodejs/node#55890); the flag is a harmless no-op on current 22.x and kept to avoid churning a working invocation." In `ci.yml:135`, additionally correct ">= 22.5, built-in sqlite" → ">= 22.13 unflagged; shipped behind the flag in 22.5".
 
-- [ ] **Step 2: Verify**:
+- [x] **Step 2: Verify**:
 
 ```bash
 grep -n "22.13" .github/workflows/ci.yml scripts/runtime-smoke-clw.mjs
@@ -203,12 +203,18 @@ grep -n "22.13" .github/workflows/ci.yml scripts/runtime-smoke-clw.mjs
 
 Expected: three matches.
 
-- [ ] **Step 3: Commit**:
+- [x] **Step 3: Commit**:
 
 ```bash
 git add .github/workflows/ci.yml scripts/runtime-smoke-clw.mjs
 git commit -m "docs(ci): correct node:sqlite flag history comments (unflagged in 22.13.0) (#376)"
 ```
+
+> **Tasks 3+4 closeout (controller, 2026-11-25):** commits `1e28cbf5` + `0658ef0d`; the
+> plan's "expect: three matches" check reads FOUR grep lines — site 2 (ci.yml:135) carries
+> BOTH the corrected parenthetical (":135") and the full history comment (":136"). Intentional
+> per the plan's site-2 instruction; verified controller-side. `git check-attr diff` on the .db
+> reports `diff: unset` = the `binary` macro's `-diff` — correct no-diff behavior.
 
 ---
 
@@ -217,7 +223,7 @@ git commit -m "docs(ci): correct node:sqlite flag history comments (unflagged in
 **Files:**
 - Create: `.gitattributes` (repo root)
 
-- [ ] **Step 1: Create** `.gitattributes`:
+- [x] **Step 1: Create** `.gitattributes`:
 
 ```
 # Byte-compared fixtures must not be re-normalized on Windows checkouts
@@ -226,7 +232,7 @@ src-tauri/src/db/testdata/*.sql text eol=lf
 src-tauri/src/db/testdata/*.db binary
 ```
 
-- [ ] **Step 2: Verify attributes apply and no churn**:
+- [x] **Step 2: Verify attributes apply and no churn**:
 
 ```bash
 git check-attr text eol -- src-tauri/src/db/testdata/ct-engine9-migrated.llm_wiki.schema.sql
@@ -236,7 +242,7 @@ git ls-files --eol src-tauri/src/db/testdata/ | head
 
 Expected: schema.sql → `text: set, eol: lf`; brain.db → `binary: -diff` (or `diff: binary`); all tracked testdata files already `w/i/lf` (no CRLF in repo — if any shows `w/crlf`, note it: working-tree re-checkout needed on Windows only).
 
-- [ ] **Step 3: Append the re-checkout note** to `src-tauri/src/db/testdata/README.md`:
+- [x] **Step 3: Append the re-checkout note** to `src-tauri/src/db/testdata/README.md`:
 
 ```markdown
 ## Line endings
@@ -246,7 +252,7 @@ byte-compares it). Windows clones created before that attribute landed need
 one re-checkout: `git rm --cached -r src-tauri/src/db/testdata && git reset --hard`.
 ```
 
-- [ ] **Step 4: Commit**:
+- [x] **Step 4: Commit**:
 
 ```bash
 git add .gitattributes src-tauri/src/db/testdata/README.md
@@ -542,7 +548,7 @@ git commit -m "fix(pipeline): stated-ledger repopulation — rebuild at switch, 
 
 - [ ] **Step 2: Reconcile the list against the ACTUAL sweep** (`queries.rs:214-303`) — every table in the sweep goes under SWEPT; resolve mismatches by fixing the LIST, not the sweep. Also seed any table the default `open_in_memory` chain creates but `seed_full_vault` doesn't (the sqlite_master query must see them — if a table only exists post-V33 on real brains, seed it explicitly or use the V33 fixture brain helper).
 - [ ] **Step 3: Run — expect PASS** with the final list.
-- [ ] **Step 4: Commit**:
+- [x] **Step 4: Commit**:
 
 ```bash
 git add src-tauri/src/db/queries.rs
@@ -615,7 +621,7 @@ Expected: PASS (Task 0 Step 1 guaranteed the allow-list is complete). If the v18
 
 - [ ] **Step 3: Negative control (temporary, local-only)**: perturb one mirror SQL in `okf_ddl.rs`, run, expect the drift FAIL, revert. Record output.
 
-- [ ] **Step 4: Commit**:
+- [x] **Step 4: Commit**:
 
 ```bash
 git add src/__tests__/engine9-setup-compat.test.ts
