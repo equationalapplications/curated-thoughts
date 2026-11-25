@@ -1027,14 +1027,76 @@ fn refresh_edge_triple(entry: &serde_json::Value) -> Option<(String, String, Str
     Some((field("type"), field("source_type"), field("target_type")))
 }
 
-/// The manifest's declared edge triples as membership keys, from a PARSED
+/// The manifest's declared edge shapes as membership keys, from a PARSED
 /// manifest (the `wiki_get_ontology` leg of the re-type's declared-shape
 /// cascade — the re-type's parent-family drop decision consults this set;
-/// rOZa). Entries are keyed exactly like `refresh_edge_triple` output.
-pub(crate) fn manifest_declared_edge_triples(
+/// rOZa). `contains` is PARENT-AWARE (T3 MAJOR 1): a triple declared on the
+/// abstract parent (`about(statement, person)`) applies to every content
+/// kind under it (`decision`/`lesson`/… carry `parent_type: statement` and
+/// the manifest's own statement description says source-`statement` rows
+/// "apply to every kind"), exactly the reasoning spec change-6 uses when it
+/// keeps `about`→`organization` as "a valid `statement`→`organization`
+/// shape".
+#[derive(Clone)]
+pub(crate) struct ManifestDeclaredEdges {
+    triples: std::collections::HashSet<(String, String, String)>,
+    /// Node key → parent key, one level (wiki_graph.rs: "one-level parent
+    /// slug, when the manifest declares inheritance"), from the SAME
+    /// manifest's `node_types`.
+    parents: std::collections::HashMap<String, String>,
+}
+
+impl ManifestDeclaredEdges {
+    /// An empty declared set means the gate is DISARMED on this manifest
+    /// (strict with no edge types — `ontology_leg`'s Strict(None) contract);
+    /// the re-type must not delete on it.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.triples.is_empty()
+    }
+
+    fn chain(&self, start: &str) -> Vec<String> {
+        let mut out = vec![start.to_string()];
+        let mut cur = start.to_string();
+        while let Some(parent) = self.parents.get(&cur) {
+            if out.iter().any(|x| x == parent) {
+                break; // cycle guard
+            }
+            out.push(parent.clone());
+            cur = parent.clone();
+        }
+        out
+    }
+
+    pub(crate) fn contains(&self, edge: &str, source: &str, target: &str) -> bool {
+        for s in self.chain(source) {
+            for t in self.chain(target) {
+                if self
+                    .triples
+                    .contains(&(edge.to_string(), s.clone(), t.clone()))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+pub(crate) fn manifest_declared_edges(
     manifest: &crate::wiki_graph::WikiManifest,
-) -> std::collections::HashSet<(String, String, String)> {
-    manifest
+) -> ManifestDeclaredEdges {
+    let parents = manifest
+        .node_types
+        .iter()
+        .filter_map(|n| {
+            let parent = n.parent_type.as_deref()?;
+            if parent.is_empty() {
+                return None;
+            }
+            Some((NodeVocabulary::key(&n.type_name), NodeVocabulary::key(parent)))
+        })
+        .collect();
+    let triples = manifest
         .edge_types
         .iter()
         .map(|e| {
@@ -1044,7 +1106,8 @@ pub(crate) fn manifest_declared_edge_triples(
                 NodeVocabulary::key(&e.target_type),
             )
         })
-        .collect()
+        .collect();
+    ManifestDeclaredEdges { triples, parents }
 }
 
 /// The sso9 manifest MERGE refresh's pure planner (plan Task 4d). Eligible

@@ -1785,7 +1785,7 @@ fn sso9_resolve_type(
 /// the canonical `tier_fact` partition manifest (the typical production
 /// case). Non-strict rows fall through to the partition leg (the gate's
 /// leg semantics); an UNREADABLE row aborts the re-type (slyA).
-type Sso9DeclaredEdgeSet = std::collections::HashSet<(String, String, String)>;
+type Sso9DeclaredEdgeSet = crate::db::entity_gate::ManifestDeclaredEdges;
 type Sso9DeclaredEdgeCache = std::collections::HashMap<String, Option<Sso9DeclaredEdgeSet>>;
 
 fn sso9_declared_edges(
@@ -1800,10 +1800,7 @@ fn sso9_declared_edges(
     for lookup in [entity_id, "tier_fact"] {
         match crate::wiki_graph::wiki_get_ontology(conn, lookup) {
             Ok(o) if o.mode == "strict" => {
-                set = o
-                    .manifest
-                    .as_ref()
-                    .map(crate::db::entity_gate::manifest_declared_edge_triples);
+                set = o.manifest.as_ref().map(crate::db::entity_gate::manifest_declared_edges);
                 break;
             }
             // Present but not strict (or no row): fall through to the next
@@ -1841,9 +1838,12 @@ fn sso9_parent_shape_declared(
     e: &Sso9Edge,
 ) -> Result<bool> {
     let Some(declared) = sso9_declared_edges(conn, declared_cache, &e.entity_id)? else {
-        // Impl-review (T1.5 rung 2 MAJOR 1): ungated — keep. The gate would
-        // admit this edge today, and the success path deletes the backup, so
-        // a wrong drop is irreversible.
+        // Impl-review (T1.5 rung 2 MAJOR 1): ungated — keep. POLICY (T3
+        // MINOR 2, pending the owner's ruling + spec erratum): the
+        // justification is NOT the Rust edge gate (it checks edge-type
+        // NAMES only, never endpoint shapes); the criterion is spec
+        // change-6's shape-level declaration, with ungated entities — where
+        // no shape can be declared — exempt from the drop by ruling.
         return Ok(true);
     };
     if declared.is_empty() {
@@ -1864,11 +1864,15 @@ fn sso9_parent_shape_declared(
     let src = post_retype(sso9_resolve_type(conn, type_cache, &e.source_id)?);
     let tgt = post_retype(sso9_resolve_type(conn, type_cache, &e.target_id)?);
     match (src, tgt) {
-        (Some(s), Some(t)) => Ok(declared.contains(&(
-            crate::db::entity_gate::NodeVocabulary::key(&e.edge_type),
-            crate::db::entity_gate::NodeVocabulary::key(&s),
-            crate::db::entity_gate::NodeVocabulary::key(&t),
-        ))),
+        (Some(s), Some(t)) => Ok(declared.contains(
+            &crate::db::entity_gate::NodeVocabulary::key(&e.edge_type),
+            &crate::db::entity_gate::NodeVocabulary::key(&s),
+            &crate::db::entity_gate::NodeVocabulary::key(&t),
+        )),
+        // An unresolvable endpoint: the shape cannot be verified — drop
+        // (status quo). OPEN QUESTION (rung 3 / T3 MINOR 3): the live gate
+        // climbs endpoints by OWNING ENTITY and never reads okf_type
+        // NULLness; ~1,436 live rows carry NULL okf_type. Ruling pending.
         _ => Ok(false),
     }
 }
@@ -7120,6 +7124,39 @@ mod tests {
         assert!(
             names.iter().all(|n| n.ends_with("-12") || n.ends_with("-13") || n.ends_with("-14")),
             "the OLDEST stale backups are the pruned ones: {names:?}"
+        );
+    }
+
+    #[test]
+    fn sso9_retype_parent_declared_shape_keeps_the_edge() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Impl-review (T3 MAJOR 1): the manifest declares statement shapes on
+        // the ABSTRACT parent — `decision` carries `parent_type: statement`
+        // and the statement description says source-`statement` rows "apply
+        // to every kind" — and spec change-6 itself keeps about->organization
+        // as "a valid statement->organization shape". A custom manifest that
+        // declares about(statement, person) therefore DECLARES the re-typed
+        // (about, decision, person) shape, and the edge must be KEPT — exact
+        // triple matching missed the parent convention and deleted the edge.
+        let mut m: serde_json::Value = serde_json::from_str(SSO8_MANIFEST).unwrap();
+        m["edge_types"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "type": "about", "source_type": "statement", "target_type": "person"
+            }));
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_wiki_entity_manifests (entity_id, mode, manifest_json, updated_at)
+             VALUES ('ent1', 'strict', ?1, 1)",
+            [&m.to_string()],
+        )
+        .unwrap();
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            etype(&conn, "e_about_person").as_deref(),
+            Some("about"),
+            "parent-declared shape about(statement, person) keeps the re-typed edge"
         );
     }
 

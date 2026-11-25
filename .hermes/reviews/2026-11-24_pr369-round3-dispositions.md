@@ -71,3 +71,15 @@ Open questions (reviewer "could not confirm" → action items):
 - **Lockfile integrity hash** — unverified by runners; CI's frontend job and the trial-install recorded in the spec cover it.
 
 "Checked and clean" receipts: step ordering/stamps, EA_SEED_TYPES 20-slug rule, TS vendored-drift test, ct_heal seed switch, backup-deleted-only-after-verification.
+
+## Opus T3 (opus, full PR scope @ c772a0fa, seated real clone) — REQUEST CHANGES
+
+**Cost $1.1258** (19 turns; floor ≥$2.5 NOT reached — the review CONVERGED rather than dying: complete verdict, 19 turns, found a MAJOR the depth rungs missed; shortfall disclosed in the merge ask rather than relaunched at 3x).
+
+**1. MAJOR — declared-shape matching is not parent-aware — FIXED.** Premises verified in-tree: `decision`/`lesson`/`rule`/`trap` carry `parent_type: statement`; the statement node says source-`statement` rows "apply to every kind"; spec change-6 itself keeps about→organization as "a valid `statement`→`organization` shape" (parent-aware reasoning). Exact-triple matching therefore under-matched: a custom manifest declaring `about(statement, person)` intends the re-typed `(about, decision, person)` edge, which V32 then deleted irreversibly. FIX: `ManifestDeclaredEdges { triples, parents }` — `contains` expands each endpoint along its one-level parent chain (cycle-guarded) and matches any combination, parents read from the SAME manifest's node_types. RED-first test `sso9_retype_parent_declared_shape_keeps_the_edge` (verified failing under exact-match-only, green after). DEFAULT brain unchanged: the vendored vocabulary declares no about(statement→person) shape, so the ratified about→person/place/event drops still hold (existing standard tests pin this).
+
+**2. MINOR — the ungated-keep's gate comparison doesn't hold — ACCEPTED, wording fixed, RULING PENDING.** Correct: the Rust edge gate checks edge-type NAMES only (EdgeVocabulary::contains), never endpoint shapes, so "the gate would admit this edge" is not the differentiator — every author edge is name-admitted on gated brains too. The ungated-keep is a POLICY choice (shape-level declaration per change-6, with ungated entities exempt by ruling). Code comments corrected to state the real criterion; the spec erratum ("E5") awaits Kurt's ruling at the merge ask — not written unilaterally (AGENTS.md: ask when the spec doesn't answer).
+
+**3. MINOR — NULL okf_type entries never fall back to curated_entities — RULING PENDING (bundled with the rung-3 open question).** The entry-first rule is the resolver's documented contract; NULL endpoints currently drop (conservative). ~1,436 live rows affected in the worst case; the census log surfaces the actual count. Owner to rule: keep drop, or fall back on NULL.
+
+"Checked and clean" receipts from T3: backup reservation + error kinds + prune prefix, per-row backup check covers all three destructive sets, every abort path rolls back including failed COMMIT, cascade legs (Strict(None) ⇒ keep), ALIAS_TABLE extension.
