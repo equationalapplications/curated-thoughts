@@ -204,6 +204,11 @@ pub fn count_pending_documents(conn: &Connection) -> Result<i64> {
 /// that decision was deferred to #213 and is now "per-vault", so proposals
 /// are cleared with everything else. The destruction is confirmed in the
 /// switch UI (spec D5), so it is not a silent side effect.
+/// S7: the raw `DELETE FROM llm_wiki_entries` leaves vault A's FTS shadow text
+/// at rest until the engine's next drain (`*_fts_ad` only enqueues into
+/// `*_fts_pending`, dist-verified); accepted as at-rest-only for CT (owner Q6
+/// ruling 2026-11-25; production Rust search never reads FTS) — engine-owned
+/// boundary per #213.
 pub fn clear_vault_tables(conn: &mut Connection, now_ms: i64) -> anyhow::Result<()> {
     let tx = conn.transaction()?;
 
@@ -273,8 +278,30 @@ pub fn clear_vault_tables(conn: &mut Connection, now_ms: i64) -> anyhow::Result<
          DELETE FROM documents;
          DELETE FROM wiki_pages;
          DELETE FROM folder_rules;
-         DELETE FROM stall_strikes;",
+         DELETE FROM stall_strikes;
+         -- per-vault rule #213 — these are vault-derived (document_path /
+         -- vault-relative keys) and must not outlive the vault; the
+         -- `stated_ledger_rederived` stamp survives (repopulation is
+         -- switch-level, spec §2 S5).
+         DELETE FROM stated_attestations;
+         DELETE FROM queue_denials;
+         DELETE FROM deposit_attribution;
+         DELETE FROM llm_wiki_source_documents;
+         DELETE FROM llm_wiki_source_passages;",
     )?;
+
+    // Rootless opens park V25 (deposit_kick_state root-gated, connection.rs);
+    //  a brain without the table never had a rooted session, so it cannot hold
+    //  kick rows — skipping is a semantic no-op, not a missed sweep.
+    let has_kick_state: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master
+                         WHERE type = 'table' AND name = 'deposit_kick_state')",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_kick_state {
+        tx.execute("DELETE FROM deposit_kick_state", [])?;
+    }
 
     // ENTITY-LEVEL manifest clear (spec R2.9.2, plan-p2-M7): drop every
     // per-entity override but KEEP the tier vocabulary — `tier_fact`,
@@ -1205,6 +1232,94 @@ mod clear_vault_tables_tests {
         clear_vault_tables(&mut conn, NOW).unwrap();
 
         assert_eq!(count(&conn, "llm_wiki_outbox"), 0);
+    }
+
+    #[test]
+    fn clear_vault_tables_empties_stated_ledger_and_kick_state_but_keeps_stamp() {
+        let mut conn = open_in_memory().unwrap();
+        seed_full_vault(&conn);
+        // V25 is vault-root-gated, so rootless in-memory brains lack
+        // `deposit_kick_state`; create V25's exact shape before seeding.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS deposit_kick_state (
+                 path       TEXT PRIMARY KEY,
+                 state      TEXT NOT NULL
+                            CHECK(state IN ('pending','chunked','ingested','failed',
+                                            'no_ingest_host','queued_watcher')),
+                 error      TEXT,
+                 updated_ms INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        // Seed every newly-swept table.
+        conn.execute(
+            "INSERT INTO deposit_kick_state (path, state, updated_ms)
+             VALUES ('docs/a.md', 'ingested', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO deposit_attribution (document_path, speaker, kind, source, deposited_at)
+             VALUES ('docs/a.md', 'spk', 'kind', 'src', 'at')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stated_attestations (document_path, content_hash, attested_by, attested_at)
+             VALUES ('docs/a.md', 'h', 'by', 'at')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO queue_denials
+                 (document_path, chunk_hash, fact_text_hash, denied_by, denied_at)
+             VALUES ('docs/a.md', 'ch', 'fh', 'by', 'at')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_source_documents
+                 (id, entity_id, source_ref, source_hash, text, text_hash, char_count, created_at)
+             VALUES ('sd1', 'ent_x', 'ref', 'hash', 'txt', 'th', 3, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_source_passages
+                 (id, entity_id, document_id, seq, start_offset, end_offset)
+             VALUES ('sp1', 'ent_x', 'sd1', 0, 0, 3)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO llm_wiki_meta (key, value) VALUES ('stated_ledger_rederived', '1')",
+            [],
+        )
+        .unwrap();
+
+        super::clear_vault_tables(&mut conn, 1).unwrap();
+
+        for table in [
+            "stated_attestations",
+            "queue_denials",
+            "deposit_attribution",
+            "deposit_kick_state",
+            "llm_wiki_source_documents",
+            "llm_wiki_source_passages",
+        ] {
+            assert_eq!(count(&conn, table), 0, "{table} must be swept");
+        }
+        // Stamp survives — the once-per-brain rederive mechanism is untouched.
+        let stamp: String = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key='stated_ledger_rederived'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamp, "1");
+        // Outbox still append-only: replica DELETEs for entries were pushed.
+        assert!(count(&conn, "llm_wiki_outbox") > 0);
     }
 }
 
