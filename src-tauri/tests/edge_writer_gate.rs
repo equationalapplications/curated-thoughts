@@ -47,7 +47,7 @@ const EXPECTED_FIXTURE_COUNTS: &[(&str, usize)] = &[
     ("src/db/bundle_apply.rs", 4),
     ("src/db/commit.rs", 3),
     ("src/db/connections.rs", 5), // +2 Task 7 fix-round-1 cluster-closure test fixtures
-    ("src/db/connection.rs", 7), // sso9 lane: seed fixture + late-write abort test (impl-review owxv) + 4 round-3 window tests (rOZt swap, rOZh remap-only, rOZa inherited-manifest, rOZe mixed-case)
+    ("src/db/connection.rs", 8), // sso9 lane: seed fixture + late-write abort test (impl-review owxv) + round-3 window tests (rOZt swap, rOZh remap-only, rOZa inherited-manifest, rOZe mixed-case) + slx2 trailing-space fixture
     ("src/db/edge_purge.rs", 2),
     ("src/db/bundle_io.rs", 2),
     ("src/db/evidence_regrade.rs", 1),
