@@ -104,4 +104,4 @@ Hygiene check (must print `0`; run before committing any regenerated fixture):
 
 `testdata/*.sql` is pinned to LF via `.gitattributes` (the Rust drift gate
 byte-compares it). Windows clones created before that attribute landed need
-one re-checkout: `git rm --cached -r src-tauri/src/db/testdata && git reset --hard`.
+one re-checkout: `git rm --cached -r src-tauri/src/db/testdata && git checkout -- src-tauri/src/db/testdata`.

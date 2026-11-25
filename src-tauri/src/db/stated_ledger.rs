@@ -1100,8 +1100,6 @@ mod tests {
         );
     }
 
-    /// Event-once idempotence (D1-v2): a second rebuild over the same ledger
-    /// emits NO new outbox rows or events — the shared helper's
     #[test]
     fn apply_stored_confirmations_stamps_without_touching_table_legs() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1119,6 +1117,8 @@ mod tests {
         assert_eq!(attestations, 0, "table legs must stay untouched");
     }
 
+    /// Event-once idempotence (D1-v2): a second rebuild over the same ledger
+    /// emits NO new outbox rows or events — the shared helper's
     /// `NOT (fully stamped)` guard makes an already-stamped row a no-op
     /// (spec §4). Re-run cleanliness is the property that keeps rebuild
     /// re-runs clean.

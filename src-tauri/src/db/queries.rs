@@ -1376,7 +1376,21 @@ mod clear_vault_tables_tests {
             "llm_wiki_source_passages",
         ];
         // Cleared in part (tier-vocabulary rows are kept).
-        const PARTIAL: &[&str] = &["llm_wiki_entity_manifests"];
+        const PARTIAL: &[&str] = &[
+            "llm_wiki_entity_manifests",
+            // Orphan caveat: rows whose entry_id is in llm_wiki_entries are
+            // deleted with them; evidence rows citing other ids may outlive
+            // the entries after a switch and are inert without their parents
+            // (spec Q9).
+            "librarian_evidence",
+        ];
+        /// FTS family — engine-owned, absent from rust chains (mirrors the TS
+        /// test's FTS_FAMILY). Never present in the in-memory brain, so the
+        /// loop below cannot see them; on real brains the engine owns them:
+        /// `llm_wiki_entries_fts{,_config,_content,...}` and the
+        /// `llm_wiki_source_passages_fts*` tables.
+        #[allow(dead_code)]
+        const FTS_FAMILY: &[&str] = &["llm_wiki_entries_fts", "llm_wiki_source_passages_fts"];
         const EXEMPT: &[&str] = &[
             // Survives INTACT (incl. the rederive stamp); only the
             // `alias_remap_completed` KEY is deleted by the sweep.
@@ -1389,10 +1403,16 @@ mod clear_vault_tables_tests {
             // may name old-vault documents (spec Q9 sub-ruling: keep, caveat).
             "pipeline_heartbeat",
             "pipeline_stalls",
-            // Orphan caveat: evidence rows may outlive the entries they cite
-            // after a switch; they are inert without their parents (spec Q9).
-            "librarian_evidence",
         ];
+        // Run the sweep, then prove every SWEPT table that exists is empty.
+        let mut swept_conn = conn;
+        super::clear_vault_tables(&mut swept_conn, 1).unwrap();
+        for t in SWEPT.iter().filter(|t| tables.iter().any(|x| x == **t)) {
+            let n: i64 = swept_conn
+                .query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{t} is listed as SWEPT but holds rows after the sweep");
+        }
         for t in &tables {
             assert!(
                 SWEPT.contains(&t.as_str())
