@@ -608,7 +608,7 @@ git commit -m "test(db): brain-wide guard — every table has an explicit vault-
 **Interfaces:**
 - Consumes: `rustChainDb()`, `engine(db).setup()`, `schemaObjects` (existing); Task 0 Step 1's allow-list.
 
-- [ ] **Step 1: Write the test** (append to the describe block):
+- [x] **Step 1: Write the test** (append to the describe block):
 
 ```typescript
   function normalizedSql(db: DatabaseSync, kind: string): Map<string, string> {
@@ -654,7 +654,7 @@ git commit -m "test(db): brain-wide guard — every table has an explicit vault-
   });
 ```
 
-- [ ] **Step 2: Run**:
+- [x] **Step 2: Run**:
 
 ```bash
 pnpm vitest run src/__tests__/engine9-setup-compat.test.ts 2>&1 | tail -15
@@ -662,7 +662,7 @@ pnpm vitest run src/__tests__/engine9-setup-compat.test.ts 2>&1 | tail -15
 
 Expected: PASS (Task 0 Step 1 guaranteed the allow-list is complete). If the v18/v19 partial indexes are MISSING from the engine brain (migration-only, replay-dependent), the plan-time check records it and this test gains the dedicated assertion for them — implement per that finding.
 
-- [ ] **Step 3: Negative control (temporary, local-only)**: perturb one mirror SQL in `okf_ddl.rs`, run, expect the drift FAIL, revert. Record output.
+- [x] **Step 3: Negative control (temporary, local-only)**: perturb one mirror SQL in `okf_ddl.rs`, run, expect the drift FAIL, revert. Record output.
 
 - [x] **Step 4: Commit**:
 
@@ -673,6 +673,16 @@ git commit -m "test(ts): helper-SQL drift gate — normalized body diff vs fresh
 
 ---
 
+
+> **Task 9 closeout (controller, 2026-11-25):** commit `3f30aa60` (single file, +59 lines).
+> The gate PROVED itself in flight: first run failed on four objects outside the ruled sets
+> (the engine's source-passages FTS5 subsystem, dist 2432-2451) and the implementer STOPPED
+> per the brief rather than self-growing a set; controller ruled those four into FTS_FAMILY
+> (rust chains never create any FTS; CT_OWNED's 8 unchanged). Negative control: perturbed
+> the CHECKED-IN DUMP (the actual rust-side comparison input — better target than okf_ddl.rs,
+> which doesn't feed rustChainDb) → drift FAIL confirmed → reverted → 5/5 green; tsc clean
+> (controller re-ran both). Compared set is index/trigger only per spec; FTS_FAMILY also
+> documents the FTS tables for the S6/S7 story (not compared).
 ### Task 10: S9 — FTS-carrying fixture + desktop-upgrade tests
 
 **Files:**
