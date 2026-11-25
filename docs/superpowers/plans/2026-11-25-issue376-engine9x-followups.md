@@ -401,7 +401,7 @@ git commit -m "fix(db): sweep the stated-ledger, kick-state and source-store tab
 
 Reality note: `switch_vault` is a tauri-command-sized function with app state; there are NO existing switch_vault tests (verified). The pin tests therefore drive the extracted seam against real temp vaults — no Tauri State involved.
 
-- [ ] **Step 1: Write the failing pin tests** (`src-tauri/src/db/switch_pin_tests.rs`). Harness: tempdir with vault A (`stated/.confirmations.jsonl` + `stated/.attestations.jsonl` + `deposits/` with one deposit file + `.brain/brain.db` created via `AppDb::open_with_config`), vault B likewise; config names A; run the sweep; run the NEW order; assert:
+- [x] **Step 1: Write the failing pin tests** (`src-tauri/src/db/switch_pin_tests.rs`). Harness: tempdir with vault A (`stated/.confirmations.jsonl` + `stated/.attestations.jsonl` + `deposits/` with one deposit file + `.brain/brain.db` created via `AppDb::open_with_config`), vault B likewise; config names A; run the sweep; run the NEW order; assert:
 
 ```rust
 //! Switch-level pin tests (spec §2 S5). These drive the extracted reopen seam
@@ -435,16 +435,16 @@ fn inplace_switch_rederives_from_new_vault_and_keeps_stamp() {
 unchanged; the run-1 `rebuild_rederive` used `roots.canonical` = B — assert
 via a `deposit_attribution` row whose document_path resolves under B.)
 
-- [ ] **Step 2: Run — expect FAIL** (config still names A at reopen; rederive writes A rows).
+- [x] **Step 2: Run — expect FAIL** (config still names A at reopen; rederive writes A rows).
 
-- [ ] **Step 3: Implement the reorder** in `switch_vault`:
+- [x] **Step 3: Implement the reorder** in `switch_vault`:
   - In-place branch (`:2296-2302`): after `clear_vault_tables` succeeds, call `vault_state.0.lock().unwrap().set_vault_path(&new_path)`; set `pending_config_align_to = None` (NOT `Some`).
   - Restore branch: after `clear_install_marker(&db_path)` (`:2291`), same two lines.
   - Remove the later `set_vault_path` + `pending_config_align_to = None` pair (`:2325-2332`) — it becomes redundant; keep the `vault-switched` emit and the rest.
   - Keep the error-path align block (`:2373-2379`) as a safety net (now normally a no-op).
   - Immediately after the reopen block (`AppDb::open_with_config` at `:2307`), add Run 1: if the sweep branch ran, call `crate::db::stated_ledger::rebuild_rederive(conn, &new_root.canonical)` on the reopened connection and log the report via `eprintln!` (NOT stdout).
 
-- [ ] **Step 4: Run — expect PASS.** All `restore_sync` and existing lib tests stay green.
+- [x] **Step 4: Run — expect PASS.** All `restore_sync` and existing lib tests stay green.
 
 - [x] **Step 5: Commit**:
 
@@ -455,6 +455,16 @@ git commit -m "fix(vault): write config before the post-sweep reopen — root-de
 
 ---
 
+
+> **Task 6 closeout (controller, 2026-11-25):** commit `d3019ee7` — seam
+> `switch_reopen_paths` (lib.rs:2120), both branches write config before the reopen
+> (:2308/:2325) with `pending_config_align_to = None`, late pair removed, Run 1
+> `rebuild_rederive` on the reopened conn with the canonical new root (:2341), error-path
+> align kept. Pins: 3 passed (old-order leak reproduction + in-place + restore-ordering
+> essence); restore_sync 16 passed; clippy ×2 exit 0 — all controller re-run. Scope notes
+> accepted: restore pin covers ordering essence (staged-backup install stays covered by
+> restore_sync suite); Run 1 failure logged not propagated (rederive error must not abort a
+> committed switch); "V22 untouched" not asserted directly.
 ### Task 7: S5c — repopulation: run-1 wiring + run-2 drain hook (TDD)
 
 **Files:**
