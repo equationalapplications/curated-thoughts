@@ -1,6 +1,8 @@
 //! DDL for OKF tables: package-owned `llm_wiki_*` (verbatim from core-llm-wiki setupDatabase)
 //! plus Rust-owned `curated_*` staging tables.
 
+use rusqlite::OptionalExtension;
+
 /// Default table prefix for core-llm-wiki in Curated Thoughts.
 pub const LLM_WIKI_PREFIX: &str = "llm_wiki_";
 
@@ -43,7 +45,10 @@ CREATE TABLE IF NOT EXISTS llm_wiki_entries (
   valid_from INTEGER,
   valid_to INTEGER,
   superseded_by TEXT,
-  superseded_at INTEGER
+  superseded_at INTEGER,
+  prior_valid_to INTEGER,
+  source_pointer TEXT,
+  derived_events TEXT
 );
 
 CREATE INDEX IF NOT EXISTS llm_wiki_entries_entity_idx ON llm_wiki_entries(entity_id);
@@ -68,6 +73,29 @@ CREATE TABLE IF NOT EXISTS llm_wiki_source_ref_index (
 CREATE UNIQUE INDEX IF NOT EXISTS llm_wiki_idx_source_ref_hash
   ON llm_wiki_source_ref_index (entity_id, source_hash)
   WHERE deleted_at IS NULL;
+
+-- source_documents / source_passages: the source store (specs/source-store \xA73).
+-- New tables only; hard delete, so no deleted_at and both UNIQUE indexes are plain.
+-- Passage text is not stored: offsets (UTF-16 code units) slice source_documents.text.
+CREATE TABLE IF NOT EXISTS llm_wiki_source_documents (
+  id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL,
+  source_ref TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  text TEXT NOT NULL,
+  text_hash TEXT NOT NULL,
+  char_count INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS llm_wiki_source_passages (
+  id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  start_offset INTEGER NOT NULL,
+  end_offset INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS llm_wiki_tasks (
   id TEXT PRIMARY KEY,
@@ -111,7 +139,8 @@ CREATE TABLE IF NOT EXISTS llm_wiki_events (
   summary TEXT NOT NULL,
   related_entry_id TEXT,
   created_at INTEGER NOT NULL,
-  occurred_at INTEGER
+  occurred_at INTEGER,
+  forgotten_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS llm_wiki_events_entity_idx ON llm_wiki_events(entity_id, created_at DESC);
@@ -151,6 +180,45 @@ CREATE INDEX IF NOT EXISTS llm_wiki_outbox_entity_id_created_at
 
 CREATE INDEX IF NOT EXISTS llm_wiki_outbox_created_at
   ON llm_wiki_outbox (created_at);
+CREATE TABLE IF NOT EXISTS llm_wiki_vector_removals (
+  seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_id       TEXT NOT NULL,
+  fact_id         TEXT NOT NULL UNIQUE,
+  enqueued_at     INTEGER NOT NULL,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at INTEGER,
+  confirmed_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS llm_wiki_vector_removals_pending
+  ON llm_wiki_vector_removals (entity_id, attempts, seq) WHERE confirmed_at IS NULL;
+
+CREATE TRIGGER IF NOT EXISTS llm_wiki_vector_removals_enqueue
+AFTER UPDATE OF deleted_at ON llm_wiki_entries
+WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
+BEGIN
+  -- DELETE then INSERT, not INSERT OR REPLACE: an outer UPSERT's conflict
+  -- handling would override OR REPLACE and abort on fact_id (spec rev 5).
+  DELETE FROM llm_wiki_vector_removals WHERE fact_id = NEW.id;
+  INSERT INTO llm_wiki_vector_removals (entity_id, fact_id, enqueued_at)
+  VALUES (NEW.entity_id, NEW.id, CAST(strftime('%s','now') AS INTEGER) * 1000);
+END;
+
+-- A hard delete outside prune (host SQL, an older engine after a
+-- downgrade). A live fact is owed only where an external index was in use;
+-- a soft-deleted one drops the rows nothing can owe (spec rev 5).
+CREATE TRIGGER IF NOT EXISTS llm_wiki_vector_removals_hard_delete
+AFTER DELETE ON llm_wiki_entries
+BEGIN
+  DELETE FROM llm_wiki_vector_removals
+   WHERE fact_id = OLD.id
+     AND (OLD.deleted_at IS NULL
+          OR confirmed_at IS NOT NULL
+          OR NOT EXISTS (SELECT 1 FROM llm_wiki_meta WHERE key = 'external_index_in_use' AND value = '1'));
+  INSERT INTO llm_wiki_vector_removals (entity_id, fact_id, enqueued_at)
+  SELECT OLD.entity_id, OLD.id, CAST(strftime('%s','now') AS INTEGER) * 1000
+   WHERE OLD.deleted_at IS NULL
+     AND EXISTS (SELECT 1 FROM llm_wiki_meta WHERE key = 'external_index_in_use' AND value = '1');
+END;
 "#;
 
 /// Rust-owned staging and local-only tables (spec §1).
@@ -271,4 +339,156 @@ pub fn apply_llm_wiki_v13_temporal_indexes(conn: &rusqlite::Connection) -> rusql
         )?;
     }
     Ok(())
+}
+
+/// Mirror of core-llm-wiki 9.18.0 `setupDatabase`'s
+/// `createOkfV02IndexesIfColumnsExist` (`dist/index.js:2247`): per
+/// `llm_wiki_entries` / `llm_wiki_tasks`, the `lifecycle_status`,
+/// `stale_after` and `last_verified_at` indexes, each gated on its column.
+///
+/// Created OUTSIDE the `setupDatabase` template; must stay out of
+/// `LLM_WIKI_PACKAGE_DDL` (`ddl_compat` compares template statements only).
+/// Runs on every Rust open, unstamped (v12/v13 precedent), so fresh and
+/// migrated brains converge without waiting for a TS `setup()`.
+pub fn apply_llm_wiki_okf_v02_indexes(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    for table in ["entries", "tasks"] {
+        let existing =
+            crate::db::ddl_compat::existing_columns(conn, &format!("{LLM_WIKI_PREFIX}{table}"))?;
+        for col in ["lifecycle_status", "stale_after", "last_verified_at"] {
+            if existing.iter().any(|c| c == col) {
+                conn.execute(
+                    &format!(
+                        "CREATE INDEX IF NOT EXISTS {LLM_WIKI_PREFIX}{table}_{col}_idx ON {LLM_WIKI_PREFIX}{table}({col})"
+                    ),
+                    [],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Mirror of core-llm-wiki 9.18.0 engine migrations v18/v19's partial
+/// indexes — `createEntriesDeletedIndex` (`dist/index.js:2855`) and
+/// `createEventsForgottenIndex` (`:2844`). Migration-only in the engine
+/// (never in the `setupDatabase` template), so they must stay out of
+/// `LLM_WIKI_PACKAGE_DDL`. `entries_deleted_idx` is unconditional in the
+/// engine (`deleted_at` is a template column); `events_forgotten_idx` is gated
+/// on `forgotten_at` existing (the engine adds the column first, v19).
+/// Every open, unstamped.
+pub fn apply_llm_wiki_v18_v19_partial_indexes(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS llm_wiki_entries_deleted_idx ON llm_wiki_entries(entity_id, deleted_at) WHERE deleted_at IS NOT NULL",
+        [],
+    )?;
+    let events = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")?;
+    if events.iter().any(|c| c == "forgotten_at") {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS llm_wiki_events_forgotten_idx ON llm_wiki_events(entity_id, forgotten_at) WHERE forgotten_at IS NOT NULL",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Mirror of core-llm-wiki 9.18.0 `setupDatabase`'s
+/// `createSourcePassageIndexesIfColumnsExist` (`dist/index.js:2278`) and
+/// `createSourceDocumentIndexesIfColumnsExist` (`:2286`): the two passage
+/// indexes (gated on `document_id` + `entity_id`) and the two UNIQUE document
+/// indexes (gated on `entity_id` + `source_ref` + `source_hash`). Created
+/// OUTSIDE the `setupDatabase` template; must stay out of
+/// `LLM_WIKI_PACKAGE_DDL`. Every open, unstamped.
+pub fn apply_llm_wiki_source_store_indexes(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let passages = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_source_passages")?;
+    let p = |c: &str| passages.iter().any(|x| x == c);
+    if p("document_id") && p("entity_id") {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS llm_wiki_idx_source_passages_doc ON llm_wiki_source_passages (document_id, seq);
+    CREATE INDEX IF NOT EXISTS llm_wiki_idx_source_passages_entity ON llm_wiki_source_passages (entity_id);",
+        )?;
+    }
+    let documents = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_source_documents")?;
+    let d = |c: &str| documents.iter().any(|x| x == c);
+    if d("entity_id") && d("source_ref") && d("source_hash") {
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS llm_wiki_idx_source_documents_ref ON llm_wiki_source_documents (entity_id, source_ref);
+    CREATE UNIQUE INDEX IF NOT EXISTS llm_wiki_idx_source_documents_hash ON llm_wiki_source_documents (entity_id, source_hash);",
+        )?;
+    }
+    Ok(())
+}
+
+/// Mirror of core-llm-wiki 9.18.0 `setupDatabase`'s `createResurrectTrigger`
+/// (`dist/index.js:2219-2246`, level ladder `resurrectLevel` `:2215`):
+/// `llm_wiki_vector_removals_resurrect`, `AFTER UPDATE OF deleted_at ON
+/// llm_wiki_entries` (column-scoped — the PR-A re-type tripwire holds, Q16).
+/// Body level: 0 = no vector columns (only drops the ledger row); 1 = also
+/// clears `embedding_blob`/`embedding` when the removal was confirmed; 2 =
+/// also resets the embed-failure marker columns. An existing trigger at a
+/// lower level than the columns allow is dropped and recreated; an equal or
+/// higher one is left alone (the engine's rule). SQL text is the engine's
+/// template with the prefix applied. Created OUTSIDE the `setupDatabase`
+/// template; must stay out of `LLM_WIKI_PACKAGE_DDL`. Every open, unstamped.
+pub fn apply_llm_wiki_resurrect_trigger(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    const NAME: &str = "llm_wiki_vector_removals_resurrect";
+    fn level(sql: &str) -> u8 {
+        if sql.contains("embedding_failed_at") {
+            2
+        } else if sql.contains("embedding_blob") {
+            1
+        } else {
+            0
+        }
+    }
+    let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
+    let has = |c: &str| cols.iter().any(|x| x == c);
+    let want: u8 = if !(has("embedding_blob") && has("embedding")) {
+        0
+    } else if ["embedding_failed_at", "embedding_failure_kind", "embedding_attempts"]
+        .iter()
+        .all(|c| has(c))
+    {
+        2
+    } else {
+        1
+    };
+    let existing: Option<Option<String>> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [NAME],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(sql) = existing {
+        if level(sql.as_deref().unwrap_or("")) >= want {
+            return Ok(());
+        }
+        conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {NAME};"))?;
+    }
+    let clear_vector = match want {
+        0 => String::new(),
+        _ => format!(
+            "
+      UPDATE llm_wiki_entries
+         SET embedding_blob = NULL, embedding = NULL{}
+       WHERE id = NEW.id
+         AND EXISTS (SELECT 1 FROM llm_wiki_vector_removals WHERE fact_id = NEW.id AND confirmed_at IS NOT NULL);",
+            if want == 2 {
+                ",
+             embedding_failed_at = NULL, embedding_failure_kind = NULL, embedding_attempts = 0"
+            } else {
+                ""
+            }
+        ),
+    };
+    conn.execute_batch(&format!(
+        "
+    CREATE TRIGGER IF NOT EXISTS {NAME}
+    AFTER UPDATE OF deleted_at ON llm_wiki_entries
+    WHEN OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL
+    BEGIN{clear_vector}
+      DELETE FROM llm_wiki_vector_removals WHERE fact_id = NEW.id;
+    END;
+  "
+    ))
 }

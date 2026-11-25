@@ -1039,6 +1039,62 @@ mod tests {
     use crate::okf::bundle_read::{ParsedBundle, ParsedEntity, ParsedEvent};
     use crate::okf::types::WikiFact;
 
+    /// engine-9x PR-B Task 9 (spec §3 step 6, Q11): the raw entity wipe
+    /// (`clear_one_entity_content`, `DELETE FROM llm_wiki_entries WHERE
+    /// entity_id=?1`) must not bypass the vector-removal ledger triggers —
+    /// over a migrated 8.0.2 fixture copy, unmarked live hard deletes enqueue
+    /// nothing; with `external_index_in_use = '1'` a pre-existing (soft
+    /// delete) row survives and the live fact enqueues exactly one row.
+    #[test]
+    fn t9_clear_entity_content_does_not_bypass_the_ledger() {
+        let rows = |c: &Connection, id: &str| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM llm_wiki_vector_removals WHERE fact_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        for marker in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dst = tmp.path().join("brain.db");
+            std::fs::copy(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("src/db/testdata/ct-brain-v32-core-8.0.2.db"),
+                &dst,
+            )
+            .unwrap();
+            let conn = Connection::open(&dst).unwrap();
+            crate::db::connection::migrate_open_db(&conn, Some(tmp.path())).unwrap();
+            if marker {
+                conn.execute(
+                    "INSERT OR REPLACE INTO llm_wiki_meta (key, value) VALUES ('external_index_in_use', '1')",
+                    [],
+                )
+                .unwrap();
+            }
+            for id in ["t9_soft", "t9_live"] {
+                conn.execute(
+                    "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+                     VALUES (?1, 'ent_t9', 't', 'b', 1, 1)",
+                    [id],
+                )
+                .unwrap();
+            }
+            conn.execute("UPDATE llm_wiki_entries SET deleted_at = 5 WHERE id = 't9_soft'", [])
+                .unwrap();
+            assert_eq!(rows(&conn, "t9_soft"), 1);
+            clear_one_entity_content(&conn, "ent_t9", 1).unwrap();
+            let left: i64 = conn
+                .query_row("SELECT COUNT(*) FROM llm_wiki_entries WHERE entity_id = 'ent_t9'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(left, 0, "entity wiped");
+            let expected = i64::from(marker);
+            assert_eq!(rows(&conn, "t9_soft"), expected, "marker={marker}: soft row");
+            assert_eq!(rows(&conn, "t9_live"), expected, "marker={marker}: live row");
+        }
+    }
+
     fn sample_fact(id: &str, entity_id: &str) -> WikiFact {
         WikiFact {
             id: id.into(),

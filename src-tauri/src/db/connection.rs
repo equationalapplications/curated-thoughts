@@ -866,6 +866,11 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // gated on V22 + exact stamp membership; skipped (unstamped) on in-memory
     // opens.
     apply_sso9_migrations(conn)?;
+    // V33 engine-9x mirror (PR-B plan Task 6, Q7/Q8): core-llm-wiki 9.18.0
+    // engine v16–v19 columns, source store, vector-removal ledger + its
+    // triggers. Ungated shape on every open; stamp gated on V22. After the
+    // sso9 re-type so its UPDATEs never run under the new triggers.
+    apply_engine9_mirror(conn)?;
 
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
     // rev 4.1 §1/D4): the deposit file's frontmatter is authoritative; this
@@ -970,6 +975,15 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     // core-llm-wiki 7.9 engine migration 13's temporal indexes, mirrored for
     // Rust-first opens (each gated on its V24 columns existing).
     crate::db::okf_ddl::apply_llm_wiki_v13_temporal_indexes(conn)?;
+
+    // core-llm-wiki 9.18.0 helper-created objects (PR-B plan Task 7), mirrored
+    // for Rust-first opens: created OUTSIDE the setupDatabase template (or
+    // migration-only), so neither `migration_v7_sql` nor the V33 DDL re-run
+    // makes them. Unstamped, every open, each gated like the engine helper.
+    crate::db::okf_ddl::apply_llm_wiki_okf_v02_indexes(conn)?;
+    crate::db::okf_ddl::apply_llm_wiki_v18_v19_partial_indexes(conn)?;
+    crate::db::okf_ddl::apply_llm_wiki_source_store_indexes(conn)?;
+    crate::db::okf_ddl::apply_llm_wiki_resurrect_trigger(conn)?;
 
     crate::db::schema_guard::verify_llm_wiki_schema(conn)?;
 
@@ -1419,6 +1433,159 @@ fn apply_v30_area_column(conn: &Connection) -> Result<()> {
 pub(crate) const SSO9_REFRESH_VERSION: i64 = 31;
 /// Slot of the sso9 okf_type/edge re-type step (plan Task 5).
 pub(crate) const SSO9_RETYPE_VERSION: i64 = SSO9_REFRESH_VERSION + 1;
+
+/// Slot of the engine-9x mirror step (PR-B plan Task 6): (highest stamped
+/// slot on this branch = `SSO9_RETYPE_VERSION` = 32) + 1. A literal, not an
+/// expression, so a renumber is one visible edit (V27 renumber precedent):
+/// if another lane takes 33 before merge, bump this const — every stamp,
+/// test and log line reads it.
+pub(crate) const ENGINE9_MIRROR_VERSION: i64 = 33;
+
+/// Columns the 9.18.0 engine adds by `ALTER TABLE` in migrations v16/v18/v19
+/// — `(table, column, declared type)`, the type copied verbatim from the
+/// engine's ALTER text (`dist/index.js` of core-llm-wiki 9.18.0):
+/// v16 `:2765` `ADD COLUMN source_pointer TEXT`; v18 `addPriorValidToColumn`
+/// `:2852` `ADD COLUMN prior_valid_to INTEGER`, `addDerivedEventsColumn`
+/// `:2863` `ADD COLUMN derived_events TEXT`; v19 `addEventsForgottenAtColumn`
+/// `:2841` `ADD COLUMN forgotten_at INTEGER`. They equal the `setupDatabase`
+/// template's own declarations (`LLM_WIKI_PACKAGE_DDL`), so fresh and
+/// migrated brains agree on `PRAGMA table_info` (T7 parity).
+const ENGINE9_MIRROR_COLUMNS: &[(&str, &str, &str)] = &[
+    ("llm_wiki_entries", "source_pointer", "TEXT"),
+    ("llm_wiki_entries", "prior_valid_to", "INTEGER"),
+    ("llm_wiki_entries", "derived_events", "TEXT"),
+    ("llm_wiki_events", "forgotten_at", "INTEGER"),
+];
+
+/// `(sqlite_master type, name)` of every object `LLM_WIKI_PACKAGE_DDL`
+/// creates, read from the const itself so the presence check can never drift
+/// from the text V33 executes.
+fn package_ddl_objects() -> Vec<(&'static str, String)> {
+    const KINDS: &[(&str, &str)] = &[
+        ("CREATE TABLE IF NOT EXISTS ", "table"),
+        ("CREATE INDEX IF NOT EXISTS ", "index"),
+        ("CREATE UNIQUE INDEX IF NOT EXISTS ", "index"),
+        ("CREATE TRIGGER IF NOT EXISTS ", "trigger"),
+    ];
+    let ddl = okf_ddl::LLM_WIKI_PACKAGE_DDL;
+    let mut out = Vec::new();
+    for (kw, kind) in KINDS {
+        for (at, _) in ddl.match_indices(kw) {
+            let rest = &ddl[at + kw.len()..];
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == '(')
+                .unwrap_or(rest.len());
+            out.push((*kind, rest[..end].to_string()));
+        }
+    }
+    out
+}
+
+/// What the V33 step would add right now: missing mirror columns (only on
+/// tables that exist — an absent table is created by the DDL re-run with the
+/// columns inline) and missing package-DDL objects.
+fn engine9_missing(conn: &Connection) -> Result<(Vec<String>, Vec<String>)> {
+    let mut columns = Vec::new();
+    for (table, column, _) in ENGINE9_MIRROR_COLUMNS {
+        let existing = crate::db::ddl_compat::existing_columns(conn, table)?;
+        if !existing.is_empty() && !existing.iter().any(|c| c == column) {
+            columns.push(format!("{table}.{column}"));
+        }
+    }
+    let mut objects = Vec::new();
+    for (kind, name) in package_ddl_objects() {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            rusqlite::params![kind, name],
+            |r| r.get(0),
+        )?;
+        if n == 0 {
+            objects.push(format!("{kind} {name}"));
+        }
+    }
+    Ok((columns, objects))
+}
+
+/// V33 body (engine-9x PR-B plan Task 6, spec §3 PR-B step 5; rulings Q7,
+/// Q8): mirror core-llm-wiki 9.18.0 engine migrations v16–v19 onto brains
+/// created under an older DDL — the guarded `ALTER`s for `source_pointer`,
+/// `prior_valid_to`, `derived_events` (entries) and `forgotten_at` (events),
+/// then the source store (`llm_wiki_source_documents`,
+/// `llm_wiki_source_passages`), the vector-removal ledger
+/// (`llm_wiki_vector_removals` + its pending index) and the two ledger
+/// triggers, by re-executing `LLM_WIKI_PACKAGE_DDL` itself (every statement
+/// `IF NOT EXISTS`, T3) — verbatim by construction, no duplicated SQL.
+///
+/// Engine guards mirrored (core-llm-wiki 9.18.0 `dist/index.js`): v16
+/// `:2759-2768` adds `source_pointer` only when `PRAGMA table_info` lacks it;
+/// v18 `:2821-2828` / v19 `:2830-2836` the same per column (`:2849`, `:2860`,
+/// `:2838`). v17 (`add_source_store`, `:2770-2819`) throws unless any
+/// pre-existing `source_documents`/`source_passages` has EXACTLY its 8/6
+/// columns and ZERO rows — CT therefore adds no CT-local column to, and writes
+/// no row into, either table, so a later engine `setup()` passes v17. The
+/// migration-only partial indexes (v18 `entries_deleted_idx`, v19
+/// `events_forgotten_idx`) and the `setupDatabase` helper objects are T7's
+/// every-open helpers, not part of this step.
+///
+/// Shape (V24/V30 pattern): ungated on every open — the every-open guard
+/// demands the 9.18.0 shape even on rootless opens — with a lock-free
+/// snapshot; only when something is missing, `BEGIN IMMEDIATE`, re-inspect
+/// under the lock (the concurrent desktop/`--mcp` open race), apply,
+/// `COMMIT`; any error rolls back and propagates. The stamp is written on
+/// every open once `MAX(version) >= 22`, outside the add branch (V30
+/// reasoning). Placed right after `apply_sso9_migrations` (Q7/Q16): on an
+/// upgrading brain the sso9 re-type always runs before the ledger triggers
+/// exist.
+fn apply_engine9_mirror(conn: &Connection) -> Result<()> {
+    let (cols, objs) = engine9_missing(conn)?;
+    if !cols.is_empty() || !objs.is_empty() {
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let applied = (|| -> Result<(Vec<String>, Vec<String>)> {
+            let (cols, objs) = engine9_missing(conn)?;
+            for (table, column, decl) in ENGINE9_MIRROR_COLUMNS {
+                if cols.iter().any(|c| *c == format!("{table}.{column}")) {
+                    conn.execute(
+                        &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+                        [],
+                    )?;
+                }
+            }
+            if !objs.is_empty() {
+                conn.execute_batch(okf_ddl::LLM_WIKI_PACKAGE_DDL)?;
+            }
+            Ok((cols, objs))
+        })();
+        match applied {
+            Ok((cols, objs)) => {
+                conn.execute_batch("COMMIT;")?;
+                if !cols.is_empty() || !objs.is_empty() {
+                    println!(
+                        "[ct::migrate] engine9 mirror (slot {ENGINE9_MIRROR_VERSION}): added \
+                         columns [{}]; objects [{}]",
+                        cols.join(", "),
+                        objs.join(", ")
+                    );
+                }
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+    }
+    let stamped_now: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    if stamped_now >= 22 {
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (?1)",
+            [ENGINE9_MIRROR_VERSION],
+        )?;
+    }
+    Ok(())
+}
 
 /// The two slugs 9.x dropped, with the type each re-types to (spec §3).
 const SSO9_RETYPE_MAP: [(&str, &str); 2] = [("handoff", "decision"), ("session_recap", "lesson")];
@@ -3531,7 +3698,7 @@ mod tests {
         let v: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 30);
+        assert_eq!(v, ENGINE9_MIRROR_VERSION);
 
         // One-shot backfill semantics: an indexed row was backfilled from `hash`;
         // embed_key got NO migration backfill (NULL until a writer stamps it).
@@ -5568,9 +5735,10 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 30,
+            version, ENGINE9_MIRROR_VERSION,
             "V22 then V23 then V24 then V25 then V26 then V27 then V28 then V29 \
-             then V30 must be stamped when the migration runs"
+             then V30 then V33 (engine9 mirror, V22-gated; sso9 31/32 skip \
+             in-memory) must be stamped when the migration runs"
         );
 
         let rewritten_path: String = conn
@@ -5614,10 +5782,10 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            version, 30,
+            version, ENGINE9_MIRROR_VERSION,
             "rooted open stamps 26 (ontology gate wave), 27 (embed scheme), \
-             28 (two-stage columns), 29 (adjudication hold) and 30 (area); \
-             MAX must be 30",
+             28 (two-stage columns), 29 (adjudication hold), 30 (area) and \
+             33 (engine9 mirror; sso9 31/32 skip in-memory); MAX must be 33",
         );
 
         let agents: String = conn
@@ -5888,8 +6056,8 @@ mod tests {
         );
         assert_eq!(
             max_version(&conn),
-            30,
-            "rooted open stamps 22..29 then V30 (the latter gated on V22)"
+            ENGINE9_MIRROR_VERSION,
+            "rooted open stamps 22..29, V30 and V33 (the latter two gated on V22)"
         );
     }
 
@@ -7631,5 +7799,541 @@ mod tests {
             crate::db::entity_gate::admit_label_landing(&vocab, "session_recap").as_deref(),
             Some("lesson")
         );
+    }
+
+    // ── engine-9x PR-B Task 6: V33 engine-mirror step ─────────────────────
+    //
+    // Every test works on a tempdir COPY of the T0 fixture brain (a V32-stamped
+    // brain created under the core-llm-wiki 8.0.2 DDL); the checked-in file is
+    // never migrated.
+
+    /// Raw (no migrate) open of a tempdir copy of the 8.0.2 fixture brain.
+    fn engine9_fixture_copy() -> (tempfile::TempDir, Connection) {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/db/testdata/ct-brain-v32-core-8.0.2.db");
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("brain.db");
+        std::fs::copy(&src, &dst).expect("copy 8.0.2 fixture brain");
+        let conn = Connection::open(&dst).expect("raw open of fixture copy");
+        (tmp, conn)
+    }
+
+    /// Fixture copy brought through CT's existing-DB open path.
+    fn engine9_migrated_fixture() -> (tempfile::TempDir, Connection) {
+        let (tmp, conn) = engine9_fixture_copy();
+        migrate_open_db(&conn, Some(tmp.path())).expect("8.0.2 fixture migrates");
+        (tmp, conn)
+    }
+
+    fn engine9_master_count(conn: &Connection, kind: &str, name: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            rusqlite::params![kind, name],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn engine9_v33_stamped(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM schema_version WHERE version = ?1",
+            [ENGINE9_MIRROR_VERSION],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            == 1
+    }
+
+    fn engine9_seed_entry(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+             VALUES (?1, 'ent_e9', 't', 'b', 1, 1)",
+            [id],
+        )
+        .unwrap();
+    }
+
+    fn engine9_ledger_rows(conn: &Connection, fact_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM llm_wiki_vector_removals WHERE fact_id = ?1",
+            [fact_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn engine9_mirror_slot_is_one_past_the_sso9_retype_slot() {
+        assert_eq!(ENGINE9_MIRROR_VERSION, 33);
+        assert_eq!(ENGINE9_MIRROR_VERSION, SSO9_RETYPE_VERSION + 1);
+    }
+
+    /// Spec §5 test 2 (Rust half): an existing 8.0.2-shape brain passes the
+    /// 9.18.0 guard after CT's existing-DB open path, and V33 is stamped.
+    #[test]
+    fn engine9_existing_8_0_2_brain_migrates_and_passes_9_18_guard() {
+        let (_tmp, conn) = engine9_migrated_fixture();
+        crate::db::schema_guard::verify_llm_wiki_schema(&conn)
+            .expect("migrated 8.0.2 brain matches the 9.18.0 guard");
+        assert!(engine9_v33_stamped(&conn), "V22-stamped brain stamps V33");
+        // v17 invariants: CT adds no column to, and writes no row into, the
+        // source store.
+        for t in ["llm_wiki_source_documents", "llm_wiki_source_passages"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{t} holds no rows after migrate (engine v17 pre-condition)");
+        }
+        let docs = crate::db::ddl_compat::existing_columns(&conn, "llm_wiki_source_documents").unwrap();
+        assert_eq!(
+            docs,
+            ["id", "entity_id", "source_ref", "source_hash", "text", "text_hash", "char_count", "created_at"]
+        );
+        let passages = crate::db::ddl_compat::existing_columns(&conn, "llm_wiki_source_passages").unwrap();
+        assert_eq!(
+            passages,
+            ["id", "entity_id", "document_id", "seq", "start_offset", "end_offset"]
+        );
+    }
+
+    /// Spec §5 test 3 (round trip / forward incompatibility): after migrate,
+    /// the 8.0.2 expectations bail with "unexpected columns" naming the new
+    /// entries columns; on an unmigrated copy they pass.
+    #[test]
+    fn engine9_migrated_brain_fails_the_8_0_2_guard_with_unexpected_columns() {
+        let old = crate::db::schema_guard::core_llm_wiki_8_0_2_expectations();
+        let (_raw_tmp, raw) = engine9_fixture_copy();
+        crate::db::schema_guard::verify_schema_with(&raw, &old)
+            .expect("8.0.2 expectations pass on the unmigrated copy");
+
+        let (_tmp, conn) = engine9_migrated_fixture();
+        let err = crate::db::schema_guard::verify_schema_with(&conn, &old)
+            .expect_err("an 8.0.2 binary must refuse the migrated brain")
+            .to_string();
+        assert!(err.contains("unexpected columns"), "got: {err}");
+        for col in ["source_pointer", "prior_valid_to", "derived_events"] {
+            assert!(err.contains(col), "bail must name {col}: {err}");
+        }
+    }
+
+    /// Spec §5 test 5 + Q14 positive control: the ledger triggers survive
+    /// migration and fire as the engine defines them.
+    #[test]
+    fn engine9_ledger_triggers_enqueue_on_soft_delete_and_marked_hard_delete_only() {
+        let (_tmp, conn) = engine9_migrated_fixture();
+        for id in ["e9_soft", "e9_hard", "e9_marked"] {
+            engine9_seed_entry(&conn, id);
+        }
+        // Soft delete → exactly one ledger row.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET deleted_at = 5 WHERE id = 'e9_soft'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(engine9_ledger_rows(&conn, "e9_soft"), 1);
+        // Hard delete, no external_index_in_use marker → nothing enqueued.
+        let total = |c: &Connection| -> i64 {
+            c.query_row("SELECT COUNT(*) FROM llm_wiki_vector_removals", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = total(&conn);
+        conn.execute("DELETE FROM llm_wiki_entries WHERE id = 'e9_hard'", [])
+            .unwrap();
+        assert_eq!(total(&conn), before, "unmarked hard delete enqueues nothing");
+        // Positive control (Q14): with the marker set, a live hard delete
+        // enqueues exactly one row — proves the hard-delete trigger exists.
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_wiki_meta (key, value) VALUES ('external_index_in_use', '1')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM llm_wiki_entries WHERE id = 'e9_marked'", [])
+            .unwrap();
+        assert_eq!(engine9_ledger_rows(&conn, "e9_marked"), 1);
+        assert_eq!(total(&conn), before + 1);
+    }
+
+    #[test]
+    fn engine9_mirror_is_idempotent_across_reopens() {
+        let (tmp, conn) = engine9_migrated_fixture();
+        let snapshot = |c: &Connection| -> (Vec<(String, String, Option<String>)>, Vec<i64>, i64) {
+            let mut s = c
+                .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+                .unwrap();
+            let master = s
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            let mut s = c.prepare("SELECT version FROM schema_version ORDER BY version").unwrap();
+            let stamps = s.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+            let ledger = c
+                .query_row("SELECT COUNT(*) FROM llm_wiki_vector_removals", [], |r| r.get(0))
+                .unwrap();
+            (master, stamps, ledger)
+        };
+        let first = snapshot(&conn);
+        migrate_open_db(&conn, Some(tmp.path())).expect("second migrate succeeds");
+        assert_eq!(snapshot(&conn), first, "second pass changes nothing");
+        // The step body itself is idempotent with everything present.
+        apply_engine9_mirror(&conn).unwrap();
+        assert_eq!(snapshot(&conn), first);
+    }
+
+    /// Stamp gating (Q7): a rootless open (V22 deferred) still gets the
+    /// columns, tables, and ledger triggers — the every-open guard demands
+    /// them — but never the V33 stamp.
+    #[test]
+    fn engine9_rootless_open_gets_shape_without_stamping_v33() {
+        let conn = open_in_memory().unwrap();
+        let max: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert!(max < 22, "precondition: rootless open defers V22 (got V{max})");
+        assert!(!engine9_v33_stamped(&conn), "V33 must not stamp past a deferred V22");
+        for t in [
+            "llm_wiki_source_documents",
+            "llm_wiki_source_passages",
+            "llm_wiki_vector_removals",
+        ] {
+            assert_eq!(engine9_master_count(&conn, "table", t), 1, "{t}");
+        }
+        for t in ["llm_wiki_vector_removals_enqueue", "llm_wiki_vector_removals_hard_delete"] {
+            assert_eq!(engine9_master_count(&conn, "trigger", t), 1, "{t}");
+        }
+        crate::db::schema_guard::verify_llm_wiki_schema(&conn).unwrap();
+    }
+
+    /// The step adds what an 8.0.2-shape brain lacks even with the stamp
+    /// present (stamp is not a skip gate) — exercised on a raw fixture copy.
+    #[test]
+    fn engine9_mirror_body_adds_columns_tables_and_triggers_on_raw_fixture() {
+        let (_tmp, conn) = engine9_fixture_copy();
+        assert_eq!(engine9_master_count(&conn, "table", "llm_wiki_vector_removals"), 0);
+        apply_engine9_mirror(&conn).unwrap();
+        let entries = crate::db::ddl_compat::existing_columns(&conn, "llm_wiki_entries").unwrap();
+        for col in ["source_pointer", "prior_valid_to", "derived_events"] {
+            assert!(entries.iter().any(|c| c == col), "entries.{col}");
+        }
+        let events = crate::db::ddl_compat::existing_columns(&conn, "llm_wiki_events").unwrap();
+        assert!(events.iter().any(|c| c == "forgotten_at"));
+        assert_eq!(engine9_master_count(&conn, "index", "llm_wiki_vector_removals_pending"), 1);
+        assert_eq!(engine9_master_count(&conn, "trigger", "llm_wiki_vector_removals_enqueue"), 1);
+        assert_eq!(engine9_master_count(&conn, "trigger", "llm_wiki_vector_removals_hard_delete"), 1);
+        assert!(engine9_v33_stamped(&conn), "V32 fixture is past V22 → stamps");
+    }
+
+    // ── engine-9x PR-B Task 7: helper objects + fresh/migrated parity ─────
+
+    /// Objects the 9.18.0 engine creates OUTSIDE the `setupDatabase` template
+    /// (helpers called at the end of `setupDatabase`, plus the v18/v19
+    /// migration-only partial indexes) — `(sqlite_master type, name)`.
+    const ENGINE9_HELPER_OBJECTS: &[(&str, &str)] = &[
+        ("index", "llm_wiki_entries_lifecycle_status_idx"),
+        ("index", "llm_wiki_entries_stale_after_idx"),
+        ("index", "llm_wiki_entries_last_verified_at_idx"),
+        ("index", "llm_wiki_tasks_lifecycle_status_idx"),
+        ("index", "llm_wiki_tasks_stale_after_idx"),
+        ("index", "llm_wiki_tasks_last_verified_at_idx"),
+        ("index", "llm_wiki_entries_superseded_idx"),
+        ("index", "llm_wiki_entries_temporal_idx"),
+        ("index", "llm_wiki_idx_source_passages_doc"),
+        ("index", "llm_wiki_idx_source_passages_entity"),
+        ("index", "llm_wiki_idx_source_documents_ref"),
+        ("index", "llm_wiki_idx_source_documents_hash"),
+        ("index", "llm_wiki_entries_deleted_idx"),
+        ("index", "llm_wiki_events_forgotten_idx"),
+        ("trigger", "llm_wiki_vector_removals_resurrect"),
+    ];
+
+    /// A fresh ROOTED file brain through CT's real open path.
+    fn engine9_fresh_rooted_brain() -> (tempfile::TempDir, AppDb) {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let config = tmp.path().join("config.json");
+        std::fs::write(
+            &config,
+            format!(r#"{{"vault_path":"{}"}}"#, vault.to_str().unwrap()),
+        )
+        .unwrap();
+        let db = AppDb::open_with_config(&tmp.path().join("brain.db"), &config)
+            .expect("fresh rooted brain opens");
+        (tmp, db)
+    }
+
+    type Engine9Columns = std::collections::BTreeMap<String, (String, i64, Option<String>, i64)>;
+
+    /// `type → name → normalized sql` for every named schema object, plus
+    /// `table → name-keyed PRAGMA table_info (cid excluded)`.
+    fn engine9_schema_shape(
+        conn: &Connection,
+    ) -> (
+        std::collections::BTreeMap<(String, String), Option<String>>,
+        std::collections::BTreeMap<String, Engine9Columns>,
+    ) {
+        let mut s = conn
+            .prepare("SELECT type, name, sql FROM sqlite_master WHERE type IN ('table','index','trigger')")
+            .unwrap();
+        let master: std::collections::BTreeMap<(String, String), Option<String>> = s
+            .query_map([], |r| {
+                Ok((
+                    (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                    r.get::<_, Option<String>>(2)?
+                        .map(|sql| crate::db::ddl_compat::normalize_ddl_statement(&sql)),
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let mut cols = std::collections::BTreeMap::new();
+        for ((kind, name), _) in &master {
+            if kind != "table" {
+                continue;
+            }
+            let mut p = conn
+                .prepare(&format!("SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('{name}')"))
+                .unwrap();
+            let info: Engine9Columns = p
+                .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            cols.insert(name.clone(), info);
+        }
+        (master, cols)
+    }
+
+    /// Spec §5 test 6, parity definition per ruling Q6: a fresh rooted brain
+    /// and a migrated 8.0.2 fixture brain have equal table/index/trigger
+    /// NAME sets; equal normalized index + trigger SQL; equal name-keyed
+    /// `PRAGMA table_info` (cid excluded — ALTER appends after CT-local
+    /// columns while the fresh template carries them inline); and equal
+    /// normalized table SQL for every table PR-B does not ALTER.
+    #[test]
+    fn engine9_fresh_and_migrated_brains_have_schema_parity() {
+        let (_ftmp, fresh) = engine9_fresh_rooted_brain();
+        let (_mtmp, migrated) = engine9_migrated_fixture();
+        let (fm, fc) = engine9_schema_shape(&fresh.0);
+        let (mm, mc) = engine9_schema_shape(&migrated);
+
+        let names = |m: &std::collections::BTreeMap<(String, String), Option<String>>| {
+            m.keys().cloned().collect::<std::collections::BTreeSet<_>>()
+        };
+        let (fnames, mnames) = (names(&fm), names(&mm));
+        assert_eq!(
+            fnames, mnames,
+            "object name sets differ — fresh-only: {:?}; migrated-only: {:?}",
+            fnames.difference(&mnames).collect::<Vec<_>>(),
+            mnames.difference(&fnames).collect::<Vec<_>>()
+        );
+        const ALTERED: &[&str] = &["llm_wiki_entries", "llm_wiki_events"];
+        for (key, fsql) in &fm {
+            let (kind, name) = key;
+            if kind == "table" && ALTERED.contains(&name.as_str()) {
+                continue;
+            }
+            assert_eq!(fsql, &mm[key], "{kind} {name}: normalized SQL differs");
+        }
+        assert_eq!(fc, mc, "name-keyed table_info differs");
+    }
+
+    /// Parity alone is vacuous for objects NEITHER path creates: both brains
+    /// must carry every engine helper object by exact prefixed name.
+    #[test]
+    fn engine9_helper_objects_present_on_fresh_and_migrated_brains() {
+        let (_ftmp, fresh) = engine9_fresh_rooted_brain();
+        let (_mtmp, migrated) = engine9_migrated_fixture();
+        for (label, conn) in [("fresh", &fresh.0), ("migrated", &migrated)] {
+            let missing: Vec<_> = ENGINE9_HELPER_OBJECTS
+                .iter()
+                .filter(|(kind, name)| engine9_master_count(conn, kind, name) != 1)
+                .collect();
+            assert!(missing.is_empty(), "{label} brain lacks helper objects: {missing:?}");
+        }
+    }
+
+    /// The resurrect trigger mirrors the engine's level ladder: a brain with
+    /// the embed-marker columns gets the level-2 body; a pre-existing
+    /// lower-level trigger is replaced, an equal one is left alone.
+    #[test]
+    fn engine9_resurrect_trigger_is_level_2_and_upgrades_a_lower_level() {
+        let (_tmp, conn) = engine9_migrated_fixture();
+        let sql = |c: &Connection| -> String {
+            c.query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'llm_wiki_vector_removals_resurrect'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(sql(&conn).contains("embedding_failed_at"), "level 2 on a CT brain");
+        conn.execute_batch(
+            "DROP TRIGGER llm_wiki_vector_removals_resurrect;
+             CREATE TRIGGER llm_wiki_vector_removals_resurrect
+             AFTER UPDATE OF deleted_at ON llm_wiki_entries
+             WHEN OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL
+             BEGIN DELETE FROM llm_wiki_vector_removals WHERE fact_id = NEW.id; END;",
+        )
+        .unwrap();
+        crate::db::okf_ddl::apply_llm_wiki_resurrect_trigger(&conn).unwrap();
+        let upgraded = sql(&conn);
+        assert!(upgraded.contains("embedding_failed_at"), "level 0 → 2: {upgraded}");
+        crate::db::okf_ddl::apply_llm_wiki_resurrect_trigger(&conn).unwrap();
+        assert_eq!(sql(&conn), upgraded, "equal level is left alone");
+
+        // Behaviour: un-deleting a fact drops its (unconfirmed) ledger row
+        // and keeps its embedding.
+        engine9_seed_entry(&conn, "e9_res");
+        conn.execute(
+            "UPDATE llm_wiki_entries SET embedding = 'v', deleted_at = 5 WHERE id = 'e9_res'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(engine9_ledger_rows(&conn, "e9_res"), 1);
+        conn.execute("UPDATE llm_wiki_entries SET deleted_at = NULL WHERE id = 'e9_res'", [])
+            .unwrap();
+        assert_eq!(engine9_ledger_rows(&conn, "e9_res"), 0);
+        let emb: Option<String> = conn
+            .query_row("SELECT embedding FROM llm_wiki_entries WHERE id = 'e9_res'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(emb.as_deref(), Some("v"), "unconfirmed removal keeps the vector");
+    }
+
+    // ── engine-9x PR-B Task 8: schema dump for the TS setup() proof ───────
+
+    /// Render the migrated 8.0.2 fixture's `llm_wiki_*` objects as the dump
+    /// `src/__tests__/engine9-setup-compat.test.ts` loads. One `-- object:`
+    /// header per object so the TS side can order tables before indexes and
+    /// triggers without splitting SQL on `;`.
+    fn engine9_migrated_schema_dump(conn: &Connection) -> String {
+        let mut s = conn
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_master WHERE name LIKE 'llm\\_wiki\\_%' ESCAPE '\\' \
+                 AND sql IS NOT NULL ORDER BY type, name",
+            )
+            .unwrap();
+        let rows: Vec<(String, String, String)> = s
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let mut out = String::from(
+            "-- GENERATED by connection.rs engine9_migrated_schema_fixture_is_current; do not edit.\n\
+             -- The llm_wiki_* schema of the 8.0.2 fixture brain after CT's migrate (V33 + helpers).\n\
+             -- Regenerate: CT_REGEN_FIXTURES=1 cargo test --manifest-path src-tauri/Cargo.toml \
+             --lib --features test-utils engine9_migrated_schema_fixture_is_current\n",
+        );
+        for (kind, name, sql) in rows {
+            out.push_str(&format!("\n-- object: {kind} {name}\n{sql};\n"));
+        }
+        out
+    }
+
+    /// Drift gate for `testdata/ct-engine9-migrated.llm_wiki.schema.sql`: the
+    /// TS-side engine `setup()` proof runs over exactly what the Rust chain
+    /// produces. `CT_REGEN_FIXTURES=1` rewrites the file.
+    #[test]
+    fn engine9_migrated_schema_fixture_is_current() {
+        let (_tmp, conn) = engine9_migrated_fixture();
+        let dump = engine9_migrated_schema_dump(&conn);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/db/testdata/ct-engine9-migrated.llm_wiki.schema.sql");
+        if std::env::var("CT_REGEN_FIXTURES").as_deref() == Ok("1") {
+            std::fs::write(&path, &dump).unwrap();
+        }
+        let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            on_disk == dump,
+            "{} is stale — regenerate with CT_REGEN_FIXTURES=1 (see file header)",
+            path.display()
+        );
+    }
+
+    // ── engine-9x PR-B Task 9: CT's raw delete paths vs the ledger ────────
+    //
+    // Spec §3 step 6 / ruling Q11: the raw delete sites stay raw; the
+    // obligation is that they never bypass the ledger triggers. Each path is
+    // driven over a migrated fixture copy seeded with a soft-deleted fact (a
+    // pre-existing ledger row) and a live fact in entity `ent_t9`.
+    //
+    // Engine semantics (the hard_delete trigger, `LLM_WIKI_PACKAGE_DDL`):
+    // without the `external_index_in_use` marker nothing is owed, so a live
+    // hard delete enqueues nothing and a hard-deleted soft-deleted fact's own
+    // pending row is dropped; with the marker, pending rows survive the hard
+    // delete and each live hard-deleted fact enqueues exactly one row.
+
+    fn t9_seed(conn: &Connection, marker: bool) {
+        if marker {
+            conn.execute(
+                "INSERT OR REPLACE INTO llm_wiki_meta (key, value) VALUES ('external_index_in_use', '1')",
+                [],
+            )
+            .unwrap();
+        }
+        for id in ["t9_soft", "t9_live"] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at)
+                 VALUES (?1, 'ent_t9', 't', 'b', 1, 1)",
+                [id],
+            )
+            .unwrap();
+        }
+        conn.execute("UPDATE llm_wiki_entries SET deleted_at = 5 WHERE id = 't9_soft'", [])
+            .unwrap();
+        assert_eq!(engine9_ledger_rows(conn, "t9_soft"), 1, "seed: soft delete enqueued");
+        assert_eq!(engine9_ledger_rows(conn, "t9_live"), 0);
+    }
+
+    /// After a path hard-deleted both seeded facts: the ledger reflects the
+    /// engine trigger exactly — nothing bypassed, nothing CT-written.
+    fn t9_assert_ledger(conn: &Connection, marker: bool, path: &str) {
+        let gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_entries WHERE id IN ('t9_soft','t9_live')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(gone, 0, "{path}: both facts hard-deleted");
+        let (soft, live) = (
+            engine9_ledger_rows(conn, "t9_soft"),
+            engine9_ledger_rows(conn, "t9_live"),
+        );
+        if marker {
+            assert_eq!(soft, 1, "{path}: pre-existing ledger row survives the hard delete");
+            assert_eq!(live, 1, "{path}: live hard delete enqueues exactly one row");
+        } else {
+            assert_eq!(soft, 0, "{path}: unmarked — engine drops the row nothing can owe");
+            assert_eq!(live, 0, "{path}: unmarked live hard delete enqueues nothing");
+        }
+    }
+
+    #[test]
+    fn t9_commit_hard_delete_entries_does_not_bypass_the_ledger() {
+        for marker in [false, true] {
+            let (_tmp, conn) = engine9_migrated_fixture();
+            t9_seed(&conn, marker);
+            crate::db::commit::hard_delete_entries(
+                &conn,
+                &[
+                    ("t9_soft".into(), "ent_t9".into()),
+                    ("t9_live".into(), "ent_t9".into()),
+                ],
+                1,
+            )
+            .unwrap();
+            t9_assert_ledger(&conn, marker, "commit::hard_delete_entries");
+        }
+    }
+
+    #[test]
+    fn t9_clear_vault_tables_does_not_bypass_the_ledger() {
+        for marker in [false, true] {
+            let (_tmp, mut conn) = engine9_migrated_fixture();
+            t9_seed(&conn, marker);
+            crate::db::queries::clear_vault_tables(&mut conn, 1).unwrap();
+            t9_assert_ledger(&conn, marker, "queries::clear_vault_tables");
+        }
     }
 }
