@@ -11,7 +11,7 @@ Receipts dir: `.superpowers/sdd/engine-9x-pr-b/receipts/` (baseline: `baseline-*
 
 ## Baseline (78160f98)
 
-- [x] Baseline gates green — G-tauri 1708, G-tools 61, G-heal 16, G-vitest 96 files / 625 + 1 skip, G-tsc exit 0; disk 75G free on `/mnt/kv-work`. Evidence: `receipts/baseline-*.out`
+- [x] Baseline gates green — G-tauri 1708, G-tools 61, G-heal 16, G-vitest 96 files / 625 + 1 skip, G-tsc exit 0; **G-integration (CI line, local fallback, Q10) all targets green, lib 1709 + 60 integration-suite tests across targets, 0 failed**; disk 75G free on `/mnt/kv-work`. Evidence: `receipts/baseline-*.out`
 
 ## Open questions (controller must rule)
 
