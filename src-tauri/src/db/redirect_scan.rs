@@ -57,6 +57,10 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "src-tauri/src/db/schema.rs",
         "the MIGRATION_V26 DDL defines the live_entities VIEW over the base table",
     ),
+    (
+        "src-tauri/src/db/connection.rs",
+        "the sso9 migrations (slots 31/32) deliberately read the base table tombstone-inclusive (spec E3: re-type covers tombstoned rows); the §12 divergence records the raw-SQL boundary case",
+    ),
 ];
 
 #[cfg(test)]

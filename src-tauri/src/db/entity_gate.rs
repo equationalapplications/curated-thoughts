@@ -73,7 +73,8 @@ impl<'c> std::ops::DerefMut for ImmediateTx<'c> {
     }
 }
 
-/// The 17 EA / SchemaSoftwareOrg seed slugs (spec §1.1).
+/// The 20 EA / SchemaSoftwareOrg 9.18.0 seed slugs (spec §1.1; every declared
+/// slug except the abstract parent `statement`, spec E1).
 ///
 /// The ensure's subset guard compares a manifest's `node_types` against this
 /// set: every EA slug ⊆ the row's declared `node_types` is the pass condition.
@@ -81,10 +82,12 @@ impl<'c> std::ops::DerefMut for ImmediateTx<'c> {
 /// report treatment (no `document`/`process` injection).
 pub const EA_SEED_TYPES: &[&str] = &[
     "action",
+    "area",
     "creativework",
+    "decision",
     "design_spec",
     "event",
-    "handoff",
+    "lesson",
     "organization",
     "person",
     "place",
@@ -94,9 +97,10 @@ pub const EA_SEED_TYPES: &[&str] = &[
     "reference_doc",
     "review",
     "role",
+    "rule",
     "service",
-    "session_recap",
     "software_application",
+    "trap",
 ];
 
 /// The signed alias table (spec §2.6.2 + R2.4.4 degrade ladder rung).
@@ -107,6 +111,8 @@ pub const EA_SEED_TYPES: &[&str] = &[
 pub const ALIAS_TABLE: &[(&str, &str)] = &[
     ("agent", "role"),
     ("component", "service"),
+    ("handoff", "decision"),
+    ("session_recap", "lesson"),
     ("software", "document"),
 ];
 
@@ -654,6 +660,18 @@ enum AdmitInternal {
     Held,
 }
 
+/// Test seam (plan Task 5 alias test): the type a proposed label lands as
+/// through the admit ladder against `vocab` (`None` = held).
+#[cfg(test)]
+pub(crate) fn admit_label_landing(vocab: &NodeVocabulary, label: &str) -> Option<String> {
+    match run_admit_ladder(vocab, Some(label)) {
+        AdmitInternal::Declared(t) => Some(t),
+        AdmitInternal::Aliased { landed_as, .. }
+        | AdmitInternal::DegradedToFallback { landed_as, .. } => Some(landed_as),
+        AdmitInternal::Held => None,
+    }
+}
+
 impl std::fmt::Debug for AdmitInternal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -939,6 +957,260 @@ pub(crate) fn plan_manifest_ensure(
     }
 }
 
+/// The vendored SchemaSoftwareOrg 9.18.0 manifest snapshot (spec §3 change 5);
+/// the source the sso9 MERGE refresh copies new node/edge entries from.
+pub(crate) const SSO_9X_VENDORED_MANIFEST_JSON: &str =
+    include_str!("vendored/schema-software-org-9.18.0.manifest.json");
+
+/// The OLD (sso 8.x era) 17-slug EA subset. Private to the sso9 refresh
+/// planner: a stored manifest declaring all of these is an 8.x EA manifest
+/// eligible for the MERGE refresh (Q12). Superseded for every other purpose by
+/// [`EA_SEED_TYPES`].
+const EA_SEED_TYPES_SSO_8X: &[&str] = &[
+    "action",
+    "creativework",
+    "design_spec",
+    "event",
+    "handoff",
+    "organization",
+    "person",
+    "place",
+    "procedure",
+    "product",
+    "project",
+    "reference_doc",
+    "review",
+    "role",
+    "service",
+    "session_recap",
+    "software_application",
+];
+
+/// Node types the 9.x ontology retired from the EA family.
+const SSO9_REMOVED_NODE_TYPES: &[&str] = &["handoff", "session_recap"];
+/// The edge type retired with them.
+const SSO9_REMOVED_EDGE_TYPE: &str = "handoffFor";
+/// Node types the refresh adds from the vendored snapshot.
+const SSO9_ADDED_NODE_TYPES: &[&str] = &["statement", "rule", "decision", "lesson", "trap", "area"];
+
+/// The pure verdict of the sso9 MERGE refresh for one stored manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RefreshPlan {
+    /// Eligible 8.x EA manifest: the edited JSON to write back.
+    Refresh { new_json: String },
+    /// Foreign / already-9.x / non-object manifest — never touched.
+    Untouched(String),
+    /// Unparseable `manifest_json` — never guess, leave alone.
+    Malformed(String),
+}
+
+/// Membership key of one `node_types` / `edge_types` array entry: either a
+/// bare string or a `{type: …}` object (the lenient shapes the gate reader
+/// accepts).
+fn refresh_entry_key(entry: &serde_json::Value) -> Option<String> {
+    let name = match entry {
+        serde_json::Value::String(s) => Some(s.as_str()),
+        serde_json::Value::Object(o) => o.get("type").and_then(|v| v.as_str()),
+        _ => None,
+    }?;
+    Some(NodeVocabulary::key(name))
+}
+
+fn refresh_edge_triple(entry: &serde_json::Value) -> Option<(String, String, String)> {
+    let o = entry.as_object()?;
+    let field = |k: &str| {
+        o.get(k)
+            .and_then(|v| v.as_str())
+            .map(NodeVocabulary::key)
+            .unwrap_or_default()
+    };
+    Some((field("type"), field("source_type"), field("target_type")))
+}
+
+/// The manifest's declared edge shapes as membership keys, from a PARSED
+/// manifest (the `wiki_get_ontology` leg of the re-type's declared-shape
+/// cascade — the re-type's parent-family drop decision consults this set;
+/// rOZa). `contains` is PARENT-AWARE (T3 MAJOR 1): a triple declared on the
+/// abstract parent (`about(statement, person)`) applies to every content
+/// kind under it (`decision`/`lesson`/… carry `parent_type: statement` and
+/// the manifest's own statement description says source-`statement` rows
+/// "apply to every kind"), exactly the reasoning spec change-6 uses when it
+/// keeps `about`→`organization` as "a valid `statement`→`organization`
+/// shape".
+#[derive(Clone)]
+pub(crate) struct ManifestDeclaredEdges {
+    triples: std::collections::HashSet<(String, String, String)>,
+    /// Node key → parent key, one level (wiki_graph.rs: "one-level parent
+    /// slug, when the manifest declares inheritance"), from the SAME
+    /// manifest's `node_types`.
+    parents: std::collections::HashMap<String, String>,
+}
+
+impl ManifestDeclaredEdges {
+    /// An empty declared set means the gate is DISARMED on this manifest
+    /// (strict with no edge types — `ontology_leg`'s Strict(None) contract);
+    /// the re-type must not delete on it.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.triples.is_empty()
+    }
+
+    fn chain(&self, start: &str) -> Vec<String> {
+        let mut out = vec![start.to_string()];
+        let mut cur = start.to_string();
+        while let Some(parent) = self.parents.get(&cur) {
+            if out.iter().any(|x| x == parent) {
+                break; // cycle guard
+            }
+            out.push(parent.clone());
+            cur = parent.clone();
+        }
+        out
+    }
+
+    pub(crate) fn contains(&self, edge: &str, source: &str, target: &str) -> bool {
+        for s in self.chain(source) {
+            for t in self.chain(target) {
+                if self
+                    .triples
+                    .contains(&(edge.to_string(), s.clone(), t.clone()))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+pub(crate) fn manifest_declared_edges(
+    manifest: &crate::wiki_graph::WikiManifest,
+) -> ManifestDeclaredEdges {
+    let parents = manifest
+        .node_types
+        .iter()
+        .filter_map(|n| {
+            let parent = n.parent_type.as_deref()?;
+            if parent.is_empty() {
+                return None;
+            }
+            Some((NodeVocabulary::key(&n.type_name), NodeVocabulary::key(parent)))
+        })
+        .collect();
+    let triples = manifest
+        .edge_types
+        .iter()
+        .map(|e| {
+            (
+                NodeVocabulary::key(&e.type_name),
+                NodeVocabulary::key(&e.source_type),
+                NodeVocabulary::key(&e.target_type),
+            )
+        })
+        .collect();
+    ManifestDeclaredEdges { triples, parents }
+}
+
+/// The sso9 manifest MERGE refresh's pure planner (plan Task 4d). Eligible
+/// (Q12) = the manifest declares every OLD 17-slug EA type. Edits, and
+/// nothing else: drop `handoff`/`session_recap` nodes and `handoffFor` edges;
+/// append the six new node types and the new edge shapes from the vendored
+/// 9.18.0 snapshot, skipping anything already declared. Every other key and
+/// entry — and array order — is preserved.
+pub(crate) fn plan_sso9_manifest_refresh(manifest_json: &str) -> Result<RefreshPlan> {
+    let mut root: serde_json::Value = match serde_json::from_str(manifest_json) {
+        Ok(v) => v,
+        Err(e) => return Ok(RefreshPlan::Malformed(format!("{e}"))),
+    };
+    if !root.is_object() {
+        return Ok(RefreshPlan::Untouched("manifest is not a JSON object".into()));
+    }
+    let vocab = NodeVocabulary::from_manifest(&crate::wiki_graph::parse_manifest_value(&root));
+    if !EA_SEED_TYPES_SSO_8X.iter().all(|s| vocab.contains(s)) {
+        return Ok(RefreshPlan::Untouched(
+            "not an sso 8.x EA manifest (old 17-slug subset not declared)".into(),
+        ));
+    }
+
+    let vendored: serde_json::Value = serde_json::from_str(SSO_9X_VENDORED_MANIFEST_JSON)
+        .context("vendored sso 9.18.0 manifest is not valid JSON")?;
+    let vendored_nodes = vendored
+        .get("node_types")
+        .and_then(|v| v.as_array())
+        .context("vendored manifest missing node_types")?;
+    let vendored_edges = vendored
+        .get("edge_types")
+        .and_then(|v| v.as_array())
+        .context("vendored manifest missing edge_types")?;
+
+    // Node types: remove retired, then add missing new ones.
+    let removed: Vec<String> = SSO9_REMOVED_NODE_TYPES
+        .iter()
+        .map(|s| NodeVocabulary::key(s))
+        .collect();
+    let nodes = root
+        .get_mut("node_types")
+        .and_then(|v| v.as_array_mut())
+        .context("eligible manifest missing node_types array")?;
+    nodes.retain(|e| refresh_entry_key(e).is_none_or(|k| !removed.contains(&k)));
+    for slug in SSO9_ADDED_NODE_TYPES {
+        let key = NodeVocabulary::key(slug);
+        if nodes.iter().any(|e| refresh_entry_key(e).as_deref() == Some(key.as_str())) {
+            continue;
+        }
+        if let Some(entry) = vendored_nodes
+            .iter()
+            .find(|e| refresh_entry_key(e).as_deref() == Some(key.as_str()))
+        {
+            nodes.push(entry.clone());
+        }
+    }
+
+    // Edge types: remove `handoffFor`, add the new shapes (any vendored edge
+    // touching one of the added node types) not already declared.
+    // Impl-review (owx8 / E2 gap): an eligible manifest may predate the
+    // `edge_types` key entirely, or carry any NON-ARRAY form (`null`, a
+    // scalar) — `parse_manifest_value` reads ALL of those as an empty list,
+    // so they all pass eligibility when the 17 node slugs are declared
+    // (rOZz: an explicit `null` previously skipped the merge wholesale and
+    // the stamped manifest lacked all four required shapes). Initialize
+    // every such form to an empty array; existing arrays keep their merge
+    // behavior.
+    if !root.get("edge_types").is_some_and(|v| v.is_array()) {
+        root["edge_types"] = serde_json::json!([]);
+    }
+    if let Some(edges) = root.get_mut("edge_types").and_then(|v| v.as_array_mut()) {
+        let removed_edge = NodeVocabulary::key(SSO9_REMOVED_EDGE_TYPE);
+        edges.retain(|e| refresh_entry_key(e).is_none_or(|k| k != removed_edge));
+        let added_keys: Vec<String> = SSO9_ADDED_NODE_TYPES
+            .iter()
+            .map(|s| NodeVocabulary::key(s))
+            .collect();
+        for v in vendored_edges {
+            let Some(triple) = refresh_edge_triple(v) else {
+                continue;
+            };
+            if !(added_keys.contains(&triple.1) || added_keys.contains(&triple.2)) {
+                continue;
+            }
+            if edges
+                .iter()
+                .any(|e| refresh_edge_triple(e).as_ref() == Some(&triple))
+            {
+                continue;
+            }
+            edges.push(v.clone());
+        }
+    }
+
+    Ok(RefreshPlan::Refresh {
+        new_json: serde_json::to_string(&root)?,
+    })
+}
+
+#[cfg(test)]
+#[path = "entity_gate_sso9_tests.rs"]
+mod sso9_refresh_tests;
+
 /// Idempotent ensure step (spec §2.4.4, plan-p10-m4).
 ///
 /// Adds `document` and `process` to a manifest that already declares every EA
@@ -1042,6 +1314,56 @@ pub fn ensure_manifest_vocabulary(conn: &Connection, entity_id: &str) -> Result<
     }
 }
 
+/// sso9 impl-review (owxz): fold the ensure planner's edits into a freshly
+/// refreshed manifest INSIDE the caller's refresh transaction, so the
+/// manifest and its required ensure edits commit together. Running the ensure
+/// as a separate best-effort pass after the stamp left a crash-or-error window
+/// where the refresh slot was stamped with the ensure skipped — and the next
+/// `migrate_open_db` short-circuits on the stamp, so a refreshed strict
+/// manifest could sit without its declared fallback forever.
+///
+/// Mirrors `ensure_manifest_vocabulary` steps 2–4 minus the write: plan on the
+/// refreshed bytes, record the memo for the FOLDED bytes (so the post-commit
+/// belt-and-suspenders ensure pass short-circuits to `AlreadyEnsured`), and
+/// return them for the caller's CAS UPDATE. Any error propagates so the
+/// refresh transaction rolls back and the next open retries the whole step.
+/// `UnusableVocabulary` is NOT fatal — the same reported-loudly outcome the
+/// ensure loop itself produces (the row is left for heal / the desktop pass),
+/// never memoized so the pass re-reports.
+pub(crate) fn fold_sso9_ensure(
+    conn: &Connection,
+    entity_id: &str,
+    refreshed_json: &str,
+) -> Result<String> {
+    let mode: Option<String> = conn
+        .query_row(
+            "SELECT mode FROM llm_wiki_entity_manifests WHERE entity_id = ?1",
+            [entity_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(mode) = mode else {
+        return Ok(refreshed_json.to_string());
+    };
+    let gated_mode = gated_row_mode(conn, entity_id, &mode)?;
+    let strict = gated_mode == "strict";
+    let new_json = match plan_manifest_ensure(refreshed_json, entity_id, strict)? {
+        EnsurePlan::Malformed(e) => {
+            anyhow::bail!("sso9 ensure fold ({entity_id}): refreshed manifest malformed: {e}")
+        }
+        EnsurePlan::ForeignNoPreferredFallback => refreshed_json.to_string(),
+        EnsurePlan::UnusableVocabulary { reason } => {
+            eprintln!("[entity-gate] manifest `{entity_id}` cannot gate: {reason}");
+            return Ok(refreshed_json.to_string());
+        }
+        EnsurePlan::Complete => refreshed_json.to_string(),
+        EnsurePlan::Edit { new_json, .. } => new_json,
+    };
+    let hash = ensure_memo_key(gated_mode, &new_json);
+    record_ensure_memo(conn, entity_id, &hash)?;
+    Ok(new_json)
+}
+
 /// What `ensure_manifest_vocabulary` did — surfaced so callers can log and
 /// tests can pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1082,7 +1404,7 @@ pub enum EnsureOutcome {
 /// pre-r26 memo kept `Complete` on rows r26 repairs or reports, so the
 /// ensure answered `AlreadyEnsured` forever while read-only `ct heal`
 /// reported the row unusable).
-const ENSURE_PLANNER_EPOCH: &str = "r26";
+const ENSURE_PLANNER_EPOCH: &str = "r27";
 
 /// The mode the GATE sees for `entity_id`'s row: its stored `mode`, except
 /// that a merged-away (or cycle-locked) id's row is never read — rung 1b
@@ -1984,10 +2306,12 @@ mod tests {
     fn ea_seed_types_match_spec_section_1_1() {
         let expected: &[&str] = &[
             "action",
+            "area",
             "creativework",
+            "decision",
             "design_spec",
             "event",
-            "handoff",
+            "lesson",
             "organization",
             "person",
             "place",
@@ -1997,12 +2321,13 @@ mod tests {
             "reference_doc",
             "review",
             "role",
+            "rule",
             "service",
-            "session_recap",
             "software_application",
+            "trap",
         ];
         assert_eq!(EA_SEED_TYPES, expected);
-        assert_eq!(EA_SEED_TYPES.len(), 17);
+        assert_eq!(EA_SEED_TYPES.len(), 20);
     }
 
     /// `fallback_node_type` reader: declared fallback is what the ladder uses.
@@ -2125,6 +2450,49 @@ mod tests {
             } => {
                 assert_eq!(original_label, "agent");
                 assert_eq!(landed_as, "project");
+            }
+            other => panic!("expected DegradedToFallback, got {other:?}"),
+        }
+    }
+
+    /// 9.x retype aliases: handoff → decision, session_recap → lesson.
+    #[test]
+    fn alias_ladder_9x_retype_aliases_land() {
+        let manifest = WikiManifest {
+            node_types: ["decision", "lesson"]
+                .iter()
+                .map(|t| WikiNodeType {
+                    type_name: (*t).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            edge_types: vec![],
+            fallback_node_type: None,
+        };
+        let v = NodeVocabulary::from_manifest(&manifest);
+        for (label, target) in [("handoff", "decision"), ("session_recap", "lesson")] {
+            match run_admit_ladder(&v, Some(label)) {
+                AdmitInternal::Aliased { landed_as, .. } => assert_eq!(landed_as, target),
+                other => panic!("expected Aliased for {label}, got {other:?}"),
+            }
+        }
+    }
+
+    /// 9.x retype alias with `decision` undeclared → fallback.
+    #[test]
+    fn alias_ladder_9x_retype_undeclared_target_falls_through() {
+        let manifest = WikiManifest {
+            node_types: vec![WikiNodeType {
+                type_name: "person".into(),
+                ..Default::default()
+            }],
+            edge_types: vec![],
+            fallback_node_type: Some("project".into()),
+        };
+        let v = NodeVocabulary::from_manifest(&manifest);
+        match run_admit_ladder(&v, Some("handoff")) {
+            AdmitInternal::DegradedToFallback { landed_as, .. } => {
+                assert_eq!(landed_as, "project")
             }
             other => panic!("expected DegradedToFallback, got {other:?}"),
         }

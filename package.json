@@ -49,7 +49,7 @@
     "@equationalapplications/core-llm-wiki": "8.0.2",
     "@equationalapplications/react-llm-wiki": "8.0.2",
     "@equationalapplications/schema-org-llm-wiki": "8.0.2",
-    "@equationalapplications/schema-software-org": "8.0.2",
+    "@equationalapplications/schema-software-org": "9.18.0",
     "@mantine/core": "9.7.4",
     "@mantine/hooks": "9.7.4",
     "@tauri-apps/api": "2.12.4",

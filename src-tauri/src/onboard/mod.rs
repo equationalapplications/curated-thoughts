@@ -125,7 +125,7 @@ fn collect_onboard_config(vault_root: PathBuf, force: bool) -> Result<OnboardCon
 
     // ── ontology ──────────────────────────────────────────────────────────────
     println!("Knowledge schema (what kinds of things Tessera tracks):");
-    println!("  1) Software team  — specs, handoffs, services, procedures");
+    println!("  1) Software team  — specs, statements, services, procedures");
     println!("  2) General        — people, places, events, works");
     println!("  3) Let it invent its own");
     println!("  4) None");

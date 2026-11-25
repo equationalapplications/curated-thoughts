@@ -26,7 +26,7 @@ export const ONTOLOGY_OPTIONS: OntologyOption[] = [
   {
     value: 'schema-software-org',
     label: 'Software team',
-    subLabel: 'Specs, handoffs, services',
+    subLabel: 'Specs, statements, services',
     packageId: '@equationalapplications/schema-software-org',
   },
   {

@@ -300,28 +300,10 @@ fn meta_value(dir: &std::path::Path, key: &str) -> Option<String> {
 fn seed_tier_fact_manifest(dir: &std::path::Path) {
     // EA-seed strict manifest (pre-wave-1: no `document`/`process`, no
     // fallback) — the ensure extends it before the census.
-    let types: Vec<String> = [
-        "action",
-        "creativework",
-        "design_spec",
-        "event",
-        "handoff",
-        "organization",
-        "person",
-        "place",
-        "procedure",
-        "product",
-        "project",
-        "reference_doc",
-        "review",
-        "role",
-        "service",
-        "session_recap",
-        "software_application",
-    ]
-    .iter()
-    .map(|s| format!(r#"{{"type":"{s}"}}"#))
-    .collect();
+    let types: Vec<String> = tauri_app_lib::db::entity_gate::EA_SEED_TYPES
+        .iter()
+        .map(|s| format!(r#"{{"type":"{s}"}}"#))
+        .collect();
     let manifest = format!(r#"{{"node_types":[{}],"edge_types":[]"#, types.join(",")) + "}";
     let conn = rusqlite::Connection::open(dir.join("brain.db")).unwrap();
     conn.execute(

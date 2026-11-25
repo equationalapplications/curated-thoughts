@@ -1,6 +1,6 @@
 # Spec: engine 9.x adoption (expo-llm-wiki 8.0.2 → 9.18.0)
 
-Status: Approved 2026-11-24 (Kurt — all three disclosed items accepted; unbounded vector_removals follow-up: expo-llm-wiki#487)
+Status: Approved 2026-11-24 (Kurt — all three disclosed items accepted; unbounded vector_removals follow-up: expo-llm-wiki#487). PR-A (sso 9.x readiness): Implemented 2026-11-24 on chore/sso-9x-readiness. PR-B (core bump + DDL regen + ddl_compat extractor): pending.
 Owner: Kurt VanDusen / Hermes Agent
 Date: 2026-11-24
 Related issues: #342 (vector_removals ledger, non-blocking), #348 (sso 9.x node types, blocking), #353 (source_pointer mirror, blocking for the guard).
@@ -170,3 +170,64 @@ PR-A tests:
 1. The `area` column ingest mapping (areas spec §14.2 — separate decision).
 2. Any new feature built on 9.x engine behavior beyond the mirrors listed here.
 3. Other pinned packages (`@tiptap/*`, `@blocknote/*`, `@mantine/*`).
+
+## 8. Errata (controller, 2026-11-24 — verified against the installed 9.18.0 tarball and the live brain DB before amendment)
+
+- **E1 (change 2):** the count label "21 slugs" is an arithmetic slip: the
+  quoted derivation (17 − `handoff` − `session_recap` + 4 kinds + `area`)
+  yields **20**, and the installed manifest has 21 node-type entries only
+  because the abstract `statement` is one of them. The binding rule
+  ("statement does NOT join EA_SEED_TYPES") governs; the implementer's
+  re-pin from the installed tarball must produce **20 slugs**.
+- **E2 (change 5):** the new edge shapes are not only `about`. The 9.18.0
+  manifest declares 42 edge shapes; 8.0.2 pinned 40 with 2 `handoffFor`
+  shapes, so the delta is −2 `handoffFor` + 4 new: three `about` shapes
+  (statement→area, statement→software_application, statement→organization)
+  **plus `partOf` (area→software_application)**. The MERGE refresh and the
+  drift test must cover all four.
+- **E3 (change 4 re-type scope):** add `curated_entities.entity_type` for
+  the two dropped slugs only, same ratified mapping
+  (`handoff`→`decision`, `session_recap`→`lesson`). Live census
+  2026-11-24: handoff ×1, session_recap ×5, zero otherwise. Rationale: the
+  node-type gate writes that column; leaving stale slugs there re-admits
+  rejected vocabulary through entity reads. Other non-manifest entity types
+  observed in the same census (`concept`, `process`, `repository`, `job`)
+  are pre-existing and OUT of scope.
+- **E4 (change 3 chain-state text):** main already carries V30 (stamped by
+  #352); the "V29 on main" text is stale. And the chain stamps literal
+  per-step versions (`connection.rs` convention), so "computes the next
+  version at open time" lands as implementation-time named consts
+  (max stamped + 1, recomputed on the merge base). Ground truth for the
+  migrations: `llm_wiki_entries.okf_type` / `llm_wiki_tasks.okf_type` are
+  currently unpopulated on the live DB (1436/2420 rows NULL), and exactly 2
+  `handoffFor` edge rows exist in `llm_wiki_edges` — census buckets will be
+  near-zero on this install, but the machinery is required for upgraded
+  DBs with stamped stock.
+- **E5 (change 6, ungated-keep — owner-authorized 2026-11-25):** an entity
+  with NO applicable strict manifest on either leg (or a strict manifest
+  whose edge vocabulary is empty) is UNGATED, not undeclared: the live gate
+  admits every shape there, so the re-type keeps parent-family edges on
+  ungated entities. This authorizes the implementation's ungated-keep
+  policy (the "pending the owner's ruling + spec erratum" note is resolved
+  by this erratum).
+- **E6 (change 6, NULL-endpoint keep — owner ruling 2026-11-25):** a
+  parent-family edge whose endpoint type resolves to nothing (endpoint row
+  absent, or `okf_type`/`entity_type` NULL — 1,436/2,420 live rows carry
+  NULL `okf_type`) is KEPT and its count logged on every path (gated,
+  ungated, and empty-vocabulary), NOT dropped. The live gate climbs
+  endpoints by owning entity and never reads `okf_type` NULLness, so NULL
+  type information does not establish that a STORED edge's shape is
+  undeclared — dropping it during migration could delete an edge the gate
+  would admit, and the migration's success path deletes the backup,
+  making the loss irreversible. This is about preserving stored edges, not
+  admitting new ones: a genuinely undeclared edge shape or a missing
+  endpoint row still drops/rejects at runtime. Implementable today only
+  via the parent-family arm (`author`/`publisher`/`supersedes`): a NULL
+  `about` target falls to `undispositioned` before the consult, and a
+  snapshot source always resolves.
+- **E7 (malformed-manifest fail-closed — owner-confirmed 2026-11-25):** a
+  manifest-read error on the APPLICABLE partition manifest aborts the
+  re-type fail-closed, retaining the pre-migration backup until the corrupt
+  manifest is repaired. An owner-row manifest read error falls through with
+  a WARN, mirroring the gate's own Err leg (round-3 fold t93k). This trade
+  is owner-confirmed as intended.
