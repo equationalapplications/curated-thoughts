@@ -1,6 +1,6 @@
 # Investigation — issue #376: engine-9.x follow-ups from the PR #375 T4 cycle
 
-**Date:** 2026-11-25 · **Status:** CONVERGED after 5 review rounds (Opus med/low + Fable step-0 + 3 Fable deltas) — final Opus consistency delta pending, then spec
+**Date:** 2026-11-25 · **Status:** CONVERGED after 7 review rounds (Opus med/low + Fable step-0 + 4 Fable deltas + final Opus consistency delta) — cleared for spec
 **Branch:** `chore/engine9x-followups` · **Lane worktree:** `/mnt/kv-work/build/worktrees/curated-thoughts/engine9x-followups` (base: `origin/main` = `10e9b006`)
 **Upstream:** issue #376; findings originated in the PR #375 T4 Fable cycle (rounds r1–r4) and spec errata E8–E10 (spec `specs/engine-9x-adoption/spec.md` §8, landed with #375). Split-out: issue #378 (forgotten_at reader gap).
 
@@ -206,7 +206,13 @@ corrections, verified):** `migrate()`'s V22 `v22_unify_documents_path`
 has no `documents` rows); the stated-ledger rederive (`:916`, stamp-gated —
 skipped when the stamp exists, WHATEVER root is passed); and
 `run_okf_migration(conn, vault_path)` — CORRECTED: it is DB-ROW-driven, not
-a blind vault walk. In-place: `wiki_pages` is cleared (`queries.rs:274`), so
+a blind vault walk. (delta-r4-final m3: the list is now complete —
+`migrate()` ALSO has a rooted V5 step at `connection.rs:237-246`, keying
+`chunks.entity_id` to `hash(roots.canonical)`; a restored backup with
+`schema_version < 5` would get B's working-tier chunks keyed to A's root —
+declare pre-V5 backups unsupported, or include V5 in the root-fix scope.
+Related: V25's `deposit_kick_state` setup is gated behind V22 and defers on
+rootless opens.) In-place: `wiki_pages` is cleared (`queries.rs:274`), so
 no rows → no-op. Restore branch with a stale backup predating the OKF
 migration: B's `approved` `wiki_pages` rows are resolved against A's root —
 `read_wiki_page_body` joins the RELATIVE page path onto the root
@@ -238,7 +244,14 @@ first ingest must not run with empty `queue_denials`/`stated_attestations`/
 reads `queue_denials` for deny-suppression (`:361`), so empty tables mean
 wrong attribution and un-suppressed re-queuing) — and one AFTER ingest for
 the confirmations leg (needs entries; safe to re-run: the rebuild truncates
-and rebuilds). Restore branch: the sweep never runs there (`:2301` is in
+and rebuilds). Trigger definition (delta-r4-final m4): the spec must NAME
+the post-ingest signal for the second run (e.g., first full scan finishing
+or the queue draining) — ingest is a continuous watcher-driven pipeline, so
+"after ingest" has no hook until a signal is defined. Safe to re-run is
+also true against live writers: `queue.rs:753-775` appends the denial to
+the VAULT LEDGER before inserting into `queue_denials`, so a
+truncate-and-rebuild after ingest loses no live-written row (delta-r4-final
+confirmation). Restore branch: the sweep never runs there (`:2301` is in
 the `else`), so only the root fix acts, and only on stale backups; a
 stamped backup keeps its own backup-era rows.
 **Pin:** a switch-level test asserting the three tables hold B's rows and
@@ -436,8 +449,16 @@ migration-only v18/v19 indexes under (b′)), Q3 (guard inventory: runtime
 sqlite_master + engine-FTS second source vs static list), Q4 — RESOLVED
 (scoped), Q5 (I8 in-lane?), Q6 (FTS window — NARROWED by the m4 blast-radius
 finding: at-rest for CT production paths; finalize after the planning-time
-join-back check), Q7 (NEW, delta M2: confirmations leg at switch — stamp
-after first ingest vs post-ingest re-run vs named residual).
+join-back check), Q7 (NEW, delta M2: confirmations leg at switch — explicit post-ingest
+re-run with the stamp UNTOUCHED, vs named residual; the "stamp after first
+ingest" wording is FORBIDDEN — it reintroduces the delta-r2-M1 leak),
+Q8 (NEW, delta-r4-final m2: root fix choice — (a) early config write,
+positioned after the point of no return, vs (d) root-override parameter;
+the r5-era "(d) recommended" label is superseded — the body is neutral),
+Q9 (NEW: `deposit_kick_state` DELETE-in-sweep disposition + per-document
+`subject` columns in `pipeline_heartbeat`/`pipeline_stalls`), Q10 (NEW:
+how the switch serializes against concurrent `--mcp` opens — the delta-m7
+live-writer question).
 
 ## Out of scope
 
@@ -533,8 +554,9 @@ context.
   branch: stale backup lacking stamps gets A's roots applied to B's rows
   TODAY — second pin-test case), M4 (I3 coverage matrix: (b′) sees only gap
   class 1), m1–m7 — all verified against the tree and adopted; option (d)
-  (root-override reopen) added as the recommended fix direction. Delta-r3
-  verification next.
+  (root-override reopen) added as a candidate fix direction. Delta-r3
+  verification next. (r7 note: the "recommended" label on (d) was later
+  superseded — see Q8.)
 - r6 (2026-11-25): Fable delta-r3 ($1.36/15 turns) REQUEST CHANGES — M1
   (option (a) objection CORRECTED: `pending_config_align_to` is already set
   pre-reopen and the error path already aligns the config — verified
@@ -554,7 +576,16 @@ context.
   (`deposit_kick_state` is path-keyed vault-relative — fourth live-residue
   class, verified `wisdom_deposit.rs:1225`), m1–m4 — all verified and
   adopted. **INVESTIGATION CONVERGED**: all factual premises settled; the
-  remaining items are explicit spec-stage decisions (Q1–Q7) and
+  remaining items are explicit spec-stage decisions (Q1–Q10) and
   planning-time checks. Final Opus-medium consistency delta before the
   spec; further fix-composition iteration moves into the spec + plan
   stage where it belongs.
+- r8 (2026-11-25): final Opus-medium consistency delta ($0.58/8 turns)
+  REQUEST CHANGES, explicitly cleared for spec once applied — M1 (fifth
+  stale "stamp after first ingest" spot in the summary Q7 list — fixed,
+  reworded FORBIDDEN), m1 (round count 7), m2 (Q8–Q10 added), m3 (rooted
+  V5 step added to the `:2307` open list — verified
+  `connection.rs:237-246`; pre-V5 backups declared unsupported or scoped),
+  m4 (post-ingest trigger must be named by the spec; truncate-rebuild safe
+  against live writers per `queue.rs:753-775`), m5 (r6 history cite noted
+  as corrected r7 — left as history). Investigation final.
