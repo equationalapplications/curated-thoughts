@@ -83,3 +83,7 @@ Open questions (reviewer "could not confirm" → action items):
 **3. MINOR — NULL okf_type entries never fall back to curated_entities — RULING PENDING (bundled with the rung-3 open question).** The entry-first rule is the resolver's documented contract; NULL endpoints currently drop (conservative). ~1,436 live rows affected in the worst case; the census log surfaces the actual count. Owner to rule: keep drop, or fall back on NULL.
 
 "Checked and clean" receipts from T3: backup reservation + error kinds + prune prefix, per-row backup check covers all three destructive sets, every abort path rolls back including failed COMMIT, cascade legs (Strict(None) ⇒ keep), ALIAS_TABLE extension.
+
+## CI incident on 5e1c61f4 (process lesson)
+
+rust-ubuntu/rust-macos failed: edge_writer_gate found 8 vs expected 7. The 8th fixture INSERT (e_sup_sp) entered with the slx2 fold at b141e476; after that commit the gate was re-verified only via --lib + clippy, which compile but do not RUN the integration gate. Lesson recorded: after EVERY fold commit, re-run edge_writer_gate explicitly alongside --lib. Fixed in 62632da6 (baseline 7 → 8, fixtures only).
