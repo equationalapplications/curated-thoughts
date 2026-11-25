@@ -402,7 +402,9 @@ mod tests {
         let config = tmp.path().join("config.json");
         std::fs::write(
             &config,
-            format!(r#"{{"vault_path":"{}"}}"#, vault.to_str().unwrap()),
+            // serde_json serialization: a format! interpolation would emit
+            // unescaped backslashes on Windows paths (invalid JSON escapes).
+            serde_json::json!({ "vault_path": vault.to_str().unwrap() }).to_string(),
         )
         .unwrap();
         let db = crate::db::connection::AppDb::open_with_config(&tmp.path().join("brain.db"), &config)

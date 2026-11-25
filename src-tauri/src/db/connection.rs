@@ -8056,7 +8056,9 @@ mod tests {
         let config = tmp.path().join("config.json");
         std::fs::write(
             &config,
-            format!(r#"{{"vault_path":"{}"}}"#, vault.to_str().unwrap()),
+            // serde_json serialization (Windows-path escaping — see the
+            // schema_guard twin of this fixture helper).
+            serde_json::json!({ "vault_path": vault.to_str().unwrap() }).to_string(),
         )
         .unwrap();
         let db = AppDb::open_with_config(&tmp.path().join("brain.db"), &config)

@@ -549,14 +549,19 @@ mod tests {
                         if !rest.starts_with(&stamped) {
                             return false;
                         }
-                        // Token boundary: `NULLIF(...)` and any other
-                        // NULL-prefixed token is a VALUE write, not a
-                        // removal — only a true boundary (or end) counts.
-                        let after = rest[stamped.len()..].chars().next();
-                        if let Some(c) = after {
-                            if c.is_ascii_alphanumeric() || c == '_' || c == '(' {
-                                return false;
-                            }
+                        // Token boundary: the assignment must END at the NULL.
+                        // `NULL IS NULL` evaluates to 1 — a non-NULL VALUE
+                        // write — so operator/keyword continuations are
+                        // rejected. Allowed continuations: end of string,
+                        // `,`, the `{` placeholder, `;`, or `WHERE` (the
+                        // package trigger body uses `NULL{} WHERE`).
+                        let after = rest[stamped.len()..].trim_start();
+                        match after.chars().next() {
+                            None => {}
+                            Some(',') | Some('{') | Some(';') => {}
+                            Some('W') | Some('w')
+                                if after.starts_with("WHERE") || after.starts_with("where") => {}
+                            _ => return false,
                         }
                         scan = &rest[stamped.len()..];
                     }
@@ -583,6 +588,11 @@ mod tests {
         // NULL-prefixed tokens are VALUE writes.
         assert!(!removals_only_statement(
             "UPDATE llm_wiki_entries SET embedding = NULLIF(?, '')"
+        ));
+        // `NULL IS NULL` evaluates to 1 — a non-NULL VALUE write despite the
+        // literal `NULL` (CodeRabbit round on d75ca75b): must NOT be exempt.
+        assert!(!removals_only_statement(
+            "UPDATE llm_wiki_entries SET embedding_blob = NULL IS NULL WHERE id = ?1"
         ));
         assert!(!removals_only_statement(
             "UPDATE llm_wiki_entries SET embedding = NULL_integer"
