@@ -536,37 +536,60 @@ mod tests {
         for (rel, lits) in production_literals() {
             for lit in lits {
                 let t = &lit.text;
-                // Removals are not landings: if EVERY `embedding_blob`
-                // occurrence in the statement is immediately followed by
-                // `= NULL`, the statement can only remove a vector (e.g. the
-                // package-owned confirmed-removal trigger body in the
-                // verbatim `LLM_WIKI_PACKAGE_DDL` — spec engine-9x §3 PR-B
-                // step 1 forbids hand edits, so no CT stamp can be inside
-                // it). Nothing lands, so no scheme stamp applies.
-                let mut blob_scan = t.as_str();
-                let removals_only = loop {
-                    match blob_scan.find("embedding_blob") {
-                        None => break true,
-                        Some(i) => {
-                            let rest = &blob_scan[i..];
-                            if !rest.starts_with("embedding_blob = NULL") {
-                                break false;
-                            }
-                            // Token boundary: `NULLIF(...)` and any other
-                            // NULL-prefixed token is a VALUE write, not a
-                            // removal — only a true boundary (or end) counts.
-                            let after = rest["embedding_blob = NULL".len()..]
-                                .chars()
-                                .next();
-                            if let Some(c) = after {
-                                if c.is_ascii_alphanumeric() || c == '_' || c == '(' {
-                                    break false;
+                // Removals are not landings: if EVERY occurrence of EITHER
+                // vector column (`embedding_blob`, `embedding`) in the
+                // statement is immediately followed by `= NULL`, the
+                // statement can only remove a vector (e.g. the package-owned
+                // confirmed-removal trigger body in the verbatim
+                // `LLM_WIKI_PACKAGE_DDL` — spec engine-9x §3 PR-B step 1
+                // forbids hand edits, so no CT stamp can be inside it).
+                // Scanning BOTH columns: `SET embedding_blob = NULL,
+                // embedding = ?` lands a vector and must trip the guard.
+                // Nothing lands, so no scheme stamp applies, only when no
+                // column is value-written.
+                let mut removals_only = true;
+                for column in ["embedding_blob", "embedding"] {
+                    let mut blob_scan = t.as_str();
+                    loop {
+                        match blob_scan.find(column) {
+                            None => break,
+                            Some(i) => {
+                                let rest = &blob_scan[i..];
+                                // Longer-identifier guard: `embedding` also
+                                // matches inside `embedding_blob` — an
+                                // occurrence that continues into a longer
+                                // identifier is neither a write of THIS
+                                // column nor a failure; skip it.
+                                let col_after = rest[column.len()..].chars().next();
+                                if matches!(col_after, Some(c) if c.is_ascii_alphanumeric() || c == '_')
+                                {
+                                    blob_scan = &rest[column.len()..];
+                                    continue;
                                 }
+                                let stamped = format!("{column} = NULL");
+                                if !rest.starts_with(&stamped) {
+                                    removals_only = false;
+                                    break;
+                                }
+                                // Token boundary: `NULLIF(...)` and any other
+                                // NULL-prefixed token is a VALUE write, not a
+                                // removal — only a true boundary (or end)
+                                // counts.
+                                let after = rest[stamped.len()..].chars().next();
+                                if let Some(c) = after {
+                                    if c.is_ascii_alphanumeric() || c == '_' || c == '(' {
+                                        removals_only = false;
+                                        break;
+                                    }
+                                }
+                                blob_scan = &rest[stamped.len()..];
                             }
-                            blob_scan = &rest["embedding_blob = NULL".len()..];
                         }
                     }
-                };
+                    if !removals_only {
+                        break;
+                    }
+                }
                 let targets_entries = t.contains("INSERT INTO llm_wiki_entries")
                     || t.contains("UPDATE llm_wiki_entries");
                 if !(targets_entries && t.contains("embedding_blob")) || removals_only {
