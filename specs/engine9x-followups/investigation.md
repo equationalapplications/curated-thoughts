@@ -51,12 +51,14 @@ by its two internal callers (`:1550`, `:1554`) — the `:8048`-area test calls
 
 **Fix direction:** group `ENGINE9_MIRROR_COLUMNS` by table; one
 `existing_columns` call per distinct table (2 calls total), return shape kept.
-Scope note (r1-m2): other every-open PRAGMA callers exist (`okf_ddl.rs:325`
-v13 helper, `:356` okf_v02, `:443` resurrect helper) and
-`package_ddl_objects` issues one `sqlite_master` query per DDL object
-(`connection.rs:1503-1511`) — likely the bigger fast-path cost. This lane
-scopes I2 to the `engine9_missing` grouping only; the per-object queries are
-deliberately out of scope (recorded, not silently dropped).
+Scope note (r1-m2, reworded per r2-N1): other every-open PRAGMA callers exist
+(`okf_ddl.rs:325` v13 helper, `:356` okf_v02, `:443` resurrect helper), and
+`engine9_missing` itself ALSO issues one `sqlite_master` COUNT query per
+package-DDL object — the object list comes from `package_ddl_objects`
+(`connection.rs:1470`, no SQL of its own), but the query loop lives inside
+`engine9_missing` (`:1503-1511`) and is likely the bigger fast-path cost.
+This lane scopes I2 to the column grouping ONLY and leaves the object
+existence loop unchanged.
 
 ### I3 — helper-SQL mirrors sit outside the drift gate (REAL, medium-large)
 
@@ -171,7 +173,7 @@ sensitive line breaks — the fragile artifact is the committed testdata file,
 which on a Windows checkout with `core.autocrlf=true` arrives CRLF and fails
 the gate even when content is identical. The repo has NO `.gitattributes`
 (verified absent). Only Windows checkouts are affected; CI (Linux/macOS) is
-not. testdata also carries a 421KB binary brain fixture
+not. testdata also carries the 412 KiB (421,888 bytes) binary brain fixture
 (`ct-brain-v32-core-8.0.2.db`) that git must never text-normalize.
 
 **Fix direction:** minimal scoped `.gitattributes` —
@@ -182,9 +184,13 @@ not. testdata also carries a 421KB binary brain fixture
 ### I7 — `ci.yml` runtime-smoke sqlite flag stale (REAL, trivial)
 
 `.github/workflows/ci.yml:223-225`: comment says "Node 22 needs
---experimental-sqlite". Verified against Node release notes (r1-m1): `node:sqlite`
-shipped behind the flag in **22.5.0** and was unflagged in **22.13.0**
-(2025-01-07, nodejs/node#55890). CI installs a floating `node-version: "22"`
+--experimental-sqlite". Verified against Node release notes (r1-m1; sources:
+[nodejs.org v22.13.0 release notes](https://nodejs.org/en/blog/release/v22.13.0)
+— "doc,lib,src,test: unflag sqlite module" — and the
+[node:sqlite API history](https://nodejs.org/docs/latest-v22.x/api/sqlite.html)):
+`node:sqlite` shipped behind the flag in **22.5.0** and was unflagged in
+**22.13.0** (2025-01-07, nodejs/node#55890). CI installs a floating
+`node-version: "22"`
 via `.github/actions/setup-node-pnpm` (no `.nvmrc`, no `engines` field), so CI
 itself always gets ≥22.13 — but a contributor on a local Node 22.5–22.12
 running the smoke script without the flag would fail to import `node:sqlite`.
@@ -261,4 +267,9 @@ dispatch context.
   findings M1 (I3 six-group inventory + mechanism), M2 (I6 testdata is the fragile file), M3
   (I4 exemption list both directions + brain-wide guard), m1 (I7 Node 22.13.0 — verified
   against nodejs.org release notes), m2 (I2 scope), m3 (I5 schema_guard entry), m4
-  (wording + Q1 precedent note) — ALL verified against the tree and adopted; this revision.
+  (wording + Q1 precedent note) — ALL verified against the tree and adopted.
+- r2 (2026-11-25): Opus-low delta (`inv-opus-r2`, $0.31/3 turns) — APPROVE WITH NITS;
+  nits N1 (per-object query loop attribution: inside `engine9_missing`, not
+  `package_ddl_objects`), N2 (fixture size stated as 412 KiB / 421,888 bytes), N3
+  (Node release-notes links added) — all verified and adopted. Investigation CONVERGED;
+  proceeding to the Fable step-0 tier.
