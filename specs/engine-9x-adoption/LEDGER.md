@@ -59,7 +59,7 @@ Receipts dir: `.superpowers/sdd/engine-9x-pr-b/receipts/` (baseline: `baseline-*
 
 | Task | Status | Gate receipts | Notes |
 |---|---|---|---|
-| T0 — 8.0.2 DDL text, expectations JSON, V32 fixture brain captured from base; committed as testdata | pending | `receipts/t0-capture.out` | Q4, Q5; before any edit |
+| T0 — 8.0.2 DDL text, expectations JSON, V32 fixture brain captured from base; committed as testdata | [x] done | [`receipts/t0-capture.out`](../../.superpowers/sdd/engine-9x-pr-b/receipts/t0-capture.out) | Q4, Q5. Captured via `git show 78160f98:…` (HEAD 7c2785a2 = base + docs-only). DDL sha256 `0b4ba8fc…`, JSON `31878afd…` (9 tables; entries 37 cols incl. tier/embed_scheme/area). Fixture brain 421888 B (<50MB), schema_version 1..32 contiguous, 9 `llm_wiki_*` tables. `pnpm why` denied by harness → version read from installed `package.json` (8.0.2) |
 | T1 — extractor concatenates every execAsync block in setupDatabase; two-block/one-block/split-shape tests RED→GREEN; green on 8.0.2 dist | pending | `t1-g-tauri-red.out`, `t1-g-tauri.out` | Q2; standalone commit |
 | T2 — five pin lines → 9.18.0; install, lockfile scope, `pnpm why`; tsc/vitest green; ddl_compat RED (block-2 drift) | pending | `t2-install.out`, `t2-why.out`, `t2-lockfile.out`, `t2-g-tsc.out`, `t2-g-vitest.out`, `t2-ddl-compat-red.out` | Q1, Q3; opens atomic set |
 | T3 — mechanical regen of LLM_WIKI_PACKAGE_DDL (both blocks); shape + fragmentation confirmed; package_ddl_matches_rust GREEN | pending | `t3-ddl-compat.out` | counts: CREATE TABLE _, CREATE TRIGGER _ |
