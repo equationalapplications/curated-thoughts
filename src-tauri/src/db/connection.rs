@@ -1692,12 +1692,17 @@ struct Sso9EdgePlan {
     /// Step 4: parent-family edges touching a re-typed row with an
     /// undeclared re-typed shape.
     parent_drop: Vec<Sso9Edge>,
-    /// Impl-review (t93c): the subset of `parent_drop` whose verdict was
-    /// `UnresolvedEndpoint` — the owner's NULL-endpoint ruling needs the
-    /// actual affected-edge count, not the 1,436-NULL-row figure.
-    parent_drop_unresolved_endpoint: usize,
+    /// Owner ruling (Kurt, 2026-11-25, the t93c open question): the subset
+    /// of parent-family edges whose verdict was `UnresolvedEndpoint` — KEPT,
+    /// never dropped (the live gate climbs by owning entity and never reads
+    /// okf_type NULLness, so these edges are admitted at runtime; the
+    /// success path deletes the backup, making a wrong drop irreversible).
+    /// The count is logged, not acted on.
+    kept_unresolved_endpoint: usize,
     /// Impl-review (owxi): parent-family edges whose POST-re-type shape is
     /// DECLARED in the entity's refreshed manifest — kept, never dropped.
+    /// The NULL-endpoint keeps land here too (ruling above), counted
+    /// separately by `kept_unresolved_endpoint`.
     kept_declared_parent: Vec<Sso9Edge>,
     /// Keep set: `about` → `organization` from a re-typed source.
     kept_about_org: usize,
@@ -1840,11 +1845,9 @@ fn sso9_declared_edges(
     Ok(set)
 }
 
-/// Verdict of the declared-shape consult. `UnresolvedEndpoint` is reported
-/// separately in the plan so the census can count candidate drops caused by
-/// an endpoint whose type resolves to nothing (t93c: the owner's
-/// NULL-endpoint ruling needs the actual affected-edge count, not the
-/// 1,436-NULL-row figure).
+/// Verdict of the declared-shape consult. `UnresolvedEndpoint` is KEPT per
+/// the owner's ruling (Kurt, 2026-11-25): the live gate admits these edges,
+/// and the count is reported in the plan/log instead of a drop.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Sso9ShapeVerdict {
     Declared,
@@ -1866,12 +1869,12 @@ fn sso9_parent_shape_declared(
     e: &Sso9Edge,
 ) -> Result<Sso9ShapeVerdict> {
     let Some(declared) = sso9_declared_edges(conn, declared_cache, &e.entity_id)? else {
-        // Impl-review (T1.5 rung 2 MAJOR 1): ungated — keep. POLICY (T3
-        // MINOR 2, pending the owner's ruling + spec erratum): the
-        // justification is NOT the Rust edge gate (it checks edge-type
-        // NAMES only, never endpoint shapes); the criterion is spec
-        // change-6's shape-level declaration, with ungated entities — where
-        // no shape can be declared — exempt from the drop by ruling.
+        // Impl-review (T1.5 rung 2 MAJOR 1): ungated — keep. RATIFIED (spec
+        // erratum E5, owner-authorized 2026-11-25): the justification is NOT
+        // the Rust edge gate (it checks edge-type NAMES only, never endpoint
+        // shapes); the criterion is spec change-6's shape-level declaration,
+        // with ungated entities — where no shape can be declared — exempt
+        // from the drop by ruling.
         return Ok(Sso9ShapeVerdict::Declared);
     };
     if declared.is_empty() {
@@ -1903,11 +1906,14 @@ fn sso9_parent_shape_declared(
                 Ok(Sso9ShapeVerdict::Undeclared)
             }
         }
-        // An unresolvable endpoint: the shape cannot be verified — drop
-        // (status quo), counted separately. OPEN QUESTION (rung 3 / T3
-        // MINOR 3 / t93c): the live gate climbs endpoints by OWNING ENTITY
-        // and never reads okf_type NULLness; ~1,436 live rows carry NULL
-        // okf_type. Ruling pending.
+        // An unresolvable endpoint (row absent or okf_type/entity_type
+        // NULL — 1,436/2,420 live rows carry NULL okf_type): the shape
+        // cannot be verified, but the live gate climbs endpoints by OWNING
+        // ENTITY and never reads okf_type NULLness, so the edge is ADMITTED
+        // at runtime — RULING (Kurt, 2026-11-25, resolving the rung 3 /
+        // T3 MINOR 3 / t93c open question): KEEP and count, never drop
+        // (the migration's success path deletes the backup, so a wrong
+        // drop is irreversible).
         _ => Ok(Sso9ShapeVerdict::UnresolvedEndpoint),
     }
 }
@@ -1967,8 +1973,8 @@ fn sso9_plan_edges(
                         Sso9ShapeVerdict::Declared => plan.kept_declared_parent.push(e),
                         Sso9ShapeVerdict::Undeclared => plan.parent_drop.push(e),
                         Sso9ShapeVerdict::UnresolvedEndpoint => {
-                            plan.parent_drop.push(e);
-                            plan.parent_drop_unresolved_endpoint += 1;
+                            plan.kept_declared_parent.push(e);
+                            plan.kept_unresolved_endpoint += 1;
                         }
                     }
                 }
@@ -1998,8 +2004,8 @@ fn sso9_plan_edges(
                                 }
                                 Sso9ShapeVerdict::Undeclared => plan.parent_drop.push(e),
                                 Sso9ShapeVerdict::UnresolvedEndpoint => {
-                                    plan.parent_drop.push(e);
-                                    plan.parent_drop_unresolved_endpoint += 1;
+                                    plan.kept_declared_parent.push(e);
+                                    plan.kept_unresolved_endpoint += 1;
                                 }
                             }
                         }
@@ -2076,13 +2082,14 @@ fn sso9_retype_census(conn: &Connection) -> Result<()> {
     parts.push(format!(
         "planned_remap={} planned_service_drop={} planned_parent_family_drop={} \
          kept_about_organization={} kept_declared_about={} kept_declared_parent={} \
-         undispositioned={}",
+         kept_unresolved_endpoint={} undispositioned={}",
         plan.remap.len(),
         plan.service_drop.len(),
         plan.parent_drop.len(),
         plan.kept_about_org,
         plan.kept_declared_about,
         plan.kept_declared_parent.len(),
+        plan.kept_unresolved_endpoint,
         plan.undispositioned
     ));
     let pending_types: i64 = conn.query_row(
@@ -2239,12 +2246,12 @@ fn run_sso9_retype_txn(conn: &Connection, backup: &Path) -> Result<Option<Sso9Di
             "[ct::migrate] sso9 retype: parent-family edges dropped by type={} \
              (about->organization kept={}, declared about->sa/area kept={}, \
              parent edges kept as declared post-retype={}, \
-             parent drops with an unresolved endpoint={})",
+             unresolved-endpoint parent edges kept={})",
             sso9_fmt_map(&by_type),
             plan.kept_about_org,
             plan.kept_declared_about,
-            plan.kept_declared_parent.len(),
-            plan.parent_drop_unresolved_endpoint
+            plan.kept_declared_parent.len() - plan.kept_unresolved_endpoint,
+            plan.kept_unresolved_endpoint
         );
         // 5. everything else: untouched, counted.
         sso9_log!(
@@ -7133,6 +7140,47 @@ mod tests {
             None,
             "service drops are unconditional, not gated by manifests"
         );
+    }
+
+    #[test]
+    fn sso9_retype_null_endpoint_parent_edges_are_kept_and_counted() {
+        let (tmp, conn) = sso9_retype_brain();
+        // Owner ruling (Kurt, 2026-11-25, the t93c open question): the live
+        // gate climbs endpoints by OWNING ENTITY and never reads okf_type
+        // NULLness, so an edge whose endpoint type resolves to nothing is
+        // still ADMITTED at runtime — the re-type must KEEP it and log the
+        // count, not drop it (the success path deletes the backup, so a
+        // wrong drop is irreversible). Fixture: an author edge from a
+        // snapshot row to a NULL-okf_type entry, under the stock strict
+        // partition manifest — had the types resolved, the shape would be
+        // UNDECLARED there (author(decision, person)); the keep below is
+        // the NULL ruling, not the declared-shape rule. (The `about` arm
+        // shares this consult but cannot produce a NULL verdict today: a
+        // NULL target falls to `undispositioned` before the consult, and a
+        // snapshot source always resolves.)
+        conn.execute_batch(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, created_at, updated_at, okf_type, deleted_at, ontology_checked_at, heal_checked_at) VALUES
+               ('null_e','ent1','t','b',1,77,NULL,NULL,88,99);
+             INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at) VALUES
+               ('e_null_author','ent1','h1','null_e','author',1);",
+        )
+        .unwrap();
+        sso9_clear_log();
+        sso9_migrate(&conn, tmp.path()).unwrap();
+        assert_eq!(
+            etype(&conn, "e_null_author").as_deref(),
+            Some("author"),
+            "author edge with a NULL-typed endpoint must survive the re-type"
+        );
+        let log = sso9_log_lines();
+        assert!(
+            log.iter()
+                .any(|l| l.contains("unresolved-endpoint parent edges kept=1")),
+            "the kept NULL-endpoint count must be logged: {log:#?}"
+        );
+        // The undeclared publisher edge on the same brain still drops —
+        // the ruling widens NOTHING except the unresolved-endpoint class.
+        assert_eq!(etype(&conn, "e_publisher"), None);
     }
 
     #[test]

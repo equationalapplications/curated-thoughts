@@ -203,3 +203,26 @@ PR-A tests:
   `handoffFor` edge rows exist in `llm_wiki_edges` — census buckets will be
   near-zero on this install, but the machinery is required for upgraded
   DBs with stamped stock.
+- **E5 (change 6, ungated-keep — owner-authorized 2026-11-25):** an entity
+  with NO applicable strict manifest on either leg (or a strict manifest
+  whose edge vocabulary is empty) is UNGATED, not undeclared: the live gate
+  admits every shape there, so the re-type keeps parent-family edges on
+  ungated entities. This authorizes the implementation's ungated-keep
+  policy (the "pending the owner's ruling + spec erratum" note is resolved
+  by this erratum).
+- **E6 (change 6, NULL-endpoint keep — owner ruling 2026-11-25):** a
+  parent-family edge whose endpoint type resolves to nothing (endpoint row
+  absent, or `okf_type`/`entity_type` NULL — 1,436/2,420 live rows carry
+  NULL `okf_type`) is KEPT and its count logged, NOT dropped. The live gate
+  climbs endpoints by owning entity and never reads `okf_type` NULLness,
+  so such edges are admitted at runtime; the migration's success path
+  deletes the backup, making a wrong drop irreversible. Implementable today
+  only via the parent-family arm (`author`/`publisher`/`supersedes`): a
+  NULL `about` target falls to `undispositioned` before the consult, and a
+  snapshot source always resolves.
+- **E7 (malformed-manifest fail-closed — owner-confirmed 2026-11-25):** a
+  manifest-read error on the APPLICABLE partition manifest aborts the
+  re-type fail-closed, retaining the pre-migration backup until the corrupt
+  manifest is repaired. An owner-row manifest read error falls through with
+  a WARN, mirroring the gate's own Err leg (round-3 fold t93k). This trade
+  is owner-confirmed as intended.
