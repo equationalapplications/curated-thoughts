@@ -1,3 +1,19 @@
+## [3.16.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.15.0...v3.16.0) (2026-11-25)
+
+### Features
+
+* **engine9:** core-llm-wiki 8.0.2 -> 9.18.0 — verbatim DDL regen, two-block ddl_compat extractor, guard 9.18.0, V33 engine-mirror step ([15ba8ae](https://github.com/equationalapplications/curated-thoughts/commit/15ba8ae90e8c9a759801f812edb802b4d20b14f2))
+
+### Bug Fixes
+
+* **ddl_compat:** extract every execAsync block inside setupDatabase ([1f5b26f](https://github.com/equationalapplications/curated-thoughts/commit/1f5b26fc5c59f93b37963836b1007c53dd8cff55))
+* **engine9:** fold CodeRabbit round on d75ca75b — both MINORs ([cadb97e](https://github.com/equationalapplications/curated-thoughts/commit/cadb97ea45f23a96d6214867a4c1058cba13751d))
+* **engine9:** fold haiku-r1 — COMMIT routes through the rollback path; removals-only boundary is token-exact ([827a4b2](https://github.com/equationalapplications/curated-thoughts/commit/827a4b2d2a4e32a1f9c4039beb1907689084663e))
+* **engine9:** fold haiku-r3 — removals-only scan covers BOTH vector columns ([1749f91](https://github.com/equationalapplications/curated-thoughts/commit/1749f917319b21cf66cf665986ab44efb307abf2))
+* **engine9:** fold T10 gate findings — writer-inventory removals-only exemption + parity-test type aliases ([86b66eb](https://github.com/equationalapplications/curated-thoughts/commit/86b66eb5ee11504ede96fca9520d1295ac580579))
+* **engine9:** fold T4 round 2 (Fable delta) — 1 MAJOR + 6 MINOR + nits ([06a8c83](https://github.com/equationalapplications/curated-thoughts/commit/06a8c83020bd73d0f682cb71bed86debb523485c))
+* **engine9:** load node:sqlite via process.getBuiltinModule in the TS setup proof ([d75ca75](https://github.com/equationalapplications/curated-thoughts/commit/d75ca75b19572baafc946e375579de7a7e2718c1))
+
 ## [3.15.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.14.2...v3.15.0) (2026-11-25)
 
 ### Features
