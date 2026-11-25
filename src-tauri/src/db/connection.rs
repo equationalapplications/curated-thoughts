@@ -868,8 +868,13 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
     apply_sso9_migrations(conn)?;
     // V33 engine-9x mirror (PR-B plan Task 6, Q7/Q8): core-llm-wiki 9.18.0
     // engine v16–v19 columns, source store, vector-removal ledger + its
-    // triggers. Ungated shape on every open; stamp gated on V22. After the
-    // sso9 re-type so its UPDATEs never run under the new triggers.
+    // triggers. Ungated shape on every open; stamp gated on V22. Called
+    // right after `apply_sso9_migrations` so the mirror evaluates the
+    // fully-retyped shape. Ordering vs the re-type is NOT a correctness
+    // invariant: on deferred-V22 opens the re-type can run with the
+    // triggers already present, which is harmless because both triggers
+    // are column-scoped (`AFTER UPDATE OF deleted_at` / `AFTER DELETE`)
+    // and the re-type UPDATEs neither (T4 r1 M3).
     apply_engine9_mirror(conn)?;
 
     // Deposit-time attribution index (user-confirmation-queue Task 1, spec
@@ -1533,9 +1538,13 @@ fn engine9_missing(conn: &Connection) -> Result<(Vec<String>, Vec<String>)> {
 /// under the lock (the concurrent desktop/`--mcp` open race), apply,
 /// `COMMIT`; any error rolls back and propagates. The stamp is written on
 /// every open once `MAX(version) >= 22`, outside the add branch (V30
-/// reasoning). Placed right after `apply_sso9_migrations` (Q7/Q16): on an
-/// upgrading brain the sso9 re-type always runs before the ledger triggers
-/// exist.
+/// reasoning). Placed right after `apply_sso9_migrations` (Q7/Q16) to
+/// evaluate the mirror on the fully-retyped shape. Do NOT read a
+/// re-type-vs-triggers ordering invariant into that placement: on
+/// deferred-V22 opens the re-type runs with the ledger triggers already
+/// present, and that is safe because the triggers are column-scoped
+/// (`AFTER UPDATE OF deleted_at` / `AFTER DELETE`) while the re-type
+/// UPDATEs neither column and never hard-deletes entries (T4 r1 M3).
 fn apply_engine9_mirror(conn: &Connection) -> Result<()> {
     let (cols, objs) = engine9_missing(conn)?;
     if !cols.is_empty() || !objs.is_empty() {
@@ -8007,11 +8016,15 @@ mod tests {
     }
 
     /// The step adds what an 8.0.2-shape brain lacks even with the stamp
-    /// present (stamp is not a skip gate) — exercised on a raw fixture copy.
+    /// present (stamp is not a skip gate) — exercised on a raw fixture copy
+    /// pre-stamped with V33 (T4 r1 M6: a raw copy is V32-stamped, so
+    /// inserting 33 first is what actually pins "stamp is not a skip gate").
     #[test]
     fn engine9_mirror_body_adds_columns_tables_and_triggers_on_raw_fixture() {
         let (_tmp, conn) = engine9_fixture_copy();
         assert_eq!(engine9_master_count(&conn, "table", "llm_wiki_vector_removals"), 0);
+        conn.execute("INSERT INTO schema_version (version) VALUES (33);", [])
+            .unwrap();
         apply_engine9_mirror(&conn).unwrap();
         let entries = crate::db::ddl_compat::existing_columns(&conn, "llm_wiki_entries").unwrap();
         for col in ["source_pointer", "prior_valid_to", "derived_events"] {
@@ -8023,6 +8036,53 @@ mod tests {
         assert_eq!(engine9_master_count(&conn, "trigger", "llm_wiki_vector_removals_enqueue"), 1);
         assert_eq!(engine9_master_count(&conn, "trigger", "llm_wiki_vector_removals_hard_delete"), 1);
         assert!(engine9_v33_stamped(&conn), "V32 fixture is past V22 → stamps");
+    }
+
+    /// T4 r1 M2: V33's snapshot → BEGIN IMMEDIATE → re-inspect → apply
+    /// sequence is the only guard against the desktop/`--mcp` double-open
+    /// race. Four concurrent opens race `apply_engine9_mirror` on a raw
+    /// V32 fixture; every open must succeed (serialized by the write lock)
+    /// and the result must satisfy the 9.18.0 guard. The
+    /// COMMIT-failure rollback arm added in `827a4b2d` is not
+    /// deterministically forceable here (it needs a write lock stolen
+    /// between BEGIN and COMMIT); the concurrent serialization below is
+    /// the exercisable half.
+    #[test]
+    fn engine9_mirror_concurrent_opens_serialize_and_do_not_race() {
+        use std::sync::{Arc, Barrier};
+
+        let (tmp, _) = engine9_fixture_copy();
+        let path = tmp.path().join("brain.db");
+        const OPENERS: usize = 4;
+        let barrier = Arc::new(Barrier::new(OPENERS));
+        let handles: Vec<_> = (0..OPENERS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let conn = Connection::open(&path).unwrap();
+                    conn.execute_batch("PRAGMA busy_timeout = 5000;").unwrap();
+                    barrier.wait();
+                    apply_engine9_mirror(&conn).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle
+                .join()
+                .unwrap()
+                .expect("every concurrent open must mirror cleanly");
+        }
+        let conn = Connection::open(&path).unwrap();
+        crate::db::schema_guard::verify_llm_wiki_schema(&conn)
+            .expect("guard must accept the concurrently upgraded database");
+        for t in [
+            "llm_wiki_source_documents",
+            "llm_wiki_source_passages",
+            "llm_wiki_vector_removals",
+        ] {
+            assert_eq!(engine9_master_count(&conn, "table", t), 1, "{t} created once");
+        }
     }
 
     // ── engine-9x PR-B Task 7: helper objects + fresh/migrated parity ─────

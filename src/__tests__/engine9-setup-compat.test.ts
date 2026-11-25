@@ -21,10 +21,12 @@ import { resolve } from "node:path";
 // builtin-loader plugin does not recognize `node:sqlite` for client-environment
 // (jsdom) externalization and fails the transform with "Cannot bundle Node.js
 // built-in node:sqlite" on a cold cache. `getBuiltinModule` is a runtime call
-// the bundler never sees (Node >= 22.3).
-const sqliteModule = process.getBuiltinModule("node:sqlite");
-const DatabaseSync = sqliteModule.DatabaseSync;
-type DatabaseSync = InstanceType<typeof DatabaseSync>;
+// the bundler never sees. Optional + skipped on Node < 22.5 (or 22.5–22.12
+// without --experimental-sqlite) where the module is absent (T4 r1 M7); CI
+// pins Node 22 latest, which has it unflagged.
+const sqliteModule = process.getBuiltinModule?.("node:sqlite");
+const DatabaseSync = sqliteModule?.DatabaseSync;
+type DatabaseSync = InstanceType<NonNullable<typeof DatabaseSync>>;
 import { createWiki } from "@equationalapplications/core-llm-wiki";
 import type { SQLiteAdapter } from "@equationalapplications/core-llm-wiki";
 
@@ -119,7 +121,11 @@ function engineVersion(db: DatabaseSync): string | undefined {
   return row?.value;
 }
 
-describe("core-llm-wiki 9.18.0 setup() over the Rust-chain (V33-migrated) schema", () => {
+// Skipped (not failed) on Node runtimes without node:sqlite — see the
+// module doc above (T4 r1 M7).
+describe.skipIf(!DatabaseSync)(
+    "core-llm-wiki 9.18.0 setup() over the Rust-chain (V33-migrated) schema",
+    () => {
   it("completes from the 8.0.2-era engine version (v16–v19 run their guards)", async () => {
     const db = rustChainDb();
     db.prepare("INSERT INTO llm_wiki_meta (key, value) VALUES ('schema_version', ?)").run(

@@ -92,13 +92,27 @@ pub fn package_ddl_matches_rust() -> Result<(), String> {
     let package_stmts = extract_setup_database_ddl(&js, LLM_WIKI_PREFIX);
     let rust_stmts = split_ddl_statements(LLM_WIKI_PACKAGE_DDL);
 
+    // Order-SENSITIVE comparison: trigger bodies fragment into
+    // order-dependent statements (T4 r1 M1 — swapping the enqueue
+    // trigger's DELETE/INSERT or moving a body between triggers must
+    // FAIL this gate). The extractor returns dist order and the const is
+    // verbatim dist order, so identity holds when there is no drift.
+    if package_stmts == rust_stmts {
+        return Ok(());
+    }
+
+    // Drift report uses sorted sets so a pure-order mismatch reads as an
+    // explicit order complaint instead of a confusing two-sided diff.
     let mut package_sorted = package_stmts.clone();
     package_sorted.sort();
     let mut rust_sorted = rust_stmts.clone();
     rust_sorted.sort();
-
     if package_sorted == rust_sorted {
-        return Ok(());
+        return Err("DDL drift: statement ORDER differs between \
+                    Rust okf_ddl::LLM_WIKI_PACKAGE_DDL and the core-llm-wiki \
+                    package while the statement SETS match. Trigger bodies are \
+                    order-sensitive — restore the dist order."
+            .to_string());
     }
 
     let only_package: Vec<_> = package_sorted

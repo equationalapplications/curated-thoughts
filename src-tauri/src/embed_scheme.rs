@@ -521,13 +521,17 @@ mod tests {
     }
 
     /// Removals are not landings: true when EVERY occurrence of EITHER
-    /// vector column (`embedding_blob`, `embedding`) in `stmt` is
-    /// `<column> = NULL` at a token boundary. Such a statement can only
-    /// remove a vector (e.g. the package-owned confirmed-removal trigger
-    /// body inside the verbatim `LLM_WIKI_PACKAGE_DDL` — spec engine-9x
-    /// §3 PR-B step 1 forbids hand edits, so no CT stamp can be inside it).
-    /// Any value write of either column (`embedding = ?`, `NULLIF(...)`,
-    /// `NULL_integer`) makes this false and the statement a landing.
+    /// vector column (`embedding_blob`, `embedding`) in `stmt` is a bare
+    /// `<column> = NULL` assignment (assignment ends at the boundary).
+    /// Scope: this exemption applies to ANY production statement that only
+    /// NULLs vector columns — today that is the confirmed-removal purge
+    /// statement in the resurrect-trigger format string inside
+    /// `apply_llm_wiki_resurrect_trigger` (`okf_ddl.rs`, hand-written,
+    /// deliberately outside the verbatim `LLM_WIKI_PACKAGE_DDL`) — NOT a
+    /// statement inside the const itself; the const contains no such
+    /// literal. Any value write of either column (`embedding = ?`,
+    /// `NULLIF(...)`, `NULL_integer`, `NULL IS NULL`) makes this false and
+    /// the statement a landing.
     fn removals_only_statement(stmt: &str) -> bool {
         for column in ["embedding_blob", "embedding"] {
             let mut scan = stmt;

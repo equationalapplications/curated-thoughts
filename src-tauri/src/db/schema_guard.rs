@@ -409,11 +409,23 @@ mod tests {
         .unwrap();
         let db = crate::db::connection::AppDb::open_with_config(&tmp.path().join("brain.db"), &config)
             .expect("fresh rooted brain opens (migrate + every-open guard)");
-        let max: i64 = db
-            .0
-            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
-            .unwrap();
-        assert!(max >= 32, "rooted fresh brain stamps the full ladder, got V{max}");
+        let stamped: Vec<i64> = {
+            let mut s = db
+                .0
+                .prepare("SELECT version FROM schema_version WHERE version IN (31, 32, 33)")
+                .unwrap();
+            let rows = s
+                .query_map([], |r| r.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        // Membership, not MAX: `>= 32` would pass even if 31/32 never stamped
+        // (T4 r1 M6).
+        for v in [31, 32, 33] {
+            assert!(stamped.contains(&v), "rooted fresh brain must stamp V{v}");
+        }
         verify_llm_wiki_schema(&db.0).expect("fresh rooted brain matches the 9.18.0 guard");
     }
 
