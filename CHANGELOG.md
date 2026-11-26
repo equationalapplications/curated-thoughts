@@ -1,3 +1,13 @@
+## [3.17.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.4...v3.17.0) (2026-11-26)
+
+### Features
+
+* **deposit:** record blocked_by_privacy_mode in kick ledger error column ([#362](https://github.com/equationalapplications/curated-thoughts/issues/362)) ([ebdbf8b](https://github.com/equationalapplications/curated-thoughts/commit/ebdbf8b8cf556f17d18147b1b4d2130aae0f0550))
+
+### Bug Fixes
+
+* **privacy:** make Strict card copy honest about embeddings ([024fcf9](https://github.com/equationalapplications/curated-thoughts/commit/024fcf92ec2d6b0ee379537dac15b4399f50b380))
+
 ## [3.16.4](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.3...v3.16.4) (2026-11-26)
 
 ### Bug Fixes
