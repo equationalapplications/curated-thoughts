@@ -272,11 +272,14 @@ jobs:
         if: matrix.platform != 'macos-latest'
         id: ctbuild
         shell: bash
-        env:
-          # NOTE (xhigh): no signing secrets here — the ct step runs a cargo
-          # build whose build.rs scripts must never see AZURE_CLIENT_SECRET.
-          # Signing lives in the dedicated "Sign Windows ct CLI + MCP sidecar"
-          # step below.
+        # NOTE (xhigh): no signing secrets in this step — the ct step runs a
+        # cargo build whose build.rs scripts must never see AZURE_CLIENT_SECRET.
+        # Signing lives in the dedicated "Sign Windows ct CLI + MCP sidecar"
+        # step below. (The former `env:` block here held only these comments
+        # after the secret-scope split — a keyless env: is a workflow-parse
+        # error that made every dispatch of this workflow fail with HTTP 422
+        # and every release since v3.14.1 ship zero assets. Comments live at
+        # step level now.)
         run: |
           set -euo pipefail
           cargo build --release -p curated-thoughts-tools --bin ct
