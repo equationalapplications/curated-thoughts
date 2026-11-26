@@ -1,6 +1,6 @@
 # Plan: #381 — Run 2 confirmations hook on every rooted `start_pipeline`
 
-Status: Draft (T3 review in progress)
+Status: Draft (T3 CONVERGED — awaiting owner plan approval)
 Spec: `specs/issue-381-confirmations-hook-restart/spec.md` — APPROVED by
 Kurt 2026-11-25 (D1: central install, rooted only). Owner check folded:
 `read_lines` returns `Ok(Vec::new())` on a missing ledger
@@ -81,6 +81,9 @@ pub, `mod.rs:1367–1368`) so no worker thread outlives the temp database.
    ledger: call the installed hook on a connection; assert `Ok` and
    unchanged row state (owner check from the approval;
    `read_lines` returns `Ok(Vec::new())`, `stated_ledger.rs:128`).
+6. Implementer note (r2 APPROVE): tests 3 and 4 must create the schema
+   with `open_app_db` before seeding, as the harness does at
+   `mod.rs:1852` — the seeded fact row needs tables to land in.
 
 ### Task 3 — gates
 
