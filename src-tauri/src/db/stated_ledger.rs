@@ -643,6 +643,41 @@ mod tests {
     }
 
     #[test]
+    fn apply_stored_confirmations_zero_byte_ledger_is_ok_zero() {
+        // Spec §C.2: the empty-ledger no-scan is the early return before the
+        // transaction and the walk — `Ok(0)`, nothing stamped, no panic.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir_all(root.join(STATED_DIR)).unwrap();
+        std::fs::write(root.join(STATED_DIR).join(CONFIRMATIONS_LEDGER), "").unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        seed_fact(&conn, "f1", "Alpha", "Alpha body");
+        let applied = apply_stored_confirmations(&conn, &root).unwrap();
+        assert_eq!(applied, 0);
+        let st: String = conn
+            .query_row(
+                "SELECT source_type FROM llm_wiki_entries WHERE id='f1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(st, "user_confirmed");
+    }
+
+    #[test]
+    fn apply_stored_confirmations_blank_lines_only_ledger_is_ok_zero() {
+        // Same early return: blank/whitespace lines parse to no confirmations.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir_all(root.join(STATED_DIR)).unwrap();
+        std::fs::write(root.join(STATED_DIR).join(CONFIRMATIONS_LEDGER), "\n\n  \n").unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        seed_fact(&conn, "f1", "Alpha", "Alpha body");
+        let applied = apply_stored_confirmations(&conn, &root).unwrap();
+        assert_eq!(applied, 0);
+    }
+
+    #[test]
     fn confirmation_jsonl_append_and_rebuild_roundtrip() {
         // scratch brain + scratch vault root; record_confirmation twice; delete
         // brain rows; rebuild_rederive re-inserts; second rebuild is idempotent.

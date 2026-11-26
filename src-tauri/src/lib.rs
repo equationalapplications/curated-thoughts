@@ -2132,11 +2132,20 @@ where
         }
         Err(e) => {
             // Not permanent: with the stamp gone the open-time gate retries.
-            let _ = conn.execute(
+            // The delete's failure is propagated into the error text (T4 m1):
+            // the failures are correlated — a rederive that failed on a
+            // locked database will likely fail the DELETE too — and a stale
+            // stamp behind a "stamp cleared" log line would hide a permanent
+            // residue.
+            match conn.execute(
                 "DELETE FROM llm_wiki_meta WHERE key='stated_ledger_rederived'",
                 [],
-            );
-            Err(format!("{e:#}"))
+            ) {
+                Ok(_) => Err(format!("{e:#}")),
+                Err(del) => Err(format!(
+                    "{e:#}; ALSO the stamp delete failed ({del:#}) — the next open will NOT retry"
+                )),
+            }
         }
     }
 }
@@ -2307,6 +2316,15 @@ async fn switch_vault(
             db::restore_sync::preserve_outgoing_wal(&db_path)
                 .map_err(|e| format!("preserving the outgoing -wal failed: {e}"))?;
             remove_sqlite_sidecars(&db_path);
+            // §2-A structural retry (T4 M2): clear the rederive stamp from
+            // the STAGED backup before the rename, so whichever open comes
+            // next — the happy-path reopen, a failed-step recovery reopen,
+            // or the startup reconciliation after a crash mid-install —
+            // finds no stamp and rederives from the new root. This runs
+            // BEFORE the point of no return: a failed clear fails the
+            // switch with the outgoing database still in place.
+            db::restore_sync::clear_staged_rederive_stamp(&staged)
+                .map_err(|e| format!("clearing the rederive stamp from the staged backup failed: {e}"))?;
             db::restore_sync::commit_staged_backup(&staged, &db_path)
                 .map_err(|e| format!("installing the backup failed: {e}"))?;
             // The rename is the point of no return — set before the dir
@@ -2378,8 +2396,7 @@ async fn switch_vault(
                     pipeline::write_error_log(
                         Some(&canonical_new_root),
                         &format!(
-                            "[ct::switch] stated-ledger rederive after restore failed: {e}; \
-                             stamp cleared, the next open retries"
+                            "[ct::switch] stated-ledger rederive after restore failed: {e}"
                         ),
                     );
                 }

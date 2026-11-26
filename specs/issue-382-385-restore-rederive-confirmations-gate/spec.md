@@ -72,6 +72,16 @@ worker or handle.
 
 ### A — restore re-derives unconditionally (recommended; Q1)
 
+**Structural retry (T4 M2):** the rederive stamp is cleared from the STAGED
+backup before the install rename (`restore_sync::clear_staged_rederive_stamp`,
+called from the switch's restore arm before `commit_staged_backup`).
+Whichever open comes next — the happy-path reopen, a failed-step recovery
+reopen (failures after the install rename keep the installed backup and
+align the config), or the startup reconciliation after a crash mid-install —
+finds no stamp and rederives from the root the config names. A failed clear
+fails the switch before the point of no return, with the outgoing database
+still in place.
+
 At restore completion — after `commit_staged_backup` publishes the captured
 backup and the config is aligned to the new root, before/at the reopen (the
 plan's Task 1 ordering is the authority; "before/at the reopen" here means
@@ -148,10 +158,7 @@ msg 1575566029889867837, 2026-11-26).
   program order: a worker's entry writes precede its `mark_dirty`, so
   against a fire that consumed the flag before its apply, either the
   apply's SELECT sees the writes or the mark lands after the consume and
-  survives to the next fire. (An earlier single-writer framing — "no Ingest
-  completion can interleave with an in-flight apply" — was false once
-  supersession exists; rung 3 of the stage-close ladder supplied the
-  interleaving and this fix; rung 4 supplied the slot-poison recovery.)
+  survives to the next fire.
   Regression tests:
   `mark_during_apply_survives_the_clear`,
   `panicking_apply_with_unchanged_ledger_rearms_dirty`,
@@ -174,19 +181,27 @@ msg 1575566029889867837, 2026-11-26).
 1. Extract `seed_confirmation_ledger(root, title, body)` and use it at both
    duplicated sites (`pipeline/mod.rs:2045-2056`, `:2076-2087`).
 2. New pins through `apply_stored_confirmations`: zero-byte ledger file and
-   blank-lines-only ledger file → `Ok(0)`, no panic, no wiki scan (same
-   `read_lines` branch as the pinned missing-file case).
+   blank-lines-only ledger file → `Ok(0)`, no panic — and no wiki scan, which
+   is delivered by the empty-ledger early return that precedes the
+   transaction and the walk (`stated_ledger.rs`, `apply_stored_confirmations`).
+   The pins live in `stated_ledger.rs`'s test module (the no-scan guarantee's
+   home); `pipeline/mod.rs` additionally pins the hook seam: an installed
+   hook over an empty ledger stamps nothing.
 3. `install_stated_confirmations` `pub` → private (`fn`); sole caller
    `:1468` is in-module; repo-wide grep shows no test/bench callers.
 
 ## 3. Files touched
 
-1. `src-tauri/src/lib.rs` — restore arm: rederive call + unstamp-on-failure.
-2. `src-tauri/src/pipeline/mod.rs` — hook memo gate; seed helper; visibility
+1. `src-tauri/src/lib.rs` — restore arm: rederive call + unstamp-on-failure;
+   staged-backup stamp clear before the install rename (§2-A structural
+   retry).
+2. `src-tauri/src/db/restore_sync.rs` — `clear_staged_rederive_stamp` (the
+   switch call site + test; no change to the install rename itself).
+3. `src-tauri/src/pipeline/mod.rs` — hook memo gate; seed helper; visibility
    narrowing; B-section unit tests.
-3. `src-tauri/src/db/switch_pin_tests.rs` — moved-root restore pin; rederive
-   failure → unstamp → open-retries pin.
-4. `src-tauri/src/db/stated_ledger.rs` — zero-byte/blank-line pins (test
+4. `src-tauri/src/db/switch_pin_tests.rs` — moved-root restore pin; rederive
+   failure → unstamp → open-retries pin; same-root restore pin.
+5. `src-tauri/src/db/stated_ledger.rs` — zero-byte/blank-line pins (test
    module only; no prod change expected).
 
 ## 4. Test plan
@@ -199,9 +214,10 @@ msg 1575566029889867837, 2026-11-26).
    and rederive ran (log/report parity, not key churn).
 3. **Failure-unstamp pin:** inject rederive failure at restore; assert stamp
    absent; reopen → open-time gate rederives (`connection.rs:905-960`).
-4. **Memo gate units:** hook with unchanged ledger → scan skipped (assert via
-   a counting seam); ledger append → scan runs, memo updated; first fire →
-   scan runs.
+4. **Dual-gate units:** hook with unchanged ledger and no entries-written
+   flag → scan skipped; entries-written flag set (worker job completed) or
+   ledger append → scan runs, memo/flag updated per §2-B; first fire → scan
+   runs.
 5. **Hygiene pins:** zero-byte + blank-line ledgers → `Ok(0)`; helper dedupe
    compiles both tests; `install_stated_confirmations` no longer visible
    outside the module (compile-enforced).

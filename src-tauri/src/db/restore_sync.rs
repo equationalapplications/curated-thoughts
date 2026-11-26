@@ -275,6 +275,50 @@ pub fn stage_backup(backup_path: &Path, db_path: &Path) -> Result<PathBuf> {
     Ok(staged)
 }
 
+/// Delete the stated-ledger rederive stamp from the STAGED backup, before the
+/// install rename. This makes the restore's rederive structural (§2-A, T4 M2):
+/// whichever open comes next — the happy-path reopen, a failed-step recovery
+/// reopen (`restore_installed` is already true past the rename), or the
+/// startup reconciliation after a crash mid-install — finds no stamp and
+/// rederives from the root the config names. Callers run this BEFORE
+/// [`commit_staged_backup`], so a failed clear fails the switch while the
+/// outgoing database is still in place. "No such table" is success: a
+/// database without the meta table has no stamp either. The delete is
+/// checkpointed and fsynced so the rename cannot publish a half-journaled
+/// file.
+pub fn clear_staged_rederive_stamp(staged: &Path) -> Result<()> {
+    let conn = rusqlite::Connection::open(staged)
+        .with_context(|| format!("open staged backup {} for the stamp clear", staged.display()))?;
+    let cleared = conn.execute(
+        "DELETE FROM llm_wiki_meta WHERE key = 'stated_ledger_rederived'",
+        [],
+    );
+    match cleared {
+        Ok(_) => {}
+        Err(e) => {
+            if e.to_string().contains("no such table") {
+                // No meta table ⇒ no stamp to clear; the post-install open
+                // rederive is already unconditional for this database.
+            } else {
+                return Err(e).with_context(|| {
+                    format!("clear stated_ledger_rederived from {}", staged.display())
+                });
+            }
+        }
+    }
+    // Fold any WAL/journal content into the main file and fsync it: the
+    // install is a rename, so the staged main file must stand alone.
+    let _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", []);
+    drop(conn);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(staged)
+        .with_context(|| format!("reopen {} to fsync after the stamp clear", staged.display()))?;
+    file.sync_all()
+        .with_context(|| format!("fsync {} after the stamp clear", staged.display()))?;
+    Ok(())
+}
+
 /// Record, durably and before anything destructive happens, that an install
 /// is in flight. See [`install_marker_path`] for how recovery reads it.
 pub fn write_install_marker(db_path: &Path) -> Result<()> {
