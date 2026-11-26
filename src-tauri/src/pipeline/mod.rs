@@ -1502,7 +1502,11 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
 /// the 2026-11-26 owner ruling): the scan runs on the first fire, when the
 /// ledger file's stat changed, OR when the live `llm_wiki_entries` table
 /// changed — detected by the caller-supplied entries watermark
-/// (`stated_ledger::entries_watermark`), which moves for EVERY writer
+/// (`stated_ledger::entries_watermark`), which moves for every insert and
+/// delete — two bounded miss classes are accepted (T4 n1): in-place
+/// title/body rewrites and a hard-delete-plus-insert that reuses the rowid;
+/// such a crossing may skip once and the miss heals on the next writer or
+/// ledger append (see the field doc below for the full statement).
 /// (worker ingests as well as out-of-worker deposits, approvals, and
 /// synthesis). Memoized state survives respawns; the hook is the only
 /// caller.
@@ -2378,11 +2382,14 @@ mod watchdog_integration_tests {
                 let slot: ConfirmationsSlot = Arc::new(std::sync::Mutex::new(None));
                 let gate = Arc::new(ConfirmationsGate::new());
                 let applies = Arc::new(AtomicUsize::new(0));
+                let hook_calls = Arc::new(AtomicUsize::new(0));
                 let hook_gate = gate.clone();
                 {
                     let applies = applies.clone();
+                    let hook_calls = hook_calls.clone();
                     let ledger = ledger.clone();
                     *slot.lock().unwrap() = Some(Box::new(move |conn| {
+                        hook_calls.fetch_add(1, Ordering::SeqCst);
                         let watermark = crate::db::stated_ledger::entries_watermark(conn)?;
                         hook_gate.fire(&ledger, watermark, || {
                             applies.fetch_add(1, Ordering::SeqCst);
@@ -2420,14 +2427,24 @@ mod watchdog_integration_tests {
                     "the apply never ran on the first crossing"
                 );
 
-                // Crossing 2: the SAME unchanged bytes — a no-op job. Neither
-                // trigger moved, so the apply must NOT run again.
+                // Crossing 2: the SAME unchanged bytes — a no-op job. The
+                // hook must fire (it is invoked on every crossing) but its
+                // apply must be SKIPPED: neither the ledger stat nor the
+                // entries watermark moved.
                 tx.send(PipelineJob::ingest_counted(
                     doc.to_string_lossy().to_string(),
                 ))
                 .unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(4000));
-                eprintln!("[diag] final applies={}", applies.load(Ordering::SeqCst));
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while hook_calls.load(Ordering::SeqCst) < 2
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                assert!(
+                    hook_calls.load(Ordering::SeqCst) >= 2,
+                    "the hook never fired on the second crossing"
+                );
                 assert_eq!(
                     applies.load(Ordering::SeqCst),
                     1,

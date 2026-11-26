@@ -453,7 +453,8 @@ pub fn rebuild_rederive(conn: &Connection, vault_root: &Path) -> Result<RebuildR
 /// Watermark of the live entries table: `(row_count, max_rowid)` over the
 /// rows the confirmations apply can stamp (`deleted_at IS NULL`, the same
 /// predicate as `apply_confirmations_by_hash`'s SELECT). Read before the
-/// apply and memoized by the gate: ANY writer — the worker's ingests as well
+/// apply and memoized by the gate: every insert and delete moves it — the
+/// worker's ingests as well
 /// as out-of-worker deposits, approvals, and synthesis — moves it, so the
 /// next drain crossing rescans (Q2 refinement, owner ruling 2026-11-26: the
 /// watermark replaces the per-job dirty flag, which was set unconditionally

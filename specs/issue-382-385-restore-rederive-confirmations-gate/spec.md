@@ -1,6 +1,6 @@
 # Spec: moved-root restore rederive + confirmations-leg idle-cost gate — issues #382 + #385
 
-**Status:** Reviewed — owner approved 2026-11-26 (Q1 = 1, Q2 = 2, Discord msg 1575566029889867837) · **Branch:** `fix/382-385-restore-rederive-confirmations-gate`
+**Status:** Implemented — owner approved 2026-11-26 (Q1 = 1, Q2 = 2 + Q2 refinement, Discord msg 1575566029889867837) · **Branch:** `fix/382-385-restore-rederive-confirmations-gate`
 **Lane:** PR-2 of the 2026-11-26 three-lane ruling (decision log D1) — one PR, one spec dir, three sections (A = #382, B = #385 m1, C = #385 m4).
 **Recon:** every pin below verified against `211c1e79` (recon report + controller re-check); line cites refer to that base.
 
@@ -145,7 +145,11 @@ msg 1575566029889867837, 2026-11-26).
   OUTSIDE the worker (deposits, approvals, synthesis — ten modules insert
   into `llm_wiki_entries`). The watermark covers every writer: any insert
   or delete moves row_count/rowid and forces a rescan on the next drain
-  crossing, so the skip branch is real and the scan never under-runs.
+  crossing, so the skip branch is real. Two bounded miss classes are accepted
+  (T4 n1): in-place title/body rewrites and a hard-delete followed by an
+  insert that reuses the rowid move neither count nor rowid — such a crossing
+  may skip once, and the miss heals on the next insert, delete, ledger
+  append, or restart (the memo is in-process).
   Nothing is consumed, so nothing can be lost to concurrency: a failed or
   panicking apply leaves the memo at its pre-read pair and the next fire
   retries. (History: the interim per-job flag designs — unconditional mark,
