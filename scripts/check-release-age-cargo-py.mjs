@@ -267,10 +267,46 @@ export function entriesFromPoetryLock(raw, problems = []) {
 // Unpinned or otherwise unparseable non-option lines are FAIL-CLOSED problems:
 // they cannot be age-checked, so they fail the gate instead of passing it.
 // Backslash line continuations are joined before parsing.
-export function entriesFromRequirements(raw, problems = []) {
+//
+// pip's requirement-file long options (pip 25.1.1 SUPPORTED_OPTIONS +
+// SUPPORTED_OPTIONS_REQ). optparse accepts an unambiguous prefix of any of
+// these (`--index-u` == `--index-url`), so tokens are canonicalized before
+// classification. This set is a superset of the fail-closed options below,
+// which keeps the mapping exact: a token pip accepts resolves to the same
+// option here, and a token ambiguous in pip stays unmapped (pip would reject
+// the line anyway). Keep in sync with the installed pip's option universe.
+const PIP_REQ_FILE_LONG_OPTS = new Set([
+  "config-settings", "constraint", "editable", "extra-index-url", "find-links",
+  "global-option", "hash", "index-url", "no-binary", "no-index", "only-binary",
+  "pre", "prefer-binary", "pypi-url", "require-hashes", "requirement",
+  "trusted-host", "use-feature",
+])
+
+export function canonicalLongOption(tok) {
+  const m = tok.match(/^(--[^\s=]+)(=.*)?$/)
+  if (!m) return tok
+  const name = m[1]
+  if (PIP_REQ_FILE_LONG_OPTS.has(name)) return tok
+  const bare = name.slice(2)
+  const cands = [...PIP_REQ_FILE_LONG_OPTS].filter((o) => o.startsWith(bare))
+  return cands.length === 1 ? `--${cands[0]}${m[2] ?? ""}` : tok
+}
+
+const UNRESOLVED_INCLUDE_PREFIX = "unresolved include directive (fail-closed; pins inside are not age-checked): "
+
+function unresolvedIncludeProblem(lineRaw) {
+  return `${UNRESOLVED_INCLUDE_PREFIX}${lineRaw.trim()}`
+}
+
+export function entriesFromRequirements(raw, problems = [], opts = {}) {
   const entries = []
-  // Join continuations like pip: a comment line is never continued (and
-  // never swallows the following line); it is emitted as-is, stripped later.
+  // Join continuations exactly like pip's join_lines: fragments are
+  // concatenated with NO inserted separator (pip builds the joined line with
+  // "".join), so a backslash-split option name (`--index-\` + `url ...`)
+  // rejoins and is still scanned; the whitespace before the backslash is
+  // preserved verbatim, which keeps ordinary continuations token-identical.
+  // A comment line is never continued (pip prepends the space itself) and
+  // never swallows the following line.
   const lines = []
   let buf = ""
   for (const l of raw.split(/\r?\n/)) {
@@ -279,9 +315,9 @@ export function entriesFromRequirements(raw, problems = []) {
       lines.push(buf ? `${buf} ${l}` : l)
       buf = ""
     } else if (l.endsWith("\\")) {
-      buf += `${buf ? " " : ""}${l.slice(0, -1)}`
+      buf += l.slice(0, -1)
     } else {
-      lines.push(buf ? `${buf} ${l}` : l)
+      lines.push(buf ? buf + l : l)
       buf = ""
     }
   }
@@ -295,26 +331,42 @@ export function entriesFromRequirements(raw, problems = []) {
       // (-e/--editable, git+), a find-links source, --trusted-host (bypasses
       // TLS verification), or --no-index (local/unverifiable sources only)
       // cannot be age-checked from a version pin. Other option lines are
-      // skipped. Include/constraint directives
-      // (-r/--requirement/-c/--constraint) pull in files this checker does not
-      // read, so they fail closed too. Short options also match attached
-      // arguments (-ihttps://..., pip's optparse treats -iX as -i X).
+      // skipped. Tokens are canonicalized first, because pip's optparse
+      // accepts unambiguous long-option abbreviations (--index-u is
+      // --index-url). Short options also match attached arguments
+      // (-ihttps://..., pip's optparse treats -iX as -i X).
       // The line is tokenized on whitespace and EVERY token is tested, so a
       // benign leading option (`--pre --index-url ...`) cannot mask a later
       // one. Matched options are recorded by canonical name in a
       // machine-readable slot: `fail-closed option line (matched: -i,--index-url)`.
       const matched = new Set()
-      let include = false
-      for (const tok of line.split(/\s+/)) {
-        if (/^(--requirement|--constraint)(=|$)/.test(tok) || /^-[rc]/.test(tok)) include = true
+      let includeArg // undefined: no directive; null: arg missing; string: arg
+      const toks = line.split(/\s+/)
+      for (let i = 0; i < toks.length; i++) {
+        const tok = canonicalLongOption(toks[i])
+        if (/^(--requirement|--constraint)(=|$)/.test(tok) || /^-[rc]/.test(tok)) {
+          if (includeArg === undefined) {
+            const eq = tok.indexOf("=")
+            if (eq >= 0) includeArg = tok.slice(eq + 1)
+            else if (/^(--requirement|--constraint|-r|-c)$/.test(tok)) includeArg = toks[i + 1] ?? null
+            else includeArg = tok.slice(2) // attached: -rpath / -cpath
+          }
+        }
         else if (/^(--index-url|--extra-index-url|--find-links|--trusted-host)(=|$)/.test(tok)) matched.add(tok.split("=")[0])
         else if (tok === "--no-index") matched.add("--no-index")
         else if (/^--editable(=|$)/.test(tok)) matched.add("--editable")
         else if (/^-[ife]/.test(tok)) matched.add(tok.slice(0, 2))
       }
       if (/git\+/.test(line)) matched.add("git+")
-      if (include) {
-        problems.push(`unresolved include directive (fail-closed; pins inside are not age-checked): ${lineRaw.trim()}`)
+      if (includeArg !== undefined) {
+        // Include/constraint directives are normally fail-closed: the pins
+        // inside are not read here. The CLI's include-graph walk passes
+        // `opts.resolveInclude`, which takes over entirely: it either resolves
+        // the target (and audits its pins itself) or pushes the unresolved
+        // problem itself — so the parser never double-pushes when a resolver
+        // is present. Without a resolver, every directive fails closed.
+        const handled = opts.resolveInclude ? opts.resolveInclude(includeArg, lineRaw.trim()) : false
+        if (!handled) problems.push(unresolvedIncludeProblem(lineRaw))
       }
       if (matched.size > 0) {
         problems.push(
@@ -333,13 +385,74 @@ export function entriesFromRequirements(raw, problems = []) {
   return entries
 }
 
-export function entriesForFile(path, raw, problems = []) {
+export function entriesForFile(path, raw, problems = [], opts = {}) {
   const base = path.split("/").pop()
   if (base === "Cargo.lock") return entriesFromCargoLock(raw)
   if (base === "uv.lock") return entriesFromUvLock(raw)
   if (base === "poetry.lock") return entriesFromPoetryLock(raw, problems)
-  if (/^requirements.*\.txt$/.test(base)) return entriesFromRequirements(raw, problems)
+  if (/^requirements.*\.txt$/.test(base)) return entriesFromRequirements(raw, problems, opts)
   throw new Error(`Unsupported lockfile format: ${path}`)
+}
+
+// Walk a requirements-file include graph: parse the root lockfile, then each
+// `-r`/`-c` target (resolved relative to the INCLUDING file's directory,
+// recursively and cycle-safe), so a pin change inside an included file is
+// delta-tracked and age-checked exactly like a direct pin. `rawAt(absPath)`
+// returns the target's content or null when it cannot be read on this side
+// (absent, unreadable). Directive args that are not plain relative/absolute
+// paths (URLs, env-var expressions, `~`) are unresolvable and fail closed.
+//
+// When a resolver callback is present the parser delegates directive handling
+// entirely (see entriesFromRequirements): this walker pushes the unresolved
+// problem itself for unresolvable args, and for a target ABSENT on this side
+// it records the directive line instead — the delta mode mirrors those into
+// the base problem multiset so an inherited-but-unreadable directive counts
+// as inherited, not new (and a target present at head is simply audited).
+// `absentPushes` is true for the head side (an absent target is a new,
+// genuinely broken state there) and false for base.
+function graphEntries(rootAbs, rootRaw, rawAt, problems, absentPushes) {
+  const entries = []
+  const absentDirectiveLines = []
+  const visited = new Set()
+  let currentAbs = ""
+  const opts = {
+    resolveInclude: (arg, lineRaw) => {
+      const stripped = typeof arg === "string" ? arg.replace(/^['"]|['"]$/g, "") : ""
+      if (!stripped || /^(~|[a-z][a-z0-9+.-]*:)/i.test(stripped) || /[$%]/.test(stripped)) {
+        problems.push(unresolvedIncludeProblem(lineRaw))
+        return true
+      }
+      // Includes resolve relative to the INCLUDING file's directory (pip's
+      // rule); parsing is synchronous, so currentAbs is the file being read.
+      const target = path.resolve(path.dirname(currentAbs), stripped)
+      const tRaw = rawAt(target)
+      if (tRaw === null) {
+        absentDirectiveLines.push(lineRaw)
+        if (absentPushes) problems.push(unresolvedIncludeProblem(lineRaw))
+        return true
+      }
+      queue.push({ abs: target, raw: tRaw })
+      return true
+    },
+  }
+  const queue = [{ abs: path.resolve(rootAbs), raw: rootRaw }]
+  while (queue.length > 0) {
+    const { abs, raw } = queue.shift()
+    if (visited.has(abs)) continue
+    visited.add(abs)
+    if (visited.size === 1 && !/^requirements.*\.txt$/.test(path.basename(abs))) {
+      // Non-requirements root (Cargo.lock, uv.lock, poetry.lock): the format
+      // dispatcher decides; these carry no include directives. An unsupported
+      // format still throws (runCheck turns that into exit 2).
+      entries.push(...entriesForFile(abs, raw, problems))
+      continue
+    }
+    // The root requirements file and every include target parse as
+    // requirements regardless of filename (pip allows any name after -r/-c).
+    currentAbs = abs
+    entries.push(...entriesFromRequirements(raw, problems, opts))
+  }
+  return { entries, absentDirectiveLines }
 }
 
 // Delta = entries in `currentEntries` whose name@version@source is not
@@ -395,12 +508,21 @@ export async function runCheck(
     return 2
   }
 
-  // Parse-level fail-closed problems (e.g. unpinned requirement lines).
+  // Parse-level fail-closed problems (e.g. unpinned requirement lines), over
+  // the full requirements include closure: include targets are parsed and
+  // their pins age-checked exactly like direct pins.
   const problems = []
+  const absLock = path.resolve(lockfile)
   const currentRaw = fs.readFileSync(lockfile, "utf8")
   let currentEntries
   try {
-    currentEntries = entriesForFile(lockfile, currentRaw, problems)
+    currentEntries = graphEntries(absLock, currentRaw, (target) => {
+      try {
+        return fs.readFileSync(target, "utf8")
+      } catch {
+        return null
+      }
+    }, problems, true).entries
   } catch (err) {
     console.error(String(err.message))
     return 2
@@ -413,13 +535,13 @@ export async function runCheck(
   const skipped = []
   if (baseRef) {
     let baseRaw
+    let repoRoot
     try {
       // Run git relative to the lockfile's directory so the check works from
       // any process cwd (CI runs at the repo root; tests use temp repos), and
       // address the blob repo-relatively — `git show ref:<path>` rejects
       // absolute paths.
-      const absLock = path.resolve(lockfile)
-      const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
         cwd: path.dirname(absLock),
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
@@ -446,17 +568,45 @@ export async function runCheck(
       console.error(`Could not read ${lockfile} from ${baseRef}: ${String(err.stderr ?? err.message).trim()}`)
       return 2
     }
-    const baseProblems = []
-    baseProblemsAll = baseProblems
-    delta = deltaEntries(currentEntries, (() => {
+    // Base-side rawAt for include-graph targets: absent on base -> null (the
+    // walker records the directive instead of a problem; see below); present
+    // but unreadable -> null too (head's resolved pins then count as new and
+    // are age-checked — the conservative direction).
+    const baseRawAt = (target) => {
+      const relTarget = path.relative(repoRoot, target)
       try {
-        return entriesForFile(lockfile, baseRaw, baseProblems)
-      } catch (err) {
-        console.error(String(err.message))
+        return execFileSync("git", ["show", `${baseRef}:${relTarget}`], {
+          cwd: repoRoot,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+      } catch {
         return null
       }
-    })())
-    if (delta === null) return 2
+    }
+    const baseProblems = []
+    baseProblemsAll = baseProblems
+    let baseGraph = null
+    try {
+      baseGraph = graphEntries(absLock, baseRaw, baseRawAt, baseProblems, false)
+    } catch (err) {
+      console.error(String(err.message))
+      return 2
+    }
+    // An include directive whose target base cannot see (absent on base —
+    // including the both-sides-absent case) is INHERITED state, not a new
+    // problem: mirror head-side unresolved-include problems whose directive
+    // line base recorded as absent into the base multiset. A directive whose
+    // target base CAN read never produces a phantom problem, so includes
+    // resolved at head are audited on their merits instead of tripping the
+    // unresolved-include guard.
+    const baseAbsent = new Set(baseGraph.absentDirectiveLines)
+    for (const p of problems) {
+      if (p.startsWith(UNRESOLVED_INCLUDE_PREFIX) && baseAbsent.has(p.slice(UNRESOLVED_INCLUDE_PREFIX.length))) {
+        baseProblems.push(p)
+      }
+    }
+    delta = deltaEntries(currentEntries, baseGraph.entries)
     // Only NEW parse problems fail a PR (count-based multiset diff, so
     // duplicating an inherited bad line still counts as new); problems
     // already present on base are inherited state (the whole-lockfile

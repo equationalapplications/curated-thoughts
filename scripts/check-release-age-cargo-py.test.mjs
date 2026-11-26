@@ -849,3 +849,132 @@ test("runCheck: poetry same-version table removal is age-checked as a new pypi e
   assert.ok(fetched > 0, "pypi lookup must happen")
   assert.equal(r.code, 1)
 })
+
+// ---------------------------------------------------------------------------
+// CodeRabbit round 2 (on 75c24385) — three majors, each verified against
+// pip 25.1.1 before fixing: (F1) join_lines concatenates fragments with NO
+// separator ("".join), so a split option name must rejoin; (F2) optparse
+// accepts unambiguous long-option abbreviations (--index-u == --index-url);
+// (F3) an include directive whose target file changes must be delta-tracked
+// even when the direct-entry delta is empty (the old empty-delta early
+// return fired before the include guard).
+// ---------------------------------------------------------------------------
+
+test("entriesFromRequirements: continuation join inserts NO separator, matching pip (CR2-F1)", () => {
+  const problems = []
+  const entries = entriesFromRequirements(
+    "flask==3.0.0\n--index-\\\nurl https://evil.example/simple\n",
+    problems,
+  )
+  assert.deepEqual(entries, [
+    { name: "flask", version: "3.0.0", registry: "pypi", src: "pypi" },
+  ])
+  assert.equal(problems.length, 1)
+  // The rejoined line is `--index-url https://...`, which the option scanner
+  // must catch as a foreign index.
+  assert.match(problems[0], /fail-closed option line \(matched: --index-url\)/)
+})
+
+test("entriesFromRequirements: pip long-option abbreviations canonicalize before classification (CR2-F2)", () => {
+  // Each of these is an unambiguous abbreviation pip's optparse accepts for a
+  // fail-closed option (verified: optparse maps --index-u -> index_url).
+  for (const [line, canonical] of [
+    ["--index-u https://evil.example/simple", "--index-url"],
+    ["--extra-index-u=https://evil.example/simple", "--extra-index-url"],
+    ["--find-l https://evil.example/links", "--find-links"],
+    ["--trusted-h 10.0.0.1", "--trusted-host"],
+    ["--no-inde", "--no-index"],
+  ]) {
+    const problems = []
+    entriesFromRequirements(`${line}\n`, problems)
+    assert.equal(problems.length, 1, line)
+    assert.match(problems[0], new RegExp(`matched: ${canonical.replace(/-/g, "\\-")}`), line)
+  }
+  // Accepted non-dangerous options still pass, exact or abbreviated.
+  for (const line of ["--pre", "--only-binary=:all:", "--only-b=:all:", "--require-hashes", "--prefer-bin"]) {
+    const benign = []
+    entriesFromRequirements(`${line}\n`, benign)
+    assert.equal(benign.length, 0, line)
+  }
+})
+
+test("runCheck: a pin bump inside an inherited include is age-checked even with no direct-entry delta (CR2-F3)", async () => {
+  const root = "-r deps.in\n"
+  const { dir } = tmpLockfile("requirements.txt", root)
+  fs.writeFileSync(path.join(dir, "deps.in"), "foo==1.0\n")
+  const run = initGitRepo(dir, "requirements.txt", root)
+  run(["add", "deps.in"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "deps.in base"])
+  const lock = path.join(dir, "requirements.txt")
+
+  // requirements.txt is untouched; only the included file changes.
+  fs.writeFileSync(path.join(dir, "deps.in"), "foo==2.0\n")
+  run(["add", "deps.in"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "bump included pin"])
+
+  const old = async () => jsonResponse({ urls: [{ upload_time: iso(400 * DAY) }] })
+  const young = async () => jsonResponse({ urls: [{ upload_time: iso(DAY) }] })
+
+  const bumped = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { fetchImpl: young, spacingMs: 1 })
+  assert.equal(bumped.code, 1, bumped.err.join("\n"))
+  assert.match(bumped.err.join("\n"), /foo@2\.0.*\(pypi\) published/)
+
+  // The old pin inside the included file passes on its merits.
+  const aged = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { fetchImpl: old, spacingMs: 1 })
+  assert.equal(aged.code, 0, aged.err.join("\n"))
+})
+
+test("runCheck: a NEW include directive with a resolvable target age-checks the included pins (CR2-F3)", async () => {
+  const { dir } = tmpLockfile("requirements.txt", "flask==3.0.0\n")
+  const run = initGitRepo(dir, "requirements.txt", "flask==3.0.0\n")
+  const lock = path.join(dir, "requirements.txt")
+  fs.writeFileSync(lock, "-r deps.in\nflask==3.0.0\n")
+  fs.writeFileSync(path.join(dir, "deps.in"), "foo==9.9.9\n")
+  run(["add", "requirements.txt", "deps.in"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "add include"])
+  const young = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () => jsonResponse({ urls: [{ upload_time: iso(DAY) }] }),
+    spacingMs: 1,
+  })
+  assert.equal(young.code, 1, young.err.join("\n"))
+  assert.match(young.err.join("\n"), /foo@9\.9\.9/)
+})
+
+test("runCheck: nested include chains resolve recursively and stay delta-tracked (CR2-F3)", async () => {
+  const root = "-r deps.in\n"
+  const { dir } = tmpLockfile("requirements.txt", root)
+  fs.writeFileSync(path.join(dir, "deps.in"), "-r more.in\n")
+  fs.writeFileSync(path.join(dir, "more.in"), "bar==1.0\n")
+  const run = initGitRepo(dir, "requirements.txt", root)
+  run(["add", "deps.in", "more.in"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "chain base"])
+  const lock = path.join(dir, "requirements.txt")
+
+  fs.writeFileSync(path.join(dir, "more.in"), "bar==2.0\n")
+  run(["add", "more.in"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "bump nested"])
+
+  const young = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () => jsonResponse({ urls: [{ upload_time: iso(DAY) }] }),
+    spacingMs: 1,
+  })
+  assert.equal(young.code, 1, young.err.join("\n"))
+  assert.match(young.err.join("\n"), /bar@2\.0/)
+})
+
+test("runCheck: unresolvable include args (URL, env var) keep failing closed as directives (CR2-F3)", async () => {
+  const { dir } = tmpLockfile("requirements.txt", "flask==3.0.0\n")
+  const run = initGitRepo(dir, "requirements.txt", "flask==3.0.0\n")
+  const lock = path.join(dir, "requirements.txt")
+  fs.writeFileSync(lock, "flask==3.0.0\n-r https://evil.example/deps.txt\n-r ${FOO}/deps.txt\n")
+  run(["add", "requirements.txt"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "unresolvable includes"])
+  const r = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () => jsonResponse({ urls: [{ upload_time: iso(400 * DAY) }] }),
+    spacingMs: 1,
+  })
+  assert.equal(r.code, 1)
+  const errs = r.err.join("\n")
+  assert.match(errs, /include directive.*https:\/\/evil\.example\/deps\.txt/)
+  assert.match(errs, /include directive.*\$\{FOO\}\/deps\.txt/)
+})
