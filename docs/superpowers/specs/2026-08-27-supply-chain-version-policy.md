@@ -2,13 +2,15 @@
 
 **Date:** 2026-08-27
 **Status:** IMPLEMENTED — Task 1 complete (exact-pinning). Task 2 (14-day gate)
-landed 2026-11-26 via PR #388: the JS side is gated by `pnpm-workspace.yaml`
-`minimumReleaseAge` (below), and the cargo/pip side is gated by
+lands via PR #388 (this file's status finalizes on merge): the JS side is
+gated by `pnpm-workspace.yaml` `minimumReleaseAge` (below), and the cargo/pip
+side is gated by
 `scripts/check-release-age-cargo-py.mjs` +
 `.github/workflows/dependency-release-age.yml` (delta-vs-base on every PR
 touching Cargo.lock; manual whole-lockfile `workflow_dispatch` audits;
-fail-closed; newly-added git-source dependencies fail; PR runs the base
-branch's copy of the script so it cannot weaken its own gate).
+fail-closed; new or source-changed non-crates.io/non-path dependencies fail;
+PR runs the base branch's copy of the script so it cannot weaken the
+script-level gate (the workflow file itself is protected by review)).
 **Author:** Hermes Agent (Tessera) at Kurt's direction
 **External guidance:** Senior architect (multi-national audit firm), relayed by Kurt:
 > "We've encountered two such attacks and our current guidance is one of two options.

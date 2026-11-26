@@ -143,16 +143,31 @@ test("entriesFromCargoLock: crates.io registry vs path vs git sources", () => {
   ].join("\n")
   const entries = entriesFromCargoLock(raw)
   assert.deepEqual(entries, [
-    { name: "serde", version: "1.0.210", registry: "crates" },
-    { name: "curated-thoughts", version: "0.1.0", registry: null, git: false, reason: "no source (path/git/local)" },
+    { name: "serde", version: "1.0.210", registry: "crates", src: "crates.io" },
+    {
+      name: "curated-thoughts",
+      version: "0.1.0",
+      registry: null,
+      git: false,
+      src: "",
+      reason: "no source (path/git/local)",
+    },
     {
       name: "evil",
       version: "2.0.0",
       registry: null,
       git: true,
+      src: "git+https://github.com/attacker/evil?rev=deadbeef",
       reason: "non-registry source git+https://github.com/attacker/evil?rev=deadbeef",
     },
-    { name: "mirror", version: "1.2.3", registry: null, git: false, reason: "non-registry source registry+https://example.com/some-mirror" },
+    {
+      name: "mirror",
+      version: "1.2.3",
+      registry: null,
+      git: false,
+      src: "registry+https://example.com/some-mirror",
+      reason: "non-registry source registry+https://example.com/some-mirror",
+    },
   ])
 })
 
@@ -369,7 +384,7 @@ test("runCheck: newly added git-source dependency fails in delta mode, establish
     fetchImpl: async () => jsonResponse(crateDoc({ "1.0.210": iso(400 * DAY) })),
   })
   assert.equal(delta.code, 1)
-  assert.match(delta.err.join("\n"), /evil@2\.0\.0: newly added git-source dependency/)
+  assert.match(delta.err.join("\n"), /evil@2\.0\.0: new or changed non-crates\.io source/)
 
   // Whole-lockfile mode: the established git dep is skipped (informational),
   // the registry dep is old -> exit 0.
@@ -405,6 +420,33 @@ test("runCheck: first-party exemption exempts a too-young version", async () => 
   })
   assert.equal(code, 0)
   assert.equal(fetchCalls, 0)
+})
+
+test("runCheck: a SAME-VERSION source swap (e.g. a [patch] to git) is a delta change and fails", async () => {
+  const serdeReg =
+    '[[package]]\nname = "serde"\nversion = "1.0.210"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n'
+  const serdeGit =
+    '[[package]]\nname = "serde"\nversion = "1.0.210"\nsource = "git+https://github.com/attacker/serde#deadbeef"\n'
+  const { dir } = tmpLockfile("Cargo.lock", serdeReg)
+  const run = initGitRepo(dir, "Cargo.lock", serdeReg)
+  const lock = path.join(dir, "Cargo.lock")
+  fs.writeFileSync(lock, serdeGit)
+  run(["add", "Cargo.lock"])
+  run(["commit", "--quiet", "--no-verify", "-m", "swap source"])
+
+  const { code, err } = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { spacingMs: 1 })
+  assert.equal(code, 1)
+  assert.match(err.join("\n"), /serde@1\.0\.210: new or changed non-crates\.io source/)
+
+  // A foreign registry swap fails the same way.
+  const serdeMirror =
+    '[[package]]\nname = "serde"\nversion = "1.0.210"\nsource = "registry+https://evil.example/mirror"\n'
+  fs.writeFileSync(lock, serdeMirror)
+  run(["add", "Cargo.lock"])
+  run(["commit", "--quiet", "--no-verify", "-m", "swap to mirror"])
+  const mirror = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { spacingMs: 1 })
+  assert.equal(mirror.code, 1)
+  assert.match(mirror.err.join("\n"), /serde@1\.0\.210: new or changed non-crates\.io source/)
 })
 
 test("runCheck: PyPI timestamp takes the YOUNGEST file's upload time (fail-closed)", async () => {

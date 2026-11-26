@@ -11,17 +11,19 @@
 //
 // Modes:
 //   --base <git-ref>  PR check: age-check only the lockfile DELTA vs <ref>
-//                     (entries that are new or changed version). A PR whose
-//                     delta is empty passes with no cooldown. A newly ADDED
-//                     git-source dependency fails the gate (no registry
-//                     timestamp exists to age-check); pre-existing path/local
+//                     (entries that are new, changed version, OR changed
+//                     source — a same-version source swap is a delta change).
+//                     A PR whose delta is empty passes with no cooldown. A
+//                     new or source-changed entry that is neither a crates.io
+//                     registry entry nor a plain path/workspace entry fails
+//                     the gate (git deps have no registry timestamp; foreign
+//                     registries are unvetted). Pre-existing path/local
 //                     workspace entries stay skipped — they are this repo's
 //                     own code, not a supply-chain input.
 //   (no --base)       Whole-lockfile audit of every registry entry — the
 //                     manual `workflow_dispatch` sweep.
 //
-// Usage:
-//   node scripts/check-release-age-cargo-py.mjs [--base origin/main] [--days 14]
+// USAGE: node scripts/check-release-age-cargo-py.mjs [--base origin/main] [--days 14]
 //        [--lockfile Cargo.lock] [--first-party-prefix <prefix>]...
 //
 // First-party exemption: entries whose package name starts with a
@@ -124,13 +126,14 @@ export function entriesFromCargoLock(raw) {
     if (!name || !version) continue
     const source = s.fields.source ?? ""
     if (source.startsWith("registry+https://github.com/rust-lang/crates.io-index")) {
-      entries.push({ name, version, registry: "crates" })
+      entries.push({ name, version, registry: "crates", src: "crates.io" })
     } else {
       entries.push({
         name,
         version,
         registry: null,
         git: source.startsWith("git+"),
+        src: source,
         reason: source ? `non-registry source ${source}` : "no source (path/git/local)",
       })
     }
@@ -220,11 +223,14 @@ export function entriesForFile(path, raw, problems = []) {
   throw new Error(`Unsupported lockfile format: ${path}`)
 }
 
-// Delta = entries in `currentEntries` whose name@version is not present in
-// `baseEntries` (new packages and version changes).
+// Delta = entries in `currentEntries` whose name@version@source is not
+// present in `baseEntries` — source is part of the key so a same-version
+// source swap (e.g. a [patch] rewriting a crate from crates.io to a git or
+// mirror source) is a delta change, not an invisible pass.
 export function deltaEntries(currentEntries, baseEntries) {
-  const baseSet = new Set(baseEntries.map((e) => `${e.name}@${e.version}`))
-  return currentEntries.filter((e) => !baseSet.has(`${e.name}@${e.version}`))
+  const key = (e) => `${e.name}@${e.version}@${e.src ?? ""}`
+  const baseSet = new Set(baseEntries.map(key))
+  return currentEntries.filter((e) => !baseSet.has(key(e)))
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +324,9 @@ export async function runCheck(
     if (delta === null) return 2
     const inherited = currentEntries.length - delta.length
     if (delta.length === 0) {
+      // Inherited-pins semantics: nothing NEW means nothing to age-check.
+      // Parse problems in UNCHANGED files (e.g. inherited unpinned
+      // requirement lines) are the whole-lockfile audit's job, not a PR's.
       console.log(`No dependency changes vs ${baseRef}; nothing to age-check.`)
       console.log(
         `${inherited} entries inherited unchanged from ${baseRef} are not re-audited in delta mode (workflow_dispatch runs the whole-lockfile audit).`,
@@ -334,15 +343,20 @@ export async function runCheck(
   const violations = []
   const failures = []
 
-  // FAIL-CLOSED (delta mode only): a newly added git-source dependency has no
-  // registry timestamp to age-check, and git deps run arbitrary build scripts
-  // in CI. Whole-lockfile audits report established git deps as skipped, not
-  // failing — otherwise the manual sweep can never pass a repo that carries
-  // one deliberately.
+  // FAIL-CLOSED (delta mode only): a new or source-changed entry whose source
+  // is neither the crates.io registry nor a plain path/workspace entry has no
+  // registry timestamp to age-check (git deps) or comes from an unvetted
+  // registry, and git deps run arbitrary build scripts in CI. Whole-lockfile
+  // audits report such entries as skipped, not failing — otherwise the manual
+  // sweep can never pass a repo that carries one deliberately.
   if (baseRef) {
     for (const e of delta) {
-      if (e.git && !firstPartyPrefixes.some((p) => e.name.startsWith(p))) {
-        failures.push(`${e.name}@${e.version}: newly added git-source dependency (fail-closed; no registry timestamp exists for git deps)`)
+      if (
+        e.registry === null &&
+        (e.src ?? "") !== "" &&
+        !firstPartyPrefixes.some((p) => e.name.startsWith(p))
+      ) {
+        failures.push(`${e.name}@${e.version}: new or changed non-crates.io source (${e.src ?? "unknown"}) (fail-closed)`)
       }
     }
   }

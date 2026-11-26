@@ -39,7 +39,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:a11y": "vitest run src/__tests__/axe-core.test.ts",
-    "test:release-age": "node --test scripts/",
+    "test:release-age": "node --test scripts/check-release-age-cargo-py.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
   },

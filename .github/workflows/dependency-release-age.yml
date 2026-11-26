@@ -8,19 +8,27 @@ name: Dependency release age
 # `workflow_dispatch` audits (timeout raised for that path — a full sweep of
 # ~750 crates costs one spaced request each, well past 10 minutes).
 # Fail-closed: a version whose registry timestamp cannot be determined fails
-# the check, and a PR that ADDS a git-source dependency fails (no registry
-# timestamp exists for git deps). The PR runs the BASE branch's copy of the
-# gate script so it cannot weaken its own gate by editing the script; on the
-# first PR that introduces the script, the base has no copy yet and the PR's
-# copy is used (nothing committed to weaken). Runs before any cargo/pip
-# install, so a too-new package's build scripts never execute in CI. The JS
-# side is already gated by pnpm-workspace.yaml `minimumReleaseAge` and is not
-# re-checked here. curated-thoughts has no Python lockfile today; the script
-# covers requirements*.txt / uv.lock / poetry.lock if one ever lands.
+# the check, and a new or source-changed dependency that is neither crates.io
+# nor a plain path/workspace entry fails (git deps have no registry timestamp;
+# foreign registries are unvetted). The PR runs the BASE branch's copy of the
+# gate script, so it cannot weaken the SCRIPT-level gate by editing the
+# script. (The workflow FILE itself is always run from the PR — GitHub
+# behavior — so weakening at that level is enforced by review/branch
+# protection, not by this check; keep this workflow NON-required in branch
+# protection, since the paths: filter means PRs that don't touch lockfiles
+# never report it.) On the first PR that introduces the script, the base has
+# no copy yet and the PR's copy is used (nothing committed to weaken). Runs
+# before any cargo/pip install, so a too-new package's build scripts never
+# execute in CI. The JS side is already gated by pnpm-workspace.yaml
+# `minimumReleaseAge` and is not re-checked here. curated-thoughts has no
+# Python lockfile today; the script covers requirements*.txt / uv.lock /
+# poetry.lock if one ever lands (the paths: filter and the check loop already
+# trigger on them).
 on:
   pull_request:
     paths:
       - Cargo.lock
+      - Cargo.toml
       - "src-tauri/Cargo.toml"
       - "tools/Cargo.toml"
       - "requirements*.txt"
