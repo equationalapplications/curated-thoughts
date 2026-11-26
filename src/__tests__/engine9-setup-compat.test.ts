@@ -19,8 +19,9 @@
  * so `node:sqlite` resolves either way.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 // Loaded via `process.getBuiltinModule`, NOT a static import: vite 8.3.5's
 // builtin-loader plugin does not recognize `node:sqlite` for client-environment
 // (jsdom) externalization and fails the transform with "Cannot bundle Node.js
@@ -37,6 +38,11 @@ import type { SQLiteAdapter } from "@equationalapplications/core-llm-wiki";
 const SCHEMA_DUMP = resolve(
   __dirname,
   "../../src-tauri/src/db/testdata/ct-engine9-migrated.llm_wiki.schema.sql",
+);
+/** Engine-generated 8.0.2 brain carrying FTS-at-rest text (see testdata/README.md). */
+const FTS_FIXTURE = resolve(
+  __dirname,
+  "../../src-tauri/src/db/testdata/ct-brain-v33-src-8.0.2-fts.db",
 );
 /** core-llm-wiki 8.0.2's last engine migration (8.0.2 dist `MIGRATIONS`). */
 const ENGINE_8_0_2_SCHEMA_VERSION = "15";
@@ -215,5 +221,112 @@ describe.skipIf(!DatabaseSync && !process.env.CI)(
     ];
     expect(dropped).toEqual([]);
     expect(added.sort()).toEqual(FTS_FAMILY);
+  });
+
+  it("helper-SQL drift gate: normalized index/trigger bodies match a fresh engine brain (engine-ownership filter)", async () => {
+    // Rust chains never create FTS; at-rest FTS is engine-owned on real desktop brains.
+    // The four source_passages entries: source-passages FTS5 subsystem (dist 2432-2451) —
+    // rust chains never create any FTS.
+    const FTS_FAMILY = new Set([
+      "trigger:llm_wiki_source_passages_fts_ai",
+      "trigger:llm_wiki_source_passages_fts_ad",
+      "index:llm_wiki_source_passages_fts_map_doc",
+      "index:llm_wiki_source_passages_fts_pending_doc",
+      "trigger:llm_wiki_entries_fts_ai",
+      "trigger:llm_wiki_entries_fts_au",
+      "trigger:llm_wiki_entries_fts_ad",
+      "index:llm_wiki_fts_map_entity",
+      "index:llm_wiki_fts_pending_entity",
+      "index:llm_wiki_fts_pending_id",
+    ]);
+    // Present in fresh 8.0.2 + 9.18.0 engines but absent from the dump (source brain built by
+    // CT's Rust open path, which never runs engine setup); replay reconciliation is engine-owned.
+    const RUST_CHAIN_LIMITS = new Set(["index:llm_wiki_entries_legacy_source_type_idx"]);
+    // Rust-side llm_wiki_* objects the engine brain does not carry; an unlisted rust-only object fails.
+    const CT_OWNED = new Set([
+      "index:llm_wiki_vector_removals_pending",
+      "trigger:llm_wiki_vector_removals_enqueue",
+      "trigger:llm_wiki_vector_removals_hard_delete",
+      "trigger:llm_wiki_vector_removals_resurrect",
+      "index:llm_wiki_idx_source_passages_doc",
+      "index:llm_wiki_idx_source_passages_entity",
+      "index:llm_wiki_entries_deleted_idx",
+      "index:llm_wiki_events_forgotten_idx",
+    ]);
+    const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
+    const bodies = (db: DatabaseSync) => {
+      const rows = db
+        .prepare(
+          "SELECT type, name, sql FROM sqlite_master WHERE type IN ('index','trigger') AND sql IS NOT NULL",
+        )
+        .all() as { type: string; name: string; sql: string }[];
+      return new Map(rows.map((r) => [`${r.type}:${r.name}`, normalize(r.sql)]));
+    };
+    const rust = bodies(rustChainDb());
+    const fresh = new DatabaseSync(":memory:");
+    await engine(fresh).setup();
+    const eng = bodies(fresh);
+
+    const problems: string[] = [];
+    for (const [key, body] of eng) {
+      if (!key.split(":")[1].startsWith("llm_wiki_")) continue;
+      if (FTS_FAMILY.has(key) || RUST_CHAIN_LIMITS.has(key)) continue;
+      const r = rust.get(key);
+      if (r === undefined) problems.push(`engine-only, missing in rust chain: ${key}`);
+      else if (r !== body) problems.push(`body drift: ${key}\n  rust:   ${r}\n  engine: ${body}`);
+    }
+    for (const key of rust.keys()) {
+      if (!key.split(":")[1].startsWith("llm_wiki_")) continue;
+      if (!eng.has(key) && !CT_OWNED.has(key)) problems.push(`rust-only, not CT_OWNED: ${key}`);
+    }
+    expect(problems).toEqual([]);
+  });
+
+  it("desktop upgrade: setup() over an FTS-carrying 8.0.2 brain keeps FTS objects and text", async () => {
+    // The real-desktop case the dump-based tests cannot cover: an 8.0.2 brain
+    // whose FTS shadow already holds at-rest text.
+    const dir = mkdtempSync(join(tmpdir(), "ct-fts-fixture-"));
+    const copy = join(dir, "brain.db");
+    copyFileSync(FTS_FIXTURE, copy);
+    const db = new DatabaseSync(copy);
+    try {
+      const ftsSql = () =>
+        new Map(
+          (
+            db
+              .prepare(
+                "SELECT type, name, sql FROM sqlite_master WHERE name LIKE '%fts%' AND type IN ('index','trigger') AND sql IS NOT NULL",
+              )
+              .all() as { type: string; name: string; sql: string }[]
+          ).map((r) => [`${r.type}:${r.name}`, r.sql.replace(/\s+/g, " ").trim()]),
+        );
+      const count = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
+      expect(engineVersion(db)).toBe(ENGINE_8_0_2_SCHEMA_VERSION);
+      const entriesBefore = count("SELECT COUNT(*) n FROM llm_wiki_entries");
+      const contentBefore = count("SELECT COUNT(*) n FROM llm_wiki_entries_fts_content");
+      const ftsBefore = ftsSql();
+      expect(entriesBefore).toBeGreaterThanOrEqual(24);
+      expect(contentBefore).toBe(entriesBefore);
+      expect(ftsBefore.size).toBeGreaterThan(0);
+
+      await expect(engine(db).setup()).resolves.toBeUndefined();
+
+      expect(engineVersion(db)).toBe(ENGINE_9_18_0_SCHEMA_VERSION);
+      const ftsAfter = ftsSql();
+      for (const [key, body] of ftsBefore) expect(ftsAfter.get(key), key).toBe(body);
+      expect(count("SELECT COUNT(*) n FROM llm_wiki_entries")).toBe(entriesBefore);
+      expect(count("SELECT COUNT(*) n FROM llm_wiki_entries_fts_content")).toBe(contentBefore);
+      const body = db
+        .prepare("SELECT body FROM llm_wiki_entries WHERE id = 'ent_astronomy_fact_0'")
+        .get() as { body: string };
+      expect(body.body).toContain("distinctwordastronomy0");
+      const fts = db
+        .prepare("SELECT COUNT(*) n FROM llm_wiki_entries_fts_content WHERE c3 LIKE '%distinctwordastronomy0%'")
+        .get() as { n: number };
+      expect(fts.n).toBe(1);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

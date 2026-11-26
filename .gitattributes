@@ -1,0 +1,4 @@
+# Byte-compared fixtures must not be re-normalized on Windows checkouts
+# (connection.rs engine9_migrated_schema_fixture_is_current compares on_disk == dump).
+src-tauri/src/db/testdata/*.sql text eol=lf
+src-tauri/src/db/testdata/*.db binary

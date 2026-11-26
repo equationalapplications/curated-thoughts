@@ -204,6 +204,11 @@ pub fn count_pending_documents(conn: &Connection) -> Result<i64> {
 /// that decision was deferred to #213 and is now "per-vault", so proposals
 /// are cleared with everything else. The destruction is confirmed in the
 /// switch UI (spec D5), so it is not a silent side effect.
+/// S7: the raw `DELETE FROM llm_wiki_entries` leaves vault A's FTS shadow text
+/// at rest until the engine's next drain (`*_fts_ad` only enqueues into
+/// `*_fts_pending`, dist-verified); accepted as at-rest-only for CT (owner Q6
+/// ruling 2026-11-25; production Rust search never reads FTS) — engine-owned
+/// boundary per #213.
 pub fn clear_vault_tables(conn: &mut Connection, now_ms: i64) -> anyhow::Result<()> {
     let tx = conn.transaction()?;
 
@@ -273,8 +278,30 @@ pub fn clear_vault_tables(conn: &mut Connection, now_ms: i64) -> anyhow::Result<
          DELETE FROM documents;
          DELETE FROM wiki_pages;
          DELETE FROM folder_rules;
-         DELETE FROM stall_strikes;",
+         DELETE FROM stall_strikes;
+         -- per-vault rule #213 — these are vault-derived (document_path /
+         -- vault-relative keys) and must not outlive the vault; the
+         -- `stated_ledger_rederived` stamp survives (repopulation is
+         -- switch-level, spec §2 S5).
+         DELETE FROM stated_attestations;
+         DELETE FROM queue_denials;
+         DELETE FROM deposit_attribution;
+         DELETE FROM llm_wiki_source_documents;
+         DELETE FROM llm_wiki_source_passages;",
     )?;
+
+    // Rootless opens park V25 (deposit_kick_state root-gated, connection.rs);
+    //  a brain without the table never had a rooted session, so it cannot hold
+    //  kick rows — skipping is a semantic no-op, not a missed sweep.
+    let has_kick_state: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master
+                         WHERE type = 'table' AND name = 'deposit_kick_state')",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_kick_state {
+        tx.execute("DELETE FROM deposit_kick_state", [])?;
+    }
 
     // ENTITY-LEVEL manifest clear (spec R2.9.2, plan-p2-M7): drop every
     // per-entity override but KEEP the tier vocabulary — `tier_fact`,
@@ -1205,6 +1232,218 @@ mod clear_vault_tables_tests {
         clear_vault_tables(&mut conn, NOW).unwrap();
 
         assert_eq!(count(&conn, "llm_wiki_outbox"), 0);
+    }
+
+    #[test]
+    fn clear_vault_tables_empties_stated_ledger_and_kick_state_but_keeps_stamp() {
+        let mut conn = open_in_memory().unwrap();
+        seed_full_vault(&conn);
+        // V25 is vault-root-gated, so rootless in-memory brains lack
+        // `deposit_kick_state`; create V25's exact shape before seeding.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS deposit_kick_state (
+                 path       TEXT PRIMARY KEY,
+                 state      TEXT NOT NULL
+                            CHECK(state IN ('pending','chunked','ingested','failed',
+                                            'no_ingest_host','queued_watcher')),
+                 error      TEXT,
+                 updated_ms INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        // Seed every newly-swept table.
+        conn.execute(
+            "INSERT INTO deposit_kick_state (path, state, updated_ms)
+             VALUES ('docs/a.md', 'ingested', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO deposit_attribution (document_path, speaker, kind, source, deposited_at)
+             VALUES ('docs/a.md', 'spk', 'kind', 'src', 'at')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stated_attestations (document_path, content_hash, attested_by, attested_at)
+             VALUES ('docs/a.md', 'h', 'by', 'at')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO queue_denials
+                 (document_path, chunk_hash, fact_text_hash, denied_by, denied_at)
+             VALUES ('docs/a.md', 'ch', 'fh', 'by', 'at')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_source_documents
+                 (id, entity_id, source_ref, source_hash, text, text_hash, char_count, created_at)
+             VALUES ('sd1', 'ent_x', 'ref', 'hash', 'txt', 'th', 3, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_source_passages
+                 (id, entity_id, document_id, seq, start_offset, end_offset)
+             VALUES ('sp1', 'ent_x', 'sd1', 0, 0, 3)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO llm_wiki_meta (key, value) VALUES ('stated_ledger_rederived', '1')",
+            [],
+        )
+        .unwrap();
+
+        super::clear_vault_tables(&mut conn, 1).unwrap();
+
+        for table in [
+            "stated_attestations",
+            "queue_denials",
+            "deposit_attribution",
+            "deposit_kick_state",
+            "llm_wiki_source_documents",
+            "llm_wiki_source_passages",
+        ] {
+            assert_eq!(count(&conn, table), 0, "{table} must be swept");
+        }
+        // Stamp survives — the once-per-brain rederive mechanism is untouched.
+        let stamp: String = conn
+            .query_row(
+                "SELECT value FROM llm_wiki_meta WHERE key='stated_ledger_rederived'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamp, "1");
+        // Outbox still append-only: replica DELETEs for entries were pushed.
+        assert!(count(&conn, "llm_wiki_outbox") > 0);
+    }
+
+    /// Brain-wide guard: every table must be swept, partially-cleared-with-
+    /// reason, or exempted-with-reason (spec §2 S6). Static list, cross-checked
+    /// against sqlite_master of a seeded in-memory brain. Iterates ACTUAL
+    /// tables only: FTS objects are engine-owned and absent from Rust
+    /// in-memory brains (enforced in the TS-side inventory, spec S7/S8), and
+    /// transient migration tables (`wiki_pages_new`, `documents_v15`) are
+    /// absent at steady state.
+    #[test]
+    fn every_brain_table_has_an_explicit_switch_disposition() {
+        let conn = open_in_memory().unwrap();
+        seed_full_vault(&conn);
+        let tables: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        // Every table `clear_vault_tables` deletes outright.
+        const SWEPT: &[&str] = &[
+            "llm_wiki_entries",
+            "llm_wiki_tasks",
+            "llm_wiki_edges",
+            "llm_wiki_events",
+            "llm_wiki_source_ref_index",
+            "llm_wiki_checkpoints",
+            "curated_agent_log",
+            "entity_type_origin",
+            "entity_redirects",
+            "ct_entity_optouts",
+            "manifest_ensure_memo",
+            "curated_entities",
+            "curated_proposal_items",
+            "curated_proposal_sources",
+            "curated_proposal_deleted_sources",
+            "curated_proposals",
+            "curated_relationships",
+            "embeddings",
+            "chunks",
+            "ingest_runs",
+            "documents",
+            "wiki_pages",
+            "folder_rules",
+            "stall_strikes",
+            "stated_attestations",
+            "queue_denials",
+            "deposit_attribution",
+            "deposit_kick_state",
+            "llm_wiki_source_documents",
+            "llm_wiki_source_passages",
+        ];
+        // Cleared in part (tier-vocabulary rows are kept).
+        const PARTIAL: &[&str] = &[
+            "llm_wiki_entity_manifests",
+            // Orphan caveat: rows whose entry_id is in llm_wiki_entries are
+            // deleted with them; evidence rows citing other ids may outlive
+            // the entries after a switch and are inert without their parents
+            // (spec Q9).
+            "librarian_evidence",
+        ];
+        /// FTS family — engine-owned, absent from rust chains (mirrors the TS
+        /// test's FTS_FAMILY). Never present in the in-memory brain, so the
+        /// loop below cannot see them; on real brains the engine owns them:
+        /// `llm_wiki_entries_fts{,_config,_content,...}` and the
+        /// `llm_wiki_source_passages_fts*` tables.
+        const FTS_FAMILY: &[&str] = &["llm_wiki_entries_fts", "llm_wiki_source_passages_fts"];
+        const EXEMPT: &[&str] = &[
+            // Survives INTACT (incl. the rederive stamp); only the
+            // `alias_remap_completed` KEY is deleted by the sweep.
+            "llm_wiki_meta",
+            "llm_wiki_outbox",          // append-only replica ledger
+            "llm_wiki_vector_removals", // #213/T9 marker-gated
+            "schema_version",           // watermark
+            "system_strikes",           // vault-independent single-row ledger
+            // Operator-facing; rows carry per-document `subject` columns that
+            // may name old-vault documents (spec Q9 sub-ruling: keep, caveat).
+            "pipeline_heartbeat",
+            "pipeline_stalls",
+        ];
+        // Run the sweep, then prove every SWEPT table that exists is empty.
+        let mut swept_conn = conn;
+        super::clear_vault_tables(&mut swept_conn, 1).unwrap();
+        for t in SWEPT.iter().filter(|t| tables.iter().any(|x| x == **t)) {
+            let n: i64 = swept_conn
+                .query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{t} is listed as SWEPT but holds rows after the sweep");
+        }
+        let disposition_of = |name: &str| -> Result<&'static str, String> {
+            if SWEPT.contains(&name) {
+                Ok("swept")
+            } else if PARTIAL.contains(&name) {
+                Ok("partial")
+            } else if EXEMPT.contains(&name) {
+                Ok("exempt")
+            } else {
+                Err(format!(
+                    "table {name} has no switch disposition — sweep it or add it with a reason (spec §2 S6)"
+                ))
+            }
+        };
+        for t in &tables {
+            if let Err(msg) = disposition_of(t) {
+                panic!("{msg}");
+            }
+            // (a) rust in-memory brains lack the engine-owned FTS family.
+            assert!(
+                !FTS_FAMILY.iter().any(|root| t.starts_with(root)),
+                "table {t} belongs to the engine-owned FTS family"
+            );
+        }
+        // (b) an engine-only FTS root cannot also be swept/partial/exempt.
+        for root in FTS_FAMILY {
+            assert!(
+                disposition_of(root).is_err(),
+                "FTS root {root} must not carry a switch disposition"
+            );
+        }
+        // Negative control: a future table is rejected by construction.
+        assert!(disposition_of("future_table_placeholder").is_err());
     }
 }
 

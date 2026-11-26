@@ -1,0 +1,55 @@
+# LEDGER — engine9x-followups (issue #376, PR #379)
+
+Plan: `docs/superpowers/plans/2026-11-25-issue376-engine9x-followups.md` · Spec: `spec.md` (same dir, Q5–Q9 owner-approved 2026-11-25) · Investigation: `investigation.md` (FINAL)
+Execution: SDD controller loop, implementers = Claude Code sonnet/low (default-implementer SOP), caps $0.90/task enforced via --max-budget-usd. Crash-resume scratch: gitignored `.superpowers/sdd/2026-11-25-issue376-engine9x-followups/progress.md`.
+
+## Baselines (2026-11-25, heavy-build, HEAVY_EXIT=0)
+- clippy src-tauri `--features test-utils,mcp-server --all-targets -D warnings`: EXIT 0 · clippy tools: EXIT 0
+- src-tauri full suite `--test-threads=1`: **lib 1735 passed / 0 failed**; 91 result lines ALL ok · tools suite: green
+- vitest: 97 files / **629 passed + 1 skipped**, exit 0 · tsc: exit 0
+- engine9 filtered suite: 12 passed (1723 filtered) — Task 2 delta judged against this
+
+## Recipe corrections (supersede plan literals)
+- CARGO_TARGET_DIR = `<worktree-root>/.cargo-shared-target` (AGENTS.md one-canonical-location rule; plan Task 11's kv-work literal is STALE).
+- Branch upstream is origin/main — push explicitly `git push origin HEAD:chore/engine9x-followups`, read back `git rev-parse origin/chore/engine9x-followups`.
+
+## Task rows
+
+| Task | Status | Commits | Gates | Adjudication |
+|------|--------|---------|-------|--------------|
+| 0 — plan-time checks | DONE | (ticked in plan) | 3-way inventory probe | CT_OWNED allow-list 3→8 (see plan Task 0 annotation); FTS-family + legacy_source_type_idx exclusions ruled for Task 9; Q6 join-back NO (S7 stands, no follow-up); S9 feasible in-lane |
+| 1 — S1 stdout→stderr | DONE | `e2a490e9` | clippy EXIT 0; grep 22/0 verified | — |
+| 2 — S2 PRAGMA grouping | DONE | `50849454` | engine9 12 passed (unchanged, controller re-run) | Deviation accepted: `*t == table` deref (mechanical type fix, behavior identical) |
+| 3 — S3 CI comments | DONE | `1e28cbf5` | grep verified (4 lines = site-2 double text, intentional) | — |
+| 4 — S4 .gitattributes | DONE | `0658ef0d` | check-attr verified (sql: text/eol=lf; db: binary macro → diff unset); no w/crlf | Child hit grant gaps (check-attr, ls-remote) — improvised correctly; controller re-verified |
+| 5 — S5a sweep DELETEs | DONE | `d4d00fcb` | clear_vault_tables 7 passed (controller re-run); clippy ×2 exit 0 | Plan defect ruled: deposit_kick_state V25 root-gated → existence-guarded DELETE (semantic no-op when absent); other 5 plain; test seeds V25 shape. Implementer $0.22 initial (honest BLOCKED) + $0.37 resume leg. RED caveat ledgered (partial RED accepted) |
+| 6 — S5b config-before-reopen + pins | DONE | `d3019ee7` | switch_pin_tests 3 passed; restore_sync 16 passed; clippy ×2 exit 0 (controller re-runs) | Restore pin = ordering essence (full install covered by restore_sync suite); Run 1 failure logged not propagated; "V22 untouched" not directly asserted — carried to stage-close review focus |
+| 7 — S5c repopulation + drain hook | DONE | `bf364efd` | apply_stored 1, stated_ledger 14, pipeline 73, clippy ×2; NEGATIVE CONTROL: probe disabled → drain-hook pair FAILS (101), restored → 2 passed (controller) | RED-first skipped by implementer — ruled acceptable via controller negative control; worker tests drive a real temp brain + worker thread, fire counted via channel |
+| 8 — S6 brain-wide guard | DONE | `7a4291fb` | guard 1 passed (controller re-run); clippy ×2 exit 0 | EXEMPT entries verified live (schema.rs base DDL); limit ledgered: guard sees in-memory-chain tables only — real-brain-only shapes ride the TS fixtures |
+| 9 — S8 TS drift gate | DONE | `3f30aa60` | 5/5 vitest (controller re-run); tsc clean; negative control FAIL confirmed on a perturbed dump | Gate caught the source-passages FTS5 family in flight → ruled into FTS_FAMILY (dist 2432-2451 evidence); implementer correctly refused to self-grow sets; $0.15 + $0.30 (stop + resume) |
+| 10 — S9 FTS fixture + upgrade tests | DONE | `e333d281` | TS 6 passed; Rust mirror-over-FTS 1 passed (controller re-ran both); clippy ×2; strings hygiene 0; gitleaks clean | Fixture engine-only → Rust test stamps CT schema_version 32 pre-mirror (accepted); harness inline in README |
+
+## Stage: IMPLEMENTATION COMPLETE (2026-11-25 18:29) — review in flight
+- Wrapped gate chain (heavy-build, task11-gates.log): clippy ×2 EXIT 0; src-tauri full suite **lib 1744/0** (base 1735, net +9 = exactly the landed tests); 108 result lines all ok; vitest **631 passed + 1 skipped** (base 629+1, net +2); tsc EXIT 0.
+- Range under review: `9f266816..HEAD` (all code commits; spec+plan already reviewed in planning).
+- Ladder per plan Task 11 Step 4: Opus (T3) → Fable (T4); CodeRabbit active on PR #379. SoR remains suspended (Kurt 2026-11-14).
+
+## Stage-close review round 1 — T3 Opus (2026-11-25): REQUEST_CHANGES → fixed
+- 1 MAJOR + 5 MINOR + 4 NIT. All findings adjudicated ACCEPT (F1's MAJOR = spec.md:107-109 every-crossing rule, owner's own S5 ruling; plan's "cleared after first fire" was the divergence).
+- Fix-A `5db755c0`: every-crossing fire (no take()), epoch-guarded probe arm, two-crossing test replaces once-test (drain_hook 2/0 controller re-run; pipeline 73/73).
+- Fix-B `6c0d62d5` + `d086e554`: open-time root-derived pins (stamp-cleared so the OPEN's rederive runs — no hand-passed root); Run 1 failure surfaces via write_error_log (no invented diagnostics flag); S6 guard proves swept tables empty post-sweep + FTS family-roots const; align net restored in-place (align before the config write); librarian_evidence → PARTIAL; README recipe non-destructive. Gates: pins 3/0, switch 5/0, guard 1/0, clippy ×2 — controller re-ran.
+- Wontfix: NIT 10 (CI comment duplication) — plan-intentional, ledgered. Known gap flagged for T4: no test fires the hook after a supersede (needs a stall/epoch harness).
+- Epoch-fire test skipped (harness absent) — T4 to weigh.
+
+## Stage-close review round 2 — T4 Fable (2026-11-25): APPROVE
+- Verified all six T3 fixes do what they claim (A-E each file:line-cited); exclusion sets ruled sound; fresh sweep: NO blocker, 3 MINOR + 4 NIT.
+- G1 (no epoch-fire test): ACCEPT — two independent guards (end-of-iteration enter + probe-arm check), residual window microseconds, a superseded fire is a benign idempotent duplicate. Known limitation ledgered.
+- G2 (real-brain-only table coverage): substitution ACCEPTED (kick_state proven by the sweep test's V25-shape seed; FTS pinned by S8/S9); the dead FTS_FAMILY const ruled NEEDS-FIX.
+- Cleanup commit `67c051b7` (Fix-C): hook fire wrapped in catch_unwind; FTS_FAMILY now a real cross-check (no in-memory table may start with a family root; disjoint from SWEPT/PARTIAL/EXEMPT; fabricated-name negative control replaces the tautology); misleading stamp assertion replaced (rename + pointer to the queries.rs survival proof); stale "one-shot" doc fixed. Gates: drain_hook 2/0, guard 1/0, pins 3/0, clippy ×2 — controller-verified.
+- T4 finding 1 (restart loses Run 2 — hook not installed on startup/recovery start_pipeline) → owner follow-up issue #381 (per AGENTS.md stop-and-ask; spec does not answer the restart case). Candidate: install unconditionally on every rooted start_pipeline.
+- FINAL wrapped chain on settled HEAD `67c051b7` (final-gates.log): clippy ×2 EXIT 0, **lib 1744/0**, 108 result lines all ok, vitest 631+1 EXIT 0, tsc EXIT 0, HEAVY_EXIT=0. A prior chain that overlapped the Fix-C edits was killed and superseded by this one.
+- Remaining pre-merge: CodeRabbit pass on the pushed range + owner merge. 4 T4 NITs (misleading-assertion rename, stale comments, probe arming after non-counted jobs, parent-before-child delete order) — all addressed except probe-arming order and delete order, ledgered as cosmetics for the merge review.
+
+## CodeRabbit round (2026-11-25 19:05 EST) — 0 unresolved
+- 11 inline threads triaged: 7 stale (fixed by Fix-B/Fix-C or superseded by the controller-run gates), 1 docs fix landed (`3bffcfa8` — VACUUM INTO fresh-destination note), 2 owner follow-ups filed (#381 restart Run-2 loss, #382 moved-restore attestation keys), 1 stale epoch-guard claim rebutted with the Fix-A evidence + T4 §B citation. Every thread resolved with an evidence reply; readback: 17 threads, 0 unresolved.
+- Lane status: READY FOR OWNER MERGE pending CI. Reviews: T3 REQUEST_CHANGES → folded; T4 APPROVE; CodeRabbit 0 unresolved. Follow-ups: #380 (pre-existing), #381, #382.

@@ -538,7 +538,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
                     || report.purged > 0
                     || report.skipped_destructive
                 {
-                    println!(
+                    eprintln!(
                         "[ct::regrade] #186 V20: regraded_anchored={} exported={} purged={} skipped_destructive={}",
                         report.regraded_anchored,
                         report.exported,
@@ -691,7 +691,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
             }
             Some(roots) => {
                 let report = v22_unify_documents_path(conn, &roots.configured, &roots.canonical)?;
-                println!(
+                eprintln!(
                     "[ct::repair] #204 V22: rewritten={} deleted={} (canonical-path \
                      rows unified to configured-root form)",
                     report.rewritten, report.deleted
@@ -915,7 +915,7 @@ fn migrate(conn: &Connection, vault_root: Option<VaultRoots>, db_dir: Option<&Pa
         if already.is_none() {
             match crate::db::stated_ledger::rebuild_rederive(conn, Path::new(&roots.canonical)) {
                 Ok(report) => {
-                    println!(
+                    eprintln!(
                         "[ct::repair] #294 §8 rederive: confirmations read={} applied={} \
                          attestations read={} dropped={} denials={} deposits={} (once per \
                          brain; derived state re-derived from stated/ ledgers)",
@@ -1488,15 +1488,29 @@ fn package_ddl_objects() -> Vec<(&'static str, String)> {
     out
 }
 
+/// Distinct tables in ENGINE9_MIRROR_COLUMNS, first-appearance order.
+/// One PRAGMA table_info per DISTINCT table instead of per column.
+fn grouped_mirror_tables() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for (table, _, _) in ENGINE9_MIRROR_COLUMNS {
+        if !out.contains(table) {
+            out.push(table);
+        }
+    }
+    out
+}
+
 /// What the V33 step would add right now: missing mirror columns (only on
 /// tables that exist — an absent table is created by the DDL re-run with the
 /// columns inline) and missing package-DDL objects.
 fn engine9_missing(conn: &Connection) -> Result<(Vec<String>, Vec<String>)> {
     let mut columns = Vec::new();
-    for (table, column, _) in ENGINE9_MIRROR_COLUMNS {
+    for table in grouped_mirror_tables() {
         let existing = crate::db::ddl_compat::existing_columns(conn, table)?;
-        if !existing.is_empty() && !existing.iter().any(|c| c == column) {
-            columns.push(format!("{table}.{column}"));
+        for (t, column, _) in ENGINE9_MIRROR_COLUMNS {
+            if *t == table && !existing.is_empty() && !existing.iter().any(|c| c == column) {
+                columns.push(format!("{table}.{column}"));
+            }
         }
     }
     let mut objects = Vec::new();
@@ -8050,6 +8064,63 @@ mod tests {
         assert_eq!(engine9_master_count(&conn, "trigger", "llm_wiki_vector_removals_enqueue"), 1);
         assert_eq!(engine9_master_count(&conn, "trigger", "llm_wiki_vector_removals_hard_delete"), 1);
         assert!(engine9_v33_stamped(&conn), "V32 fixture is past V22 → stamps");
+    }
+
+    /// Desktop-upgrade proof (#376): an engine-generated 8.0.2 brain that
+    /// already carries FTS-at-rest text goes through the V33 chain. The
+    /// guarded ALTERs must not error, rows must survive, and the
+    /// engine-owned FTS objects must be untouched by the mirror.
+    #[test]
+    fn engine9_mirror_over_fts_carrying_8_0_2_brain_preserves_data_and_fts() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/db/testdata/ct-brain-v33-src-8.0.2-fts.db");
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("brain.db");
+        std::fs::copy(&src, &dst).expect("copy FTS fixture brain");
+        let conn = Connection::open(&dst).expect("raw open of FTS fixture copy");
+        // The fixture is engine-only (no CT-owned tables); the chain's
+        // stamp step needs CT's version table, which a real desktop brain has.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
+             INSERT OR IGNORE INTO schema_version (version) VALUES (32);",
+        )
+        .unwrap();
+
+        let count = |c: &Connection, t: &str| -> i64 {
+            c.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).unwrap()
+        };
+        let fts_objects = |c: &Connection| -> Vec<(String, String, Option<String>)> {
+            let mut stmt = c
+                .prepare(
+                    "SELECT type, name, sql FROM sqlite_master \
+                     WHERE name LIKE '%fts%' ORDER BY type, name",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        let entries_before = count(&conn, "llm_wiki_entries");
+        let content_before = count(&conn, "llm_wiki_entries_fts_content");
+        let fts_before = fts_objects(&conn);
+        assert!(entries_before >= 24, "fixture seeds >= 8 entities x 3 entries");
+        assert_eq!(content_before, entries_before, "FTS at-rest text present");
+        assert!(!fts_before.is_empty());
+
+        apply_engine9_mirror(&conn).expect("V33 chain over FTS-carrying brain");
+        // Second run: every guarded ALTER now targets an existing column.
+        apply_engine9_mirror(&conn).expect("V33 chain is idempotent");
+
+        assert_eq!(count(&conn, "llm_wiki_entries"), entries_before);
+        assert_eq!(count(&conn, "llm_wiki_entries_fts_content"), content_before);
+        assert_eq!(fts_objects(&conn), fts_before, "mirror must not touch engine FTS");
+        let entries = crate::db::ddl_compat::existing_columns(&conn, "llm_wiki_entries").unwrap();
+        for col in ["source_pointer", "prior_valid_to", "derived_events"] {
+            assert!(entries.iter().any(|c| c == col), "entries.{col}");
+        }
     }
 
     /// V33's snapshot → BEGIN IMMEDIATE → re-inspect → apply
