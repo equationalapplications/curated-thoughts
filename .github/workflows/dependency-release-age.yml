@@ -54,10 +54,13 @@ jobs:
           BASE_REF: origin/${{ github.event.pull_request.base.ref }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # The base ref must resolve; only a missing SCRIPT on a valid
+            # base may fall back to the PR's copy.
+            git rev-parse --verify "$BASE_REF^{commit}" >/dev/null || { echo "BASE_REF $BASE_REF does not resolve" >&2; exit 1; }
             # Run the BASE branch's copy of the gate script so the PR under
-            # review cannot weaken its own gate by editing the script. On the
-            # first PR that introduces the script the base has no copy yet —
-            # fall back to the PR's copy (nothing committed to weaken).
+            # review cannot weaken its own gate by editing the script. When
+            # the base branch predates the script, the PR's copy is used
+            # (nothing committed to weaken).
             if git cat-file -e "$BASE_REF:scripts/check-release-age-cargo-py.mjs" 2>/dev/null; then
               git show "$BASE_REF:scripts/check-release-age-cargo-py.mjs" > "$RUNNER_TEMP/check-release-age-cargo-py.mjs"
             else
@@ -69,8 +72,7 @@ jobs:
             GATE="scripts/check-release-age-cargo-py.mjs"
           fi
           # Check every lockfile present (Cargo.lock today; requirements*.txt
-          # / uv.lock / poetry.lock if one ever lands — the paths: filter
-          # above already triggers on them).
+          # / uv.lock / poetry.lock if one ever lands).
           found=0
           for lf in Cargo.lock requirements*.txt uv.lock poetry.lock; do
             [ -f "$lf" ] || continue

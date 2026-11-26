@@ -395,7 +395,7 @@ test("runCheck: newly added git-source dependency fails in delta mode, establish
     fetchImpl: async () => jsonResponse(crateDoc({ "1.0.210": iso(400 * DAY) })),
   })
   assert.equal(delta.code, 1)
-  assert.match(delta.err.join("\n"), /evil@2\.0\.0: new or changed non-crates\.io source/)
+  assert.match(delta.err.join("\n"), /evil@2\.0\.0: new or changed non-registry source/)
 
   // Whole-lockfile mode: the established git dep is skipped (informational),
   // the registry dep is old -> exit 0.
@@ -447,7 +447,7 @@ test("runCheck: a SAME-VERSION source swap (e.g. a [patch] to git) is a delta ch
 
   const { code, err } = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { spacingMs: 1 })
   assert.equal(code, 1)
-  assert.match(err.join("\n"), /serde@1\.0\.210: new or changed non-crates\.io source/)
+  assert.match(err.join("\n"), /serde@1\.0\.210: new or changed non-registry source/)
 
   // A foreign registry swap fails the same way.
   const serdeMirror =
@@ -457,7 +457,7 @@ test("runCheck: a SAME-VERSION source swap (e.g. a [patch] to git) is a delta ch
   run(["commit", "--quiet", "--no-verify", "-m", "swap to mirror"])
   const mirror = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { spacingMs: 1 })
   assert.equal(mirror.code, 1)
-  assert.match(mirror.err.join("\n"), /serde@1\.0\.210: new or changed non-crates\.io source/)
+  assert.match(mirror.err.join("\n"), /serde@1\.0\.210: new or changed non-registry source/)
 })
 
 test("runCheck: NEW unpinned or foreign-index requirement lines fail delta mode even with an empty entry delta", async () => {
@@ -527,7 +527,7 @@ test("runCheck: uv git-source dependency fails in delta mode", async () => {
   run(["commit", "--quiet", "--no-verify", "-m", "add git dep"])
   const { code, err } = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { spacingMs: 1 })
   assert.equal(code, 1)
-  assert.match(err.join("\n"), /evil@2\.0\.0: new or changed non-crates\.io source/)
+  assert.match(err.join("\n"), /evil@2\.0\.0: new or changed non-registry source/)
 })
 
 test("runCheck: poetry [package.source] tables and a new uv workspace member behave per policy", async () => {

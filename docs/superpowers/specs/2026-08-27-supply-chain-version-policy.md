@@ -6,8 +6,8 @@ lands via PR #388: the JS side is
 gated by `pnpm-workspace.yaml` `minimumReleaseAge` (below), and the cargo/pip
 side is gated by
 `scripts/check-release-age-cargo-py.mjs` +
-`.github/workflows/dependency-release-age.yml` (delta-vs-base on every PR
-touching Cargo.lock; manual whole-lockfile `workflow_dispatch` audits;
+`.github/workflows/dependency-release-age.yml` (delta-vs-base on EVERY PR;
+manual whole-lockfile `workflow_dispatch` audits;
 fail-closed; new or source-changed non-crates.io/non-path dependencies fail;
 PR runs the base branch's copy of the script so it cannot weaken the
 script-level gate (the workflow file itself is protected by review)).

@@ -185,9 +185,14 @@ export function entriesFromPoetryLock(raw, problems = []) {
   // pinned at a version that exists on PyPI would otherwise pass the PyPI
   // lookup. Any lockfile using [package.source] is rejected outright.
   if (/\[package\.source\]/.test(raw)) {
-    problems.push(
-      "poetry.lock contains [package.source] tables (git/URL/direct sources) which this parser cannot verify (fail-closed)",
-    )
+    // One problem PER OCCURRENCE (with the count in each) so the multiset
+    // diff flags newly ADDED tables even when the base already had some.
+    const n = (raw.match(/\[package\.source\]/g) ?? []).length
+    for (let i = 0; i < n; i++) {
+      problems.push(
+        `poetry.lock contains a [package.source] table (git/URL/direct sources) which this parser cannot verify (fail-closed) [table ${i + 1}/${n}]`,
+      )
+    }
   }
   const entries = []
   for (const s of parseTomlPackageSections(raw)) {
@@ -421,7 +426,7 @@ export async function runCheck(
         (e.src ?? "") !== "" &&
         !firstPartyPrefixes.some((p) => e.name.startsWith(p))
       ) {
-        failures.push(`${e.name}@${e.version}: new or changed non-crates.io source (${e.src ?? "unknown"}) (fail-closed)`)
+        failures.push(`${e.name}@${e.version}: new or changed non-registry source (${e.src ?? "unknown"}) (fail-closed)`)
       }
     }
   }
@@ -437,8 +442,10 @@ export async function runCheck(
   const lastRequestAt = { t: 0 }
 
   async function fetchJson(url, attemptMax = 5) {
-    // attemptMax 5: with the 60s Retry-After cap the worst case per request
-    // is ~5 min — inside the 10-minute PR-path job timeout.
+    // attemptMax 5: worst case per request is 5 fetch timeouts (30s each)
+    // plus 4 Retry-After waits (60s cap) — about 6.5 minutes, which can
+    // approach the 10-minute PR-path job timeout alongside a second worker.
+    // The job still fails closed either way.
     for (let attempt = 1; attempt <= attemptMax; attempt++) {
       let res
       try {
