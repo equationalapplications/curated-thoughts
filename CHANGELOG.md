@@ -1,3 +1,21 @@
+## [3.17.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.17.0...v3.17.1) (2026-11-26)
+
+### Bug Fixes
+
+* **ci:** exclude scripts/ from vitest — node:test files broke the frontend job ([c3f830a](https://github.com/equationalapplications/curated-thoughts/commit/c3f830a9d7a4b69f63c3a0fa11c8e6963c1022e5))
+* **ci:** harden release-age gate per review r1 ([2d2b5ab](https://github.com/equationalapplications/curated-thoughts/commit/2d2b5ab59320ef584c0038559c9f134be73013c0)), closes [#revision](https://github.com/equationalapplications/curated-thoughts/issues/revision)
+* **ci:** pin gate actions by SHA, clamp Retry-After, retry transient 5xx, youngest-file PyPI timestamps ([a9b3da9](https://github.com/equationalapplications/curated-thoughts/commit/a9b3da9028efa693e021f1b14bdf9033aa411dcf))
+* **ci:** report the gate on every PR so it can be a required check ([9862bc0](https://github.com/equationalapplications/curated-thoughts/commit/9862bc06c744b9ba355bb0b39f9d142915d46340))
+* **ci:** wire Python lockfiles into the release-age trigger and check loop ([f6f1ad1](https://github.com/equationalapplications/curated-thoughts/commit/f6f1ad159c2642fb183cfd14b9de370e116710b3))
+* **gate:** delta keys include source; same-version source swaps fail closed ([972cef8](https://github.com/equationalapplications/curated-thoughts/commit/972cef88d8d9528942c95e15772111187251e3f0)), closes [lands-via-#388](https://github.com/equationalapplications/lands-via-/issues/388)
+* **gate:** delta-nit folds — drop duplicate 503 retry branch, cite PR [#391](https://github.com/equationalapplications/curated-thoughts/issues/391) in policy doc, pin pip comment semantics ([8a2cdb9](https://github.com/equationalapplications/curated-thoughts/commit/8a2cdb90b78d385a84b6c6cb4c3f156fe489b948))
+* **gate:** fail closed on poetry [package.source]; uv local members skip; test hygiene ([6e0f3af](https://github.com/equationalapplications/curated-thoughts/commit/6e0f3afb2dae92a569efb91f96542c306a4c3c9f))
+* **gate:** fold CodeRabbit threads — fail-closed requirements includes, stable problem identities, poetry source retention, comment-aware continuations, attached short options, inherited index carry, network-free test ([81cf1cb](https://github.com/equationalapplications/curated-thoughts/commit/81cf1cbf5cf5d06c4432daa888f2cf615c54be71))
+* **gate:** pip-exact continuations, optparse abbreviation canonicalization, include-graph delta auditing (CodeRabbit round 2) ([4245e7a](https://github.com/equationalapplications/curated-thoughts/commit/4245e7a4cb2964ea2766293f789134e2274625d3))
+* **gate:** Python parsers now honor the delta fail-closed source rule ([4482304](https://github.com/equationalapplications/curated-thoughts/commit/4482304097ee0d138c4e7986c403bf976911149a))
+* **gate:** T3 r5 confirmation folds — per-table poetry problems, BASE_REF verify, label fix ([86f4e2a](https://github.com/equationalapplications/curated-thoughts/commit/86f4e2a6e25971250d3bf50867b38093b78e1158))
+* **gate:** token-scan option lines, fail delta on inherited includes, keep poetry source identity in entry delta ([75c2438](https://github.com/equationalapplications/curated-thoughts/commit/75c24385a4df8bf3c4d00e0e1bed933bb57b9a5a))
+
 ## [3.17.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.4...v3.17.0) (2026-11-26)
 
 ### Features
