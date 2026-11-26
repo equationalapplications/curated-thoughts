@@ -1,3 +1,9 @@
+## [3.16.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.1...v3.16.2) (2026-11-26)
+
+### Bug Fixes
+
+* **ci:** remove keyless env: block that made build.yml unparseable ([58c993a](https://github.com/equationalapplications/curated-thoughts/commit/58c993a14b48fba543b5214b349b22264afa00a9)), closes [#337](https://github.com/equationalapplications/curated-thoughts/issues/337) [#337](https://github.com/equationalapplications/curated-thoughts/issues/337)
+
 ## [3.16.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.0...v3.16.1) (2026-11-26)
 
 ### Bug Fixes
