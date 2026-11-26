@@ -1548,10 +1548,13 @@ impl ConfirmationsGate {
         // retries.
         apply()?;
         self.dirty.store(false, Ordering::SeqCst);
-        // Stat AFTER the read: a racing ledger append resolves toward
-        // "changed next fire" (the safe direction).
+        // Memo the PRE-read stat (`cur`): any ledger append that lands at or
+        // after this stat — during or after the apply — changes the file's
+        // stat and forces a rescan on the next fire. Statting AFTER the read
+        // instead would record a not-yet-applied append as already seen (the
+        // unsafe direction), so the capture order is stat-before-read.
         if let Ok(mut g) = self.memo.lock() {
-            *g = Some(ledger_stat(ledger));
+            *g = Some(cur);
         }
         Ok(())
     }
@@ -3233,6 +3236,30 @@ mod confirmations_gate_tests {
         std::fs::write(&p, "a\nbb\n").unwrap();
         gate.fire(&p, || bump(&n)).unwrap();
         assert_eq!(n.get(), 2);
+    }
+
+    #[test]
+    fn append_during_apply_rescans_on_next_fire() {
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        let during = p.clone();
+        gate
+            .fire(&p, || {
+                n.set(n.get() + 1);
+                // A confirmation appends to the ledger while the apply's read
+                // is in flight: not covered by this apply, and the memo must
+                // NOT record its (post-append) stat as already seen.
+                std::fs::write(&during, "a\nb\n").unwrap();
+                Ok(0)
+            })
+            .unwrap();
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(
+            n.get(),
+            2,
+            "an append that landed during the apply must rescan on the next fire"
+        );
     }
 
     #[test]

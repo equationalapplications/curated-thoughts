@@ -33,7 +33,7 @@ Normal same-root restores are unaffected (the backup's own keys are correct).
 
 ### B — #385 m1: full wiki scan per idle crossing once the ledger is non-empty
 
-`apply_stored_confirmations` (`stated_ledger.rs:454`) early-returns only on an
+`apply_stored_confirmations` (`stated_ledger.rs:453`) early-returns only on an
 EMPTY ledger (`:457-461`). With ≥1 confirmation on disk, every 1→0 drain
 crossing reads the ledger and then loads + hashes every live
 `llm_wiki_entries` title+body (`apply_confirmations_by_hash`,
@@ -72,8 +72,11 @@ worker or handle.
 
 ### A — restore re-derives unconditionally (recommended; Q1)
 
-At restore completion (after the install rename commits and before/at the
-reopen), run the same one-shot rederive the switch path already uses:
+At restore completion — after `commit_staged_backup` publishes the captured
+backup and the config is aligned to the new root, before/at the reopen (the
+plan's Task 1 ordering is the authority; "before/at the reopen" here means
+the same window) — run the same one-shot rederive the switch path already
+uses:
 `rebuild_rederive(conn, canonical_new_root)` (pub, one tx, idempotent,
 `stated_ledger.rs:356`; canonicalizes its own arg `:365`; Run 1 precedent at
 `lib.rs:2346`). Because the backup records no capture-time root, no reliable
@@ -103,7 +106,10 @@ at a cost the switch path already pays on every in-place switch).
 Gate the hook leg on a **dual condition**: the ledger stat memo **OR** an
 entries-written dirty flag. A stat memo alone is WRONG: new facts ingested
 across drain waves change `llm_wiki_entries` while
-`<root>/.confirmations.jsonl` (exact path constant from `stated_ledger.rs`)
+`<root>/stated/.confirmations.jsonl` — built as
+`root.join(STATED_DIR).join(CONFIRMATIONS_LEDGER)` (`stated_ledger.rs:25`,
+`:455`; `STATED_DIR` is a directory constant, so the bare file name alone is
+NOT the path) —
 stays unchanged, and `apply_confirmations_by_hash` must re-scan so the
 newly-ingested entries can match confirmed hashes (owner ruling, Discord
 msg 1575566029889867837, 2026-11-26).
@@ -113,22 +119,32 @@ msg 1575566029889867837, 2026-11-26).
   (`mod.rs:1469`); the memo lives next to it. The confirmations slot is
   `Arc<Mutex<Option<ConfirmationsHook>>>` (`mod.rs:1426-1453`) and
   `respawn_worker` reuses the slot, so state survives worker respawns
-  (unlike worker fields).
+  (unlike worker fields). **Capture order is stat-before-read:** the stat
+  compared/stored is taken BEFORE the apply's read, and on success the
+  memo stores that pre-read stat. A ledger append that lands at or after
+  the stat (during or after the apply) then changes the file's stat and
+  forces a rescan on the next fire. Statting after the read instead would
+  record a not-yet-applied append as already seen (unsafe direction).
 - **Entries-written dirty flag:** a flag in the same shared state, set by the
   job-completion path when the completed job WROTE entries (ingest /
   rechunk / any variant that inserts or changes `llm_wiki_entries` rows —
   the implementer verifies the exact variant set from the tree and STOPs if
   it is ambiguous; pure-read jobs never set it). The flag is cleared ONLY
   after a successful full apply — a failed apply stays dirty so the next
-  fire retries.
+  fire retries. **Safety invariant (single writer):** both the dirty-setter
+  (worker job-completion path, `mod.rs:402`) and the hook's clear run on
+  the one worker thread, so no Ingest completion can interleave with an
+  in-flight apply and a concurrent set-then-clear loss cannot occur; the
+  implementation documents this invariant at the clear site.
 - **Fire path unchanged** (probe cadence `mod.rs:211-261`, `DRAIN_PROBE`
   250ms, panic-safety, drain semantics). Hook leg:
   - first fire (no memo): always applies;
   - otherwise: skip read + scan only when the stat is unchanged AND the
     dirty flag is clear; else apply exactly as today (the existing
     empty-ledger early return `:457-461` stays as the inner fast path), then
-    update the memo from the file's stat after the read (stat-before-read
-    races resolve toward "dirty next fire" — the safe direction).
+    store the PRE-read stat into the memo — the stat is captured before the
+    read, so an append landing at/after the capture resolves toward
+    "changed stat next fire" (the safe direction).
 - Alternative rejected: stat memo alone (breaks the multi-wave ingest case,
   per the ruling); leave-as-is (the #381 spec accepted the cost once; #384
   widened who pays it to every rooted session).
