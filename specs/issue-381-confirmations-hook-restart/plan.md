@@ -1,6 +1,6 @@
 # Plan: #381 — Run 2 confirmations hook on every rooted `start_pipeline`
 
-Status: Draft (T3 CONVERGED — awaiting owner plan approval)
+Status: Approved (owner 2026-11-25) — implementation in progress
 Spec: `specs/issue-381-confirmations-hook-restart/spec.md` — APPROVED by
 Kurt 2026-11-25 (D1: central install, rooted only). Owner check folded:
 `read_lines` returns `Ok(Vec::new())` on a missing ledger
