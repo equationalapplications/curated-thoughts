@@ -450,6 +450,22 @@ pub fn rebuild_rederive(conn: &Connection, vault_root: &Path) -> Result<RebuildR
 /// legs and the stamp are NOT touched. Idempotent (dedup by hash;
 /// already-stamped rows are no-ops). Returns the number of hash-matched
 /// rows stamped.
+/// Watermark of the live entries table: `(row_count, max_rowid)` over the
+/// rows the confirmations apply can stamp (`deleted_at IS NULL`, the same
+/// predicate as `apply_confirmations_by_hash`'s SELECT). Read before the
+/// apply and memoized by the gate: ANY writer — the worker's ingests as well
+/// as out-of-worker deposits, approvals, and synthesis — moves it, so the
+/// next drain crossing rescans (Q2 refinement, owner ruling 2026-11-26: the
+/// watermark replaces the per-job dirty flag, which was set unconditionally
+/// and could not see out-of-worker writers).
+pub fn entries_watermark(conn: &Connection) -> Result<(i64, i64)> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM llm_wiki_entries WHERE deleted_at IS NULL",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
 pub fn apply_stored_confirmations(conn: &Connection, vault_root: &Path) -> Result<usize> {
     let confirmations: Vec<ConfirmationLine> =
         read_lines(&vault_root.join(STATED_DIR).join(CONFIRMATIONS_LEDGER))?;

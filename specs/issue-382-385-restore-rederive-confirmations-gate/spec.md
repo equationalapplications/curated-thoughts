@@ -111,10 +111,10 @@ at a cost the switch path already pays on every in-place switch).
   unsupported — leaves silent stale-key residue behind, which the issue
   exists to remove.
 
-### B — entries-written + stat dual gate on the confirmations hook (ruling Q2=2)
+### B — entries-table watermark + stat gate on the confirmations hook (ruling Q2=2, refined 2026-11-26)
 
 Gate the hook leg on a **dual condition**: the ledger stat memo **OR** an
-entries-written dirty flag. A stat memo alone is WRONG: new facts ingested
+entries-table watermark. A stat memo alone is WRONG: new facts ingested
 across drain waves change `llm_wiki_entries` while
 `<root>/stated/.confirmations.jsonl` — built as
 `root.join(STATED_DIR).join(CONFIRMATIONS_LEDGER)` (`stated_ledger.rs:25`,
@@ -125,56 +125,48 @@ newly-ingested entries can match confirmed hashes (owner ruling, Discord
 msg 1575566029889867837, 2026-11-26).
 
 - **Ledger stat memo:** `(mtime_nanos, len)` of the ledger file, captured in
-  the hook's state. The hook closure already captures `root`
-  (`mod.rs:1469`); the memo lives next to it. The confirmations slot is
-  `Arc<Mutex<Option<ConfirmationsHook>>>` (`mod.rs:1426-1453`) and
-  `respawn_worker` reuses the slot, so state survives worker respawns
-  (unlike worker fields). **Capture order is stat-before-read:** the stat
-  compared/stored is taken BEFORE the apply's read, and on success the
-  memo stores that pre-read stat. A ledger append that lands at or after
-  the stat (during or after the apply) then changes the file's stat and
-  forces a rescan on the next fire. Statting after the read instead would
-  record a not-yet-applied append as already seen (unsafe direction).
-- **Entries-written dirty flag:** a flag in the same shared state, set by the
-  job-completion path when the completed job WROTE entries (ingest /
-  rechunk / any variant that inserts or changes `llm_wiki_entries` rows —
-  the implementer verifies the exact variant set from the tree and STOPs if
-  it is ambiguous; pure-read jobs never set it). The flag is CONSUMED at the
-  start of an apply (swapped to false before the apply runs) and re-armed if
-  the apply does not succeed — error or panic, since the drain probe runs
-  the hook under `catch_unwind` and retries the leg — so the next fire
-  retries regardless of which trigger fired; the stat memo likewise never
-  advances past a failed apply. A panicking hook poisons the slot mutex, so
-  all three slot locks (probe, fire, install) recover with `into_inner`
-  (`lock_confirmations_slot`): without that recovery the one panic the
-  `catch_unwind` leg survives would read "hook not installed" forever and
-  the retry above would never run. **Writer invariant (multi-generation):** the
-  watchdog can supersede a wedged worker (`mod.rs:1373-1378`), so two
-  dirty-setters can transiently coexist — the superseded worker's job-tail
-  `mark_dirty` (the worker's job-tail call) is unconditional and
-  epoch-blind, and a
-  set-then-clear loss against an in-flight apply WAS possible while the
-  clear ran after the apply. Consume-before-apply closes that race by
-  program order: a worker's entry writes precede its `mark_dirty`, so
-  against a fire that consumed the flag before its apply, either the
-  apply's SELECT sees the writes or the mark lands after the consume and
-  survives to the next fire.
-  Regression tests:
-  `mark_during_apply_survives_the_clear`,
-  `panicking_apply_with_unchanged_ledger_rearms_dirty`,
-  `panicking_hook_is_reinvoked_on_the_next_crossing`.
-- **Fire path unchanged** (probe cadence `mod.rs:211-261`, `DRAIN_PROBE`
+  the hook's state. The hook closure already captures `root`; the memo lives
+  next to it in `ConfirmationsGate` (an `Arc` shared into the installed hook,
+  so state survives worker respawns). **Capture order is
+  stat/watermark-before-read:** both triggers are captured BEFORE the apply's
+  read, and on success the memo stores the pre-read pair. A ledger append
+  that lands at or after the stat capture (during or after the apply) changes
+  the file's stat and forces a rescan on the next fire; statting after the
+  read instead would record a not-yet-applied append as already seen (unsafe
+  direction).
+- **Entries-table watermark (Q2 refinement, owner ruling 2026-11-26,
+  option 1):** `(row_count, max_rowid)` over the live `llm_wiki_entries`
+  rows (`stated_ledger::entries_watermark` — the same `deleted_at IS NULL`
+  predicate as the apply's SELECT), read by the hook before each apply and
+  memoized next to the stat. The original Q2=2 design — a per-job dirty flag
+  set at the worker's job tail — was implemented unconditionally (every job
+  set it, including no-op ingests), which made the skip branch unreachable
+  in production (T4 M1); and a job-tail flag cannot see entries written
+  OUTSIDE the worker (deposits, approvals, synthesis — ten modules insert
+  into `llm_wiki_entries`). The watermark covers every writer: any insert
+  or delete moves row_count/rowid and forces a rescan on the next drain
+  crossing, so the skip branch is real and the scan never under-runs.
+  Nothing is consumed, so nothing can be lost to concurrency: a failed or
+  panicking apply leaves the memo at its pre-read pair and the next fire
+  retries. (History: the interim per-job flag designs — unconditional mark,
+  then consume-before-apply with re-arm — are superseded by this memo pair;
+  the slot-poison recovery from that lineage is retained and is what keeps
+  retry-after-panic true.)
+- **Fire path unchanged** (probe cadence `mod.rs` drain probe, `DRAIN_PROBE`
   250ms, panic-safety, drain semantics). Hook leg:
   - first fire (no memo): always applies;
-  - otherwise: skip read + scan only when the stat is unchanged AND the
-    dirty flag is clear; else apply exactly as today (the existing
-    empty-ledger early return `:457-461` stays as the inner fast path), then
-    store the PRE-read stat into the memo — the stat is captured before the
-    read, so an append landing at/after the capture resolves toward
-    "changed stat next fire" (the safe direction).
+  - otherwise: skip read + scan only when the stat AND the watermark are
+    unchanged; else apply exactly as today (the existing empty-ledger early
+    return stays as the inner fast path), then store the PRE-read stat +
+    watermark into the memo — both are captured before the read, so a write
+    landing at/after the captures resolves toward "changed next fire" (the
+    safe direction).
 - Alternative rejected: stat memo alone (breaks the multi-wave ingest case,
   per the ruling); leave-as-is (the #381 spec accepted the cost once; #384
-  widened who pays it to every rooted session).
+  widened who pays it to every rooted session); per-job dirty flag with
+  precise write detection (T4 M1) — cannot see out-of-worker writers, so
+  entries written outside the worker would wait for the next writing ingest
+  before being stamped.
 
 ### C — hygiene (mechanical, no owner question)
 
@@ -240,11 +232,16 @@ msg 1575566029889867837, 2026-11-26).
 1. **Q1 (owner, RULED 2026-11-26): #382 shape = (a1).** Unconditional
    rederive at restore + unstamp-on-failure (next open retries), per §2-A.
 2. **Q2 (owner, RULED 2026-11-26): #385 m1 gate = dual gate.** Ledger stat
-   memo AND entries-written dirty flag (consumed at apply start, re-armed
-   on error or panic; the memo never advances past a failed apply),
-   per §2-B — a stat memo alone was explicitly rejected by the owner: it
-   would miss newly-ingested facts across drain waves while the
-   confirmations file is unchanged.
+   memo AND an entries-written trigger, per §2-B — a stat memo alone was
+   explicitly rejected by the owner: it would miss newly-ingested facts
+   across drain waves while the confirmations file is unchanged.
+3. **Q2 refinement (owner, RULED 2026-11-26, reply "1"):** the
+   entries-written trigger is an entries-TABLE watermark
+   (`row_count`, `max_rowid` over live rows), read by the hook before each
+   apply and memoized beside the stat — it sees out-of-worker writers
+   (deposits, approvals, synthesis) that a worker job-tail flag cannot, and
+   the per-job flag (which T4 showed was set unconditionally, leaving the
+   skip branch dead) is removed.
 3. C section is mechanical — no ruling needed.
 4. PR topology per D1: ONE PR for all three sections (Single PR delivery;
    lifecycle cleanup last LIFECYCLE commit before the ready flip).
