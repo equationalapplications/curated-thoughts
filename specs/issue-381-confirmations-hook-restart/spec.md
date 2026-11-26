@@ -1,6 +1,6 @@
 # Spec: #381 — install the Run 2 confirmations hook on every rooted `start_pipeline`
 
-Status: Draft (awaiting owner review)
+Status: Reviewed (owner-approved 2026-11-25 — D1: central install)
 Issue: #381. Found by T4 stage-close review of #379 (F1, MINOR).
 
 ## Problem
