@@ -1,6 +1,6 @@
 # Spec: #386 — Stabilize the UnverifiedPromptModal focus test
 
-Status: Draft (2026-11-26)
+Status: Reviewed (2026-11-26 — owner approval, Discord msg 1575535367145398364; amendment: third wrap for the close-test cleanup race, flagged for plan approval)
 Issue: #386
 Branch: fix/386-focus-flake
 
@@ -93,9 +93,26 @@ await waitFor(() => {
 The wait proves the trap is active, so its keydown handler is
 registered. The rest of the test stays unchanged.
 
+Fix 3 — test "on close, focus returns to the previously focused
+element". The trap restores the previous focus inside its effect
+cleanup, which is also a passive flush. The current `waitFor` covers
+only the dialog's removal, and the assertion at line 216 runs after
+the `waitFor` block. Wrap that assertion in `waitFor` too:
+
+```tsx
+await waitFor(() => {
+  expect(document.activeElement).toBe(opener);
+});
+```
+
+The restore is a cleanup of the same passive effect, so this fix
+belongs to the same root cause. The owner's spec approval carried a
+sanity check for exactly this family of leftovers; the plan adds this
+wrap and flags it.
+
 ## Files touched
 
-- `src/__tests__/UnverifiedPromptModal.test.tsx` — add the two
+- `src/__tests__/UnverifiedPromptModal.test.tsx` — add the three
   `waitFor` wraps. No other change to the file.
 
 No product code changes.
@@ -128,8 +145,8 @@ No product code changes.
 
 ## Out of scope
 
-- The other assertions in this file. They already use `waitFor` or
-  run synchronously.
+- The click-driven tests in this file. Clicks reach React props set at
+  commit time, so they do not race the trap.
 - `useFocusTrap` and the modal component.
 
 ## Errata
