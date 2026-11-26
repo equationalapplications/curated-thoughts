@@ -407,6 +407,42 @@ test("runCheck: first-party exemption exempts a too-young version", async () => 
   assert.equal(fetchCalls, 0)
 })
 
+test("runCheck: PyPI timestamp takes the YOUNGEST file's upload time (fail-closed)", async () => {
+  const { file } = tmpLockfile("requirements.txt", "flask==3.0.0\n")
+  const old = iso(400 * DAY)
+  const young = iso(2 * DAY)
+  const { code, err } = await runQuiet(["--lockfile", file], {
+    fetchImpl: async () =>
+      jsonResponse({
+        urls: [
+          { upload_time_iso_8601: old },
+          { upload_time_iso_8601: young }, // file added later -> release is young
+        ],
+      }),
+    spacingMs: 1,
+  })
+  assert.equal(code, 1)
+  assert.match(err.join("\n"), /flask@3\.0\.0 .* published \d{4}-\d{2}-\d{2}/)
+})
+
+test("runCheck: transient 5xx is retried, not failed immediately", async () => {
+  const { file } = tmpLockfile(
+    "Cargo.lock",
+    '[[package]]\nname = "flaky"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n',
+  )
+  let calls = 0
+  const { code } = await runQuiet(["--lockfile", file], {
+    fetchImpl: async () => {
+      calls++
+      if (calls <= 2) return jsonResponse({}, 502)
+      return jsonResponse(crateDoc({ "1.0.0": iso(400 * DAY) }))
+    },
+    spacingMs: 1,
+  })
+  assert.equal(code, 0)
+  assert.equal(calls, 3)
+})
+
 test("runCheck: request spacing reserves slots synchronously (no two calls together)", async () => {
   const names = ["a", "b", "c"]
   const content = names

@@ -376,8 +376,8 @@ export async function runCheck(
         continue
       }
       if (res.status === 404) return null // unknown package/version: fail closed upstream
-      if (res.status === 429 || res.status === 503) {
-        const retryAfter = Number(res.headers.get("retry-after")) || Math.min(2 ** attempt, 30)
+      if (res.status === 429 || res.status === 503 || res.status >= 500) {
+        const retryAfter = Math.min(Number(res.headers.get("retry-after")) || Math.min(2 ** attempt, 30), 60)
         if (attempt === attemptMax) throw new Error(`HTTP ${res.status} after ${attemptMax} attempts`)
         await new Promise((r) => setTimeout(r, retryAfter * 1000))
         continue
@@ -400,8 +400,17 @@ export async function runCheck(
   async function pypiCreated(name, version) {
     const doc = await fetchJson(`https://pypi.org/pypi/${encodeURIComponent(name)}/${encodeURIComponent(version)}/json`)
     if (!doc || !doc.urls || !Array.isArray(doc.urls)) return null
-    const upload = doc.urls.find((u) => u.upload_time)
-    return upload ? upload.upload_time : null
+    // Youngest file wins: releases can gain files after the first upload, so
+    // taking the latest upload time is the fail-closed direction (a new file
+    // on an old release is still too new). Prefer the timezone-explicit
+    // upload_time_iso_8601 field over the naive upload_time string.
+    const times = doc.urls
+      .map((u) => u.upload_time_iso_8601 ?? u.upload_time)
+      .filter(Boolean)
+      .map((t) => new Date(t))
+      .filter((d) => !Number.isNaN(d.getTime()))
+    if (times.length === 0) return null
+    return new Date(Math.max(...times.map((d) => d.getTime()))).toISOString()
   }
 
   const registryLookup = { crates: cratesVersions, pypi: pypiCreated }
