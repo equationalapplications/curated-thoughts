@@ -136,9 +136,11 @@ function makeRow(id: string, title: string, body: string): QueueRow {
 test("focus moves into the dialog on open (first action button focused)", async () => {
   renderWithTheme(<UnverifiedPromptModal pollMs={3600_000} />);
   await screen.findByText("Real body from the brain.");
-  expect(document.activeElement).toBe(
-    screen.getByRole("button", { name: /^confirm$/i }),
-  );
+  await waitFor(() => {
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /^confirm$/i }),
+    );
+  });
 });
 
 test("after confirming one of two facts, focus is on a remaining action button (NOT document.body)", async () => {
@@ -187,6 +189,13 @@ test("Tab from the last focusable wraps to the first focusable inside the dialog
   const buttons = within(dialog).getAllByRole("button");
   const last = buttons[buttons.length - 1];
   expect(last).toHaveTextContent(/not now/i);
+  // The trap's passive effect must have run before we fire Tab, or its
+  // keydown handler is not registered yet. Wait for its initial focus.
+  await waitFor(() => {
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /^confirm$/i }),
+    );
+  });
   last.focus();
   expect(document.activeElement).toBe(last);
   fireEvent.keyDown(last, { key: "Tab" });
@@ -213,5 +222,10 @@ test("on close, focus returns to the previously focused element", async () => {
   await waitFor(() => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
-  expect(document.activeElement).toBe(opener);
+  // Defensive: the restore runs in the trap's effect cleanup, another
+  // passive flush. No failure of this test was ever captured, but the
+  // wrap is free insurance and cannot mask a missing restore.
+  await waitFor(() => {
+    expect(document.activeElement).toBe(opener);
+  });
 });
