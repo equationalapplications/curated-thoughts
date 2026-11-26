@@ -1,6 +1,6 @@
 # Spec: Record `blocked_by_privacy_mode` in the kick ledger error column (#362)
 
-Status: Reviewed (owner chat ruling 2026-11-26)
+Status: Implemented
 
 ## Problem
 
