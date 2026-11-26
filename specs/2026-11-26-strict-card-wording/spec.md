@@ -1,6 +1,6 @@
 # Spec: Strict privacy card must be honest about embeddings (issue #355)
 
-Status: Draft
+Status: Implemented
 
 ## Problem
 
