@@ -531,7 +531,7 @@ export async function runCheck(
         continue
       }
       if (res.status === 404) return null // unknown package/version: fail closed upstream
-      if (res.status === 429 || res.status === 503 || res.status >= 500) {
+      if (res.status === 429 || res.status >= 500) {
         const retryAfter = Math.min(Number(res.headers.get("retry-after")) || Math.min(2 ** attempt, 30), 60)
         if (attempt === attemptMax) throw new Error(`HTTP ${res.status} after ${attemptMax} attempts`)
         await new Promise((r) => setTimeout(r, retryAfter * 1000))

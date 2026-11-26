@@ -2,7 +2,8 @@
 
 **Date:** 2026-08-27
 **Status:** IMPLEMENTED — Task 1 complete (exact-pinning). Task 2 (14-day gate)
-lands via PR #388: the JS side is
+landed via PR #388 (merged 2026-11-26); the cargo/pip checker hardening carrier
+is PR #391. The JS side is
 gated by `pnpm-workspace.yaml` `minimumReleaseAge` (below), and the cargo/pip
 side is gated by
 `scripts/check-release-age-cargo-py.mjs` +

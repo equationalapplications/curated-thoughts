@@ -632,6 +632,18 @@ test("runCheck: transient 5xx is retried, not failed immediately", async () => {
   assert.equal(calls, 3)
 })
 
+test("entriesFromRequirements: pip comment stripping ignores quotes (delta nit 3)", () => {
+  const problems = []
+  const entries = entriesFromRequirements(
+    ["flask==3.0.0 \"weird unmatched quote # trailing note"].join("\n"),
+    problems,
+  )
+  assert.deepEqual(entries, [
+    { name: "flask", version: "3.0.0", registry: "pypi", src: "pypi" },
+  ])
+  assert.equal(problems.length, 0)
+})
+
 test("entriesFromRequirements: include/constraint directives fail closed (T1)", () => {
   for (const line of ["-r deps.txt", "-rdeps.txt", "--requirement=deps.txt", "--requirement deps.txt", "-c cons.txt", "--constraint cons.txt"]) {
     const problems = []
