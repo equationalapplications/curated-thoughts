@@ -1,0 +1,48 @@
+name: Dependency release age
+
+# Policy (dependency-supply-chain-sop.md): a PR's Cargo.lock delta vs the
+# base branch must contain no registry version published in the last 14 days,
+# to limit exposure to poisoned upstream releases. A PR whose delta is empty
+# passes without a cooldown; whole-lockfile sweeps stay available as manual
+# `workflow_dispatch` audits. Fail-closed: a version whose registry timestamp
+# cannot be determined fails the check. Runs before any cargo/pip install, so
+# a too-new package's build scripts never execute in CI. The JS side is
+# already gated by pnpm-workspace.yaml `minimumReleaseAge` and is not
+# re-checked here. curated-thoughts has no Python lockfile today; the script
+# covers requirements*.txt / uv.lock / poetry.lock if one ever lands.
+on:
+  pull_request:
+    paths:
+      - Cargo.lock
+      - "src-tauri/Cargo.toml"
+      - "tools/Cargo.toml"
+      - scripts/check-release-age-cargo-py.mjs
+      - .github/workflows/dependency-release-age.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # Full history so the base branch ref is present for the delta
+          # diff; `git show` afterwards needs no credentials.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check minimum release age
+        env:
+          BASE_REF: origin/${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            node scripts/check-release-age-cargo-py.mjs --days 14 --lockfile Cargo.lock --base "$BASE_REF"
+          else
+            node scripts/check-release-age-cargo-py.mjs --days 14 --lockfile Cargo.lock
+          fi
