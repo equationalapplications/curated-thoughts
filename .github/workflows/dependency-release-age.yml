@@ -17,7 +17,9 @@ name: Dependency release age
 # protection, not by this check; keep this workflow NON-required in branch
 # protection, since the paths: filter means PRs that don't touch lockfiles
 # never report it.) On the first PR that introduces the script, the base has
-# no copy yet and the PR's copy is used (nothing committed to weaken). Runs
+# no copy yet and the PR's copy is used (nothing committed to weaken) — this
+# fallback applies to ANY PR whose base branch predates the script, not just
+# the first one. Runs
 # before any cargo/pip install, so a too-new package's build scripts never
 # execute in CI. The JS side is already gated by pnpm-workspace.yaml
 # `minimumReleaseAge` and is not re-checked here. curated-thoughts has no

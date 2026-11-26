@@ -51,8 +51,14 @@ function crateDoc(createdAtByNum) {
   }
 }
 
+const tmpDirs = []
+process.on("exit", () => {
+  for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true })
+})
+
 function tmpLockfile(name, content) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "release-age-test-"))
+  tmpDirs.push(dir)
   const file = path.join(dir, name)
   fs.writeFileSync(file, content)
   return { dir, file }
@@ -66,6 +72,8 @@ function initGitRepo(dir, fileName, content) {
       encoding: "utf8",
       env: {
         ...process.env,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
         GIT_AUTHOR_NAME: "t",
         GIT_AUTHOR_EMAIL: "t@t",
         GIT_COMMITTER_NAME: "t",
@@ -74,7 +82,7 @@ function initGitRepo(dir, fileName, content) {
     })
   run(["init", "--quiet"])
   run(["add", fileName])
-  run(["commit", "--quiet", "--no-verify", "-m", "base"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "base"])
   return run
 }
 
@@ -498,7 +506,11 @@ test("runCheck: a brand-new lockfile (absent on base) treats the whole file as t
     spacingMs: 1,
   })
   assert.equal(code, 0)
-  assert.match(out.join("\n"), /whole-file|1 changed entr|Checked 1 package version/)
+  // The whole file becomes the delta (base had no lockfile), and the run is
+  // an age-check delta run — not a "nothing to age-check" early exit and not
+  // a usage error.
+  assert.match(out.join("\n"), /delta vs HEAD~1 \(1 changed entry; 0 inherited unchanged\)/)
+  assert.match(out.join("\n"), /Checked 1 package version/)
 })
 
 test("runCheck: uv git-source dependency fails in delta mode", async () => {
@@ -516,6 +528,37 @@ test("runCheck: uv git-source dependency fails in delta mode", async () => {
   const { code, err } = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { spacingMs: 1 })
   assert.equal(code, 1)
   assert.match(err.join("\n"), /evil@2\.0\.0: new or changed non-crates\.io source/)
+})
+
+test("runCheck: poetry [package.source] tables and a new uv workspace member behave per policy", async () => {
+  // poetry.lock with a [package.source] table: rejected outright (the
+  // parser cannot verify nested git/URL sources).
+  const { file: pfile } = tmpLockfile(
+    "poetry.lock",
+    '[[package]]\nname = "requests"\nversion = "2.31.0"\n\n[package.source]\ntype = "git"\nurl = "https://github.com/attacker/requests"\n',
+  )
+  const poetry = await runQuiet(["--lockfile", pfile], { spacingMs: 1 })
+  assert.equal(poetry.code, 1)
+  assert.match(poetry.err.join("\n"), /\[package\.source\]/)
+
+  // uv: a newly added local workspace member (virtual source) is skipped,
+  // not failed — same policy as Cargo path entries.
+  const uvBase =
+    '[[package]]\nname = "flask"\nversion = "3.0.0"\nsource = { registry = "https://pypi.org/simple" }\n'
+  const uvWithMember =
+    uvBase + '[[package]]\nname = "app"\nversion = "0.1.0"\nsource = { virtual = "." }\n'
+  const { dir } = tmpLockfile("uv.lock", uvBase)
+  const run = initGitRepo(dir, "uv.lock", uvBase)
+  const lock = path.join(dir, "uv.lock")
+  fs.writeFileSync(lock, uvWithMember)
+  run(["add", "uv.lock"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "add member"])
+  const uv = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () => jsonResponse({ urls: [{ upload_time: iso(400 * DAY) }] }),
+    spacingMs: 1,
+  })
+  assert.equal(uv.code, 0)
+  assert.match(uv.out.join("\n"), /app@0\.1\.0 .*virtual/)
 })
 
 test("runCheck: PyPI timestamp takes the YOUNGEST file's upload time (fail-closed)", async () => {

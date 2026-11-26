@@ -37,10 +37,9 @@
 // Retry-After-aware to respect registry rate limits.
 //
 // Known parser limitation (fails toward MORE checking, never less):
-// - poetry.lock stores per-package source in a nested [package.source] table
-//   this parser does not read; poetry entries without an inline
-//   `source = "pypi"` field default to pypi, and a git-sourced package then
-//   404s on the PyPI lookup, which fails closed.
+// - poetry.lock per-package git/URL sources live in a nested [package.source]
+//   table this parser does not read; any poetry.lock containing such tables
+//   is rejected outright (fail-closed) rather than misread as pypi.
 
 import fs from "node:fs"
 import { execFileSync } from "node:child_process"
@@ -154,6 +153,17 @@ export function entriesFromUvLock(raw) {
     const m = source.match(/registry\s*=\s*"([^"]+)"/)
     if (m && m[1].startsWith("https://pypi.org/simple")) {
       entries.push({ name, version, registry: "pypi", src: "pypi" })
+    } else if (/\b(virtual|editable|path)\s*=\s*"/.test(source)) {
+      // uv workspace members and local paths: the project's own code, not a
+      // supply-chain input — treated like Cargo path entries (skipped).
+      entries.push({
+        name,
+        version,
+        registry: null,
+        git: false,
+        src: "",
+        reason: `local source ${source}`,
+      })
     } else {
       entries.push({
         name,
@@ -168,10 +178,17 @@ export function entriesFromUvLock(raw) {
   return entries
 }
 
-export function entriesFromPoetryLock(raw) {
+export function entriesFromPoetryLock(raw, problems = []) {
   // poetry.lock [[package]] with source section or name = "pkg (==1.2.3)".
-  // See the header note: inline source fields only; missing source defaults
-  // to pypi and git-sourced packages fail closed at the PyPI 404.
+  // FAIL-CLOSED on [package.source] tables: poetry stores git/URL sources in
+  // that NESTED table, which this minimal parser does not read — a git fork
+  // pinned at a version that exists on PyPI would otherwise pass the PyPI
+  // lookup. Any lockfile using [package.source] is rejected outright.
+  if (/\[package\.source\]/.test(raw)) {
+    problems.push(
+      "poetry.lock contains [package.source] tables (git/URL/direct sources) which this parser cannot verify (fail-closed)",
+    )
+  }
   const entries = []
   for (const s of parseTomlPackageSections(raw)) {
     if (s.section !== "package") continue
@@ -203,15 +220,17 @@ export function entriesFromRequirements(raw, problems = []) {
   const entries = []
   const lines = raw.replace(/\\\r?\n/g, " ").split(/\r?\n/)
   for (const lineRaw of lines) {
-    const line = lineRaw.replace(/#.*$/, "").trim()
+    const line = stripTomlComment(lineRaw).trim()
     if (!line) continue
     if (line.startsWith("-")) {
       // FAIL-CLOSED on supply-chain-relevant option lines: a foreign index
       // (-i/--index-url/--extra-index-url), an editable/URL/git install
-      // (-e/--editable, git+), or a find-links source cannot be age-checked
-      // from a version pin. Other option lines (e.g. -r includes) are skipped.
+      // (-e/--editable, git+), a find-links source, --trusted-host (bypasses
+      // TLS verification), or --no-index (local/unverifiable sources only)
+      // cannot be age-checked from a version pin. Other option lines (e.g.
+      // -r includes) are skipped.
       if (
-        /^(--index-url|--extra-index-url|-i\b|-e\b|--editable|--find-links|-f\b)/.test(line) ||
+        /^(--index-url|--extra-index-url|-i\b|-e\b|--editable|--find-links|-f\b|--trusted-host\b|--no-index\b)/.test(line) ||
         /git\+/.test(line)
       ) {
         problems.push(`fail-closed option line (foreign index or editable/git/URL install): ${lineRaw.trim()}`)
@@ -232,7 +251,7 @@ export function entriesForFile(path, raw, problems = []) {
   const base = path.split("/").pop()
   if (base === "Cargo.lock") return entriesFromCargoLock(raw)
   if (base === "uv.lock") return entriesFromUvLock(raw)
-  if (base === "poetry.lock") return entriesFromPoetryLock(raw)
+  if (base === "poetry.lock") return entriesFromPoetryLock(raw, problems)
   if (/^requirements.*\.txt$/.test(base)) return entriesFromRequirements(raw, problems)
   throw new Error(`Unsupported lockfile format: ${path}`)
 }
