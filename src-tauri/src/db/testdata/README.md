@@ -45,7 +45,9 @@ tables (the Rust test creates `schema_version` itself).
 Regenerate: `pnpm add` / install `@equationalapplications/core-llm-wiki@8.0.2`
 in an empty neutral dir, save the harness below as `gen.cjs`, run
 `node --experimental-sqlite gen.cjs <install-dir> <work>.db`, then
-`sqlite3 <work>.db "VACUUM INTO '<repo>/src-tauri/src/db/testdata/ct-brain-v33-src-8.0.2-fts.db'"`.
+`sqlite3 <work>.db "VACUUM INTO '<repo>/src-tauri/src/db/testdata/ct-brain-v33-src-8.0.2-fts.db'"`
+(`VACUUM INTO` refuses an existing non-empty destination — export to a fresh
+`<work>.db` each run, never in place).
 
 ```js
 const { DatabaseSync } = require('node:sqlite');
