@@ -1,6 +1,6 @@
 # Spec: #381 — install the Run 2 confirmations hook on every rooted `start_pipeline`
 
-Status: Reviewed (owner-approved 2026-11-25 — D1: central install)
+Status: Implemented (PR #384; T4 Fable APPROVE at r2 delta)
 Issue: #381. Found by T4 stage-close review of #379 (F1, MINOR).
 
 ## Problem
@@ -75,7 +75,7 @@ next switch or a heal.
 3. Negative test: an unrooted handle keeps no hook, so no crossing can
    stamp anything.
 4. Gates: `cargo --manifest-path src-tauri/Cargo.toml test --lib
-   --features test-utils` (base 1744 tests, report the delta); clippy on
+   --features test-utils` (final count 1749 with the lane's six tests; pre-lane base not separately measured — the remembered 1744 disagreed with the ledger by one); clippy on
    both crates, no new findings; no frontend or TS surface changes.
 
 ## Rejected alternatives
