@@ -321,14 +321,28 @@ pub fn clear_staged_rederive_stamp(staged: &Path) -> Result<()> {
 
 /// Record, durably and before anything destructive happens, that an install
 /// is in flight. See [`install_marker_path`] for how recovery reads it.
-pub fn write_install_marker(db_path: &Path) -> Result<()> {
+pub fn write_install_marker(db_path: &Path, destination_root: &str) -> Result<()> {
     let marker = install_marker_path(db_path);
-    std::fs::write(&marker, b"").with_context(|| format!("write {}", marker.display()))?;
+    std::fs::write(&marker, destination_root.as_bytes())
+        .with_context(|| format!("write {}", marker.display()))?;
     let f = std::fs::File::open(&marker)
         .with_context(|| format!("reopen {} to fsync", marker.display()))?;
     f.sync_all()
         .with_context(|| format!("fsync {}", marker.display()))?;
     fsync_parent_dir(&marker)
+}
+
+/// The DESTINATION vault root recorded in the install marker, if any. Older
+/// markers are empty (no root recorded) → `None`; recovery then leaves the
+/// persisted config alone, exactly as before the recording existed.
+pub fn read_install_marker_destination(db_path: &Path) -> Option<String> {
+    let root = std::fs::read_to_string(install_marker_path(db_path)).ok()?;
+    let trimmed = root.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 /// Remove the install marker. Best effort; a stray marker with no staged file
@@ -554,7 +568,7 @@ pub fn run_pending(conn: &Connection, db_path: &Path, now_ms: i64) -> Result<boo
 /// |        |         | had begun; clear any strays.                        |
 ///
 /// Idempotent, and cheap in the common case: one `stat` that finds no marker.
-pub fn reconcile_interrupted_install(db_path: &Path) {
+pub fn reconcile_interrupted_install(db_path: &Path, config_path: &Path) {
     let marker = install_marker_path(db_path);
     if !marker.exists() {
         // A crash this early left at most stray artifacts; the outgoing
@@ -571,6 +585,28 @@ pub fn reconcile_interrupted_install(db_path: &Path) {
                 "[restore_sync] install committed but its capture could not be \
                  published ({e}); the replica may diverge for the outgoing vault"
             );
+        }
+        // The installed database is the DESTINATION vault's, but the
+        // persisted config still names the outgoing vault until
+        // `set_vault_path` runs — and it never runs if the process exited
+        // inside the post-rename window. The marker records that destination:
+        // align the config HERE, before the startup's first rooted open, so
+        // the open-time rederive (the stamp was cleared from the staged
+        // backup) runs from the root the restore targeted instead of
+        // re-deriving — and stamping complete — the outgoing root over the
+        // new vault's keys. Read BEFORE the marker is removed, below. An
+        // empty (pre-recording) marker leaves the config untouched.
+        if let Some(dest) = read_install_marker_destination(db_path) {
+            match crate::vault::config::VaultConfig::new(config_path.to_path_buf())
+                .set_vault_path(&dest)
+            {
+                Ok(()) => eprintln!(
+                    "[restore_sync] install committed mid-switch: config aligned to the recorded destination {dest}"
+                ),
+                Err(e) => eprintln!(
+                    "[restore_sync] install committed but aligning the config to {dest} failed: {e}"
+                ),
+            }
         }
     } else {
         restore_outgoing_wal(db_path);
@@ -1303,7 +1339,8 @@ mod tests {
         std::fs::write(install_marker_path(&db_path), b"").unwrap();
         std::fs::write(outgoing_wal_path(&db_path), b"stale wal").unwrap();
 
-        reconcile_interrupted_install(&db_path);
+        let config_path = tmp.path().join("config.json");
+        reconcile_interrupted_install(&db_path, &config_path);
 
         assert!(
             sidecar_path(&db_path).exists(),
@@ -1334,12 +1371,13 @@ mod tests {
         let wal = sibling(&db_path, "-wal");
         std::fs::write(&wal, b"journal with committed rows").unwrap();
         std::fs::write(staged_backup_path(&db_path), b"staged").unwrap();
-        write_install_marker(&db_path).unwrap();
+        write_install_marker(&db_path, "").unwrap();
         preserve_outgoing_wal(&db_path).unwrap();
         assert!(outgoing_wal_path(&db_path).exists());
         std::fs::remove_file(&wal).unwrap(); // sidecar removal
 
-        reconcile_interrupted_install(&db_path);
+        let config_path = tmp.path().join("config.json");
+        reconcile_interrupted_install(&db_path, &config_path);
 
         assert_eq!(
             std::fs::read(&wal).unwrap(),
@@ -1357,6 +1395,65 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_committed_install_aligns_the_config_to_the_destination_root() {
+        // The crash window the T4-follow-up Major covers: the install rename
+        // ran (staged file consumed, marker present) but the process exited
+        // BEFORE `set_vault_path` — the persisted config still names the
+        // outgoing vault, while the installed database (whose rederive stamp
+        // was cleared pre-rename) belongs to the destination. Recovery must
+        // align the config to the DESTINATION the marker recorded, before the
+        // startup's first rooted open rederives from the wrong root and
+        // stamps that result complete.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let config_path = tmp.path().join("config.json");
+        crate::vault::config::VaultConfig::new(config_path.clone())
+            .set_vault_path(tmp.path().join("vault-a").to_str().unwrap())
+            .unwrap();
+
+        // Committed-install leftovers: no staged file (the rename consumed
+        // it) and a marker that records the destination root.
+        std::fs::write(install_marker_path(&db_path), b"vault-b").unwrap();
+
+        reconcile_interrupted_install(&db_path, &config_path);
+
+        let named = crate::vault::config::VaultConfig::new(config_path)
+            .get_vault_path()
+            .unwrap();
+        assert_eq!(
+            named.as_deref(),
+            Some("vault-b"),
+            "recovery left the config on the outgoing vault — the unstamped \
+             installed brain would rederive (and stamp) the wrong root"
+        );
+    }
+
+    #[test]
+    fn reconcile_never_committed_leaves_the_outgoing_config_alone() {
+        // The "never happened" side: staged file present ⇒ the install rename
+        // did NOT run, so the config must keep naming the outgoing vault even
+        // though a destination was recorded.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let config_path = tmp.path().join("config.json");
+        crate::vault::config::VaultConfig::new(config_path.clone())
+            .set_vault_path(tmp.path().join("vault-a").to_str().unwrap())
+            .unwrap();
+        std::fs::write(staged_backup_path(&db_path), b"staged").unwrap();
+        write_install_marker(&db_path, "vault-b").unwrap();
+
+        reconcile_interrupted_install(&db_path, &config_path);
+
+        let named = crate::vault::config::VaultConfig::new(config_path)
+            .get_vault_path()
+            .unwrap();
+        assert!(
+            !named.as_deref().unwrap_or("").contains("vault-b"),
+            "a never-committed install must not move the config (names {named:?})"
+        );
+    }
+
+    #[test]
     fn reconcile_clears_strays_when_the_crash_predates_the_marker() {
         // The crash: capture written, staged copy half-written, marker never
         // reached the disk. Nothing was replaced; nothing is owed.
@@ -1366,7 +1463,8 @@ mod tests {
         std::fs::write(pending_sidecar_path(&db_path), b"{}").unwrap();
         std::fs::write(staged_backup_path(&db_path), b"partial").unwrap();
 
-        reconcile_interrupted_install(&db_path);
+        let config_path = tmp.path().join("config.json");
+        reconcile_interrupted_install(&db_path, &config_path);
 
         assert!(!pending_sidecar_path(&db_path).exists());
         assert!(!staged_backup_path(&db_path).exists());

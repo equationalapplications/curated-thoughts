@@ -78,7 +78,13 @@ called from the switch's restore arm before `commit_staged_backup`).
 Whichever open comes next — the happy-path reopen, a failed-step recovery
 reopen (failures after the install rename keep the installed backup and
 align the config), or the startup reconciliation after a crash mid-install —
-finds no stamp and rederives from the root the config names. A failed clear
+finds no stamp and rederives from the root the config names. Because a
+process exit inside the post-rename window leaves that config on the
+OUTGOING vault, the install marker records the destination root and the
+startup reconciliation aligns the config to it before the first rooted open
+(`restore_sync::clear_staged_rederive_stamp` + `write_install_marker`'s
+destination + `reconcile_interrupted_install`'s committed-branch alignment):
+the rederive always runs from the root the restore targeted. A failed clear
 fails the switch before the point of no return, with the outgoing database
 still in place.
 

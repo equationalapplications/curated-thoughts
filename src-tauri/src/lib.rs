@@ -2307,7 +2307,7 @@ async fn switch_vault(
             // consumes the staged file, so marker-present plus
             // staged-absent is the only combination that can arise after
             // the rename returned.
-            db::restore_sync::write_install_marker(&db_path)
+            db::restore_sync::write_install_marker(&db_path, &new_path)
                 .map_err(|e| format!("writing the install marker failed: {e}"))?;
             // A concurrent --mcp connection blocks the WAL checkpoint on
             // close, so committed rows can live only in the -wal that
@@ -4465,7 +4465,7 @@ pub fn run() {
     // brain is opened, so the database is never read with its -wal missing or
     // an owed capture left unpublished. No marker is the normal case and
     // costs one `stat`.
-    crate::db::restore_sync::reconcile_interrupted_install(&db_path);
+    crate::db::restore_sync::reconcile_interrupted_install(&db_path, &config_path);
     let db = AppDb::open_with_config(&db_path, &config_path).expect("failed to open database");
     // A switch that crashed between the backup copy and its replica sync left
     // a capture sidecar behind; finish it now. No sidecar is the normal case

@@ -2445,14 +2445,18 @@ mod watchdog_integration_tests {
                     hook_calls.load(Ordering::SeqCst) >= 2,
                     "the hook never fired on the second crossing"
                 );
+
+                // The applies assertion waits for the worker to EXIT: asserting
+                // while the second hook may still be in flight would pass even
+                // if a regression re-ran the apply right after the check (T4
+                // follow-up minor). The completed skip case reports one apply.
+                drop(tx);
+                join.join().unwrap();
                 assert_eq!(
                     applies.load(Ordering::SeqCst),
                     1,
                     "the apply re-ran on an unchanged crossing — the skip branch is still dead"
                 );
-
-                drop(tx);
-                join.join().unwrap();
             },
         );
     }
