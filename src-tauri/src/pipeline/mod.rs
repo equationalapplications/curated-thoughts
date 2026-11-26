@@ -1401,7 +1401,7 @@ impl PipelineHandle {
     /// Install the post-drain hook. `start_pipeline` installs it for every
     /// rooted handle; it fires on every 1→0 drain crossing until the worker
     /// is superseded.
-    pub fn install_stated_confirmations(&self, hook: ConfirmationsHook) {
+    fn install_stated_confirmations(&self, hook: ConfirmationsHook) {
         if let Ok(mut g) = self.stated_confirmations.lock() {
             *g = Some(hook);
         }
@@ -2083,6 +2083,62 @@ mod watchdog_integration_tests {
         .unwrap()
     }
 
+    /// Write a one-line confirmations ledger confirming fact `f1` at the
+    /// content hash of (`title`, `body`).
+    fn seed_confirmation_ledger(root: &std::path::Path, title: &str, body: &str) {
+        let line = crate::db::stated_ledger::ConfirmationLine {
+            fact_id: "f1".into(),
+            content_hash: crate::db::stated_ledger::confirmation_content_hash(title, body),
+            by: "human:kurt".into(),
+            at: "2026-10-21T00:00:00.000Z".into(),
+        };
+        let stated = root.join("stated");
+        std::fs::create_dir_all(&stated).unwrap();
+        std::fs::write(
+            stated.join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER),
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .unwrap();
+    }
+
+    fn write_raw_ledger(root: &std::path::Path, content: &str) {
+        let stated = root.join("stated");
+        std::fs::create_dir_all(&stated).unwrap();
+        std::fs::write(
+            stated.join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER),
+            content,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn zero_byte_ledger_applies_nothing() {
+        with_rooted_fixture(|db_path, root| {
+            let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
+            seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
+            write_raw_ledger(root, "");
+            assert_eq!(
+                crate::db::stated_ledger::apply_stored_confirmations(&conn, root).unwrap(),
+                0
+            );
+            assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
+        });
+    }
+
+    #[test]
+    fn blank_lines_only_ledger_applies_nothing() {
+        with_rooted_fixture(|db_path, root| {
+            let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
+            seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
+            write_raw_ledger(root, "\n\n  \n");
+            assert_eq!(
+                crate::db::stated_ledger::apply_stored_confirmations(&conn, root).unwrap(),
+                0
+            );
+            assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
+        });
+    }
+
     fn call_installed_hook(handle: &PipelineHandle, conn: &Connection) -> Result<()> {
         let g = handle.stated_confirmations.lock().unwrap();
         let hook = g.as_ref().expect("hook installed");
@@ -2126,20 +2182,7 @@ mod watchdog_integration_tests {
         with_rooted_fixture(|db_path, root| {
             let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
             seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
-            let h = crate::db::stated_ledger::confirmation_content_hash("Alpha", "Alpha body");
-            let line = crate::db::stated_ledger::ConfirmationLine {
-                fact_id: "f1".into(),
-                content_hash: h,
-                by: "human:kurt".into(),
-                at: "2026-10-21T00:00:00.000Z".into(),
-            };
-            let stated = root.join("stated");
-            std::fs::create_dir_all(&stated).unwrap();
-            std::fs::write(
-                stated.join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER),
-                format!("{}\n", serde_json::to_string(&line).unwrap()),
-            )
-            .unwrap();
+            seed_confirmation_ledger(root, "Alpha", "Alpha body");
 
             let handle = start_pipeline(db_path.to_path_buf(), Some(root.to_path_buf()));
             assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
@@ -2157,20 +2200,7 @@ mod watchdog_integration_tests {
         with_rooted_fixture(|db_path, root| {
             let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
             seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
-            let h = crate::db::stated_ledger::confirmation_content_hash("Alpha", "Alpha body");
-            let line = crate::db::stated_ledger::ConfirmationLine {
-                fact_id: "f1".into(),
-                content_hash: h,
-                by: "human:kurt".into(),
-                at: "2026-10-21T00:00:00.000Z".into(),
-            };
-            let stated = root.join("stated");
-            std::fs::create_dir_all(&stated).unwrap();
-            std::fs::write(
-                stated.join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER),
-                format!("{}\n", serde_json::to_string(&line).unwrap()),
-            )
-            .unwrap();
+            seed_confirmation_ledger(root, "Alpha", "Alpha body");
             let doc = root.join("doc.md");
             std::fs::write(&doc, "hello world").unwrap();
 
