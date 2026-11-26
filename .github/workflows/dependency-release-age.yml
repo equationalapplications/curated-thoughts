@@ -23,6 +23,9 @@ on:
       - Cargo.lock
       - "src-tauri/Cargo.toml"
       - "tools/Cargo.toml"
+      - "requirements*.txt"
+      - uv.lock
+      - poetry.lock
       - scripts/check-release-age-cargo-py.mjs
       - .github/workflows/dependency-release-age.yml
   workflow_dispatch:
@@ -58,7 +61,24 @@ jobs:
             else
               cp scripts/check-release-age-cargo-py.mjs "$RUNNER_TEMP/check-release-age-cargo-py.mjs"
             fi
-            node "$RUNNER_TEMP/check-release-age-cargo-py.mjs" --days 14 --lockfile Cargo.lock --base "$BASE_REF"
+            GATE="$RUNNER_TEMP/check-release-age-cargo-py.mjs"
           else
-            node scripts/check-release-age-cargo-py.mjs --days 14 --lockfile Cargo.lock
+            GATE="scripts/check-release-age-cargo-py.mjs"
+          fi
+          # Check every lockfile present (Cargo.lock today; requirements*.txt
+          # / uv.lock / poetry.lock if one ever lands — the paths: filter
+          # above already triggers on them).
+          found=0
+          for lf in Cargo.lock requirements*.txt uv.lock poetry.lock; do
+            [ -f "$lf" ] || continue
+            found=1
+            if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+              node "$GATE" --days 14 --lockfile "$lf" --base "$BASE_REF"
+            else
+              node "$GATE" --days 14 --lockfile "$lf"
+            fi
+          done
+          if [ "$found" != 1 ]; then
+            echo "No lockfile found to age-check (expected Cargo.lock or a Python lockfile)" >&2
+            exit 1
           fi
