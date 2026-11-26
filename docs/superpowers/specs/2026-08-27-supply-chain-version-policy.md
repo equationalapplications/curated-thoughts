@@ -1,8 +1,8 @@
 # Supply-Chain Version Policy: exact pins + 14-day release-age gate
 
 **Date:** 2026-08-27
-**Status:** IMPLEMENTED — Task 1 complete (exact-pinning). Task 2 (14-day gate)
-lands via PR #388 (this file's status finalizes on merge): the JS side is
+**Status:** IN PROGRESS — Task 1 complete (exact-pinning). Task 2 (14-day gate)
+lands via PR #388 (status becomes IMPLEMENTED on merge): the JS side is
 gated by `pnpm-workspace.yaml` `minimumReleaseAge` (below), and the cargo/pip
 side is gated by
 `scripts/check-release-age-cargo-py.mjs` +

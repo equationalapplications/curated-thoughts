@@ -153,13 +153,14 @@ export function entriesFromUvLock(raw) {
     const source = s.fields.source ?? ""
     const m = source.match(/registry\s*=\s*"([^"]+)"/)
     if (m && m[1].startsWith("https://pypi.org/simple")) {
-      entries.push({ name, version, registry: "pypi" })
+      entries.push({ name, version, registry: "pypi", src: "pypi" })
     } else {
       entries.push({
         name,
         version,
         registry: null,
         git: /git\s*=\s*"/.test(source),
+        src: source,
         reason: source ? `non-registry source ${source}` : "no registry source",
       })
     }
@@ -178,13 +179,14 @@ export function entriesFromPoetryLock(raw) {
     const version = (s.fields.version ?? "").replace(/^[=<>!~^ ]+/, "")
     if (!name || !version) continue
     if ((s.fields.source ?? "pypi") === "pypi") {
-      entries.push({ name, version, registry: "pypi" })
+      entries.push({ name, version, registry: "pypi", src: "pypi" })
     } else {
       entries.push({
         name,
         version,
         registry: null,
         git: (s.fields.source ?? "").startsWith("git"),
+        src: s.fields.source ?? "",
         reason: `source ${s.fields.source}`,
       })
     }
@@ -203,10 +205,22 @@ export function entriesFromRequirements(raw, problems = []) {
   for (const lineRaw of lines) {
     const line = lineRaw.replace(/#.*$/, "").trim()
     if (!line) continue
-    if (line.startsWith("-")) continue // -r/-e/--flags: pip options, not pins
+    if (line.startsWith("-")) {
+      // FAIL-CLOSED on supply-chain-relevant option lines: a foreign index
+      // (-i/--index-url/--extra-index-url), an editable/URL/git install
+      // (-e/--editable, git+), or a find-links source cannot be age-checked
+      // from a version pin. Other option lines (e.g. -r includes) are skipped.
+      if (
+        /^(--index-url|--extra-index-url|-i\b|-e\b|--editable|--find-links|-f\b)/.test(line) ||
+        /git\+/.test(line)
+      ) {
+        problems.push(`fail-closed option line (foreign index or editable/git/URL install): ${lineRaw.trim()}`)
+      }
+      continue
+    }
     const m = line.match(/^([A-Za-z0-9_.[\]-]+)==([^;\s]+)/)
     if (m) {
-      entries.push({ name: m[1].toLowerCase().split("[")[0], version: m[2], registry: "pypi" })
+      entries.push({ name: m[1].toLowerCase().split("[")[0], version: m[2], registry: "pypi", src: "pypi" })
     } else {
       problems.push(`unpinned or unparseable requirement line (fail-closed): ${lineRaw.trim()}`)
     }
@@ -289,6 +303,7 @@ export async function runCheck(
 
   let scope
   let delta
+  let newProblems = []
   const skipped = []
   if (baseRef) {
     let baseRaw
@@ -304,29 +319,51 @@ export async function runCheck(
         stdio: ["ignore", "pipe", "pipe"],
       }).trim()
       const relLock = path.relative(repoRoot, absLock)
-      baseRaw = execFileSync("git", ["show", `${baseRef}:${relLock}`], {
-        cwd: repoRoot,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      })
+      let baseMissing = false
+      try {
+        execFileSync("git", ["cat-file", "-e", `${baseRef}:${relLock}`], {
+          cwd: repoRoot,
+          stdio: ["ignore", "ignore", "ignore"],
+        })
+      } catch {
+        // Brand-new lockfile (not on base): the whole file is the delta.
+        baseMissing = true
+      }
+      baseRaw = baseMissing
+        ? ""
+        : execFileSync("git", ["show", `${baseRef}:${relLock}`], {
+            cwd: repoRoot,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          })
     } catch (err) {
       console.error(`Could not read ${lockfile} from ${baseRef}: ${String(err.stderr ?? err.message).trim()}`)
       return 2
     }
+    const baseProblems = []
     delta = deltaEntries(currentEntries, (() => {
       try {
-        return entriesForFile(lockfile, baseRaw, [])
+        return entriesForFile(lockfile, baseRaw, baseProblems)
       } catch (err) {
         console.error(String(err.message))
         return null
       }
     })())
     if (delta === null) return 2
+    // Only NEW parse problems fail a PR; problems already present on base are
+    // inherited state (the whole-lockfile audit's job). An ADDED unpinned or
+    // foreign-index line is a new problem and fails even when the entry delta
+    // is empty.
+    newProblems = problems.filter((p) => !baseProblems.includes(p))
     const inherited = currentEntries.length - delta.length
     if (delta.length === 0) {
+      if (newProblems.length > 0) {
+        console.error(
+          `New unage-checkable lines vs ${baseRef} (fail-closed):\n  ${newProblems.sort().join("\n  ")}`,
+        )
+        return 1
+      }
       // Inherited-pins semantics: nothing NEW means nothing to age-check.
-      // Parse problems in UNCHANGED files (e.g. inherited unpinned
-      // requirement lines) are the whole-lockfile audit's job, not a PR's.
       console.log(`No dependency changes vs ${baseRef}; nothing to age-check.`)
       console.log(
         `${inherited} entries inherited unchanged from ${baseRef} are not re-audited in delta mode (workflow_dispatch runs the whole-lockfile audit).`,
@@ -337,6 +374,7 @@ export async function runCheck(
     scope = `delta vs ${baseRef} (${versionCount} changed entr${versionCount === 1 ? "y" : "ies"}; ${inherited} inherited unchanged)`
   } else {
     delta = currentEntries
+    newProblems = problems
     scope = `whole lockfile (${currentEntries.length} entries)`
   }
 
@@ -485,9 +523,8 @@ export async function runCheck(
   }
   await Promise.all(Array.from({ length: 2 }, worker))
 
-  // Whole-lockfile sweep / non-empty delta only: parse problems from unchanged
-  // files surface on the manual audit; pure-delta runs already exited above.
-  for (const p of problems) failures.push(p)
+  // Whole-lockfile sweep: all parse problems; delta mode: only NEW ones.
+  for (const p of newProblems) failures.push(p)
 
   const checkedCount = [...wanted.values()].reduce(
     (n, byName) => n + [...byName.values()].reduce((m, s) => m + s.size, 0),

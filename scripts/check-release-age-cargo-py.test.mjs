@@ -205,14 +205,14 @@ test("entriesFromPoetryLock: constraint prefix stripped, source default, explici
     'source = "git"',
   ].join("\n")
   const entries = entriesFromPoetryLock(raw)
-  assert.deepEqual(entries[0], { name: "requests", version: "2.31.0", registry: "pypi" })
+  assert.deepEqual(entries[0], { name: "requests", version: "2.31.0", registry: "pypi", src: "pypi" })
   assert.equal(entries[1].name, "old-style")
   assert.equal(entries[1].version, "1.0")
   assert.equal(entries[2].registry, null)
   assert.equal(entries[2].git, true)
 })
 
-test("entriesFromRequirements: pins, extras, env markers, comments, options, continuations; unpinned fails closed", () => {
+test("entriesFromRequirements: pins, extras, env markers, comments, continuations; unpinned and foreign-index/option lines fail closed", () => {
   const problems = []
   const entries = entriesFromRequirements(
     [
@@ -220,7 +220,8 @@ test("entriesFromRequirements: pins, extras, env markers, comments, options, con
       "Flask[async]==3.0.0 ; python_version < '3.9'",
       "requests==2.31.0  # inline comment",
       "-r dev-requirements.txt",
-      "--index-url https://example.com",
+      "--index-url https://evil.example/simple", // foreign index -> fail closed
+      "-e git+https://github.com/attacker/x#egg=x", // editable git -> fail closed
       "somepkg", // unpinned -> fail closed
       "other==1.0 \\",
       "    --hash=sha256:abc",
@@ -228,12 +229,14 @@ test("entriesFromRequirements: pins, extras, env markers, comments, options, con
     problems,
   )
   assert.deepEqual(entries, [
-    { name: "flask", version: "3.0.0", registry: "pypi" },
-    { name: "requests", version: "2.31.0", registry: "pypi" },
-    { name: "other", version: "1.0", registry: "pypi" },
+    { name: "flask", version: "3.0.0", registry: "pypi", src: "pypi" },
+    { name: "requests", version: "2.31.0", registry: "pypi", src: "pypi" },
+    { name: "other", version: "1.0", registry: "pypi", src: "pypi" },
   ])
-  assert.equal(problems.length, 1)
-  assert.match(problems[0], /unpinned or unparseable requirement line .*somepkg/)
+  assert.equal(problems.length, 3)
+  assert.match(problems[0], /install.*--index-url/)
+  assert.match(problems[1], /install.*-e git\+/)
+  assert.match(problems[2], /unpinned or unparseable requirement line .*somepkg/)
 })
 
 test("entriesForFile: dispatches by basename, throws on unsupported format", () => {
@@ -447,6 +450,72 @@ test("runCheck: a SAME-VERSION source swap (e.g. a [patch] to git) is a delta ch
   const mirror = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { spacingMs: 1 })
   assert.equal(mirror.code, 1)
   assert.match(mirror.err.join("\n"), /serde@1\.0\.210: new or changed non-crates\.io source/)
+})
+
+test("runCheck: NEW unpinned or foreign-index requirement lines fail delta mode even with an empty entry delta", async () => {
+  const clean = "flask==3.0.0\n"
+  const dirtyUnpinned = "flask==3.0.0\nloose-package\n"
+  const dirtyIndex = "flask==3.0.0\n--index-url https://evil.example/simple\n"
+  const { dir } = tmpLockfile("requirements.txt", clean)
+  const run = initGitRepo(dir, "requirements.txt", clean)
+  const lock = path.join(dir, "requirements.txt")
+
+  // Inherited unpinned line (base AND current have it), no new pins: passes.
+  fs.writeFileSync(lock, dirtyUnpinned)
+  run(["add", "requirements.txt"])
+  run(["commit", "--quiet", "--no-verify", "-m", "inherit"])
+  fs.writeFileSync(lock, dirtyUnpinned) // unchanged content
+  const inherited = await runQuiet(["--lockfile", lock, "--base", "HEAD"], { spacingMs: 1 })
+  assert.equal(inherited.code, 0)
+
+  // A NEWLY ADDED unpinned line: empty entry delta, still exit 1.
+  fs.writeFileSync(lock, dirtyUnpinned + "another-loose\n")
+  run(["add", "requirements.txt"])
+  run(["commit", "--quiet", "--no-verify", "-m", "add unpinned"])
+  const newUnpinned = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { spacingMs: 1 })
+  assert.equal(newUnpinned.code, 1)
+  assert.match(newUnpinned.err.join("\n"), /New unage-checkable lines/)
+
+  // A NEWLY ADDED foreign-index line: same.
+  fs.writeFileSync(lock, dirtyIndex)
+  run(["add", "requirements.txt"])
+  run(["commit", "--quiet", "--no-verify", "-m", "add evil index"])
+  const newIndex = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { spacingMs: 1 })
+  assert.equal(newIndex.code, 1)
+  assert.match(newIndex.err.join("\n"), /foreign index or editable\/git\/URL install/)
+})
+
+test("runCheck: a brand-new lockfile (absent on base) treats the whole file as the delta", async () => {
+  const { dir } = tmpLockfile("requirements.txt", "placeholder\n")
+  const run = initGitRepo(dir, "placeholder.txt", "placeholder\n")
+  const lock = path.join(dir, "requirements.txt")
+  fs.writeFileSync(lock, "flask==3.0.0\n") // lockfile NOT on base
+  run(["add", "requirements.txt"])
+  run(["commit", "--quiet", "--no-verify", "-m", "add lockfile"])
+
+  const { code, out } = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () => jsonResponse({ urls: [{ upload_time: iso(400 * DAY) }] }),
+    spacingMs: 1,
+  })
+  assert.equal(code, 0)
+  assert.match(out.join("\n"), /whole-file|1 changed entr|Checked 1 package version/)
+})
+
+test("runCheck: uv git-source dependency fails in delta mode", async () => {
+  const base =
+    '[[package]]\nname = "flask"\nversion = "3.0.0"\nsource = { registry = "https://pypi.org/simple" }\n'
+  const withGit =
+    base +
+    '[[package]]\nname = "evil"\nversion = "2.0.0"\nsource = { git = "https://github.com/attacker/evil?rev=abc" }\n'
+  const { dir } = tmpLockfile("uv.lock", base)
+  const run = initGitRepo(dir, "uv.lock", base)
+  const lock = path.join(dir, "uv.lock")
+  fs.writeFileSync(lock, withGit)
+  run(["add", "uv.lock"])
+  run(["commit", "--quiet", "--no-verify", "-m", "add git dep"])
+  const { code, err } = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { spacingMs: 1 })
+  assert.equal(code, 1)
+  assert.match(err.join("\n"), /evil@2\.0\.0: new or changed non-crates\.io source/)
 })
 
 test("runCheck: PyPI timestamp takes the YOUNGEST file's upload time (fail-closed)", async () => {
