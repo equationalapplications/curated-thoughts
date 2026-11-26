@@ -445,13 +445,19 @@ pub fn rebuild_rederive(conn: &Connection, vault_root: &Path) -> Result<RebuildR
 
 /// Confirmations-only re-application (spec §2 S5 Run 2): re-stamp
 /// `user_confirmed` from `stated/.confirmations.jsonl` for facts that
-/// arrived after the switch-time rebuild. Mirrors rebuild step 1 in its own
-/// transaction; the attestation/denial table legs and the stamp are NOT
-/// touched. Idempotent (dedup by hash; already-stamped rows are no-ops).
-/// Returns the number of hash-matched rows stamped.
+/// arrived after the Run 1 rebuild (switch-time or open-time). Mirrors
+/// rebuild step 1 in its own transaction; the attestation/denial table
+/// legs and the stamp are NOT touched. Idempotent (dedup by hash;
+/// already-stamped rows are no-ops). Returns the number of hash-matched
+/// rows stamped.
 pub fn apply_stored_confirmations(conn: &Connection, vault_root: &Path) -> Result<usize> {
     let confirmations: Vec<ConfirmationLine> =
         read_lines(&vault_root.join(STATED_DIR).join(CONFIRMATIONS_LEDGER))?;
+    if confirmations.is_empty() {
+        // Nothing to stamp: skip the transaction and the wiki-wide hash scan
+        // (this runs on every drain crossing of every rooted pipeline).
+        return Ok(0);
+    }
     let tx = conn.unchecked_transaction()?;
     let applied = apply_confirmations_by_hash(&tx, &confirmations)?;
     tx.commit()?;
@@ -1115,6 +1121,16 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM stated_attestations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(attestations, 0, "table legs must stay untouched");
+    }
+
+    /// #381 m1: an empty/missing ledger returns before any entry scan. A
+    /// schema-less connection proves it — scanning `llm_wiki_entries` there
+    /// would error, so `Ok(0)` can only come from the early return.
+    #[test]
+    fn apply_stored_confirmations_empty_ledger_returns_before_scan() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(apply_stored_confirmations(&conn, tmp.path()).unwrap(), 0);
     }
 
     /// Event-once idempotence (D1-v2): a second rebuild over the same ledger

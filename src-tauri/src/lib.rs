@@ -2377,12 +2377,7 @@ async fn switch_vault(
         {
             let mut g = pipeline.0.lock().unwrap();
             let canon_root = new_root.canonicalize().unwrap_or_else(|_| new_root.clone());
-            let handle = start_pipeline(db_path.clone(), Some(canon_root.clone()));
-            // Run 2 (spec §2 S5): confirmations that arrive after the
-            // switch-time rebuild are re-applied once the queue drains.
-            handle.install_stated_confirmations(Box::new(move |conn| {
-                db::stated_ledger::apply_stored_confirmations(conn, &canon_root).map(|_| ())
-            }));
+            let handle = start_pipeline(db_path.clone(), Some(canon_root));
             *g = Some(handle);
         }
 
