@@ -1,3 +1,11 @@
+## [3.16.4](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.3...v3.16.4) (2026-11-26)
+
+### Bug Fixes
+
+* **ci:** keep [extras] names parseable in requirements regex ([fbaa19b](https://github.com/equationalapplications/curated-thoughts/commit/fbaa19ba5d291531d8b36e9836824d247c6e1f8b))
+* **ci:** resolve eslint findings in release-age script ([e56ff54](https://github.com/equationalapplications/curated-thoughts/commit/e56ff54dc1693f60c88c5a32ed7394834206157d))
+* **ci:** strip PEP 508 extras before PyPI lookup ([f3059aa](https://github.com/equationalapplications/curated-thoughts/commit/f3059aa1063fe4dd1eee9cacfc5d7d446a79336b))
+
 ## [3.16.3](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.2...v3.16.3) (2026-11-26)
 
 ### Bug Fixes
