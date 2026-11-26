@@ -9,7 +9,7 @@ export const PRIVACY_MODES: {
     id: "strict",
     label: "Strict (default)",
     summary:
-      "Fully local. Inference, embeddings, and storage all on-device. Cloud Bridge and external API fields disabled. Nothing ever leaves this machine.",
+      "Chat and agent generation stay on-device, and Cloud Bridge is off. Cloud embeddings are not covered yet: if a cloud embedding endpoint is set, vault text can be sent to it.",
   },
   {
     id: "ephemeral",
@@ -33,7 +33,11 @@ interface Props {
 
 export function PrivacyModeCards({ mode, onChange, disabled = false }: Props) {
   return (
-    <div className="privacy-options" role="radiogroup" aria-label="Privacy mode">
+    <div
+      className="privacy-options"
+      role="radiogroup"
+      aria-label="Privacy mode"
+    >
       {PRIVACY_MODES.map((m) => (
         <label
           key={m.id}
@@ -56,9 +60,21 @@ export function PrivacyModeCards({ mode, onChange, disabled = false }: Props) {
               which is a weak signal for the one control in Settings that
               governs whether data leaves the machine. */}
           <span className="privacy-option__mark" aria-hidden="true">
-            <svg className="icon icon--sm" viewBox="0 0 24 24" focusable="false">
+            <svg
+              className="icon icon--sm"
+              viewBox="0 0 24 24"
+              focusable="false"
+            >
               <circle cx="12" cy="12" r="8" />
-              {mode === m.id && <circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" />}
+              {mode === m.id && (
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="3.4"
+                  fill="currentColor"
+                  stroke="none"
+                />
+              )}
             </svg>
           </span>
           <span className="privacy-option__text">
