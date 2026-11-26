@@ -90,6 +90,8 @@ pub struct PipelineWorker {
     /// Post-drain hook slot, shared with `PipelineHandle`; the hook fires on
     /// every 1→0 drain crossing. See `DRAIN_PROBE`.
     stated_confirmations: ConfirmationsSlot,
+    /// Dirty-flag side of the confirmations dual gate (spec §2-B).
+    confirmations_gate: Arc<ConfirmationsGate>,
 }
 
 /// Hook run on the worker's own connection once the queue has drained.
@@ -120,6 +122,7 @@ impl PipelineWorker {
             my_epoch: heartbeat.epoch(),
             heartbeat,
             stated_confirmations: Arc::new(std::sync::Mutex::new(None)),
+            confirmations_gate: Arc::new(ConfirmationsGate::new()),
         }
     }
 
@@ -140,12 +143,19 @@ impl PipelineWorker {
             my_epoch: heartbeat.epoch(),
             heartbeat,
             stated_confirmations: Arc::new(std::sync::Mutex::new(None)),
+            confirmations_gate: Arc::new(ConfirmationsGate::new()),
         }
     }
 
     /// Share an install slot with the owning handle (set before `run`).
     pub fn with_confirmations_slot(mut self, slot: ConfirmationsSlot) -> Self {
         self.stated_confirmations = slot;
+        self
+    }
+
+    /// Share the dual-gate state with the owning handle (set before `run`).
+    fn with_confirmations_gate(mut self, gate: Arc<ConfirmationsGate>) -> Self {
+        self.confirmations_gate = gate;
         self
     }
 
@@ -386,6 +396,10 @@ impl PipelineWorker {
                 let msg = format!("panic processing {}: {:?}", job_path, e);
                 eprintln!("[pipeline] {}", msg);
             }
+            // Every Ingest job (the only variant) may have written entries,
+            // including a failed or panicked one; mark dirty unconditionally
+            // so the next drain crossing re-scans (spec §2-B).
+            self.confirmations_gate.mark_dirty();
 
             if count_pending {
                 // CAS loop instead of `fetch_update`: the newer Rust
@@ -1376,6 +1390,7 @@ pub struct PipelineHandle {
     vault_root: Option<PathBuf>,
     status_tx: mpsc::Sender<PipelineStatusEvent>,
     stated_confirmations: ConfirmationsSlot,
+    confirmations_gate: Arc<ConfirmationsGate>,
 }
 
 /// Channel depth. Shared by `start_pipeline` and `respawn_worker` so a
@@ -1414,7 +1429,8 @@ impl PipelineHandle {
             self.status_tx.clone(),
             self.heartbeat.clone(),
         )
-        .with_confirmations_slot(self.stated_confirmations.clone());
+        .with_confirmations_slot(self.stated_confirmations.clone())
+        .with_confirmations_gate(self.confirmations_gate.clone());
         let join = std::thread::Builder::new()
             .name("pipeline-worker".to_string())
             .spawn(move || worker.run())
@@ -1434,6 +1450,7 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
     let pending = Arc::new(AtomicUsize::new(0));
     let heartbeat = Arc::new(watchdog::heartbeat::Heartbeat::new());
     let stated_confirmations: ConfirmationsSlot = Arc::new(std::sync::Mutex::new(None));
+    let confirmations_gate = Arc::new(ConfirmationsGate::new());
     let worker = PipelineWorker::new_with_vault(
         db_path.clone(),
         rx,
@@ -1442,7 +1459,8 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
         status_tx.clone(),
         heartbeat.clone(),
     )
-    .with_confirmations_slot(stated_confirmations.clone());
+    .with_confirmations_slot(stated_confirmations.clone())
+    .with_confirmations_gate(confirmations_gate.clone());
     let join = std::thread::Builder::new()
         .name("pipeline-worker".to_string())
         .spawn(move || worker.run())
@@ -1457,6 +1475,7 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
         vault_root,
         status_tx,
         stated_confirmations,
+        confirmations_gate: confirmations_gate.clone(),
     };
     // Run 2 (spec §2 S5): confirmations that arrive after the Run 1
     // rebuild (switch-time or open-time) are re-applied once the queue
@@ -1465,11 +1484,77 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
     // gets it (#381). `root` is already canonical at every caller; do not
     // re-canonicalize.
     if let Some(root) = handle.vault_root.clone() {
+        let ledger_path = root
+            .join(crate::db::stated_ledger::STATED_DIR)
+            .join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER);
         handle.install_stated_confirmations(Box::new(move |conn| {
-            crate::db::stated_ledger::apply_stored_confirmations(conn, &root).map(|_| ())
+            confirmations_gate.fire(&ledger_path, || {
+                crate::db::stated_ledger::apply_stored_confirmations(conn, &root)
+            })
         }));
     }
     handle
+}
+
+/// Dual gate for the post-drain confirmations hook (spec §2-B, Q2=2): the
+/// scan runs on the first fire, when the ledger file's stat changed, OR when
+/// an Ingest job completed since the last successful apply. Shared between
+/// the worker (sets `dirty`) and the installed hook; survives respawns.
+pub struct ConfirmationsGate {
+    memo: std::sync::Mutex<Option<(u64, u64)>>,
+    dirty: std::sync::atomic::AtomicBool,
+}
+
+/// `(mtime_nanos, len)` of the ledger file; `(0, 0)` when absent/unreadable.
+fn ledger_stat(path: &std::path::Path) -> (u64, u64) {
+    std::fs::metadata(path)
+        .map(|m| {
+            let nanos = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            (nanos, m.len())
+        })
+        .unwrap_or((0, 0))
+}
+
+impl ConfirmationsGate {
+    fn new() -> Self {
+        ConfirmationsGate {
+            memo: std::sync::Mutex::new(None),
+            dirty: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// An Ingest job completed (every Ingest job may write entries).
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+    }
+
+    fn fire<F>(&self, ledger: &std::path::Path, apply: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<usize>,
+    {
+        let cur = ledger_stat(ledger);
+        let memo = self.memo.lock().ok().and_then(|g| *g);
+        if memo == Some(cur) && !self.dirty.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        // The hook runs on the worker thread, the only dirty-setter, so no
+        // Ingest completion can interleave with the apply. Cleared only on
+        // success; a failure leaves memo + dirty untouched so the next fire
+        // retries.
+        apply()?;
+        self.dirty.store(false, Ordering::SeqCst);
+        // Stat AFTER the read: a racing ledger append resolves toward
+        // "changed next fire" (the safe direction).
+        if let Ok(mut g) = self.memo.lock() {
+            *g = Some(ledger_stat(ledger));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -3066,5 +3151,75 @@ mod diff_swap_tests {
                 "mismatch must map to the clean retryable error, got: {msg}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod confirmations_gate_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn ledger() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = tmp.path().join(".confirmations.jsonl");
+        std::fs::write(&p, "a\n").unwrap();
+        (tmp, p)
+    }
+
+    fn bump(n: &Cell<u32>) -> Result<usize> {
+        n.set(n.get() + 1);
+        Ok(0)
+    }
+
+    #[test]
+    fn unchanged_ledger_and_no_ingest_skips_second_scan() {
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, || bump(&n)).unwrap();
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(n.get(), 1, "first fire applies, second is skipped");
+    }
+
+    #[test]
+    fn ingest_since_last_apply_reruns_scan_despite_unchanged_ledger() {
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, || bump(&n)).unwrap();
+        gate.mark_dirty();
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(n.get(), 2);
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(n.get(), 2, "dirty cleared by the successful apply");
+    }
+
+    #[test]
+    fn changed_ledger_stat_reruns_scan() {
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, || bump(&n)).unwrap();
+        std::fs::write(&p, "a\nbb\n").unwrap();
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(n.get(), 2);
+    }
+
+    #[test]
+    fn failed_apply_stays_dirty_and_retries() {
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, || bump(&n)).unwrap();
+        gate.mark_dirty();
+        let r = gate.fire(&p, || {
+            n.set(n.get() + 1);
+            Err(anyhow::anyhow!("boom"))
+        });
+        assert!(r.is_err());
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(n.get(), 3, "failed apply must retry on the next fire");
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(n.get(), 3, "success clears the gate");
     }
 }
