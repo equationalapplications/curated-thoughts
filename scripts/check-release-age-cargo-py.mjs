@@ -197,7 +197,7 @@ function entriesFromRequirements(raw) {
   for (const lineRaw of raw.split(/\r?\n/)) {
     const line = lineRaw.replace(/#.*$/, "").trim()
     if (!line || line.startsWith("-")) continue // -r/-e/--flags not handled
-    const m = line.match(/^([A-Za-z0-9_.\[\]-]+)==([^;\s]+)/)
+    const m = line.match(/^([A-Za-z0-9_.\]-]+)==([^;\s]+)/)
     if (!m) continue
     entries.push({ name: m[1].toLowerCase(), version: m[2], registry: "pypi" })
   }
@@ -248,7 +248,7 @@ if (baseRef) {
     process.exit(0)
   }
   wanted = collectEntries(delta, skipped)
-  const versionCount = delta.reduce((n, e) => n + 1, 0)
+  const versionCount = delta.length
   scope = `delta vs ${baseRef} (${versionCount} changed entr${versionCount === 1 ? "y" : "ies"}; ${inherited} inherited unchanged)`
 } else {
   wanted = collectEntries(currentEntries, skipped)
