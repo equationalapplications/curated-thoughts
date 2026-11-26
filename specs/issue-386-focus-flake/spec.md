@@ -61,10 +61,10 @@ test-side race only.
 ## Proposed change
 
 Each racy test must wait for the trap's passive effect before it
-asserts. Both fixes use `waitFor`, which polls until the condition
-holds, within its timeout. If the trap never runs, `waitFor` times
-out and the test fails. The fixes keep the assertions' strength and
-remove the races.
+asserts. All three fixes use `waitFor`, which polls until the
+condition holds, within its timeout. If the trap never runs, `waitFor`
+times out and the test fails. The fixes keep the assertions' strength
+and remove the races.
 
 Fix 1 — test "focus moves into the dialog on open", lines 139-141 of
 `src/__tests__/UnverifiedPromptModal.test.tsx`. Wrap the assertion in
@@ -94,10 +94,13 @@ The wait proves the trap is active, so its keydown handler is
 registered. The rest of the test stays unchanged.
 
 Fix 3 — test "on close, focus returns to the previously focused
-element". The trap restores the previous focus inside its effect
-cleanup, which is also a passive flush. The current `waitFor` covers
-only the dialog's removal, and the assertion at line 216 runs after
-the `waitFor` block. Wrap that assertion in `waitFor` too:
+element". This fix is DEFENSIVE, not a reproduced failure. No run of
+this test has failed. React runs the trap's cleanup inside the
+`act()`-wrapped `fireEvent.click`, so the restore normally happens
+before the click returns. The wrap is insurance for the same
+mechanism family: the trap's effect and its cleanup are passive
+flushes, and the current `waitFor` covers only the dialog's removal.
+Wrap the assertion at line 216 in `waitFor` too:
 
 ```tsx
 await waitFor(() => {
@@ -105,10 +108,11 @@ await waitFor(() => {
 });
 ```
 
-The restore is a cleanup of the same passive effect, so this fix
-belongs to the same root cause. The owner's spec approval carried a
-sanity check for exactly this family of leftovers; the plan adds this
-wrap and flags it.
+`waitFor` passes at once when the restore already happened, so the
+wrap cannot mask a broken restore. The owner's spec approval carried
+a sanity check for leftover races in this file; the T3 review ruled
+this wrap defensive-only, and the owner decides at plan approval
+whether to keep or drop it.
 
 ## Files touched
 

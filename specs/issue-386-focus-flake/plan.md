@@ -6,7 +6,7 @@
 
 **Architecture:** Test-only change. The focus trap registers its handler and moves focus in a passive effect; under load, tests interacted with the dialog before that effect flushed. Three `waitFor` wraps make the tests wait for the effect instead of racing it. No product code changes.
 
-**Tech Stack:** Vitest + React Testing Library (`waitFor` is already imported in the file), pnpm, happy-dom.
+**Tech Stack:** Vitest + React Testing Library (`waitFor` is already imported in the file), pnpm, jsdom 31 (`vite.config.ts:91`).
 
 **Spec:** `specs/issue-386-focus-flake/spec.md` (this plan argues from the spec; read both).
 
@@ -14,11 +14,11 @@
 
 - No product code changes. Only `src/__tests__/UnverifiedPromptModal.test.tsx` is modified (spec, Files touched).
 - Synchronization must use `waitFor` only. No sleeps, no fake timers, no custom timeouts (spec, Rejected alternatives).
-- `npx prettier --check` must pass on every touched file (repo CI format gate).
+- This repo has NO Prettier gate and NO Prettier config. Never run Prettier write-mode on the test file (it would reflow unrelated lines, e.g. the 86-character line 148). The gates are: `npx eslint src/__tests__/UnverifiedPromptModal.test.tsx` clean, and `git diff --stat` after the edit showing exactly one file, with changes confined to the three sites.
 - Commit messages use conventional prefixes (`test:`, `docs:`), no `!`, no `[skip ci]` (repo release rules).
 - Run pnpm, not npm. Snap-node `…/bin/env: No such file or directory` stderr lines are noise; judge by the vitest output, not stderr.
 - Never leave uncommitted tree state between dispatches.
-- Stability-bar numbers are exact: 30 loaded runs + 20 unloaded runs + one full-suite run, all green (spec, Test plan).
+- Stability-bar numbers are exact and set by the owner's plan ruling: loaded runs + 20 unloaded runs + one full-suite run, all green (spec, Test plan).
 
 ---
 
@@ -59,7 +59,7 @@ Replace with:
 
 - [ ] **Step 2: Fix 2 — wait for initial focus before firing Tab**
 
-Find this block (test "Tab from the last focusable wraps to the first focusable inside the dialog"):
+Find this block (test "Tab from the last focusable wraps to the first focusable inside the dialog"; note the 2-space indentation, which the exact-string edit must preserve):
 
 ```tsx
 expect(last).toHaveTextContent(/not now/i);
@@ -98,8 +98,9 @@ Replace with:
   await waitFor(() => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
-  // The focus restore runs in the trap's effect cleanup, another passive
-  // flush that can lag the DOM commit under load. Wait for it too.
+  // Defensive: the restore runs in the trap's effect cleanup, another
+  // passive flush. No failure of this test was ever captured, but the
+  // wrap is free insurance and cannot mask a broken restore.
   await waitFor(() => {
     expect(document.activeElement).toBe(opener);
   });
@@ -111,10 +112,10 @@ Replace with:
 Run: `pnpm vitest run src/__tests__/UnverifiedPromptModal.test.tsx 2>&1 | tail -8`
 Expected: `Tests  9 passed (9)` and `Test Files  1 passed (1)`. Read the real output; do not assume.
 
-- [ ] **Step 5: Format check and commit**
+- [ ] **Step 5: Lint, scope check, and commit**
 
-Run: `npx prettier --check src/__tests__/UnverifiedPromptModal.test.tsx`
-Expected: "All matched files use Prettier code style!". If it fails, run `npx prettier --write` on that one file and re-run Step 4.
+Run: `npx eslint src/__tests__/UnverifiedPromptModal.test.tsx`
+Expected: no errors. Then run `git diff --stat` and confirm it lists exactly one file and `git diff` shows changes only at the three sites. This repo has no Prettier gate; do not run Prettier on the test file.
 
 ```bash
 git add src/__tests__/UnverifiedPromptModal.test.tsx
@@ -138,9 +139,9 @@ The owner's approval (Discord msg 1575535367145398364) requires: "confirm no oth
 Run: `grep -n 'keyDown\|keyboard\|Escape\|fireEvent' src/__tests__/UnverifiedPromptModal.test.tsx`
 Expected at plan-writing time: exactly one `fireEvent.keyDown` site (the Tab test, now behind the Fix 2 `waitFor`), plus `fireEvent.click` sites. No Shift+Tab or Escape keydown tests exist. Pre-plan evidence (2026-11-26, commit 53baa084): the only keyDown was line 192; click sites at lines 90, 101, 170, 212 reach React props set at commit time and do not race the trap.
 
-- [ ] **Step 2: Record the result in LEDGER.md**
+- [ ] **Step 2: Record the result in LEDGER.md and the spec Errata**
 
-Tick Task 2's box with the grep output summary as evidence. If the grep shows a NEW racy keyboard site the plan did not anticipate, STOP and report — do not improvise a fix outside the spec.
+Tick Task 2's box with the grep output summary as evidence, and record the same one-line result in the spec's Errata section (LEDGER.md is deleted at cleanup in Task 4; Errata is the durable home). If the grep shows a NEW racy keyboard site the plan did not anticipate, STOP and report — do not improvise a fix outside the spec.
 
 ### Task 3: Stability bar
 
@@ -152,21 +153,34 @@ Tick Task 2's box with the grep output summary as evidence. If the grep shows a 
 
 - Consumes: Task 1's committed test change. Produces: recorded evidence that the fix holds under load.
 
-- [ ] **Step 1: Loaded loop — 30 runs**
+- [ ] **Step 1: Loaded loop — 30 runs (or the count the owner sets at plan approval)**
 
-Spawn 6 spinner processes on the 4-core machine, run the file 30 times, count results. Track the spinner PIDs in a variable and kill only those (a `pkill -f 'while :'` would kill the running shell itself):
+Run the whole step as one background script so a mid-loop timeout cannot orphan the spinners. The `trap` guarantees cleanup even if the script dies; the pre-check before Step 2 verifies it:
 
 ```bash
+cat > /tmp/ct386-loaded-loop.sh <<'EOF'
+#!/usr/bin/env bash
+cd /home/kv-thinkpad-t420-ubuntu/code/github/equationalapplications/curated-thoughts || exit 9
 N=$(nproc); SPIN=""
+trap 'kill $SPIN 2>/dev/null' EXIT INT TERM
 for i in $(seq 1 $((N+2))); do (while :; do :; done) & SPIN="$SPIN $!"; done
-LOADED=$(for i in $(seq 1 30); do pnpm vitest run src/__tests__/UnverifiedPromptModal.test.tsx 2>&1 | grep -c 'Tests  9 passed'; done | grep -c 1)
-kill $SPIN
+LOADED=0
+for i in $(seq 1 30); do
+  pnpm vitest run src/__tests__/UnverifiedPromptModal.test.tsx 2>&1 | grep -q 'Tests  9 passed' && LOADED=$((LOADED+1))
+done
+kill $SPIN 2>/dev/null
 echo "loaded green: $LOADED/30"
+EOF
+bash /tmp/ct386-loaded-loop.sh
 ```
 
-Expected: `loaded green: 30/30`. Kill the spinners via `$SPIN` even if a run fails. Judge each iteration by the `Tests  9 passed` line.
+Run the script with a generous timeout (600 s or more) or in the background — 30 loaded runs at several seconds each can exceed a 120 s tool timeout.
+
+Expected: `loaded green: 30/30`. Judge each iteration by the `Tests  9 passed` line; a failing run prints `N failed | M passed` and cannot match, so counting errs toward failure, never false success.
 
 - [ ] **Step 2: Unloaded loop — 20 runs**
+
+First verify no spinner survived: `ps -o pid= -p $SPIN 2>/dev/null` must print nothing (run the pre-check with the PIDs from Step 1, or check `ps aux | grep 'while :' | grep -v grep`). If any spinner survives, kill it and note it in the Errata — leftover load would invalidate the unloaded runs.
 
 ```bash
 UNLOADED=$(for i in $(seq 1 20); do pnpm vitest run src/__tests__/UnverifiedPromptModal.test.tsx 2>&1 | grep -c 'Tests  9 passed'; done | grep -c 1)
