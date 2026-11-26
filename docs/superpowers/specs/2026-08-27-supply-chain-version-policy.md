@@ -1,7 +1,17 @@
 # Supply-Chain Version Policy: exact pins + 14-day release-age gate
 
 **Date:** 2026-08-27
-**Status:** IN PROGRESS — Task 1 complete (exact-pinning), Task 2 pending (14-day gate)
+**Status:** IMPLEMENTED — Task 1 complete (exact-pinning). Task 2 (14-day gate)
+landed via PR #388 (merged 2026-11-26); the cargo/pip checker hardening carrier
+is PR #391. The JS side is
+gated by `pnpm-workspace.yaml` `minimumReleaseAge` (below), and the cargo/pip
+side is gated by
+`scripts/check-release-age-cargo-py.mjs` +
+`.github/workflows/dependency-release-age.yml` (delta-vs-base on EVERY PR;
+manual whole-lockfile `workflow_dispatch` audits;
+fail-closed; new or source-changed non-crates.io/non-path dependencies fail;
+PR runs the base branch's copy of the script so it cannot weaken the
+script-level gate (the workflow file itself is protected by review)).
 **Author:** Hermes Agent (Tessera) at Kurt's direction
 **External guidance:** Senior architect (multi-national audit firm), relayed by Kurt:
 > "We've encountered two such attacks and our current guidance is one of two options.
