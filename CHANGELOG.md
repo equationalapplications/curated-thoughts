@@ -1,3 +1,13 @@
+## [3.16.3](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.2...v3.16.3) (2026-11-26)
+
+### Bug Fixes
+
+* **pipeline:** install the Run 2 confirmations hook inside start_pipeline ([#381](https://github.com/equationalapplications/curated-thoughts/issues/381)) ([52c9b80](https://github.com/equationalapplications/curated-thoughts/commit/52c9b80d9ea4a32ae6b22b10c663900536635af1))
+
+### Performance Improvements
+
+* **stated-ledger:** skip the wiki-wide hash scan when the confirmations ledger is empty ([#381](https://github.com/equationalapplications/curated-thoughts/issues/381)) ([83bcdc5](https://github.com/equationalapplications/curated-thoughts/commit/83bcdc5fb36c3de016eff7ba633b02dc1c6dc85d))
+
 ## [3.16.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.1...v3.16.2) (2026-11-26)
 
 ### Bug Fixes
