@@ -2117,6 +2117,33 @@ fn recover_after_failed_switch_vault(
 /// The post-sweep / post-install reopen of `switch_vault`. A seam so the pin
 /// tests drive the SAME open the switch uses: the open resolves the vault root
 /// from `config_path`, so the config must already name the new vault (S5b).
+/// Spec §2-A: after a restore publishes, rederive the stated-ledger keys from
+/// the NEW root unconditionally. On failure the stamp is deleted so the
+/// open-time gate retries; the error is returned for the caller to log.
+pub(crate) fn restore_rederive_with<F>(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    rederive: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&rusqlite::Connection, &Path) -> anyhow::Result<db::stated_ledger::RebuildReport>,
+{
+    match rederive(conn, root) {
+        Ok(report) => {
+            eprintln!("[ct::switch] stated-ledger rederive after restore: {report:?}");
+            Ok(())
+        }
+        Err(e) => {
+            // Not permanent: with the stamp gone the open-time gate retries.
+            let _ = conn.execute(
+                "DELETE FROM llm_wiki_meta WHERE key='stated_ledger_rederived'",
+                [],
+            );
+            Err(format!("{e:#}"))
+        }
+    }
+}
+
 pub(crate) fn switch_reopen_paths(db_path: &Path, config_path: &Path) -> anyhow::Result<AppDb> {
     AppDb::open_with_config(db_path, config_path)
 }
@@ -2336,6 +2363,27 @@ async fn switch_vault(
         {
             let mut guard = db_state.0.lock().unwrap();
             *guard = switch_reopen_paths(&db_path, &config_path).map_err(|e| e.to_string())?;
+            // Spec §2-A (#382): a restored backup carries the stamp and the
+            // OLD root's keys, so the open skipped the walk — rederive from
+            // the new root unconditionally.
+            if will_restore {
+                let canonical_new_root =
+                    new_root.canonicalize().unwrap_or_else(|_| new_root.clone());
+                if let Err(e) = restore_rederive_with(
+                    &guard.0,
+                    &canonical_new_root,
+                    db::stated_ledger::rebuild_rederive,
+                ) {
+                    eprintln!("[ct::switch] stated-ledger rederive after restore failed: {e}");
+                    pipeline::write_error_log(
+                        Some(&canonical_new_root),
+                        &format!(
+                            "[ct::switch] stated-ledger rederive after restore failed: {e}; \
+                             stamp cleared, the next open retries"
+                        ),
+                    );
+                }
+            }
         }
 
         // Run 1: the sweep emptied the stated-ledger tables; repopulate them

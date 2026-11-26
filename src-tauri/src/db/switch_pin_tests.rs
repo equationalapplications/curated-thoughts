@@ -127,6 +127,63 @@ fn inplace_switch_rederives_from_new_vault_via_open_rederive() {
     assert!(before.is_some());
 }
 
+/// Moved-root restore: the installed backup is A's brain (stamped, A-rooted
+/// keys) placed under B, config names B. The open skips the walk (stamp set).
+fn installed_backup_at_b(f: &Fixture) -> AppDb {
+    let b_db = f.b.join(".brain").join("brain.db");
+    std::fs::copy(&f.db_path, &b_db).unwrap();
+    VaultConfig::new(f.config_path.clone())
+        .set_vault_path(f.b.to_str().unwrap())
+        .unwrap();
+    crate::switch_reopen_paths(&b_db, &f.config_path).unwrap()
+}
+
+#[test]
+fn moved_root_restore_rederives_keys_from_new_root() {
+    let f = fixture();
+    {
+        let conn = rusqlite::Connection::open(&f.db_path).unwrap();
+        let p = f.b.parent().unwrap().join("A").join("notes").join("deposit-a.md");
+        conn.execute(
+            "INSERT OR REPLACE INTO stated_attestations VALUES (?1,'h','kurt','t')",
+            [p.to_str().unwrap()],
+        )
+        .unwrap();
+    }
+    let db = installed_backup_at_b(&f);
+    assert!(stamp(&db).is_some(), "backup carries the stamp; open skips the walk");
+    crate::restore_rederive_with(&db.0, &f.b.canonicalize().unwrap(), |c, r| {
+        stated_ledger::rebuild_rederive(c, r)
+    })
+    .unwrap();
+    let paths = deposit_paths(&db);
+    assert!(paths.iter().any(|p| p.contains("deposit-b.md")), "{paths:?}");
+    assert!(!paths.iter().any(|p| p.contains("deposit-a.md")), "{paths:?}");
+    let n: i64 = db
+        .0
+        .query_row("SELECT COUNT(*) FROM stated_attestations WHERE document_path LIKE '%/A/%'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "stated_attestations holds an A-rooted key");
+}
+
+#[test]
+fn restore_rederive_failure_unstamps_and_open_gate_retries() {
+    let f = fixture();
+    let b_db = f.b.join(".brain").join("brain.db");
+    let db = installed_backup_at_b(&f);
+    assert!(stamp(&db).is_some());
+    let r = crate::restore_rederive_with(&db.0, &f.b.canonicalize().unwrap(), |_, _| {
+        anyhow::bail!("injected")
+    });
+    assert!(r.is_err());
+    assert!(stamp(&db).is_none(), "failure must delete the stamp");
+    drop(db);
+    let db = crate::switch_reopen_paths(&b_db, &f.config_path).unwrap();
+    let paths = deposit_paths(&db);
+    assert!(paths.iter().any(|p| p.contains("deposit-b.md")), "{paths:?}");
+    assert!(!paths.iter().any(|p| p.contains("deposit-a.md")), "{paths:?}");
+}
+
 #[test]
 fn restore_branch_config_before_reopen_rederives_from_new_vault() {
     // Scope: the restore branch's ordering essence — production does NOT sweep
