@@ -74,8 +74,11 @@ next switch or a heal.
      fails if the worker is not wired to the handle's confirmations slot.
 3. Negative test: an unrooted handle keeps no hook, so no crossing can
    stamp anything.
-4. Gates: `cargo --manifest-path src-tauri/Cargo.toml test --lib
-   --features test-utils` (final count 1749 with the lane's six tests; pre-lane base not separately measured — the remembered 1744 disagreed with the ledger by one); clippy on
+4. Gates: `cargo test --manifest-path src-tauri/Cargo.toml --lib
+   --features test-utils` (this cargo rejects `--manifest-path` before
+   the subcommand) — final count 1749 with the lane's six tests; pre-lane
+   base not separately measured — the remembered 1744 disagreed with the
+   ledger by one; clippy on
    both crates, no new findings; no frontend or TS surface changes.
 
 ## Rejected alternatives
