@@ -224,7 +224,8 @@ test("on close, focus returns to the previously focused element", async () => {
   });
   // Defensive: the restore runs in the trap's effect cleanup, another
   // passive flush. No failure of this test was ever captured, but the
-  // wrap is free insurance and cannot mask a missing restore.
+  // wrap is free insurance and cannot mask a missing restore (a restore
+  // delayed under waitFor's 1s timeout would still pass).
   await waitFor(() => {
     expect(document.activeElement).toBe(opener);
   });
