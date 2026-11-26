@@ -112,8 +112,8 @@ await waitFor(() => {
 wrap cannot mask a missing restore; a restore delayed under 1 s
 (waitFor's default timeout) would pass. The owner's spec approval
 carried a sanity check for leftover races in this file; the T3 review
-ruled this wrap defensive-only, and the owner decides at plan approval
-whether to keep or drop it.
+ruled this wrap defensive-only, and the owner kept it at plan approval
+(owner ruling, 2026-11-26).
 
 ## Files touched
 
@@ -124,8 +124,9 @@ No product code changes.
 
 ## Test plan
 
-1. Run the fixed file 30 times under the same load profile (6 spinner
-   processes on 4 cores). All 30 runs must pass.
+1. Run the fixed file 100 times under the same load profile (6 spinner
+   processes on 4 cores; count raised from 30 by owner plan ruling,
+   2026-11-26). All 100 runs must pass.
 2. Run the fixed file 20 times unloaded. All 20 runs must pass.
 3. Run the full frontend suite once (`pnpm vitest run`). All tests
    must pass. The implementer must read the real output.

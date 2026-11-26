@@ -1,6 +1,6 @@
 # LEDGER — issue-386-focus-flake
 
-**In flight:** T3 plan review CONVERGED (r1 REQUEST_CHANGES $0.76/11t; r2 APPROVE $1.03/4t, same session, all 8 dispositions dispositioned, 9 r2 text findings folded by controller). AWAITING owner plan approval (two decisions: Fix 3 keep/drop, loaded-run count). No implementation started; boxes unticked by design.
+**In flight:** Owner plan ruling landed (Discord msg 1575539721000722587: "1,1" = Fix 3 KEPT, 100 loaded runs). IMPLEMENTATION STARTING per executing-plans. No code committed yet.
 
 ## Tasks
 

@@ -18,7 +18,7 @@
 - Commit messages use conventional prefixes (`test:`, `docs:`), no `!`, no `[skip ci]` (repo release rules).
 - Run pnpm, not npm. Snap-node `…/bin/env: No such file or directory` stderr lines are noise; judge by the vitest output, not stderr.
 - Never leave uncommitted tree state between dispatches.
-- Stability-bar numbers are exact and set by the owner's plan ruling: loaded runs + 20 unloaded runs + one full-suite run, all green (spec, Test plan).
+- Stability-bar numbers are exact per the owner's plan ruling (2026-11-26, Discord msg 1575539721000722587): 100 loaded runs + 20 unloaded runs + one full-suite run, all green (spec, Test plan).
 
 ---
 
@@ -80,9 +80,7 @@ Replace with:
   last.focus();
 ```
 
-- [ ] **Step 3: Fix 3 — wrap the close-test focus-restore assertion (DEFENSIVE; owner decides keep-or-drop at plan approval)**
-
-If the owner drops Fix 3 at plan approval: skip this step, and change "three" to "two" in the spec's Files touched (spec.md), the plan's Goal line, this task's intro, and the LEDGER task count.
+- [ ] **Step 3: Fix 3 — wrap the close-test focus-restore assertion (DEFENSIVE; kept per owner ruling, 2026-11-26)**
 
 Find this block (test "on close, focus returns to the previously focused element"):
 
@@ -160,7 +158,7 @@ git commit -m "docs(spec): #386 — record keyboard-site sweep in Errata"
 
 - Consumes: Task 1's committed test change. Produces: recorded evidence that the fix holds under load.
 
-- [ ] **Step 1: Loaded loop — 30 runs (or the count the owner sets at plan approval)**
+- [ ] **Step 1: Loaded loop — 100 runs (owner ruling, 2026-11-26)**
 
 Run the whole step as one background script so a mid-loop timeout cannot orphan the spinners. The `trap` guarantees cleanup even if the script dies; the pre-check before Step 2 verifies it:
 
@@ -180,14 +178,14 @@ done
 kill $SPIN 2>/dev/null
 echo "loaded green: $LOADED/$RUNS"
 EOF
-RUNS=30 bash /tmp/ct386-loaded-loop.sh
+RUNS=100 bash /tmp/ct386-loaded-loop.sh
 ```
 
-`RUNS` is the owner's plan-approval lever: if the owner sets a count other than 30, run `RUNS=<count> bash /tmp/ct386-loaded-loop.sh` and amend the spec's Test plan item 1 to the same number in the same commit (the spec outranks the plan). Note a bash `trap` does not run on SIGKILL, which is exactly why Step 2's pre-check exists.
+Note a bash `trap` does not run on SIGKILL, which is exactly why Step 2's pre-check exists.
 
-Run the script with a generous timeout (600 s or more) or in the background — 30 loaded runs at several seconds each can exceed a 120 s tool timeout.
+Run the script with a generous timeout (1800 s or more) or in the background — 100 loaded runs at several seconds each can exceed a 120 s tool timeout.
 
-Expected: `loaded green: 30/30`. Judge each iteration by the `Tests  9 passed` line; a failing run prints `N failed | M passed` and cannot match, so counting errs toward failure, never false success.
+Expected: `loaded green: 100/100`. Judge each iteration by the `Tests  9 passed` line; a failing run prints `N failed | M passed` and cannot match, so counting errs toward failure, never false success.
 
 - [ ] **Step 2: Unloaded loop — 20 runs**
 
@@ -216,7 +214,7 @@ Expected: every test file passes and the totals line shows 0 failed. Read the re
 
 Fill `specs/issue-386-focus-flake/spec.md`'s Errata section with:
 
-- The loaded count over 30 (or the owner's count), the unloaded count over 20, the full-suite totals, the machine profile (4 cores, 6 spinner processes), and the date.
+- The loaded count over 100, the unloaded count over 20, the full-suite totals, the machine profile (4 cores, 6 spinner processes), and the date.
 - The pre-fix baseline for comparison: the identical file, pre-fix, failed 2 of 30 loaded runs (~7 percent).
 - The honesty statement, verbatim intent: the loaded loop backs up the reasoning that each `waitFor` can only pass after the trap's effect ran — it does not prove the fix alone (a pass rate this high leaves residual chance of an unfixed flake surviving the bar).
 
