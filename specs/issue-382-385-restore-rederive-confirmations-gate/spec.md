@@ -129,13 +129,26 @@ msg 1575566029889867837, 2026-11-26).
   job-completion path when the completed job WROTE entries (ingest /
   rechunk / any variant that inserts or changes `llm_wiki_entries` rows —
   the implementer verifies the exact variant set from the tree and STOPs if
-  it is ambiguous; pure-read jobs never set it). The flag is cleared ONLY
-  after a successful full apply — a failed apply stays dirty so the next
-  fire retries. **Safety invariant (single writer):** both the dirty-setter
-  (worker job-completion path, `mod.rs:402`) and the hook's clear run on
-  the one worker thread, so no Ingest completion can interleave with an
-  in-flight apply and a concurrent set-then-clear loss cannot occur; the
-  implementation documents this invariant at the clear site.
+  it is ambiguous; pure-read jobs never set it). The flag is CONSUMED at the
+  start of an apply (swapped to false before the apply runs) and re-armed if
+  the apply does not succeed — error or panic, since the drain probe runs
+  the hook under `catch_unwind` and retries the leg — so the next fire
+  retries regardless of which trigger fired; the stat memo likewise never
+  advances past a failed apply. **Writer invariant (multi-generation):** the
+  watchdog can supersede a wedged worker (`mod.rs:1373-1378`), so two
+  dirty-setters can transiently coexist — the superseded worker's job-tail
+  `mark_dirty` (`mod.rs:402`) is unconditional and epoch-blind, and a
+  set-then-clear loss against an in-flight apply WAS possible while the
+  clear ran after the apply. Consume-before-apply closes that race by
+  program order: a worker's entry writes precede its `mark_dirty`, so
+  against a fire that consumed the flag before its apply, either the
+  apply's SELECT sees the writes or the mark lands after the consume and
+  survives to the next fire. (An earlier single-writer framing — "no Ingest
+  completion can interleave with an in-flight apply" — was false once
+  supersession exists; rung 3 of the stage-close ladder supplied the
+  interleaving and this fix.) Regression tests:
+  `mark_during_apply_survives_the_clear`,
+  `panicking_apply_with_unchanged_ledger_rearms_dirty`.
 - **Fire path unchanged** (probe cadence `mod.rs:211-261`, `DRAIN_PROBE`
   250ms, panic-safety, drain semantics). Hook leg:
   - first fire (no memo): always applies;
@@ -204,7 +217,8 @@ msg 1575566029889867837, 2026-11-26).
 1. **Q1 (owner, RULED 2026-11-26): #382 shape = (a1).** Unconditional
    rederive at restore + unstamp-on-failure (next open retries), per §2-A.
 2. **Q2 (owner, RULED 2026-11-26): #385 m1 gate = dual gate.** Ledger stat
-   memo AND entries-written dirty flag (cleared only on successful apply),
+   memo AND entries-written dirty flag (consumed at apply start, re-armed
+   on error or panic; the memo never advances past a failed apply),
    per §2-B — a stat memo alone was explicitly rejected by the owner: it
    would miss newly-ingested facts across drain waves while the
    confirmations file is unchanged.

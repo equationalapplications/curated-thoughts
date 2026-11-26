@@ -1539,20 +1539,38 @@ impl ConfirmationsGate {
     {
         let cur = ledger_stat(ledger);
         let memo = self.memo.lock().ok().and_then(|g| *g);
-        if memo == Some(cur) && !self.dirty.load(Ordering::SeqCst) {
+        // Consume the dirty flag BEFORE the apply. The apply reads TWO inputs:
+        // the ledger file (stat'd above, memo-capped by the PRE-read stat) and
+        // the live `llm_wiki_entries` table (hash stamping), and the table can
+        // change WITHOUT the ledger stat moving — that is exactly why the
+        // entries-written flag exists (spec §B, owner ruling Q2=2). A
+        // superseded worker finishing the Ingest it was mid-way through marks
+        // dirty at its job tail, unconditionally and epoch-blind, and that mark
+        // can land while this apply is in flight; consuming first lets it
+        // survive to the next fire instead of being erased by a post-apply
+        // clear. Program order closes the race: the worker's entry writes
+        // precede its `mark_dirty`, so either this apply's SELECT sees the
+        // writes, or the mark lands after this swap and re-arms the flag.
+        let dirty = self.dirty.swap(false, Ordering::SeqCst);
+        if memo == Some(cur) && !dirty {
             return Ok(());
         }
-        // Cleared only on success; a failure leaves memo + dirty untouched so
-        // the next fire retries. NOTE: a SUPERSEDED worker finishing the Ingest
-        // it was mid-way through can set `dirty` concurrently with this clear
-        // (`mark_dirty` at the job tail is unconditional and epoch-blind), so a
-        // lost dirty signal is possible — and benign: the apply's sole input is
-        // the ledger file stat'd above, and `cur` is captured PRE-read, so any
-        // append this apply did not see changes the stat and forces a rescan on
-        // the next fire. `dirty` is the auxiliary trigger; the memo is the
-        // load-bearing one (rung-2 adjudication, PR #389 ladder).
-        apply()?;
-        self.dirty.store(false, Ordering::SeqCst);
+        // Re-arm on ANY non-success (error or panic — the drain probe runs the
+        // hook under catch_unwind and retries the leg): the memo stays at its
+        // PRE-read value and the flag comes back, so the next fire retries
+        // regardless of which trigger fired this one.
+        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(apply));
+        match applied {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                self.dirty.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+            Err(payload) => {
+                self.dirty.store(true, Ordering::SeqCst);
+                std::panic::resume_unwind(payload);
+            }
+        }
         // Memo the PRE-read stat (`cur`): any ledger append that lands at or
         // after this stat — during or after the apply — changes the file's
         // stat and forces a rescan on the next fire. Statting AFTER the read
@@ -3309,5 +3327,58 @@ mod confirmations_gate_tests {
         );
         gate.fire(&p, || bump(&n)).unwrap();
         assert_eq!(n.get(), 3, "successful apply clears the stat-memo trigger");
+    }
+
+    #[test]
+    fn mark_during_apply_survives_the_clear() {
+        // The superseded-worker interleaving (rung-3 major): a worker finishing
+        // the Ingest it was mid-way through marks dirty WHILE the live worker's
+        // apply is in flight. The apply reads the live `llm_wiki_entries` table
+        // too (hash stamping), so a table-only write can land mid-apply without
+        // touching the ledger stat — if the mark were erased by a post-apply
+        // clear, the entry would stay unstamped until the next unrelated
+        // trigger. The flag is consumed BEFORE the apply, so this mark survives.
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate
+            .fire(&p, || {
+                n.set(n.get() + 1);
+                gate.mark_dirty(); // the stale worker's job tail, mid-apply
+                Ok(0)
+            })
+            .unwrap();
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(
+            n.get(),
+            2,
+            "a mark landing during the apply must rescan on the next fire"
+        );
+    }
+
+    #[test]
+    fn panicking_apply_with_unchanged_ledger_rearms_dirty() {
+        // The dirty-only trigger meets a panicking apply: the call site catches
+        // hook panics (`mod.rs` drain probe) and the leg is idempotent, so the
+        // consumed flag must be re-armed — the memo cannot see table-only
+        // writes, and the ledger stat is unchanged here.
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, || bump(&n)).unwrap(); // memo = S0
+        gate.mark_dirty();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            gate.fire(&p, || {
+                n.set(n.get() + 1);
+                panic!("hook blew up")
+            })
+        }));
+        assert!(r.is_err());
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(
+            n.get(),
+            3,
+            "the dirty trigger must survive a panicking apply"
+        );
     }
 }
