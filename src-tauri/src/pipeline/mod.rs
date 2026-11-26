@@ -2050,6 +2050,53 @@ mod watchdog_integration_tests {
         });
     }
 
+    /// #381 T4 M1: the WORKER (not a direct call) fires the production hook
+    /// installed by `start_pipeline`. Fails if the worker is not wired to the
+    /// handle's confirmations slot (`.with_confirmations_slot(...)`).
+    #[test]
+    fn drain_fires_installed_hook_end_to_end() {
+        with_rooted_fixture(|db_path, root| {
+            let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
+            seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
+            let h = crate::db::stated_ledger::confirmation_content_hash("Alpha", "Alpha body");
+            let line = crate::db::stated_ledger::ConfirmationLine {
+                fact_id: "f1".into(),
+                content_hash: h,
+                by: "human:kurt".into(),
+                at: "2026-10-21T00:00:00.000Z".into(),
+            };
+            let stated = root.join("stated");
+            std::fs::create_dir_all(&stated).unwrap();
+            std::fs::write(
+                stated.join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER),
+                format!("{}\n", serde_json::to_string(&line).unwrap()),
+            )
+            .unwrap();
+            let doc = root.join("doc.md");
+            std::fs::write(&doc, "hello world").unwrap();
+
+            let handle = start_pipeline(db_path.to_path_buf(), Some(root.to_path_buf()));
+            assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
+            handle
+                .tx
+                .send(PipelineJob::ingest_counted(doc.to_string_lossy().to_string()))
+                .unwrap();
+
+            // The 1->0 drain crossing after the job fires the hook.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let mut stamped = false;
+            while std::time::Instant::now() < deadline {
+                if source_type_of(&conn, "f1") == "user_confirmed" {
+                    stamped = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            shut_down(handle);
+            assert!(stamped, "worker never fired the installed hook after the drain");
+        });
+    }
+
     #[test]
     fn hook_on_vault_without_ledger_is_quiet_noop() {
         with_rooted_fixture(|db_path, root| {
