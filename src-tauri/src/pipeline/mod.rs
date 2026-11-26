@@ -1934,6 +1934,134 @@ mod watchdog_integration_tests {
         // so the hook must fire exactly once, after BOTH are ingested.
         assert_eq!(run_drain_hook(2), vec![2]);
     }
+
+    // ---- #381: start_pipeline installs the Run 2 confirmations hook ----
+    //
+    // These build a real handle via `start_pipeline` (the harness above
+    // builds a worker directly with no vault root, so it cannot exercise the
+    // install). Firing cadence is pinned by the drain tests above.
+
+    /// Run `f` with a temp brain env, a temp dir holding an initialised
+    /// `brain.db`, and return nothing. `f` gets `(db_path, vault_root)`.
+    fn with_rooted_fixture(f: impl FnOnce(&std::path::Path, &std::path::Path)) {
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+                ("CURATED_EMBED_STUB", Some("constant8")),
+            ],
+            || {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let db_path = tmp.path().join("brain.db");
+                // Schema must exist before seeding (as the harness does).
+                crate::db::connection::open_app_db(&db_path, None).unwrap();
+                let root = tmp.path().join("vault");
+                std::fs::create_dir_all(&root).unwrap();
+                f(&db_path, &root);
+            },
+        );
+    }
+
+    /// Drop the sender and join the worker so it cannot outlive the temp db.
+    fn shut_down(handle: PipelineHandle) {
+        let PipelineHandle { tx, join, .. } = handle;
+        drop(tx);
+        join.join().unwrap();
+    }
+
+    fn seed_unconfirmed_fact(conn: &Connection, id: &str, title: &str, body: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                source_hash, source_ref, created_at, updated_at, last_accessed_at,
+                access_count, deleted_at, embedding_blob, embedding,
+                lifecycle_status, okf_verified
+             ) VALUES (?1, 'e1', ?2, ?3, '[\"a\"]', 'inferred', 'librarian_inferred',
+                       NULL, 'documents/x.md', 100, 200, NULL, 0, NULL, NULL, NULL,
+                       'stable', '[]')",
+            rusqlite::params![id, title, body],
+        )
+        .unwrap();
+    }
+
+    fn source_type_of(conn: &Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT source_type FROM llm_wiki_entries WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn call_installed_hook(handle: &PipelineHandle, conn: &Connection) -> Result<()> {
+        let g = handle.stated_confirmations.lock().unwrap();
+        let hook = g.as_ref().expect("hook installed");
+        hook(conn)
+    }
+
+    #[test]
+    fn rooted_start_pipeline_installs_confirmations_hook() {
+        with_rooted_fixture(|db_path, root| {
+            let handle = start_pipeline(db_path.to_path_buf(), Some(root.to_path_buf()));
+            assert!(handle.stated_confirmations.lock().unwrap().is_some());
+            shut_down(handle);
+        });
+    }
+
+    #[test]
+    fn unrooted_start_pipeline_keeps_no_hook() {
+        // Spec Test 3's intent: with no hook installed, no drain crossing
+        // can stamp anything.
+        with_rooted_fixture(|db_path, _root| {
+            let handle = start_pipeline(db_path.to_path_buf(), None);
+            assert!(handle.stated_confirmations.lock().unwrap().is_none());
+            shut_down(handle);
+        });
+    }
+
+    #[test]
+    fn installed_hook_stamps_confirmation() {
+        with_rooted_fixture(|db_path, root| {
+            let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
+            seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
+            let h = crate::db::stated_ledger::confirmation_content_hash("Alpha", "Alpha body");
+            let line = crate::db::stated_ledger::ConfirmationLine {
+                fact_id: "f1".into(),
+                content_hash: h,
+                by: "human:kurt".into(),
+                at: "2026-10-21T00:00:00.000Z".into(),
+            };
+            let stated = root.join("stated");
+            std::fs::create_dir_all(&stated).unwrap();
+            std::fs::write(
+                stated.join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER),
+                format!("{}\n", serde_json::to_string(&line).unwrap()),
+            )
+            .unwrap();
+
+            let handle = start_pipeline(db_path.to_path_buf(), Some(root.to_path_buf()));
+            assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
+            call_installed_hook(&handle, &conn).unwrap();
+            assert_eq!(source_type_of(&conn, "f1"), "user_confirmed");
+            shut_down(handle);
+        });
+    }
+
+    #[test]
+    fn hook_on_vault_without_ledger_is_quiet_noop() {
+        with_rooted_fixture(|db_path, root| {
+            let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
+            seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
+
+            let handle = start_pipeline(db_path.to_path_buf(), Some(root.to_path_buf()));
+            call_installed_hook(&handle, &conn).unwrap();
+            assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
+            shut_down(handle);
+        });
+    }
 }
 
 /// Task 8 (issue #271 §8(a)/§8(c)): diff-swap transaction, four-row funnel
