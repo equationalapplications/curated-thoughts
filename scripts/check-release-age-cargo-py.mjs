@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Supply-chain policy (dependency-supply-chain-sop.md): every registry
-// dependency version must have been published at least MIN_DAYS days ago
-// (default 14), so a poisoned upstream release has time to be caught and
-// unpublished before it is installed. FAIL-CLOSED: a version whose registry
+// Supply-chain policy (docs/superpowers/specs/2026-08-27-supply-chain-version-policy.md):
+// every registry dependency version must have been published at least MIN_DAYS
+// days ago (default 14), so a poisoned upstream release has time to be caught
+// and unpublished before it is installed. FAIL-CLOSED: a version whose registry
 // timestamp cannot be determined is a failure, not a skip.
 //
 // Covers Rust (Cargo.lock) and Python (requirements*.txt, uv.lock,
@@ -12,7 +12,11 @@
 // Modes:
 //   --base <git-ref>  PR check: age-check only the lockfile DELTA vs <ref>
 //                     (entries that are new or changed version). A PR whose
-//                     delta is empty passes with no cooldown.
+//                     delta is empty passes with no cooldown. A newly ADDED
+//                     git-source dependency fails the gate (no registry
+//                     timestamp exists to age-check); pre-existing path/local
+//                     workspace entries stay skipped — they are this repo's
+//                     own code, not a supply-chain input.
 //   (no --base)       Whole-lockfile audit of every registry entry — the
 //                     manual `workflow_dispatch` sweep.
 //
@@ -29,58 +33,46 @@
 // Uses only Node built-ins so it can run before any `cargo`/`pip` install.
 // crates.io requires a User-Agent header; requests are globally spaced and
 // Retry-After-aware to respect registry rate limits.
+//
+// Known parser limitation (fails toward MORE checking, never less):
+// - poetry.lock stores per-package source in a nested [package.source] table
+//   this parser does not read; poetry entries without an inline
+//   `source = "pypi"` field default to pypi, and a git-sourced package then
+//   404s on the PyPI lookup, which fails closed.
 
 import fs from "node:fs"
 import { execFileSync } from "node:child_process"
-
-const args = process.argv.slice(2)
-const arg = (name, fallback) => {
-  const i = args.indexOf(name)
-  return i >= 0 ? args[i + 1] : fallback
-}
-const minDays = Number(arg("--days", process.env.MIN_RELEASE_AGE_DAYS || 14))
-if (!Number.isFinite(minDays) || minDays <= 0) {
-  console.error(`Invalid minimum release age: ${minDays}`)
-  process.exit(2)
-}
-const cutoff = new Date(Date.now() - minDays * 24 * 60 * 60 * 1000)
-const firstPartyPrefixes = []
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--first-party-prefix") {
-    if (!args[i + 1]) {
-      console.error("--first-party-prefix requires a value")
-      process.exit(2)
-    }
-    firstPartyPrefixes.push(args[i + 1])
-  }
-}
-const lockfile = arg("--lockfile", "Cargo.lock")
-const baseFlag = args.indexOf("--base")
-const baseRef = baseFlag >= 0 ? args[baseFlag + 1] : undefined
-if (baseFlag >= 0 && !baseRef) {
-  console.error("--base requires a git ref (e.g. --base origin/main)")
-  process.exit(2)
-}
-
-if (!fs.existsSync(lockfile)) {
-  console.error(`Lockfile not found: ${lockfile}`)
-  process.exit(2)
-}
+import path from "node:path"
+import { pathToFileURL } from "node:url"
 
 // ---------------------------------------------------------------------------
 // Lockfile parsing -> Map(name -> Set(version)), plus skipped entries.
-// Each entry: { name, version, registry: "crates"|"pypi"|null, reason? }
-// registry === null means not registry-checkable (path/git dep, etc.).
+// Each entry: { name, version, registry: "crates"|"pypi"|null, git?, reason? }
+// registry === null means not registry-checkable (path/git dep, etc.); `git`
+// marks git-source entries, which are a fail-closed violation when newly
+// added in delta mode.
 // ---------------------------------------------------------------------------
 
 // Minimal hand-rolled parse of the Cargo.lock / poetry.lock TOML subset:
 // [[package]] array-of-table sections with string-valued keys. Handles quoted
 // strings and inline arrays like `dependencies = ["a", "b"]` (ignored anyway).
-function parseTomlPackageSections(raw) {
+// Comment stripping is quote-aware so values like git URLs carrying a
+// `#revision` fragment survive intact.
+export function stripTomlComment(line) {
+  let inStr = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === '"' && line[i - 1] !== "\\") inStr = !inStr
+    else if (ch === "#" && !inStr) return line.slice(0, i)
+  }
+  return line
+}
+
+export function parseTomlPackageSections(raw) {
   const sections = []
   let current = null
   for (const lineRaw of raw.split(/\r?\n/)) {
-    const line = lineRaw.replace(/#.*$/, "").trim()
+    const line = stripTomlComment(lineRaw).trim()
     if (!line) continue
     const section = line.match(/^\[\[([^\]]+)\]\]$/)
     if (section) {
@@ -103,19 +95,16 @@ function parseTomlPackageSections(raw) {
   return sections
 }
 
-function isFirstParty(name) {
-  return firstPartyPrefixes.some((p) => name.startsWith(p))
-}
-
-function collectEntries(entries, skipped) {
+export function collectEntries(entries, skipped, prefixes = []) {
   const wanted = new Map() // registry -> Map(name -> Set(version))
+  const isFirstParty = (name) => prefixes.some((p) => name.startsWith(p))
   for (const e of entries) {
     if (isFirstParty(e.name)) {
-      skipped.push(`${e.name}@${e.version} (first-party exemption)`)
+      skipped.push({ name: e.name, version: e.version, reason: "first-party exemption" })
       continue
     }
     if (!e.registry) {
-      skipped.push(`${e.name}@${e.version} (${e.reason})`)
+      skipped.push({ name: e.name, version: e.version, reason: e.reason })
       continue
     }
     if (!wanted.has(e.registry)) wanted.set(e.registry, new Map())
@@ -126,7 +115,7 @@ function collectEntries(entries, skipped) {
   return wanted
 }
 
-function entriesFromCargoLock(raw) {
+export function entriesFromCargoLock(raw) {
   const entries = []
   for (const s of parseTomlPackageSections(raw)) {
     if (s.section !== "package") continue
@@ -141,6 +130,7 @@ function entriesFromCargoLock(raw) {
         name,
         version,
         registry: null,
+        git: source.startsWith("git+"),
         reason: source ? `non-registry source ${source}` : "no source (path/git/local)",
       })
     }
@@ -148,7 +138,7 @@ function entriesFromCargoLock(raw) {
   return entries
 }
 
-function entriesFromUvLock(raw) {
+export function entriesFromUvLock(raw) {
   // uv.lock: [[package]] name/version, source = { registry = "..." } (inline
   // table) for registry packages; otherwise path/git/virtual.
   const entries = []
@@ -166,6 +156,7 @@ function entriesFromUvLock(raw) {
         name,
         version,
         registry: null,
+        git: /git\s*=\s*"/.test(source),
         reason: source ? `non-registry source ${source}` : "no registry source",
       })
     }
@@ -173,8 +164,10 @@ function entriesFromUvLock(raw) {
   return entries
 }
 
-function entriesFromPoetryLock(raw) {
+export function entriesFromPoetryLock(raw) {
   // poetry.lock [[package]] with source section or name = "pkg (==1.2.3)".
+  // See the header note: inline source fields only; missing source defaults
+  // to pypi and git-sourced packages fail closed at the PyPI 404.
   const entries = []
   for (const s of parseTomlPackageSections(raw)) {
     if (s.section !== "package") continue
@@ -184,206 +177,322 @@ function entriesFromPoetryLock(raw) {
     if ((s.fields.source ?? "pypi") === "pypi") {
       entries.push({ name, version, registry: "pypi" })
     } else {
-      entries.push({ name, version, registry: null, reason: `source ${s.fields.source}` })
+      entries.push({
+        name,
+        version,
+        registry: null,
+        git: (s.fields.source ?? "").startsWith("git"),
+        reason: `source ${s.fields.source}`,
+      })
     }
   }
   return entries
 }
 
-function entriesFromRequirements(raw) {
-  // requirements*.txt: pinned lines `name==version`. Unpinned lines cannot be
-  // age-checked -> fail-closed violation via the unpinned list.
+// requirements*.txt: pinned lines `name==version`. PEP 508 extras are stripped
+// ("flask[async]" -> "flask", the PyPI project name) and names are lowercased.
+// Unpinned or otherwise unparseable non-option lines are FAIL-CLOSED problems:
+// they cannot be age-checked, so they fail the gate instead of passing it.
+// Backslash line continuations are joined before parsing.
+export function entriesFromRequirements(raw, problems = []) {
   const entries = []
-  for (const lineRaw of raw.split(/\r?\n/)) {
+  const lines = raw.replace(/\\\r?\n/g, " ").split(/\r?\n/)
+  for (const lineRaw of lines) {
     const line = lineRaw.replace(/#.*$/, "").trim()
-    if (!line || line.startsWith("-")) continue // -r/-e/--flags not handled
+    if (!line) continue
+    if (line.startsWith("-")) continue // -r/-e/--flags: pip options, not pins
     const m = line.match(/^([A-Za-z0-9_.[\]-]+)==([^;\s]+)/)
-    if (!m) continue
-    // strip PEP 508 extras: "flask[async]" -> "flask" (the PyPI project name)
-    entries.push({ name: m[1].toLowerCase().split("[")[0], version: m[2], registry: "pypi" })
+    if (m) {
+      entries.push({ name: m[1].toLowerCase().split("[")[0], version: m[2], registry: "pypi" })
+    } else {
+      problems.push(`unpinned or unparseable requirement line (fail-closed): ${lineRaw.trim()}`)
+    }
   }
   return entries
 }
 
-function entriesForFile(path, raw) {
+export function entriesForFile(path, raw, problems = []) {
   const base = path.split("/").pop()
   if (base === "Cargo.lock") return entriesFromCargoLock(raw)
   if (base === "uv.lock") return entriesFromUvLock(raw)
   if (base === "poetry.lock") return entriesFromPoetryLock(raw)
-  if (/^requirements.*\.txt$/.test(base)) return entriesFromRequirements(raw)
-  console.error(`Unsupported lockfile format: ${path}`)
-  process.exit(2)
+  if (/^requirements.*\.txt$/.test(base)) return entriesFromRequirements(raw, problems)
+  throw new Error(`Unsupported lockfile format: ${path}`)
 }
 
-const currentRaw = fs.readFileSync(lockfile, "utf8")
-const currentEntries = entriesForFile(lockfile, currentRaw)
+// Delta = entries in `currentEntries` whose name@version is not present in
+// `baseEntries` (new packages and version changes).
+export function deltaEntries(currentEntries, baseEntries) {
+  const baseSet = new Set(baseEntries.map((e) => `${e.name}@${e.version}`))
+  return currentEntries.filter((e) => !baseSet.has(`${e.name}@${e.version}`))
+}
 
-let scope
-let wanted
-const skipped = []
-if (baseRef) {
-  let baseRaw
+// ---------------------------------------------------------------------------
+// Check runner. Exported (with the parsers above) so the test suite can
+// exercise every path network-free via the `fetchImpl` and `spacingMs`
+// injections; the CLI guard at the bottom preserves the original behavior.
+// ---------------------------------------------------------------------------
+
+export async function runCheck(
+  argv = process.argv.slice(2),
+  { fetchImpl = fetch, spacingMs = 1000 } = {},
+) {
+  const arg = (name, fallback) => {
+    const i = argv.indexOf(name)
+    return i >= 0 ? argv[i + 1] : fallback
+  }
+  const minDays = Number(arg("--days", process.env.MIN_RELEASE_AGE_DAYS || 14))
+  if (!Number.isFinite(minDays) || minDays <= 0) {
+    console.error(`Invalid minimum release age: ${minDays}`)
+    return 2
+  }
+  const cutoff = new Date(Date.now() - minDays * 24 * 60 * 60 * 1000)
+  const firstPartyPrefixes = []
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--first-party-prefix") {
+      if (!argv[i + 1]) {
+        console.error("--first-party-prefix requires a value")
+        return 2
+      }
+      firstPartyPrefixes.push(argv[i + 1])
+    }
+  }
+  const lockfile = arg("--lockfile", "Cargo.lock")
+  const baseFlag = argv.indexOf("--base")
+  const baseRef = baseFlag >= 0 ? argv[baseFlag + 1] : undefined
+  if (baseFlag >= 0 && !baseRef) {
+    console.error("--base requires a git ref (e.g. --base origin/main)")
+    return 2
+  }
+
+  if (!fs.existsSync(lockfile)) {
+    console.error(`Lockfile not found: ${lockfile}`)
+    return 2
+  }
+
+  // Parse-level fail-closed problems (e.g. unpinned requirement lines).
+  const problems = []
+  const currentRaw = fs.readFileSync(lockfile, "utf8")
+  let currentEntries
   try {
-    const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim()
-    baseRaw = execFileSync("git", ["show", `${baseRef}:${lockfile}`], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    })
+    currentEntries = entriesForFile(lockfile, currentRaw, problems)
   } catch (err) {
-    console.error(`Could not read ${lockfile} from ${baseRef}: ${String(err.stderr ?? err.message).trim()}`)
-    process.exit(2)
+    console.error(String(err.message))
+    return 2
   }
-  const baseSet = new Set()
-  for (const e of entriesForFile(lockfile, baseRaw)) baseSet.add(`${e.name}@${e.version}`)
-  const delta = currentEntries.filter((e) => !baseSet.has(`${e.name}@${e.version}`))
-  const inherited = currentEntries.length - delta.length
-  if (delta.length === 0) {
-    console.log(`No dependency changes vs ${baseRef}; nothing to age-check.`)
-    console.log(
-      `${inherited} entries inherited unchanged from ${baseRef} are not re-audited in delta mode (workflow_dispatch runs the whole-lockfile audit).`,
-    )
-    process.exit(0)
-  }
-  wanted = collectEntries(delta, skipped)
-  const versionCount = delta.length
-  scope = `delta vs ${baseRef} (${versionCount} changed entr${versionCount === 1 ? "y" : "ies"}; ${inherited} inherited unchanged)`
-} else {
-  wanted = collectEntries(currentEntries, skipped)
-  scope = `whole lockfile (${currentEntries.length} entries)`
-}
 
-// ---------------------------------------------------------------------------
-// Registry queries
-// ---------------------------------------------------------------------------
-
-const violations = []
-const failures = []
-const UA = "equationalapplications-release-age-check/1.0 (github.com/equationalapplications)"
-
-const lastRequestAt = { t: 0 }
-const MIN_REQUEST_INTERVAL_MS = 1000 // global spacing across all workers
-
-async function fetchJson(url, attemptMax = 10) {
-  for (let attempt = 1; attempt <= attemptMax; attempt++) {
-    let res
+  let scope
+  let delta
+  const skipped = []
+  if (baseRef) {
+    let baseRaw
     try {
-      const wait = lastRequestAt.t + MIN_REQUEST_INTERVAL_MS - Date.now()
-      if (wait > 0) await new Promise((r) => setTimeout(r, wait))
-      lastRequestAt.t = Date.now()
-      res = await fetch(url, {
-        headers: { "User-Agent": UA, Accept: "application/json" },
-        signal: AbortSignal.timeout(30_000),
+      // Run git relative to the lockfile's directory so the check works from
+      // any process cwd (CI runs at the repo root; tests use temp repos), and
+      // address the blob repo-relatively — `git show ref:<path>` rejects
+      // absolute paths.
+      const absLock = path.resolve(lockfile)
+      const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        cwd: path.dirname(absLock),
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim()
+      const relLock = path.relative(repoRoot, absLock)
+      baseRaw = execFileSync("git", ["show", `${baseRef}:${relLock}`], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
       })
     } catch (err) {
-      if (attempt === attemptMax) throw err
-      await new Promise((r) => setTimeout(r, 1000 * attempt))
-      continue
+      console.error(`Could not read ${lockfile} from ${baseRef}: ${String(err.stderr ?? err.message).trim()}`)
+      return 2
     }
-    if (res.status === 404) return null // unknown package/version: fail closed upstream
-    if (res.status === 429 || res.status === 503) {
-      const retryAfter = Number(res.headers.get("retry-after")) || Math.min(2 ** attempt, 30)
-      if (attempt === attemptMax) throw new Error(`HTTP ${res.status} after ${attemptMax} attempts`)
-      await new Promise((r) => setTimeout(r, retryAfter * 1000))
-      continue
-    }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return await res.json()
-  }
-}
-
-// One bulk request per crate name returns every version's created_at, so a
-// lockfile with many versions of one crate costs a single lookup.
-async function cratesVersions(name) {
-  const doc = await fetchJson(`https://crates.io/api/v1/crates/${encodeURIComponent(name)}`)
-  if (!doc || !Array.isArray(doc.versions)) return null
-  const byNum = new Map()
-  for (const v of doc.versions) if (v.num && v.created_at) byNum.set(v.num, v.created_at)
-  return byNum
-}
-
-async function pypiCreated(name, version) {
-  const doc = await fetchJson(`https://pypi.org/pypi/${encodeURIComponent(name)}/${encodeURIComponent(version)}/json`)
-  if (!doc || !doc.urls || !Array.isArray(doc.urls)) return null
-  const upload = doc.urls.find((u) => u.upload_time)
-  return upload ? upload.upload_time : null
-}
-
-const registryLookup = { crates: cratesVersions, pypi: pypiCreated }
-
-// Build a flat job list [{registry, name, versions:Set}]; 2 workers plus the
-// global 300ms request spacing keeps us well under crates.io rate limits.
-const jobs = []
-for (const [registry, byName] of wanted) {
-  for (const [name, versions] of byName) jobs.push({ registry, name, versions })
-}
-let next = 0
-async function worker() {
-  while (next < jobs.length) {
-    const { registry, name, versions } = jobs[next++]
-    if (registry === "crates") {
-      let byNum
+    delta = deltaEntries(currentEntries, (() => {
       try {
-        byNum = await cratesVersions(name)
+        return entriesForFile(lockfile, baseRaw, [])
       } catch (err) {
-        for (const version of versions)
-          failures.push(`${name}@${version} (${registry}): registry query failed after retries: ${err.message}`)
+        console.error(String(err.message))
+        return null
+      }
+    })())
+    if (delta === null) return 2
+    const inherited = currentEntries.length - delta.length
+    if (delta.length === 0) {
+      console.log(`No dependency changes vs ${baseRef}; nothing to age-check.`)
+      console.log(
+        `${inherited} entries inherited unchanged from ${baseRef} are not re-audited in delta mode (workflow_dispatch runs the whole-lockfile audit).`,
+      )
+      return 0
+    }
+    const versionCount = delta.length
+    scope = `delta vs ${baseRef} (${versionCount} changed entr${versionCount === 1 ? "y" : "ies"}; ${inherited} inherited unchanged)`
+  } else {
+    delta = currentEntries
+    scope = `whole lockfile (${currentEntries.length} entries)`
+  }
+
+  const violations = []
+  const failures = []
+
+  // FAIL-CLOSED (delta mode only): a newly added git-source dependency has no
+  // registry timestamp to age-check, and git deps run arbitrary build scripts
+  // in CI. Whole-lockfile audits report established git deps as skipped, not
+  // failing — otherwise the manual sweep can never pass a repo that carries
+  // one deliberately.
+  if (baseRef) {
+    for (const e of delta) {
+      if (e.git && !firstPartyPrefixes.some((p) => e.name.startsWith(p))) {
+        failures.push(`${e.name}@${e.version}: newly added git-source dependency (fail-closed; no registry timestamp exists for git deps)`)
+      }
+    }
+  }
+
+  const wanted = collectEntries(delta, skipped, firstPartyPrefixes)
+
+  // ---------------------------------------------------------------------------
+  // Registry queries
+  // ---------------------------------------------------------------------------
+
+  const UA = "equationalapplications-release-age-check/1.0 (github.com/equationalapplications)"
+
+  const lastRequestAt = { t: 0 }
+
+  async function fetchJson(url, attemptMax = 10) {
+    for (let attempt = 1; attempt <= attemptMax; attempt++) {
+      let res
+      try {
+        // Reserve the spacing slot synchronously BEFORE awaiting, so concurrent
+        // workers cannot compute the same slot and fire together.
+        const slot = Math.max(Date.now(), lastRequestAt.t + spacingMs)
+        lastRequestAt.t = slot
+        if (slot > Date.now()) await new Promise((r) => setTimeout(r, slot - Date.now()))
+        res = await fetchImpl(url, {
+          headers: { "User-Agent": UA, Accept: "application/json" },
+          signal: AbortSignal.timeout(30_000),
+        })
+      } catch (err) {
+        if (attempt === attemptMax) throw err
+        await new Promise((r) => setTimeout(r, 1000 * attempt))
         continue
       }
-      for (const version of versions) {
-        const created = byNum ? byNum.get(version) : undefined
-        if (created === undefined) {
-          failures.push(`${name}@${version} (${registry}): no publish timestamp in registry (fail-closed)`)
-          continue
-        }
-        const publishedAt = new Date(created)
-        if (Number.isNaN(publishedAt.getTime()))
-          failures.push(`${name}@${version} (${registry}): unparsable publish timestamp: ${created}`)
-        else if (publishedAt > cutoff)
-          violations.push(`${name}@${version} (${registry}) published ${created.slice(0, 10)}`)
+      if (res.status === 404) return null // unknown package/version: fail closed upstream
+      if (res.status === 429 || res.status === 503) {
+        const retryAfter = Number(res.headers.get("retry-after")) || Math.min(2 ** attempt, 30)
+        if (attempt === attemptMax) throw new Error(`HTTP ${res.status} after ${attemptMax} attempts`)
+        await new Promise((r) => setTimeout(r, retryAfter * 1000))
+        continue
       }
-    } else {
-      for (const version of versions) {
-        let created
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      return await res.json()
+    }
+  }
+
+  // One bulk request per crate name returns every version's created_at, so a
+  // lockfile with many versions of one crate costs a single lookup.
+  async function cratesVersions(name) {
+    const doc = await fetchJson(`https://crates.io/api/v1/crates/${encodeURIComponent(name)}`)
+    if (!doc || !Array.isArray(doc.versions)) return null
+    const byNum = new Map()
+    for (const v of doc.versions) if (v.num && v.created_at) byNum.set(v.num, v.created_at)
+    return byNum
+  }
+
+  async function pypiCreated(name, version) {
+    const doc = await fetchJson(`https://pypi.org/pypi/${encodeURIComponent(name)}/${encodeURIComponent(version)}/json`)
+    if (!doc || !doc.urls || !Array.isArray(doc.urls)) return null
+    const upload = doc.urls.find((u) => u.upload_time)
+    return upload ? upload.upload_time : null
+  }
+
+  const registryLookup = { crates: cratesVersions, pypi: pypiCreated }
+
+  // Build a flat job list [{registry, name, versions:Set}]; 2 workers plus the
+  // global request spacing (1s per request, slot reserved synchronously) keeps
+  // us under crates.io rate limits.
+  const jobs = []
+  for (const [registry, byName] of wanted) {
+    for (const [name, versions] of byName) jobs.push({ registry, name, versions })
+  }
+  let next = 0
+  async function worker() {
+    while (next < jobs.length) {
+      const { registry, name, versions } = jobs[next++]
+      if (registry === "crates") {
+        let byNum
         try {
-          created = await registryLookup[registry](name, version)
+          byNum = await cratesVersions(name)
         } catch (err) {
-          failures.push(`${name}@${version} (${registry}): registry query failed after retries: ${err.message}`)
+          for (const version of versions)
+            failures.push(`${name}@${version} (${registry}): registry query failed after retries: ${err.message}`)
           continue
         }
-        if (!created) {
-          failures.push(`${name}@${version} (${registry}): no publish timestamp in registry (fail-closed)`)
-          continue
+        for (const version of versions) {
+          const created = byNum ? byNum.get(version) : undefined
+          if (created === undefined) {
+            failures.push(`${name}@${version} (${registry}): no publish timestamp in registry (fail-closed)`)
+            continue
+          }
+          const publishedAt = new Date(created)
+          if (Number.isNaN(publishedAt.getTime()))
+            failures.push(`${name}@${version} (${registry}): unparsable publish timestamp: ${created}`)
+          else if (publishedAt > cutoff)
+            violations.push(`${name}@${version} (${registry}) published ${created.slice(0, 10)}`)
         }
-        const publishedAt = new Date(created)
-        if (Number.isNaN(publishedAt.getTime()))
-          failures.push(`${name}@${version} (${registry}): unparsable publish timestamp: ${created}`)
-        else if (publishedAt > cutoff)
-          violations.push(`${name}@${version} (${registry}) published ${created.slice(0, 10)}`)
+      } else {
+        for (const version of versions) {
+          let created
+          try {
+            created = await registryLookup[registry](name, version)
+          } catch (err) {
+            failures.push(`${name}@${version} (${registry}): registry query failed after retries: ${err.message}`)
+            continue
+          }
+          if (!created) {
+            failures.push(`${name}@${version} (${registry}): no publish timestamp in registry (fail-closed)`)
+            continue
+          }
+          const publishedAt = new Date(created)
+          if (Number.isNaN(publishedAt.getTime()))
+            failures.push(`${name}@${version} (${registry}): unparsable publish timestamp: ${created}`)
+          else if (publishedAt > cutoff)
+            violations.push(`${name}@${version} (${registry}) published ${created.slice(0, 10)}`)
+        }
       }
     }
   }
-}
-await Promise.all(Array.from({ length: 2 }, worker))
+  await Promise.all(Array.from({ length: 2 }, worker))
 
-const checkedCount = [...wanted.values()].reduce(
-  (n, byName) => n + [...byName.values()].reduce((m, s) => m + s.size, 0),
-  0,
-)
-console.log(
-  `Checked ${checkedCount} package version(s) across ${jobs.length} packages from ${lockfile} (${scope}) against a ${minDays}-day minimum release age (cutoff ${cutoff.toISOString().slice(0, 10)}).`,
-)
-if (skipped.length)
-  console.log(`Not age-checkable / exempt, skipped: ${[...new Set(skipped)].sort().join(", ")}`)
-if (failures.length)
-  console.error(`Could not verify (fail-closed):\n  ${failures.sort().join("\n  ")}`)
-if (violations.length) {
-  console.error(`Too new for policy:\n  ${violations.sort().join("\n  ")}`)
-  console.error(
-    `Resolve by waiting until these publish dates are ${minDays} days old, or pinning releases published before ${cutoff.toISOString().slice(0, 10)}.`,
+  // Whole-lockfile sweep / non-empty delta only: parse problems from unchanged
+  // files surface on the manual audit; pure-delta runs already exited above.
+  for (const p of problems) failures.push(p)
+
+  const checkedCount = [...wanted.values()].reduce(
+    (n, byName) => n + [...byName.values()].reduce((m, s) => m + s.size, 0),
+    0,
   )
+  console.log(
+    `Checked ${checkedCount} package version(s) across ${jobs.length} packages from ${lockfile} (${scope}) against a ${minDays}-day minimum release age (cutoff ${cutoff.toISOString().slice(0, 10)}).`,
+  )
+  if (skipped.length)
+    console.log(
+      `Not age-checkable / exempt, skipped: ${
+        [...new Set(skipped.map((s) => `${s.name}@${s.version} (${s.reason})`))].sort().join(", ")
+      }`,
+    )
+  if (failures.length)
+    console.error(`Could not verify (fail-closed):\n  ${failures.sort().join("\n  ")}`)
+  if (violations.length) {
+    console.error(`Too new for policy:\n  ${violations.sort().join("\n  ")}`)
+    console.error(
+      `Resolve by waiting until these publish dates are ${minDays} days old, or pinning releases published before ${cutoff.toISOString().slice(0, 10)}.`,
+    )
+  }
+  return violations.length || failures.length ? 1 : 0
 }
-process.exit(violations.length || failures.length ? 1 : 0)
+
+// CLI guard: run only when executed directly, so test files can import the
+// exported helpers without triggering a check.
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+if (isMain) {
+  process.exit(await runCheck())
+}
