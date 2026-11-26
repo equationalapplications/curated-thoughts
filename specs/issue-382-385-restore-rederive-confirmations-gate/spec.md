@@ -1,6 +1,6 @@
 # Spec: moved-root restore rederive + confirmations-leg idle-cost gate — issues #382 + #385
 
-**Status:** Draft — premises pinned by recon against `origin/main` `211c1e79` (2026-11-26), controller-verified live · **awaiting owner approval (Q1, Q2 below)** · **Branch:** `fix/382-385-restore-rederive-confirmations-gate`
+**Status:** Reviewed — owner approved 2026-11-26 (Q1 = 1, Q2 = 2, Discord msg 1575566029889867837) · **Branch:** `fix/382-385-restore-rederive-confirmations-gate`
 **Lane:** PR-2 of the 2026-11-26 three-lane ruling (decision log D1) — one PR, one spec dir, three sections (A = #382, B = #385 m1, C = #385 m4).
 **Recon:** every pin below verified against `211c1e79` (recon report + controller re-check); line cites refer to that base.
 
@@ -98,31 +98,40 @@ at a cost the switch path already pays on every in-place switch).
   unsupported — leaves silent stale-key residue behind, which the issue
   exists to remove.
 
-### B — stat-memo gate on the confirmations hook (recommended; Q2)
+### B — entries-written + stat dual gate on the confirmations hook (ruling Q2=2)
 
-Gate the hook leg on a cheap `(mtime_nanos, len)` memo of
-`<root>/.stated/confirmations.jsonl` (exact path constants from
-`stated_ledger.rs`), carried in the hook's captured state:
+Gate the hook leg on a **dual condition**: the ledger stat memo **OR** an
+entries-written dirty flag. A stat memo alone is WRONG: new facts ingested
+across drain waves change `llm_wiki_entries` while
+`<root>/.confirmations.jsonl` (exact path constant from `stated_ledger.rs`)
+stays unchanged, and `apply_confirmations_by_hash` must re-scan so the
+newly-ingested entries can match confirmed hashes (owner ruling, Discord
+msg 1575566029889867837, 2026-11-26).
 
-- The hook closure already captures `root` (`mod.rs:1469`); the memo lives
-  next to it. The confirmations slot is `Arc<Mutex<Option<ConfirmationsHook>>>`
-  (`mod.rs:1426-1453`) and `respawn_worker` reuses the slot, so memo state
-  survives worker respawns (unlike worker fields).
-- Fire path unchanged (probe cadence, panic-safety, drain semantics); only
-  the ledger read + hash scan is skipped when `(mtime_nanos, len)` equals the
-  memo from the last actual apply. First fire (no memo) always applies.
-- On memo hit: return without reading the ledger. On memo miss: read + apply
-  exactly as today (the existing empty-ledger early return `:457-461` stays
-  as the inner fast path), then update the memo from the file's stat after
-  the read (stat-before-read races resolve toward "memo miss" next fire —
-  the safe direction).
-- Known residual: a rewrite that lands with byte-identical size AND
-  identical mtime granularity skips one fire; the next change to the file
-  re-arms. Accepted and documented (conformation writes are append-only in
-  practice).
-- Alternative rejected: entries-written-since-last-fire bookkeeping — no
-  such counter exists in worker or handle (pinned), so it would be a larger
-  plumbing change for the same guarantee.
+- **Ledger stat memo:** `(mtime_nanos, len)` of the ledger file, captured in
+  the hook's state. The hook closure already captures `root`
+  (`mod.rs:1469`); the memo lives next to it. The confirmations slot is
+  `Arc<Mutex<Option<ConfirmationsHook>>>` (`mod.rs:1426-1453`) and
+  `respawn_worker` reuses the slot, so state survives worker respawns
+  (unlike worker fields).
+- **Entries-written dirty flag:** a flag in the same shared state, set by the
+  job-completion path when the completed job WROTE entries (ingest /
+  rechunk / any variant that inserts or changes `llm_wiki_entries` rows —
+  the implementer verifies the exact variant set from the tree and STOPs if
+  it is ambiguous; pure-read jobs never set it). The flag is cleared ONLY
+  after a successful full apply — a failed apply stays dirty so the next
+  fire retries.
+- **Fire path unchanged** (probe cadence `mod.rs:211-261`, `DRAIN_PROBE`
+  250ms, panic-safety, drain semantics). Hook leg:
+  - first fire (no memo): always applies;
+  - otherwise: skip read + scan only when the stat is unchanged AND the
+    dirty flag is clear; else apply exactly as today (the existing
+    empty-ledger early return `:457-461` stays as the inner fast path), then
+    update the memo from the file's stat after the read (stat-before-read
+    races resolve toward "dirty next fire" — the safe direction).
+- Alternative rejected: stat memo alone (breaks the multi-wave ingest case,
+  per the ruling); leave-as-is (the #381 spec accepted the cost once; #384
+  widened who pays it to every rooted session).
 
 ### C — hygiene (mechanical, no owner question)
 
@@ -176,14 +185,13 @@ Gate the hook leg on a cheap `(mtime_nanos, len)` memo of
 
 ## 6. Decisions
 
-1. **Q1 (owner): #382 shape.** Recommendation: **(a1) unconditional
-   rederive at restore + unstamp-on-failure**, per §2-A. Alternatives:
-   capture-time root stamp + rederive-on-mismatch (a2), or
-   document/assert-only (b).
-2. **Q2 (owner): #385 m1 gate.** Recommendation: **(i) stat-memo in the
-   confirmations slot**, per §2-B. Alternative: entries-written bookkeeping
-   (rejected: no counter exists today), or leave as-is and accept the scan
-   (the #381 spec explicitly accepted the cost once; #384 widened who pays).
+1. **Q1 (owner, RULED 2026-11-26): #382 shape = (a1).** Unconditional
+   rederive at restore + unstamp-on-failure (next open retries), per §2-A.
+2. **Q2 (owner, RULED 2026-11-26): #385 m1 gate = dual gate.** Ledger stat
+   memo AND entries-written dirty flag (cleared only on successful apply),
+   per §2-B — a stat memo alone was explicitly rejected by the owner: it
+   would miss newly-ingested facts across drain waves while the
+   confirmations file is unchanged.
 3. C section is mechanical — no ruling needed.
 4. PR topology per D1: ONE PR for all three sections (Single PR delivery;
    lifecycle cleanup last LIFECYCLE commit before the ready flip).
