@@ -1383,8 +1383,9 @@ pub struct PipelineHandle {
 pub const PIPELINE_CHANNEL_CAPACITY: usize = 256;
 
 impl PipelineHandle {
-    /// Install the post-drain hook. Installed once per switch epoch; it fires
-    /// on every 1→0 drain crossing until the worker is superseded.
+    /// Install the post-drain hook. `start_pipeline` installs it for every
+    /// rooted handle; it fires on every 1→0 drain crossing until the worker
+    /// is superseded.
     pub fn install_stated_confirmations(&self, hook: ConfirmationsHook) {
         if let Ok(mut g) = self.stated_confirmations.lock() {
             *g = Some(hook);
@@ -1446,7 +1447,7 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
         .name("pipeline-worker".to_string())
         .spawn(move || worker.run())
         .expect("spawn pipeline worker");
-    PipelineHandle {
+    let handle = PipelineHandle {
         tx,
         join,
         pending,
@@ -1456,7 +1457,18 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
         vault_root,
         status_tx,
         stated_confirmations,
+    };
+    // Run 2 (spec §2 S5): confirmations that arrive after the
+    // switch-time rebuild are re-applied once the queue drains.
+    // Installed here so every rooted start (startup, recovery, switch)
+    // gets it (#381). `root` is already canonical at every caller; do not
+    // re-canonicalize.
+    if let Some(root) = handle.vault_root.clone() {
+        handle.install_stated_confirmations(Box::new(move |conn| {
+            crate::db::stated_ledger::apply_stored_confirmations(conn, &root).map(|_| ())
+        }));
     }
+    handle
 }
 
 #[cfg(test)]
