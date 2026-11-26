@@ -369,11 +369,19 @@ export async function runCheck(
       }
     })())
     if (delta === null) return 2
-    // Only NEW parse problems fail a PR; problems already present on base are
-    // inherited state (the whole-lockfile audit's job). An ADDED unpinned or
-    // foreign-index line is a new problem and fails even when the entry delta
-    // is empty.
-    newProblems = problems.filter((p) => !baseProblems.includes(p))
+    // Only NEW parse problems fail a PR (count-based multiset diff, so
+    // duplicating an inherited bad line still counts as new); problems
+    // already present on base are inherited state (the whole-lockfile
+    // audit's job). An ADDED unpinned or foreign-index line is a new problem
+    // and fails even when the entry delta is empty.
+    const baseCounts = new Map()
+    for (const p of baseProblems) baseCounts.set(p, (baseCounts.get(p) ?? 0) + 1)
+    const curCounts = new Map()
+    for (const p of problems) curCounts.set(p, (curCounts.get(p) ?? 0) + 1)
+    newProblems = []
+    for (const [p, n] of curCounts) {
+      for (let i = 0; i < n - (baseCounts.get(p) ?? 0); i++) newProblems.push(p)
+    }
     const inherited = currentEntries.length - delta.length
     if (delta.length === 0) {
       if (newProblems.length > 0) {
@@ -428,7 +436,9 @@ export async function runCheck(
 
   const lastRequestAt = { t: 0 }
 
-  async function fetchJson(url, attemptMax = 10) {
+  async function fetchJson(url, attemptMax = 5) {
+    // attemptMax 5: with the 60s Retry-After cap the worst case per request
+    // is ~5 min — inside the 10-minute PR-path job timeout.
     for (let attempt = 1; attempt <= attemptMax; attempt++) {
       let res
       try {

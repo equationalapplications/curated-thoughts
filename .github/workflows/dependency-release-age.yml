@@ -13,31 +13,23 @@ name: Dependency release age
 # foreign registries are unvetted). The PR runs the BASE branch's copy of the
 # gate script, so it cannot weaken the SCRIPT-level gate by editing the
 # script. (The workflow FILE itself is always run from the PR — GitHub
-# behavior — so weakening at that level is enforced by review/branch
-# protection, not by this check; keep this workflow NON-required in branch
-# protection, since the paths: filter means PRs that don't touch lockfiles
-# never report it.) On the first PR that introduces the script, the base has
-# no copy yet and the PR's copy is used (nothing committed to weaken) — this
-# fallback applies to ANY PR whose base branch predates the script, not just
-# the first one. Runs
+# behavior — so weakening at that level is enforced by review and by marking
+# this check required in branch protection; a CODEOWNERS entry on the
+# workflow and script is recommended.) When the base branch predates the
+# script, the PR's copy is used (nothing committed to weaken). Runs
 # before any cargo/pip install, so a too-new package's build scripts never
 # execute in CI. The JS side is already gated by pnpm-workspace.yaml
 # `minimumReleaseAge` and is not re-checked here. curated-thoughts has no
 # Python lockfile today; the script covers requirements*.txt / uv.lock /
-# poetry.lock if one ever lands (the paths: filter and the check loop already
-# trigger on them).
+# poetry.lock if one ever lands (the check loop already looks for them).
 on:
   pull_request:
-    paths:
-      - Cargo.lock
-      - Cargo.toml
-      - "src-tauri/Cargo.toml"
-      - "tools/Cargo.toml"
-      - "requirements*.txt"
-      - uv.lock
-      - poetry.lock
-      - scripts/check-release-age-cargo-py.mjs
-      - .github/workflows/dependency-release-age.yml
+  # No paths: filter — a paths-filtered workflow can never be a required
+  # check in branch protection (PRs that don't touch lockfiles would never
+  # report it and would be blocked). Without the filter every PR reports the
+  # check, and the delta path costs ~1s when no lockfile changed. Mark this
+  # check REQUIRED in branch protection for the gate to be enforced rather
+  # than advisory.
   workflow_dispatch:
 
 permissions:
@@ -69,6 +61,7 @@ jobs:
             if git cat-file -e "$BASE_REF:scripts/check-release-age-cargo-py.mjs" 2>/dev/null; then
               git show "$BASE_REF:scripts/check-release-age-cargo-py.mjs" > "$RUNNER_TEMP/check-release-age-cargo-py.mjs"
             else
+              echo "::warning::base branch has no committed gate script — using the PR's copy (nothing on base to weaken)"
               cp scripts/check-release-age-cargo-py.mjs "$RUNNER_TEMP/check-release-age-cargo-py.mjs"
             fi
             GATE="$RUNNER_TEMP/check-release-age-cargo-py.mjs"

@@ -561,6 +561,37 @@ test("runCheck: poetry [package.source] tables and a new uv workspace member beh
   assert.match(uv.out.join("\n"), /app@0\.1\.0 .*virtual/)
 })
 
+test("runCheck: delta mode — a too-new version bump fails and a path-entry version change skips", async () => {
+  const mk = (name, version) =>
+    `[[package]]\nname = "${name}"\nversion = "${version}"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n`
+  const { dir } = tmpLockfile("Cargo.lock", mk("serde", "1.0.210") + '[[package]]\nname = "app"\nversion = "0.1.0"\n')
+  const run = initGitRepo(dir, "Cargo.lock", mk("serde", "1.0.210") + '[[package]]\nname = "app"\nversion = "0.1.0"\n')
+  const lock = path.join(dir, "Cargo.lock")
+
+  // Registry version bump to a too-new version: exit 1.
+  fs.writeFileSync(lock, mk("serde", "1.0.211") + '[[package]]\nname = "app"\nversion = "0.1.0"\n')
+  run(["add", "Cargo.lock"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "bump"])
+  const bump = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () =>
+      jsonResponse(crateDoc({ "1.0.210": iso(400 * DAY), "1.0.211": iso(2 * DAY) })),
+    spacingMs: 1,
+  })
+  assert.equal(bump.code, 1)
+  assert.match(bump.err.join("\n"), /serde@1\.0\.211 .* published \d{4}-\d{2}-\d{2}/)
+
+  // Path/workspace entry version change: skipped, not failed — exit 0.
+  fs.writeFileSync(lock, mk("serde", "1.0.210") + '[[package]]\nname = "app"\nversion = "0.2.0"\n')
+  run(["add", "Cargo.lock"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "local bump"])
+  const local = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () => jsonResponse(crateDoc({ "1.0.210": iso(400 * DAY) })),
+    spacingMs: 1,
+  })
+  assert.equal(local.code, 0)
+  assert.match(local.out.join("\n"), /app@0\.2\.0 .*no source/)
+})
+
 test("runCheck: PyPI timestamp takes the YOUNGEST file's upload time (fail-closed)", async () => {
   const { file } = tmpLockfile("requirements.txt", "flask==3.0.0\n")
   const old = iso(400 * DAY)
