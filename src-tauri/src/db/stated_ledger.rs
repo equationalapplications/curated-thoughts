@@ -445,10 +445,11 @@ pub fn rebuild_rederive(conn: &Connection, vault_root: &Path) -> Result<RebuildR
 
 /// Confirmations-only re-application (spec §2 S5 Run 2): re-stamp
 /// `user_confirmed` from `stated/.confirmations.jsonl` for facts that
-/// arrived after the switch-time rebuild. Mirrors rebuild step 1 in its own
-/// transaction; the attestation/denial table legs and the stamp are NOT
-/// touched. Idempotent (dedup by hash; already-stamped rows are no-ops).
-/// Returns the number of hash-matched rows stamped.
+/// arrived after the Run 1 rebuild (switch-time or open-time). Mirrors
+/// rebuild step 1 in its own transaction; the attestation/denial table
+/// legs and the stamp are NOT touched. Idempotent (dedup by hash;
+/// already-stamped rows are no-ops). Returns the number of hash-matched
+/// rows stamped.
 pub fn apply_stored_confirmations(conn: &Connection, vault_root: &Path) -> Result<usize> {
     let confirmations: Vec<ConfirmationLine> =
         read_lines(&vault_root.join(STATED_DIR).join(CONFIRMATIONS_LEDGER))?;
