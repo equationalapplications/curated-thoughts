@@ -157,4 +157,5 @@ No product code changes.
 
 ## Errata
 
-(to be filled by the implementation with the stability-bar results)
+- Keyboard-site sweep (owner sanity check, 2026-11-26, post-fix tree `1771faf2`): exactly one `fireEvent.keyDown` site in the file (the Tab test, now behind the Fix 2 `waitFor`); all other interactions are `fireEvent.click`, which reach React props set at commit time and do not race the trap. No Shift+Tab or Escape keydown tests exist.
+- (stability bar results to be recorded below by Task 3)
