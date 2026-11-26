@@ -199,7 +199,8 @@ function entriesFromRequirements(raw) {
     if (!line || line.startsWith("-")) continue // -r/-e/--flags not handled
     const m = line.match(/^([A-Za-z0-9_.[\]-]+)==([^;\s]+)/)
     if (!m) continue
-    entries.push({ name: m[1].toLowerCase(), version: m[2], registry: "pypi" })
+    // strip PEP 508 extras: "flask[async]" -> "flask" (the PyPI project name)
+    entries.push({ name: m[1].toLowerCase().split("[")[0], version: m[2], registry: "pypi" })
   }
   return entries
 }
