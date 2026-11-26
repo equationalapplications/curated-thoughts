@@ -1542,10 +1542,15 @@ impl ConfirmationsGate {
         if memo == Some(cur) && !self.dirty.load(Ordering::SeqCst) {
             return Ok(());
         }
-        // The hook runs on the worker thread, the only dirty-setter, so no
-        // Ingest completion can interleave with the apply. Cleared only on
-        // success; a failure leaves memo + dirty untouched so the next fire
-        // retries.
+        // Cleared only on success; a failure leaves memo + dirty untouched so
+        // the next fire retries. NOTE: a SUPERSEDED worker finishing the Ingest
+        // it was mid-way through can set `dirty` concurrently with this clear
+        // (`mark_dirty` at the job tail is unconditional and epoch-blind), so a
+        // lost dirty signal is possible — and benign: the apply's sole input is
+        // the ledger file stat'd above, and `cur` is captured PRE-read, so any
+        // append this apply did not see changes the stat and forces a rescan on
+        // the next fire. `dirty` is the auxiliary trigger; the memo is the
+        // load-bearing one (rung-2 adjudication, PR #389 ladder).
         apply()?;
         self.dirty.store(false, Ordering::SeqCst);
         // Memo the PRE-read stat (`cur`): any ledger append that lands at or
@@ -3278,5 +3283,31 @@ mod confirmations_gate_tests {
         assert_eq!(n.get(), 3, "failed apply must retry on the next fire");
         gate.fire(&p, || bump(&n)).unwrap();
         assert_eq!(n.get(), 3, "success clears the gate");
+    }
+
+    #[test]
+    fn failed_apply_keeps_pre_read_stat_memo_so_a_stat_change_still_rescans() {
+        // The dirty-free twin of `failed_apply_stays_dirty_and_retries`: the
+        // ledger stat changed but the apply failed — the memo must stay at the
+        // PRE-read stat (never advance past a failed apply), so the next fire
+        // retries on the stat difference alone.
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, || bump(&n)).unwrap();
+        std::fs::write(&p, "a\nbb\n").unwrap();
+        let r = gate.fire(&p, || {
+            n.set(n.get() + 1);
+            Err(anyhow::anyhow!("boom"))
+        });
+        assert!(r.is_err());
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(
+            n.get(),
+            3,
+            "the stat-changed retry survives a failed apply with no dirty flag"
+        );
+        gate.fire(&p, || bump(&n)).unwrap();
+        assert_eq!(n.get(), 3, "successful apply clears the stat-memo trigger");
     }
 }

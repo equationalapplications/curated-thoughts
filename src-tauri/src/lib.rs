@@ -2114,9 +2114,6 @@ fn recover_after_failed_switch_vault(
     true
 }
 
-/// The post-sweep / post-install reopen of `switch_vault`. A seam so the pin
-/// tests drive the SAME open the switch uses: the open resolves the vault root
-/// from `config_path`, so the config must already name the new vault (S5b).
 /// Spec §2-A: after a restore publishes, rederive the stated-ledger keys from
 /// the NEW root unconditionally. On failure the stamp is deleted so the
 /// open-time gate retries; the error is returned for the caller to log.
@@ -2144,6 +2141,9 @@ where
     }
 }
 
+/// The post-sweep / post-install reopen of `switch_vault`. A seam so the pin
+/// tests drive the SAME open the switch uses: the open resolves the vault root
+/// from `config_path`, so the config must already name the new vault (S5b).
 pub(crate) fn switch_reopen_paths(db_path: &Path, config_path: &Path) -> anyhow::Result<AppDb> {
     AppDb::open_with_config(db_path, config_path)
 }
