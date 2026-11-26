@@ -49,3 +49,7 @@ Execution: SDD controller loop, implementers = Claude Code sonnet/low (default-i
 - T4 finding 1 (restart loses Run 2 — hook not installed on startup/recovery start_pipeline) → owner follow-up issue #381 (per AGENTS.md stop-and-ask; spec does not answer the restart case). Candidate: install unconditionally on every rooted start_pipeline.
 - FINAL wrapped chain on settled HEAD `67c051b7` (final-gates.log): clippy ×2 EXIT 0, **lib 1744/0**, 108 result lines all ok, vitest 631+1 EXIT 0, tsc EXIT 0, HEAVY_EXIT=0. A prior chain that overlapped the Fix-C edits was killed and superseded by this one.
 - Remaining pre-merge: CodeRabbit pass on the pushed range + owner merge. 4 T4 NITs (misleading-assertion rename, stale comments, probe arming after non-counted jobs, parent-before-child delete order) — all addressed except probe-arming order and delete order, ledgered as cosmetics for the merge review.
+
+## CodeRabbit round (2026-11-25 19:05 EST) — 0 unresolved
+- 11 inline threads triaged: 7 stale (fixed by Fix-B/Fix-C or superseded by the controller-run gates), 1 docs fix landed (`3bffcfa8` — VACUUM INTO fresh-destination note), 2 owner follow-ups filed (#381 restart Run-2 loss, #382 moved-restore attestation keys), 1 stale epoch-guard claim rebutted with the Fix-A evidence + T4 §B citation. Every thread resolved with an evidence reply; readback: 17 threads, 0 unresolved.
+- Lane status: READY FOR OWNER MERGE pending CI. Reviews: T3 REQUEST_CHANGES → folded; T4 APPROVE; CodeRabbit 0 unresolved. Follow-ups: #380 (pre-existing), #381, #382.
