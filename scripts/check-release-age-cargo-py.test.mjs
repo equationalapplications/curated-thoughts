@@ -696,7 +696,10 @@ test("runCheck: removing a poetry source table passes; changing a source's url f
     spacingMs: 1,
   })
   assert.equal(swap.code, 1)
-  assert.match(swap.err.join("\n"), /New unage-checkable lines/)
+  // The table's contents are part of the entry identity (F1), so the changed
+  // url surfaces as a changed non-registry source plus the table problem.
+  assert.match(swap.err.join("\n"), /aaa@1\.0\.0: new or changed non-registry source/)
+  assert.match(swap.err.join("\n"), /\[package\.source\] table/)
 })
 
 test("runCheck: a new pin fails while an unsupported index applies in base OR head (T6)", async () => {
@@ -750,4 +753,99 @@ test("runCheck: request spacing reserves slots synchronously (no two calls toget
       `calls ${i - 1}->${i} only ${callTimes[i] - callTimes[i - 1]}ms apart (spacing ${SPACING})`,
     )
   }
+})
+
+// ---------------------------------------------------------------------------
+// CodeRabbit folds F1-F3 (PR #391)
+// ---------------------------------------------------------------------------
+
+test("entriesFromRequirements: multi-option lines test every token (F3)", () => {
+  for (const line of [
+    "--pre --index-url https://evil.example/simple",
+    "--pre -ihttps://evil.example/simple",
+    "--pre --extra-index-url=https://evil.example/simple",
+    "--pre -e ./local",
+    "--pre --find-links=https://evil.example/links",
+  ]) {
+    const problems = []
+    entriesFromRequirements(line + "\n", problems)
+    assert.equal(problems.length, 1, line)
+    assert.match(problems[0], /^fail-closed option line \(matched: /, line)
+  }
+  const inc = []
+  entriesFromRequirements("--pre -r deps.txt\n", inc)
+  assert.equal(inc.length, 1)
+  assert.match(inc[0], /include directive/)
+  const benign = []
+  entriesFromRequirements("--pre\n", benign)
+  assert.equal(benign.length, 0)
+})
+
+test("runCheck: a new pin fails closed beside a multi-option index line (F3)", async () => {
+  const base = "flask==3.0.0\n"
+  const head = "--pre --index-url https://evil.example/simple\nflask==3.0.0\nrequests==2.31.0\n"
+  const { dir } = tmpLockfile("requirements.txt", base)
+  const run = initGitRepo(dir, "requirements.txt", base)
+  const lock = path.join(dir, "requirements.txt")
+  fs.writeFileSync(lock, head)
+  run(["add", "requirements.txt"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "head"])
+  const r = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () => jsonResponse({ urls: [{ upload_time: iso(400 * DAY) }] }),
+    spacingMs: 1,
+  })
+  assert.equal(r.code, 1)
+  assert.match(r.err.join("\n"), /requests@2\.31\.0.*index/)
+})
+
+test("runCheck: inherited include directive + new pin fails closed; no new pin passes (F2)", async () => {
+  const base = "-r deps.txt\n"
+  const { dir } = tmpLockfile("requirements.txt", base)
+  const run = initGitRepo(dir, "requirements.txt", base)
+  const lock = path.join(dir, "requirements.txt")
+  const old = async () => jsonResponse({ urls: [{ upload_time: iso(400 * DAY) }] })
+  const same = await runQuiet(["--lockfile", lock, "--base", "HEAD"], { fetchImpl: old, spacingMs: 1 })
+  assert.equal(same.code, 0, same.err.join("\n"))
+  fs.writeFileSync(lock, base + "foo==1.2.3\n")
+  run(["add", "requirements.txt"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "add pin"])
+  const r = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { fetchImpl: old, spacingMs: 1 })
+  assert.equal(r.code, 1)
+  assert.match(r.err.join("\n"), /foo@1\.2\.3.*unresolved include directive applies/)
+})
+
+test("entriesFromPoetryLock: dropping [package.source] at the same version changes the entry identity (F1)", () => {
+  const withTable = POETRY_PKG("aaa", "https://git.example/a")
+  const without = '[[package]]\nname = "aaa"\nversion = "1.0.0"\n\n'
+  const key = (e) => e.name + "@" + e.version + "@" + e.src
+  const a = entriesFromPoetryLock(withTable, [])
+  const b = entriesFromPoetryLock(without, [])
+  assert.equal(a.length, 1)
+  assert.equal(a[0].registry, null)
+  assert.notEqual(key(a[0]), key(b[0]))
+  // head = pypi entry, base = table entry: the head entry is new in the delta.
+  const delta = deltaEntries(b, a)
+  assert.equal(delta.length, 1)
+  assert.equal(delta[0].registry, "pypi")
+})
+
+test("runCheck: poetry same-version table removal is age-checked as a new pypi entry (F1)", async () => {
+  const withTable = POETRY_PKG("aaa", "https://git.example/a")
+  const without = '[[package]]\nname = "aaa"\nversion = "1.0.0"\n\n'
+  const { dir } = tmpLockfile("poetry.lock", withTable)
+  const run = initGitRepo(dir, "poetry.lock", withTable)
+  const lock = path.join(dir, "poetry.lock")
+  fs.writeFileSync(lock, without)
+  run(["add", "poetry.lock"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "drop table"])
+  let fetched = 0
+  const r = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () => {
+      fetched++
+      return jsonResponse({ urls: [{ upload_time: iso(1000) }] })
+    },
+    spacingMs: 1,
+  })
+  assert.ok(fetched > 0, "pypi lookup must happen")
+  assert.equal(r.code, 1)
 })

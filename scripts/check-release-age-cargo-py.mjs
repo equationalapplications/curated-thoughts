@@ -184,6 +184,7 @@ export function entriesFromPoetryLock(raw, problems = []) {
   // that NESTED table, which this minimal parser does not read — a git fork
   // pinned at a version that exists on PyPI would otherwise pass the PyPI
   // lookup. Any lockfile using [package.source] is rejected outright.
+  const sourceTables = new Map()
   {
     // One problem PER TABLE. The identity is package name@version plus the
     // table's own contents (type/url/reference) — NOT a mutable count — so
@@ -194,6 +195,7 @@ export function entriesFromPoetryLock(raw, problems = []) {
     let src = null
     const flush = () => {
       if (src) {
+        if (pkg) sourceTables.set(`${pkg.name}@${pkg.version}`, [...src].sort().join("; "))
         problems.push(
           `poetry.lock package ${pkg?.name ?? "?"}@${pkg?.version ?? "?"} has a [package.source] table (git/URL/direct source) which this parser cannot verify (fail-closed): ${src.sort().join("; ")}`,
         )
@@ -230,7 +232,21 @@ export function entriesFromPoetryLock(raw, problems = []) {
     const name = (s.fields.name ?? "").split(" ")[0]
     const version = (s.fields.version ?? "").replace(/^[=<>!~^ ]+/, "")
     if (!name || !version) continue
-    if ((s.fields.source ?? "pypi") === "pypi") {
+    // A package with a nested [package.source] table is NOT a plain PyPI
+    // entry: its entry identity carries the table contents, so removing the
+    // table at the same version changes the delta key and the now-PyPI
+    // version is age-checked. (The per-table problem identity is unchanged.)
+    const table = sourceTables.get(`${name}@${version}`)
+    if (table !== undefined) {
+      entries.push({
+        name,
+        version,
+        registry: null,
+        git: /type\s*=\s*"git"/.test(table),
+        src: `table:${table}`,
+        reason: `nested [package.source] table: ${table}`,
+      })
+    } else if ((s.fields.source ?? "pypi") === "pypi") {
       entries.push({ name, version, registry: "pypi", src: "pypi" })
     } else {
       entries.push({
@@ -283,15 +299,27 @@ export function entriesFromRequirements(raw, problems = []) {
       // (-r/--requirement/-c/--constraint) pull in files this checker does not
       // read, so they fail closed too. Short options also match attached
       // arguments (-ihttps://..., pip's optparse treats -iX as -i X).
-      if (/^(--requirement\b|--constraint\b|-r|-c)/.test(line)) {
-        problems.push(`unresolved include directive (fail-closed; pins inside are not age-checked): ${lineRaw.trim()}`)
-        continue
+      // The line is tokenized on whitespace and EVERY token is tested, so a
+      // benign leading option (`--pre --index-url ...`) cannot mask a later
+      // one. Matched options are recorded by canonical name in a
+      // machine-readable slot: `fail-closed option line (matched: -i,--index-url)`.
+      const matched = new Set()
+      let include = false
+      for (const tok of line.split(/\s+/)) {
+        if (/^(--requirement|--constraint)(=|$)/.test(tok) || /^-[rc]/.test(tok)) include = true
+        else if (/^(--index-url|--extra-index-url|--find-links|--trusted-host)(=|$)/.test(tok)) matched.add(tok.split("=")[0])
+        else if (tok === "--no-index") matched.add("--no-index")
+        else if (/^--editable(=|$)/.test(tok)) matched.add("--editable")
+        else if (/^-[ife]/.test(tok)) matched.add(tok.slice(0, 2))
       }
-      if (
-        /^(--index-url|--extra-index-url|-i|-e|--editable|--find-links|-f|--trusted-host\b|--no-index\b)/.test(line) ||
-        /git\+/.test(line)
-      ) {
-        problems.push(`fail-closed option line (foreign index or editable/git/URL install): ${lineRaw.trim()}`)
+      if (/git\+/.test(line)) matched.add("git+")
+      if (include) {
+        problems.push(`unresolved include directive (fail-closed; pins inside are not age-checked): ${lineRaw.trim()}`)
+      }
+      if (matched.size > 0) {
+        problems.push(
+          `fail-closed option line (matched: ${[...matched].sort().join(",")}) (foreign index or editable/git/URL install): ${lineRaw.trim()}`,
+        )
       }
       continue
     }
@@ -478,8 +506,22 @@ export async function runCheck(
     // An unsupported index/source option applying in EITHER base or head means
     // a public-PyPI timestamp for a new pin verifies nothing (the pin may
     // resolve from the foreign index, or did before the PR removed it).
-    const indexRe = /^fail-closed option line .*?: (--index-url|--extra-index-url|-i|--find-links|-f|--no-index|--trusted-host)/
-    const indexApplies = [...baseProblemsAll, ...problems].some((p) => indexRe.test(p))
+    const indexTokens = new Set(["--index-url", "--extra-index-url", "-i", "--find-links", "-f", "--no-index", "--trusted-host"])
+    const indexApplies = [...baseProblemsAll, ...problems].some((p) => {
+      const m = p.match(/^fail-closed option line \(matched: ([^)]*)\)/)
+      return m !== null && m[1].split(",").some((t) => indexTokens.has(t))
+    })
+    // Same fail-closed rule for an unresolved include (-r/-c): the included
+    // file is never read, so a pin change there is unaudited even when the
+    // directive itself is inherited unchanged from base.
+    const includeApplies = [...baseProblemsAll, ...problems].some((p) => p.startsWith("unresolved include directive"))
+    if (includeApplies) {
+      for (const e of delta) {
+        if (e.registry === "pypi") {
+          failures.push(`${e.name}@${e.version}: new pin while an unresolved include directive applies in base or head (included file contents are not age-checked) (fail-closed)`)
+        }
+      }
+    }
     if (indexApplies) {
       for (const e of delta) {
         if (e.registry === "pypi") {
