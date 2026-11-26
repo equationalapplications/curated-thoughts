@@ -1,3 +1,19 @@
+## [3.16.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.0...v3.16.1) (2026-11-26)
+
+### Bug Fixes
+
+* **db:** migrate repair reports to stderr — stdout is the --mcp JSON-RPC channel ([#376](https://github.com/equationalapplications/curated-thoughts/issues/376)) ([e2a490e](https://github.com/equationalapplications/curated-thoughts/commit/e2a490e93bd22c3ca91f0f939a925597970ceda5))
+* **db:** sweep the stated-ledger, kick-state and source-store tables on vault switch ([#376](https://github.com/equationalapplications/curated-thoughts/issues/376), [#213](https://github.com/equationalapplications/curated-thoughts/issues/213)) ([d4d00fc](https://github.com/equationalapplications/curated-thoughts/commit/d4d00fcb0fe8bbb238417225cee9e7386e2dc41c))
+* **pipeline:** confirmations hook fires on every drain crossing, epoch-guarded (T3 r1, [#376](https://github.com/equationalapplications/curated-thoughts/issues/376)) ([5db755c](https://github.com/equationalapplications/curated-thoughts/commit/5db755c09ceb49aa089ee888e81fce18e793e2ae))
+* **pipeline:** harden the confirmations hook; real FTS cross-check in the guard (T4 cleanup, [#376](https://github.com/equationalapplications/curated-thoughts/issues/376)) ([67c051b](https://github.com/equationalapplications/curated-thoughts/commit/67c051b7980439d8bd653f3a1eb68c3e1633ef8e))
+* **pipeline:** stated-ledger repopulation — rebuild at switch, confirmations on queue drain ([#376](https://github.com/equationalapplications/curated-thoughts/issues/376)) ([bf364ef](https://github.com/equationalapplications/curated-thoughts/commit/bf364efd10499674795bf142688c666add8e27cb))
+* **vault:** pin the reorder at open time, restore the align net, surface Run 1 failures (T3 r1, [#376](https://github.com/equationalapplications/curated-thoughts/issues/376)) ([6c0d62d](https://github.com/equationalapplications/curated-thoughts/commit/6c0d62d50d96880957a5afbfbe722ed6f295da29))
+* **vault:** write config before the post-sweep reopen — root-dependent steps see the NEW vault ([#376](https://github.com/equationalapplications/curated-thoughts/issues/376)) ([d3019ee](https://github.com/equationalapplications/curated-thoughts/commit/d3019ee73e7e6664ad8452befb3ddafd37eba1bd))
+
+### Performance Improvements
+
+* **db:** engine9_missing reads PRAGMA table_info once per table ([#376](https://github.com/equationalapplications/curated-thoughts/issues/376)) ([5084945](https://github.com/equationalapplications/curated-thoughts/commit/50849454c6dc8cd52cafdf96ceb8e9091bb77e47))
+
 ## [3.16.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.15.0...v3.16.0) (2026-11-25)
 
 ### Features
