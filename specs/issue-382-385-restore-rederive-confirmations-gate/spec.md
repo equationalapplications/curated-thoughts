@@ -141,7 +141,8 @@ msg 1575566029889867837, 2026-11-26).
   the retry above would never run. **Writer invariant (multi-generation):** the
   watchdog can supersede a wedged worker (`mod.rs:1373-1378`), so two
   dirty-setters can transiently coexist — the superseded worker's job-tail
-  `mark_dirty` (`mod.rs:402`) is unconditional and epoch-blind, and a
+  `mark_dirty` (the worker's job-tail call) is unconditional and
+  epoch-blind, and a
   set-then-clear loss against an in-flight apply WAS possible while the
   clear ran after the apply. Consume-before-apply closes that race by
   program order: a worker's entry writes precede its `mark_dirty`, so

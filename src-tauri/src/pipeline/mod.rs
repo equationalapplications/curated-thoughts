@@ -100,13 +100,14 @@ pub type ConfirmationsHook = Box<dyn Fn(&Connection) -> Result<()> + Send>;
 /// Shared install slot between `PipelineHandle` and its worker.
 pub type ConfirmationsSlot = Arc<std::sync::Mutex<Option<ConfirmationsHook>>>;
 
-/// Lock the confirmations slot, recovering from a poisoned mutex. The slot's
-/// data is write-once (an immutable `Fn` installed by `start_pipeline`), and a
-/// panicking HOOK leaves the gate's memo untouched and its dirty flag re-armed,
-/// so recovery is sound: without it, the one hook panic the `catch_unwind` leg
-/// exists to survive would poison the slot and permanently disable the drain
-/// hook (a plain `lock()` on the probe path would read "not installed" for the
-/// life of the pipeline — rung-4 major, PR #389 ladder).
+/// Lock the confirmations slot, recovering from a poisoned mutex. The
+/// production hook is write-once (`start_pipeline` installs an immutable `Fn`
+/// capturing only `Arc`/`PathBuf` state), and a panicking HOOK leaves the
+/// gate's memo untouched and its dirty flag re-armed, so recovery is sound for
+/// that hook: without it, the one hook panic the `catch_unwind` leg exists to
+/// survive would poison the slot and permanently disable the drain hook (a
+/// plain `lock()` on the probe path would read "not installed" for the life of
+/// the pipeline).
 fn lock_confirmations_slot(
     slot: &ConfirmationsSlot,
 ) -> std::sync::MutexGuard<'_, Option<ConfirmationsHook>> {
@@ -2253,9 +2254,7 @@ mod watchdog_integration_tests {
             assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
             handle
                 .tx
-                .send(PipelineJob::ingest_counted(
-                    doc.to_string_lossy().to_string(),
-                ))
+                .send(PipelineJob::ingest_counted(doc.to_string_lossy().to_string()))
                 .unwrap();
 
             // The 1->0 drain crossing after the job fires the hook.
@@ -2269,10 +2268,7 @@ mod watchdog_integration_tests {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             shut_down(handle);
-            assert!(
-                stamped,
-                "worker never fired the installed hook after the drain"
-            );
+            assert!(stamped, "worker never fired the installed hook after the drain");
         });
     }
 
@@ -2291,15 +2287,13 @@ mod watchdog_integration_tests {
 
     #[test]
     fn panicking_hook_is_reinvoked_on_the_next_crossing() {
-        // Rung-4 major (PR #389 ladder): the hook runs under `catch_unwind`
-        // with the slot's MutexGuard held across it, so ONE panicking hook
-        // poisons the slot mutex — and every later `lock()` on the probe path
-        // reads as "not installed", permanently disabling the drain hook. The
-        // leg's own comment promises "the next crossing retries", and the
-        // dual gate re-arms the dirty flag on panic for exactly that retry:
-        // the slot lock must therefore survive the poison. The hook is an
-        // immutable, write-once `Fn` and a panicking leg leaves the gate's
-        // memo untouched, so `into_inner` recovery is sound.
+        // The hook runs under `catch_unwind` with the slot's MutexGuard held
+        // across it, so ONE panicking hook poisons the slot mutex — and every
+        // later `lock()` on the probe path reads as "not installed",
+        // permanently disabling the drain hook. This test pins the slot-lock
+        // recovery only: the worker is built WITHOUT the dual-gate gate, so
+        // gate-level retry is covered by
+        // `panicking_apply_with_unchanged_ledger_rearms_dirty`.
         let brain_tmp = tempfile::TempDir::new().unwrap();
         let brain = brain_tmp.path().to_string_lossy().into_owned();
         temp_env::with_vars(
