@@ -96,8 +96,25 @@ pub struct PipelineWorker {
 
 /// Hook run on the worker's own connection once the queue has drained.
 pub type ConfirmationsHook = Box<dyn Fn(&Connection) -> Result<()> + Send>;
+
 /// Shared install slot between `PipelineHandle` and its worker.
 pub type ConfirmationsSlot = Arc<std::sync::Mutex<Option<ConfirmationsHook>>>;
+
+/// Lock the confirmations slot, recovering from a poisoned mutex. The slot's
+/// data is write-once (an immutable `Fn` installed by `start_pipeline`), and a
+/// panicking HOOK leaves the gate's memo untouched and its dirty flag re-armed,
+/// so recovery is sound: without it, the one hook panic the `catch_unwind` leg
+/// exists to survive would poison the slot and permanently disable the drain
+/// hook (a plain `lock()` on the probe path would read "not installed" for the
+/// life of the pipeline — rung-4 major, PR #389 ladder).
+fn lock_confirmations_slot(
+    slot: &ConfirmationsSlot,
+) -> std::sync::MutexGuard<'_, Option<ConfirmationsHook>> {
+    match slot.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
 
 /// After a counted job leaves `pending` at 0, the worker waits this long for
 /// a straggler before treating the queue as drained (`PendingCount(0)` alone
@@ -225,7 +242,7 @@ impl PipelineWorker {
                 Some(j) => j,
                 None => {
                     let hook_installed =
-                        probe && self.stated_confirmations.lock().is_ok_and(|g| g.is_some());
+                        probe && lock_confirmations_slot(&self.stated_confirmations).is_some();
                     let received = if hook_installed {
                         match self.rx.recv_timeout(DRAIN_PROBE) {
                             Ok(j) => Some(j),
@@ -245,13 +262,15 @@ impl PipelineWorker {
                                 // retries.
                                 let fired =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        if let Ok(g) = self.stated_confirmations.lock() {
-                                            if let Some(hook) = g.as_ref() {
-                                                if let Err(e) = hook(&conn) {
-                                                    eprintln!(
-                                                        "[pipeline] stated confirmations hook: {e:#}"
-                                                    );
-                                                }
+                                        // Poison-recovering lock: a panicking
+                                        // hook must not disable this leg (see
+                                        // `lock_confirmations_slot`).
+                                        let g = lock_confirmations_slot(&self.stated_confirmations);
+                                        if let Some(hook) = g.as_ref() {
+                                            if let Err(e) = hook(&conn) {
+                                                eprintln!(
+                                                    "[pipeline] stated confirmations hook: {e:#}"
+                                                );
                                             }
                                         }
                                     }));
@@ -1402,9 +1421,9 @@ impl PipelineHandle {
     /// rooted handle; it fires on every 1→0 drain crossing until the worker
     /// is superseded.
     fn install_stated_confirmations(&self, hook: ConfirmationsHook) {
-        if let Ok(mut g) = self.stated_confirmations.lock() {
-            *g = Some(hook);
-        }
+        // Poison-recovering lock: the slot data is write-once and this runs on
+        // the handle's install path (see `lock_confirmations_slot`).
+        *lock_confirmations_slot(&self.stated_confirmations) = Some(hook);
     }
 
     /// Rebuild the channel and spawn a replacement worker, returning the new
@@ -2234,7 +2253,9 @@ mod watchdog_integration_tests {
             assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
             handle
                 .tx
-                .send(PipelineJob::ingest_counted(doc.to_string_lossy().to_string()))
+                .send(PipelineJob::ingest_counted(
+                    doc.to_string_lossy().to_string(),
+                ))
                 .unwrap();
 
             // The 1->0 drain crossing after the job fires the hook.
@@ -2248,7 +2269,10 @@ mod watchdog_integration_tests {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             shut_down(handle);
-            assert!(stamped, "worker never fired the installed hook after the drain");
+            assert!(
+                stamped,
+                "worker never fired the installed hook after the drain"
+            );
         });
     }
 
@@ -2263,6 +2287,91 @@ mod watchdog_integration_tests {
             assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
             shut_down(handle);
         });
+    }
+
+    #[test]
+    fn panicking_hook_is_reinvoked_on_the_next_crossing() {
+        // Rung-4 major (PR #389 ladder): the hook runs under `catch_unwind`
+        // with the slot's MutexGuard held across it, so ONE panicking hook
+        // poisons the slot mutex — and every later `lock()` on the probe path
+        // reads as "not installed", permanently disabling the drain hook. The
+        // leg's own comment promises "the next crossing retries", and the
+        // dual gate re-arms the dirty flag on panic for exactly that retry:
+        // the slot lock must therefore survive the poison. The hook is an
+        // immutable, write-once `Fn` and a panicking leg leaves the gate's
+        // memo untouched, so `into_inner` recovery is sound.
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+            ],
+            || {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let db_path = tmp.path().join("brain.db");
+                crate::db::connection::open_app_db(&db_path, None).unwrap();
+                let doc = tmp.path().join("documents").join("a.md");
+                std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+                std::fs::write(&doc, "hello world").unwrap();
+
+                let slot: ConfirmationsSlot = Arc::new(std::sync::Mutex::new(None));
+                let calls = Arc::new(AtomicUsize::new(0));
+                {
+                    let calls = calls.clone();
+                    *slot.lock().unwrap() = Some(Box::new(move |_conn| {
+                        let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                        if n == 1 {
+                            panic!("first fire blows up");
+                        }
+                        Ok(())
+                    }));
+                }
+
+                let (tx, rx) = sync_channel::<PipelineJob>(8);
+                let heartbeat = Arc::new(Heartbeat::new());
+                let pending = Arc::new(AtomicUsize::new(0));
+                let (status_tx, _status_rx) = mpsc::channel();
+                let worker = PipelineWorker::new_with_vault(
+                    db_path, rx, pending, None, status_tx, heartbeat,
+                )
+                .with_confirmations_slot(slot);
+                let join = std::thread::spawn(move || worker.run());
+
+                // Crossing 1: the hook fires and panics; the worker continues.
+                tx.send(PipelineJob::ingest_counted(
+                    doc.to_string_lossy().to_string(),
+                ))
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while calls.load(Ordering::SeqCst) < 1 && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                assert!(
+                    calls.load(Ordering::SeqCst) >= 1,
+                    "hook never fired on the first crossing"
+                );
+
+                // Crossing 2: the hook must fire AGAIN despite the panic.
+                tx.send(PipelineJob::ingest_counted(
+                    doc.to_string_lossy().to_string(),
+                ))
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while calls.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    2,
+                    "hook dead after one panic — the poisoned slot disabled the drain hook"
+                );
+
+                drop(tx);
+                join.join().unwrap();
+            },
+        );
     }
 }
 

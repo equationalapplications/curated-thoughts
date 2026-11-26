@@ -134,7 +134,11 @@ msg 1575566029889867837, 2026-11-26).
   the apply does not succeed — error or panic, since the drain probe runs
   the hook under `catch_unwind` and retries the leg — so the next fire
   retries regardless of which trigger fired; the stat memo likewise never
-  advances past a failed apply. **Writer invariant (multi-generation):** the
+  advances past a failed apply. A panicking hook poisons the slot mutex, so
+  all three slot locks (probe, fire, install) recover with `into_inner`
+  (`lock_confirmations_slot`): without that recovery the one panic the
+  `catch_unwind` leg survives would read "hook not installed" forever and
+  the retry above would never run. **Writer invariant (multi-generation):** the
   watchdog can supersede a wedged worker (`mod.rs:1373-1378`), so two
   dirty-setters can transiently coexist — the superseded worker's job-tail
   `mark_dirty` (`mod.rs:402`) is unconditional and epoch-blind, and a
@@ -146,9 +150,11 @@ msg 1575566029889867837, 2026-11-26).
   survives to the next fire. (An earlier single-writer framing — "no Ingest
   completion can interleave with an in-flight apply" — was false once
   supersession exists; rung 3 of the stage-close ladder supplied the
-  interleaving and this fix.) Regression tests:
+  interleaving and this fix; rung 4 supplied the slot-poison recovery.)
+  Regression tests:
   `mark_during_apply_survives_the_clear`,
-  `panicking_apply_with_unchanged_ledger_rearms_dirty`.
+  `panicking_apply_with_unchanged_ledger_rearms_dirty`,
+  `panicking_hook_is_reinvoked_on_the_next_crossing`.
 - **Fire path unchanged** (probe cadence `mod.rs:211-261`, `DRAIN_PROBE`
   250ms, panic-safety, drain semantics). Hook leg:
   - first fire (no memo): always applies;
