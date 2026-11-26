@@ -1,6 +1,6 @@
 # Spec: read-time gate for forgotten facts (`forgotten_at`) — #378
 
-**Status:** Reviewed (owner rulings 2026-11-26: read-time gate + survival guard)
+**Status:** Reviewed (owner rulings 2026-11-26: read-time gate + survival guard + OQ4 container predicate)
 **Date:** 2026-11-26
 **Ruling issue:** equationalapplications/curated-thoughts#378
 **All file:line evidence against `origin/main` @ `bbe15dc2` (3.16.4).**
@@ -20,6 +20,12 @@
 > 3 (Option 1 with a multi-event survival guard): Hide entries at read time, but do not hide an entry just because one linked event was forgotten if other live events or stated provenance still back it:
 > 1. All-backing-events rule: An event-backed entry is hidden iff it has linked derived_events and zero linked events remain with forgotten_at IS NULL (plus never hide structural entity/hub containers or stated-ledger rows via event-forget). If the link is strictly 1:1 in the schema, prove and cite that in the spec; if many-to-one is possible, enforce the NOT EXISTS (live event) guard so forgetting one session event never collateral-deletes a shared rule or entity.
 > 2. Verify UI parity: Since engine forget() leaves the entry visible in core-llm-wiki, explicitly verify in the spec whether the Tauri UI reads entries via Rust commands (inheriting this gate) or via TS core-llm-wiki queries directly—so UI and CLI/MCP genuinely cannot agree to disagree.
+
+## Owner ruling #3 — structural-container predicate (verbatim, 2026-11-26, resolves OQ4)
+
+> OQ4 — 3 (the OR predicate of both candidates as a future-proof guard). Live 0/1,458 verification clears the over-protection concern today, preserves the D5 commitment, and keeps the guard in place if container rows ever land in llm_wiki_entries. Proceed with that in the #378 (PR #395) spec.
+
+**Verification basis (2026-11-26, live `brain.db` census + `origin/main` code audit, read-only):** there is no `llm_wiki_entities` table (only `llm_wiki_entity_manifests` ontology config); all 1458 live entries are leaf statements (id prefix `fact…`, `entity_id` = shared `ent_<hash>`, `tier` = `wisdom`, `area` NULL); `id = entity_id` matches **0/1458** rows and no ingest path mints such rows; `id`/`entity_id` in the reserved tier namespace matches **0/1458** rows (the namespace exists only in the manifests table). Neither signal over-protects a leaf row today; the OR guard is deliberately vacuous now and fails safe if container rows ever land in `llm_wiki_entries`.
 
 ## Problem
 
@@ -89,9 +95,11 @@ Notes: there is **no FTS table over wiki entries** — the "FTS leg" of recall i
 
    ```sql
    AND e.source_type != 'user_stated'
-   AND NOT EXISTS (  -- structural container carve-out (OQ4 signal)
-     SELECT 1 FROM reserved_container_ids rc WHERE rc.id = e.id
-   )
+   AND NOT (  -- structural container carve-out (OQ4 ruling #3: OR of both signals)
+     e.id = e.entity_id                    -- signal 1: self-referential container root
+     OR e.id LIKE 'tier%'                  -- signal 2: reserved tier-entity namespace
+     OR e.entity_id LIKE 'tier%'           --   (tier_fact / tier_wisdom constants,
+   )                                       --    tier_working::<hash> runtime-derived; wiki.ts:52-60)
    AND (  -- survival guard: hidden iff it HAS backing events and NONE are live
      NOT EXISTS (SELECT 1 FROM llm_wiki_events be
                  WHERE be.related_entry_id = e.id)
@@ -129,7 +137,7 @@ The Tauri UI reads the wiki DB **exclusively via Rust commands** — no direct T
 
 1. **Shared-fragment parity** (extends `wisdom_match` tests): seed an entry + event with `related_entry_id` and `forgotten_at` set; assert `gated_entries`, `eligible_entry_ids`, `candidate_set`, `rank_wiki_entries`, `wiki_search_in_scheme`, and `curated_get_wiki_entry` all exclude it; assert clearing `forgotten_at` restores eligibility everywhere (single-source-of-truth regression trap).
 2. **Survival guard (ruling #2.1):** seed one entry with two linked events; forget exactly one (`forgotten_at` set, other NULL) — the entry MUST remain visible in every gated path (collateral-delete regression). Then forget the second — the entry disappears. Re-add an event with `forgotten_at IS NULL` — the entry resurfaces. Same for an entry with two events forgotten in either order.
-3. **Carve-outs:** a `user_stated` entry (`source_type = 'user_stated'`, `MANUAL_SOURCE_REF` sentinel) and an entry whose source document has a `stated_attestations` row are NEVER hidden even with all linked events forgotten. Structural containers (per OQ4's chosen signal) are never hidden.
+3. **Carve-outs:** a `user_stated` entry (`source_type = 'user_stated'`, `MANUAL_SOURCE_REF` sentinel) and an entry whose source document has a `stated_attestations` row are NEVER hidden even with all linked events forgotten. Structural containers (OQ4 ruling #3: `e.id = e.entity_id` OR `e.id`/`e.entity_id` in the reserved `tier%` namespace) are never hidden — seed a fixture row hitting each of the three arms and assert it stays visible; on the production schema both signals match zero leaf rows (2026-11-26 live census: 0/1458), so the guard is expected to be a no-op on real data.
 4. **Degraded shapes:** same fixtures on a pre-v19 shape (no `forgotten_at` column) — queries compile, arm omitted, behavior identical to today (mirrors `connection.rs:8062` column probing).
 5. **Event readers:** `load_events` and `list_events` hide forgotten events; `queue.rs` replay still sees them.
 6. **Starvation guard:** seed 1 fully-forgotten + 5 live entries where the forgotten one scores highest; assert the returned top-k contains 5 live entries (no hole), not 4 + a gap.
@@ -142,5 +150,5 @@ The Tauri UI reads the wiki DB **exclusively via Rust commands** — no direct T
 1. ~~**OQ1: does forgetting an EVENT suppress its ENTRY?**~~ **RESOLVED by owner ruling #2 (2026-11-26, quoted verbatim above): hide entries at read time, gated by the all-backing-events survival guard, with structural-container and stated-ledger carve-outs.**
 2. **OQ2 (unchanged): does CT ever call `forget({ eventId })` today?** Nothing in `src-tauri/src` writes `forgotten_at`; if no CT surface invokes event-forget yet, the gate is purely defensive and priority is the owner's call.
 3. **OQ3 (unchanged, informational): stale engine install on the shared checkout** (7.13.0 symlink vs lockfile 9.18.0) — a `pnpm install` resolves it. No action requested in this PR.
-4. **OQ4 (NEW — needs a ruling before implementation): what signal identifies "structural entity/hub containers"?** Ruling #2 requires never hiding them, but the schema offers no explicit marker: `okf_type` is NULL on live rows (set only in migration rename paths, `connection.rs:2467`; deleted rows never carry it per the `connection.rs:6509` comment), there is no `tier` column on `llm_wiki_entries` (`okf_ddl.rs:14-52`), and no hub/container table exists. Candidate signals: entity_id namespace (entries of the reserved tier entities — `tier_fact`, `tier_wisdom`, and the workspace tier derived from the vault path; compile-time constants in `src/lib/wiki.ts:52-60`), or entry-id == entity-id container convention. D1.2's SQL sketches the carve-out as a reserved-id set; the implementation needs Kurt to pick (or define) the exact predicate.
+4. ~~**OQ4 (NEW — needs a ruling before implementation): what signal identifies "structural entity/hub containers"?**~~ **RESOLVED by owner ruling #3 (2026-11-26, quoted verbatim above): the carve-out predicate is the OR of both candidate signals** (`id = entity_id` OR `id`/`entity_id` in the reserved tier-entity namespace), as a future-proof guard. Verified before ruling: no `llm_wiki_entities` table exists, and both signals match **0/1458** live `brain.db` rows (containers do not exist as entry rows today; entity identity lives in the shared `entity_id` column + `llm_wiki_edges` + manifests), so the guard cannot over-protect a leaf fact and honors the ruling #2.1 "never hide structural hubs" commitment vacuously-but-fails-safe.
 5. **OQ5 (NEW, minor): does the attestation carve-out apply belt-and-braces or `source_type` alone?** `source_type = 'user_stated'` is cheap and definitive for stated rows; the `documents` ⇄ `stated_attestations` join (pattern `commit.rs:3009-3013`) also spares librarian facts derived from an attested stated document — wider than the ruling's literal "stated-ledger rows". Default in this spec: `source_type` carve-out in SQL, attestation join documented as the owner's optional widening.
