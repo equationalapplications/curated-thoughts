@@ -1,6 +1,6 @@
 # Spec: #386 — Stabilize the UnverifiedPromptModal focus test
 
-Status: Reviewed (2026-11-26 — owner approval, Discord msg 1575535367145398364; amendment: defensive third wrap (close-test restore), flagged for plan approval)
+Status: Implemented (2026-11-26 — PR #387; stability bar and T4 verdict recorded in Errata and review records)
 Issue: #386
 Branch: fix/386-focus-flake
 
@@ -18,13 +18,14 @@ caught the sibling timing test in this file (see Root cause).
 ## Root cause
 
 The race sits between the test and one asynchronous step. The modal
-opens through these steps:
+opens through these steps (test-file line numbers refer to the
+pre-fix tree `53baa084`):
 
 1. The component calls `useFocusTrap(dialogRef, ...)` at
    `src/components/queue/UnverifiedPromptModal.tsx:95`.
-2. `useFocusTrap` registers its keydown handler and focuses the first
-   button inside a passive `useEffect` at
-   `src/a11y/useFocusTrap.ts:88-94`.
+2. `useFocusTrap` registers its keydown handler and takes initial
+   focus inside a passive `useEffect` at
+   `src/a11y/useFocusTrap.ts:88-129` (registration at :123).
 3. React schedules passive effects after the commit. Under load, the
    scheduler runs them late.
 4. `findByText` resolves as soon as the modal text appears. The tests
@@ -53,10 +54,10 @@ Evidence from real runs (2026-11-26, this machine):
   element was "Confirm". The modal text was fully rendered, so the
   dialog had mounted, but the trap had not taken focus.
 
-The product behavior is correct. A real browser runs passive effects
-before paint, so the dialog always receives focus and the handler is
-always registered before a user can press Tab. The defect is a
-test-side race only.
+The product behavior is correct. The trap effect lands within about
+one scheduler tick of the dialog mounting — a window a human cannot
+Tab into, unlike the test's poll, which resolves on that same tick.
+The defect is a test-side race only.
 
 ## Proposed change
 
@@ -162,6 +163,6 @@ No product code changes.
   - Loaded loop: 100/100 runs green.
   - Unloaded loop: 20/20 runs green (after a verified no-surviving-spinner pre-check).
   - Full frontend suite: 631 passed, 1 skipped (632 total), 0 failed, ~70 s.
-  - Pre-fix baseline for comparison: the identical file, pre-fix, failed 2 of 30 loaded runs (~7 percent), and failed once in CI on PR #384.
-  - Honesty statement: the loaded loop backs up the reasoning that each `waitFor` can only pass after the trap's effect ran — it does not prove the fix alone. Residual risk of an unfixed flake surviving even 100 green runs is under 0.1 percent on the measured base rate, but the mechanism argument, not the loop, is the primary evidence.
-  - Counting-pipeline note: a naive `grep 'Tests  9 passed'` misses when vitest emits ANSI color codes (observed in one shell context, absent in another; the failure mode undercounts, never false-successes). Counts above used context-appropriate patterns and each leg's raw output was read.
+  - Pre-fix baseline for comparison: the identical file, pre-fix, failed 2 of 30 loaded runs (~7 percent point estimate), and failed once in CI on PR #384 (the focus-on-open test). The 2/30 failures were captured as summary lines only, so they are not attributable to a specific test; the only locally captured named failure was the Tab test (detail loop).
+  - Honesty statement: the loaded loop backs up the reasoning that each `waitFor` can only pass after the trap's effect ran — it does not prove the fix alone. On the 2-in-30 point estimate, an unfixed flake surviving 100 green runs sits around 0.1 percent, but the small-sample spread of that base rate is wide, so the mechanism argument, not the loop, is the primary evidence.
+  - Counting method and pipeline note: the loaded leg counted with `grep -q 'Tests  9 passed'` (that shell context emitted no color codes, so the literal pattern matched). The unloaded leg first ran the same literal pattern and undercounted 0/20 against visibly passing runs — vitest emitted ANSI codes there (`Tests \x1b[22m ...`); it was rerun with the ANSI-safe `grep -cE 'Tests.*9 passed'`, which requires the literal "9 passed" and cannot match a "1 failed | 8 passed" summary line. Both patterns fail toward undercounting, never false-successes. Each leg's raw output was read.
