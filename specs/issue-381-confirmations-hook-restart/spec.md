@@ -55,16 +55,25 @@ next switch or a heal.
 - `src-tauri/src/pipeline/mod.rs` — hook install inside `start_pipeline`;
   new tests near the drain harness (`run_drain_waves`, `mod.rs:1838`).
 - `src-tauri/src/lib.rs` — delete the switch-path install block only.
+- `src-tauri/src/db/stated_ledger.rs` — `apply_stored_confirmations`
+  returns `Ok(0)` early on an empty ledger (skips the transaction and the
+  wiki-wide hash scan; T4 m1) + a unit pin.
 
 ## Test plan
 
 1. Slot test: a rooted `start_pipeline` handle exposes an installed hook;
    an unrooted one keeps `None`. Asserted in the `mod.rs` test module.
-2. Drain test (reuses the #379 harness): seed
-   `stated/.confirmations.jsonl` with a confirmation for an ingested,
-   unstamped fact; run one drain crossing on a rooted handle; assert the
-   row is stamped `user_confirmed`.
-3. Negative test: the same drain on an unrooted handle stamps nothing.
+2. Two layers (the #379 harness builds a worker directly with no vault
+   root, so it cannot exercise the install):
+   - Direct-call unit pins: seed `stated/.confirmations.jsonl` + an
+     unstamped fact, call the handle's installed hook on a connection,
+     assert `user_confirmed`; a vault with no ledger is a quiet no-op.
+   - End-to-end drain test (`drain_fires_installed_hook_end_to_end`): on a
+     real rooted `start_pipeline` handle, send one counted ingest job and
+     assert the WORKER's drain crossing stamps the row (bounded poll). This
+     fails if the worker is not wired to the handle's confirmations slot.
+3. Negative test: an unrooted handle keeps no hook, so no crossing can
+   stamp anything.
 4. Gates: `cargo --manifest-path src-tauri/Cargo.toml test --lib
    --features test-utils` (base 1744 tests, report the delta); clippy on
    both crates, no new findings; no frontend or TS surface changes.

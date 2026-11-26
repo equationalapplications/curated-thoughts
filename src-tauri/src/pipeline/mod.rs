@@ -1458,8 +1458,9 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
         status_tx,
         stated_confirmations,
     };
-    // Run 2 (spec §2 S5): confirmations that arrive after the
-    // switch-time rebuild are re-applied once the queue drains.
+    // Run 2 (spec §2 S5): confirmations that arrive after the Run 1
+    // rebuild (switch-time or open-time) are re-applied once the queue
+    // drains.
     // Installed here so every rooted start (startup, recovery, switch)
     // gets it (#381). `root` is already canonical at every caller; do not
     // re-canonicalize.
@@ -1941,8 +1942,9 @@ mod watchdog_integration_tests {
     // builds a worker directly with no vault root, so it cannot exercise the
     // install). Firing cadence is pinned by the drain tests above.
 
-    /// Run `f` with a temp brain env, a temp dir holding an initialised
-    /// `brain.db`, and return nothing. `f` gets `(db_path, vault_root)`.
+    /// Run `f` with a temp brain env and a temp dir holding an initialised
+    /// `brain.db` plus an empty `vault/` dir. `f` receives
+    /// `(db_path, vault_root)`.
     fn with_rooted_fixture(f: impl FnOnce(&std::path::Path, &std::path::Path)) {
         let brain_tmp = tempfile::TempDir::new().unwrap();
         let brain = brain_tmp.path().to_string_lossy().into_owned();
@@ -2015,11 +2017,23 @@ mod watchdog_integration_tests {
     fn unrooted_start_pipeline_keeps_no_hook() {
         // Spec Test 3's intent: with no hook installed, no drain crossing
         // can stamp anything.
-        with_rooted_fixture(|db_path, _root| {
-            let handle = start_pipeline(db_path.to_path_buf(), None);
-            assert!(handle.stated_confirmations.lock().unwrap().is_none());
-            shut_down(handle);
-        });
+        let tmp = tempfile::TempDir::new().unwrap();
+        let brain = tmp.path().join("brain").to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+                ("CURATED_EMBED_STUB", Some("constant8")),
+            ],
+            || {
+                let db_path = tmp.path().join("brain.db");
+                crate::db::connection::open_app_db(&db_path, None).unwrap();
+                let handle = start_pipeline(db_path, None);
+                assert!(handle.stated_confirmations.lock().unwrap().is_none());
+                shut_down(handle);
+            },
+        );
     }
 
     #[test]
