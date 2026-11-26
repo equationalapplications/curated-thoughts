@@ -62,25 +62,27 @@ Replace with:
 Find this block (test "Tab from the last focusable wraps to the first focusable inside the dialog"; note the 2-space indentation, which the exact-string edit must preserve):
 
 ```tsx
-expect(last).toHaveTextContent(/not now/i);
-last.focus();
+  expect(last).toHaveTextContent(/not now/i);
+  last.focus();
 ```
 
 Replace with:
 
 ```tsx
-expect(last).toHaveTextContent(/not now/i);
-// The trap's passive effect must have run before we fire Tab, or its
-// keydown handler is not registered yet. Wait for its initial focus.
-await waitFor(() => {
-  expect(document.activeElement).toBe(
-    screen.getByRole("button", { name: /^confirm$/i }),
-  );
-});
-last.focus();
+  expect(last).toHaveTextContent(/not now/i);
+  // The trap's passive effect must have run before we fire Tab, or its
+  // keydown handler is not registered yet. Wait for its initial focus.
+  await waitFor(() => {
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /^confirm$/i }),
+    );
+  });
+  last.focus();
 ```
 
-- [ ] **Step 3: Fix 3 — wrap the close-test focus-restore assertion**
+- [ ] **Step 3: Fix 3 — wrap the close-test focus-restore assertion (DEFENSIVE; owner decides keep-or-drop at plan approval)**
+
+If the owner drops Fix 3 at plan approval: skip this step, and change "three" to "two" in the spec's Files touched (spec.md), the plan's Goal line, this task's intro, and the LEDGER task count.
 
 Find this block (test "on close, focus returns to the previously focused element"):
 
@@ -126,7 +128,7 @@ git commit -m "test: #386 — wait for the focus trap's passive effect before as
 
 **Files:**
 
-- None modified. Verification only.
+- Modify: `specs/issue-386-focus-flake/spec.md` (Errata only), `specs/issue-386-focus-flake/LEDGER.md` (evidence tick)
 
 **Interfaces:**
 
@@ -142,6 +144,11 @@ Expected at plan-writing time: exactly one `fireEvent.keyDown` site (the Tab tes
 - [ ] **Step 2: Record the result in LEDGER.md and the spec Errata**
 
 Tick Task 2's box with the grep output summary as evidence, and record the same one-line result in the spec's Errata section (LEDGER.md is deleted at cleanup in Task 4; Errata is the durable home). If the grep shows a NEW racy keyboard site the plan did not anticipate, STOP and report — do not improvise a fix outside the spec.
+
+```bash
+git add specs/issue-386-focus-flake/LEDGER.md specs/issue-386-focus-flake/spec.md
+git commit -m "docs(spec): #386 — record keyboard-site sweep in Errata"
+```
 
 ### Task 3: Stability bar
 
@@ -161,18 +168,22 @@ Run the whole step as one background script so a mid-loop timeout cannot orphan 
 cat > /tmp/ct386-loaded-loop.sh <<'EOF'
 #!/usr/bin/env bash
 cd /home/kv-thinkpad-t420-ubuntu/code/github/equationalapplications/curated-thoughts || exit 9
+RUNS=${RUNS:-30}
 N=$(nproc); SPIN=""
 trap 'kill $SPIN 2>/dev/null' EXIT INT TERM
 for i in $(seq 1 $((N+2))); do (while :; do :; done) & SPIN="$SPIN $!"; done
+echo $SPIN > /tmp/ct386-spin.pids
 LOADED=0
-for i in $(seq 1 30); do
+for i in $(seq 1 $RUNS); do
   pnpm vitest run src/__tests__/UnverifiedPromptModal.test.tsx 2>&1 | grep -q 'Tests  9 passed' && LOADED=$((LOADED+1))
 done
 kill $SPIN 2>/dev/null
-echo "loaded green: $LOADED/30"
+echo "loaded green: $LOADED/$RUNS"
 EOF
-bash /tmp/ct386-loaded-loop.sh
+RUNS=30 bash /tmp/ct386-loaded-loop.sh
 ```
+
+`RUNS` is the owner's plan-approval lever: if the owner sets a count other than 30, run `RUNS=<count> bash /tmp/ct386-loaded-loop.sh` and amend the spec's Test plan item 1 to the same number in the same commit (the spec outranks the plan). Note a bash `trap` does not run on SIGKILL, which is exactly why Step 2's pre-check exists.
 
 Run the script with a generous timeout (600 s or more) or in the background — 30 loaded runs at several seconds each can exceed a 120 s tool timeout.
 
@@ -180,7 +191,14 @@ Expected: `loaded green: 30/30`. Judge each iteration by the `Tests  9 passed` l
 
 - [ ] **Step 2: Unloaded loop — 20 runs**
 
-First verify no spinner survived: `ps -o pid= -p $SPIN 2>/dev/null` must print nothing (run the pre-check with the PIDs from Step 1, or check `ps aux | grep 'while :' | grep -v grep`). If any spinner survives, kill it and note it in the Errata — leftover load would invalidate the unloaded runs.
+First verify no spinner survived. The spinners are forked subshells of the script, so `ps` shows them as `bash /tmp/ct386-loaded-loop.sh` — do not grep for `while :`. Both checks must print nothing:
+
+```bash
+ps -o pid=,cmd= -p "$(tr ' ' ',' < /tmp/ct386-spin.pids | sed 's/^,//')" 2>/dev/null
+pgrep -af ct386-loaded-loop.sh
+```
+
+If anything survives, kill those PIDs and note it in the Errata — leftover load would invalidate the unloaded runs.
 
 ```bash
 UNLOADED=$(for i in $(seq 1 20); do pnpm vitest run src/__tests__/UnverifiedPromptModal.test.tsx 2>&1 | grep -c 'Tests  9 passed'; done | grep -c 1)
@@ -196,7 +214,11 @@ Expected: every test file passes and the totals line shows 0 failed. Read the re
 
 - [ ] **Step 4: Record results in the spec Errata and commit**
 
-Fill `specs/issue-386-focus-flake/spec.md`'s Errata section with: the loaded count over 30, the unloaded count over 20, the full-suite totals, the machine profile (4 cores, 6 spinner processes), and the date.
+Fill `specs/issue-386-focus-flake/spec.md`'s Errata section with:
+
+- The loaded count over 30 (or the owner's count), the unloaded count over 20, the full-suite totals, the machine profile (4 cores, 6 spinner processes), and the date.
+- The pre-fix baseline for comparison: the identical file, pre-fix, failed 2 of 30 loaded runs (~7 percent).
+- The honesty statement, verbatim intent: the loaded loop backs up the reasoning that each `waitFor` can only pass after the trap's effect ran — it does not prove the fix alone (a pass rate this high leaves residual chance of an unfixed flake surviving the bar).
 
 ```bash
 git add specs/issue-386-focus-flake/spec.md

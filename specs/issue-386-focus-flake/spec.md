@@ -1,6 +1,6 @@
 # Spec: #386 — Stabilize the UnverifiedPromptModal focus test
 
-Status: Reviewed (2026-11-26 — owner approval, Discord msg 1575535367145398364; amendment: third wrap for the close-test cleanup race, flagged for plan approval)
+Status: Reviewed (2026-11-26 — owner approval, Discord msg 1575535367145398364; amendment: defensive third wrap (close-test restore), flagged for plan approval)
 Issue: #386
 Branch: fix/386-focus-flake
 
@@ -109,9 +109,10 @@ await waitFor(() => {
 ```
 
 `waitFor` passes at once when the restore already happened, so the
-wrap cannot mask a broken restore. The owner's spec approval carried
-a sanity check for leftover races in this file; the T3 review ruled
-this wrap defensive-only, and the owner decides at plan approval
+wrap cannot mask a missing restore; a restore delayed under 1 s
+(waitFor's default timeout) would pass. The owner's spec approval
+carried a sanity check for leftover races in this file; the T3 review
+ruled this wrap defensive-only, and the owner decides at plan approval
 whether to keep or drop it.
 
 ## Files touched
