@@ -888,7 +888,7 @@ test("entriesFromRequirements: pip long-option abbreviations canonicalize before
     const problems = []
     entriesFromRequirements(`${line}\n`, problems)
     assert.equal(problems.length, 1, line)
-    assert.match(problems[0], new RegExp(`matched: ${canonical.replace(/-/g, "\\-")}`), line)
+    assert.ok(problems[0].includes(`matched: ${canonical}`), `${line}: ${problems[0]}`)
   }
   // Accepted non-dangerous options still pass, exact or abbreviated.
   for (const line of ["--pre", "--only-binary=:all:", "--only-b=:all:", "--require-hashes", "--prefer-bin"]) {
