@@ -158,4 +158,10 @@ No product code changes.
 ## Errata
 
 - Keyboard-site sweep (owner sanity check, 2026-11-26, post-fix tree `1771faf2`): exactly one `fireEvent.keyDown` site in the file (the Tab test, now behind the Fix 2 `waitFor`); all other interactions are `fireEvent.click`, which reach React props set at commit time and do not race the trap. No Shift+Tab or Escape keydown tests exist.
-- (stability bar results to be recorded below by Task 3)
+- Stability bar (2026-11-26, post-fix tree `1771faf2`, machine: 4 cores, 6 spinner processes for the loaded leg):
+  - Loaded loop: 100/100 runs green.
+  - Unloaded loop: 20/20 runs green (after a verified no-surviving-spinner pre-check).
+  - Full frontend suite: 631 passed, 1 skipped (632 total), 0 failed, ~70 s.
+  - Pre-fix baseline for comparison: the identical file, pre-fix, failed 2 of 30 loaded runs (~7 percent), and failed once in CI on PR #384.
+  - Honesty statement: the loaded loop backs up the reasoning that each `waitFor` can only pass after the trap's effect ran — it does not prove the fix alone. Residual risk of an unfixed flake surviving even 100 green runs is under 0.1 percent on the measured base rate, but the mechanism argument, not the loop, is the primary evidence.
+  - Counting-pipeline note: a naive `grep 'Tests  9 passed'` misses when vitest emits ANSI color codes (observed in one shell context, absent in another; the failure mode undercounts, never false-successes). Counts above used context-appropriate patterns and each leg's raw output was read.

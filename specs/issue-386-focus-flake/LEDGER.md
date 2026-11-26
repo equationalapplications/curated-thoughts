@@ -6,7 +6,7 @@
 
 - [x] Task 1 — three `waitFor` wraps (evidence: commit `1771faf2`; vitest file 9/9 green; eslint rc=0; `git diff --stat` = 1 file, 18+/4-)
 - [x] Task 2 — keyboard-site sweep, owner sanity check (evidence: post-fix grep 2026-11-26 — one keyDown site only, Tab test line 201 behind Fix 2 waitFor; clicks at 90/101/172/221 are commit-time props; Errata line recorded, commit pending with this tick)
-- [ ] Task 3 — stability bar: 100 loaded (owner ruling) + 20 unloaded + full suite (evidence: pending)
+- [x] Task 3 — stability bar: 100 loaded (owner ruling) + 20 unloaded + full suite (evidence: Errata recorded 2026-11-26 — 100/100 loaded, 20/20 unloaded, 631 passed + 1 skipped / 0 failed full suite; commit with this tick)
 - [ ] Task 4 — cleanup: status flip, plan/ledger deletion, `gh pr ready` (evidence: pending)
 
 ## Review ledger
