@@ -2301,6 +2301,9 @@ mod watchdog_integration_tests {
                 ("CURATED_BRAIN_DIR", Some(brain.as_str())),
                 ("CURATED_BRAIN_CONFIG", None::<&str>),
                 ("CURATED_BRAIN_DB", None::<&str>),
+                // Same pin as every sibling worker-driven test: the two
+                // ingests must not reach a real embed provider.
+                ("CURATED_EMBED_STUB", Some("constant8")),
             ],
             || {
                 let tmp = tempfile::TempDir::new().unwrap();
