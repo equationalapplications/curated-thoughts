@@ -184,15 +184,45 @@ export function entriesFromPoetryLock(raw, problems = []) {
   // that NESTED table, which this minimal parser does not read — a git fork
   // pinned at a version that exists on PyPI would otherwise pass the PyPI
   // lookup. Any lockfile using [package.source] is rejected outright.
-  if (/\[package\.source\]/.test(raw)) {
-    // One problem PER OCCURRENCE (with the count in each) so the multiset
-    // diff flags newly ADDED tables even when the base already had some.
-    const n = (raw.match(/\[package\.source\]/g) ?? []).length
-    for (let i = 0; i < n; i++) {
-      problems.push(
-        `poetry.lock contains a [package.source] table (git/URL/direct sources) which this parser cannot verify (fail-closed) [table ${i + 1}/${n}]`,
-      )
+  {
+    // One problem PER TABLE. The identity is package name@version plus the
+    // table's own contents (type/url/reference) — NOT a mutable count — so
+    // removing a table passes, adding one fails, and a CHANGED url/revision
+    // is a new identity and fails.
+    let pkg = null
+    let inPkg = false
+    let src = null
+    const flush = () => {
+      if (src) {
+        problems.push(
+          `poetry.lock package ${pkg?.name ?? "?"}@${pkg?.version ?? "?"} has a [package.source] table (git/URL/direct source) which this parser cannot verify (fail-closed): ${src.sort().join("; ")}`,
+        )
+      }
+      src = null
     }
+    for (const lineRaw of raw.split(/\r?\n/)) {
+      const line = stripTomlComment(lineRaw).trim()
+      if (!line) continue
+      if (/^\[[^\]]+\]\]?$/.test(line)) {
+        flush()
+        if (line === "[[package]]") {
+          pkg = { name: "", version: "" }
+          inPkg = true
+        } else if (line === "[package.source]") {
+          src = []
+          inPkg = false
+        } else {
+          inPkg = false
+        }
+        continue
+      }
+      if (src) src.push(line)
+      else if (inPkg && pkg) {
+        const kv = line.match(/^(name|version)\s*=\s*"(.*)"$/)
+        if (kv) pkg[kv[1]] = kv[2]
+      }
+    }
+    flush()
   }
   const entries = []
   for (const s of parseTomlPackageSections(raw)) {
@@ -223,7 +253,23 @@ export function entriesFromPoetryLock(raw, problems = []) {
 // Backslash line continuations are joined before parsing.
 export function entriesFromRequirements(raw, problems = []) {
   const entries = []
-  const lines = raw.replace(/\\\r?\n/g, " ").split(/\r?\n/)
+  // Join continuations like pip: a comment line is never continued (and
+  // never swallows the following line); it is emitted as-is, stripped later.
+  const lines = []
+  let buf = ""
+  for (const l of raw.split(/\r?\n/)) {
+    const isComment = l.trimStart().startsWith("#")
+    if (isComment) {
+      lines.push(buf ? `${buf} ${l}` : l)
+      buf = ""
+    } else if (l.endsWith("\\")) {
+      buf += `${buf ? " " : ""}${l.slice(0, -1)}`
+    } else {
+      lines.push(buf ? `${buf} ${l}` : l)
+      buf = ""
+    }
+  }
+  if (buf) lines.push(buf)
   for (const lineRaw of lines) {
     const line = stripTomlComment(lineRaw).trim()
     if (!line) continue
@@ -232,10 +278,17 @@ export function entriesFromRequirements(raw, problems = []) {
       // (-i/--index-url/--extra-index-url), an editable/URL/git install
       // (-e/--editable, git+), a find-links source, --trusted-host (bypasses
       // TLS verification), or --no-index (local/unverifiable sources only)
-      // cannot be age-checked from a version pin. Other option lines (e.g.
-      // -r includes) are skipped.
+      // cannot be age-checked from a version pin. Other option lines are
+      // skipped. Include/constraint directives
+      // (-r/--requirement/-c/--constraint) pull in files this checker does not
+      // read, so they fail closed too. Short options also match attached
+      // arguments (-ihttps://..., pip's optparse treats -iX as -i X).
+      if (/^(--requirement\b|--constraint\b|-r|-c)/.test(line)) {
+        problems.push(`unresolved include directive (fail-closed; pins inside are not age-checked): ${lineRaw.trim()}`)
+        continue
+      }
       if (
-        /^(--index-url|--extra-index-url|-i\b|-e\b|--editable|--find-links|-f\b|--trusted-host\b|--no-index\b)/.test(line) ||
+        /^(--index-url|--extra-index-url|-i|-e|--editable|--find-links|-f|--trusted-host\b|--no-index\b)/.test(line) ||
         /git\+/.test(line)
       ) {
         problems.push(`fail-closed option line (foreign index or editable/git/URL install): ${lineRaw.trim()}`)
@@ -328,6 +381,7 @@ export async function runCheck(
   let scope
   let delta
   let newProblems = []
+  let baseProblemsAll = []
   const skipped = []
   if (baseRef) {
     let baseRaw
@@ -365,6 +419,7 @@ export async function runCheck(
       return 2
     }
     const baseProblems = []
+    baseProblemsAll = baseProblems
     delta = deltaEntries(currentEntries, (() => {
       try {
         return entriesForFile(lockfile, baseRaw, baseProblems)
@@ -420,6 +475,18 @@ export async function runCheck(
   // audits report such entries as skipped, not failing — otherwise the manual
   // sweep can never pass a repo that carries one deliberately.
   if (baseRef) {
+    // An unsupported index/source option applying in EITHER base or head means
+    // a public-PyPI timestamp for a new pin verifies nothing (the pin may
+    // resolve from the foreign index, or did before the PR removed it).
+    const indexRe = /^fail-closed option line .*?: (--index-url|--extra-index-url|-i|--find-links|-f|--no-index|--trusted-host)/
+    const indexApplies = [...baseProblemsAll, ...problems].some((p) => indexRe.test(p))
+    if (indexApplies) {
+      for (const e of delta) {
+        if (e.registry === "pypi") {
+          failures.push(`${e.name}@${e.version}: new pin while an unsupported index/source option applies in base or head (fail-closed)`)
+        }
+      }
+    }
     for (const e of delta) {
       if (
         e.registry === null &&

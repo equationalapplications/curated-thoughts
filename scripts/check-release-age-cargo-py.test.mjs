@@ -241,10 +241,11 @@ test("entriesFromRequirements: pins, extras, env markers, comments, continuation
     { name: "requests", version: "2.31.0", registry: "pypi", src: "pypi" },
     { name: "other", version: "1.0", registry: "pypi", src: "pypi" },
   ])
-  assert.equal(problems.length, 3)
-  assert.match(problems[0], /install.*--index-url/)
-  assert.match(problems[1], /install.*-e git\+/)
-  assert.match(problems[2], /unpinned or unparseable requirement line .*somepkg/)
+  assert.equal(problems.length, 4)
+  assert.match(problems[0], /include directive.*-r dev-requirements/)
+  assert.match(problems[1], /install.*--index-url/)
+  assert.match(problems[2], /install.*-e git\+/)
+  assert.match(problems[3], /unpinned or unparseable requirement line .*somepkg/)
 })
 
 test("entriesForFile: dispatches by basename, throws on unsupported format", () => {
@@ -537,7 +538,10 @@ test("runCheck: poetry [package.source] tables and a new uv workspace member beh
     "poetry.lock",
     '[[package]]\nname = "requests"\nversion = "2.31.0"\n\n[package.source]\ntype = "git"\nurl = "https://github.com/attacker/requests"\n',
   )
-  const poetry = await runQuiet(["--lockfile", pfile], { spacingMs: 1 })
+  const poetry = await runQuiet(["--lockfile", pfile], {
+    fetchImpl: async () => jsonResponse({ urls: [{ upload_time: iso(400 * DAY) }] }),
+    spacingMs: 1,
+  })
   assert.equal(poetry.code, 1)
   assert.match(poetry.err.join("\n"), /\[package\.source\]/)
 
@@ -626,6 +630,86 @@ test("runCheck: transient 5xx is retried, not failed immediately", async () => {
   })
   assert.equal(code, 0)
   assert.equal(calls, 3)
+})
+
+test("entriesFromRequirements: include/constraint directives fail closed (T1)", () => {
+  for (const line of ["-r deps.txt", "-rdeps.txt", "--requirement=deps.txt", "--requirement deps.txt", "-c cons.txt", "--constraint cons.txt"]) {
+    const problems = []
+    entriesFromRequirements(`flask==3.0.0\n${line}\n`, problems)
+    assert.equal(problems.length, 1, line)
+    assert.match(problems[0], /include directive/, line)
+  }
+})
+
+test("entriesFromRequirements: a comment line ending in a backslash does not swallow the next pin (T4)", () => {
+  const problems = []
+  const entries = entriesFromRequirements("# note \\\nflask==3.0.0\n", problems)
+  assert.deepEqual(entries, [{ name: "flask", version: "3.0.0", registry: "pypi", src: "pypi" }])
+  assert.equal(problems.length, 0)
+})
+
+test("entriesFromRequirements: attached short options (-iURL, -e<path>, -fURL) fail closed (T5)", () => {
+  for (const line of ["-ihttps://evil.example/simple", "-e./local-pkg", "-fhttps://evil.example/links"]) {
+    const problems = []
+    entriesFromRequirements(`${line}\n`, problems)
+    assert.equal(problems.length, 1, line)
+    assert.match(problems[0], /foreign index or editable/, line)
+  }
+})
+
+const POETRY_PKG = (name, url) =>
+  `[[package]]\nname = "${name}"\nversion = "1.0.0"\n\n[package.source]\ntype = "git"\nurl = "${url}"\n\n`
+
+test("runCheck: removing a poetry source table passes; changing a source's url fails (T2, T3)", async () => {
+  const two = POETRY_PKG("aaa", "https://git.example/a") + POETRY_PKG("bbb", "https://git.example/b")
+  const one = POETRY_PKG("aaa", "https://git.example/a")
+  const { dir } = tmpLockfile("poetry.lock", two)
+  const run = initGitRepo(dir, "poetry.lock", two)
+  const lock = path.join(dir, "poetry.lock")
+  fs.writeFileSync(lock, one)
+  run(["add", "poetry.lock"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "drop b"])
+  const removed = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () => jsonResponse({ urls: [{ upload_time: iso(400 * DAY) }] }),
+    spacingMs: 1,
+  })
+  assert.equal(removed.code, 0, removed.err.join("\n"))
+
+  const changed = POETRY_PKG("aaa", "https://git.example/EVIL")
+  fs.writeFileSync(lock, changed)
+  run(["add", "poetry.lock"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "change url"])
+  const swap = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], {
+    fetchImpl: async () => jsonResponse({ urls: [{ upload_time: iso(400 * DAY) }] }),
+    spacingMs: 1,
+  })
+  assert.equal(swap.code, 1)
+  assert.match(swap.err.join("\n"), /New unage-checkable lines/)
+})
+
+test("runCheck: a new pin fails while an unsupported index applies in base OR head (T6)", async () => {
+  const withIndex = "--index-url https://internal.example/simple\nflask==3.0.0\n"
+  const noIndexPlusNew = "flask==3.0.0\nrequests==2.31.0\n"
+  const old = async () => jsonResponse({ urls: [{ upload_time: iso(400 * DAY) }] })
+  const { dir } = tmpLockfile("requirements.txt", withIndex)
+  const run = initGitRepo(dir, "requirements.txt", withIndex)
+  const lock = path.join(dir, "requirements.txt")
+
+  // Base had the index; head removes it AND adds a pin.
+  fs.writeFileSync(lock, noIndexPlusNew)
+  run(["add", "requirements.txt"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "drop index, add pin"])
+  const removed = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { fetchImpl: old, spacingMs: 1 })
+  assert.equal(removed.code, 1)
+  assert.match(removed.err.join("\n"), /requests@2\.31\.0.*index/)
+
+  // Head keeps the (inherited) index and adds a pin.
+  fs.writeFileSync(lock, withIndex + "click==8.1.0\n")
+  run(["add", "requirements.txt"])
+  run(["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", "keep index, add pin"])
+  const kept = await runQuiet(["--lockfile", lock, "--base", "HEAD~1"], { fetchImpl: old, spacingMs: 1 })
+  assert.equal(kept.code, 1)
+  assert.match(kept.err.join("\n"), /click@8\.1\.0.*index/)
 })
 
 test("runCheck: request spacing reserves slots synchronously (no two calls together)", async () => {
