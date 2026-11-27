@@ -189,4 +189,16 @@ mod tests {
             assert_eq!(text, "(note) hi");
         }
     }
+
+    #[test]
+    fn append_negative_forgotten_writes_id_only_comment() {
+        // T1.5 r3 MINOR characterization: the writer's `ms >= 0` guard makes a
+        // negative tombstone export as a live id-only line. This state is
+        // unreachable via engine writes (`forget()` stamps current epoch-ms)
+        // and bundle imports (the parser filters negatives), so the guard
+        // matches the parser's contract rather than dropping data in practice.
+        // Pinned here so a future writer-side change is a deliberate one.
+        let t = append_event_id_comment_forgotten("(note) hi", "evt_x", Some(-5));
+        assert_eq!(t, "(note) hi <!-- id: evt_x -->");
+    }
 }
