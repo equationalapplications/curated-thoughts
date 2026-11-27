@@ -263,23 +263,30 @@ QUERY PLAN
   2); carries a targeted `#[allow(clippy::too_many_arguments)]` rather
   than a signature refactor, to preserve the converged plan's
   prescribed shapes.
-- **Dup tombstone scope evolved past this text:** the test-plan line
-  102 wording has the dup UPDATE as `WHERE id = ? AND forgotten_at IS
-  NULL`. The shipped scope is `AND entity_id IN (<target cluster>)` —
-  evolved in two review folds (T1.5 r1: entity scoping against
+- **Dup tombstone scope evolved past this text:** the Task 2 design text
+  (spec line 102) has the dup UPDATE as `WHERE id = ? AND forgotten_at
+  IS NULL`. The shipped scope is `AND entity_id IN (<target cluster>)`
+  — evolved in review folds (T1.5 r1: entity scoping against
   unrelated-entity collisions; CodeRabbit CR-1 + T4 r1 M1: widened to
   the CLUSTER via `entities::cluster_ids` so merged-loser-owned rows
-  reconcile). T4 r2 additionally gates the forgotten FRESH INSERT: a
-  tombstone whose related entry is owned outside the import's cluster
-  (or not locally resolvable) keeps the verbatim tombstone but drops
-  the LINKAGE (`related_entry_id = NULL`) with an import warning — a
-  forgotten event with no related id can neither hide nor back an
-  entry, and its re-import dup is a no-op (tombstone-wins).
-  Task-related related ids are kept (the guard joins entries only).
-  This slightly narrows "apply verbatim" for unprovable linkage only;
-  flagged to the owner in the merge ask.
+  reconcile). T4 r2/r3 additionally gate the LINKAGE on every fresh
+  INSERT (live and forgotten): a tombstone/event whose related entry is
+  owned outside the import's cluster (or not locally resolvable) keeps
+  its verbatim tombstone but drops the linkage (`related_entry_id =
+  NULL`) with an import warning — a forgotten event with no related id
+  can neither hide nor back an entry, a live one cannot resurrect a
+  locally-forgotten foreign entry, and a re-import dup is a no-op
+  (tombstone-wins). Task-related related ids are kept (the guard joins
+  entries only). Known trade-off: if the referenced entry arrives in a
+  LATER import, the earlier tombstone no longer hides it (verbatim
+  linkage would have) — accepted, because the alternative lets bundle
+  content flip a foreign entry's visibility in either direction. The
+  dropped linkage is permanent (reported in `ImportResult.warnings`,
+  never persisted). This narrows "apply verbatim" for unprovable
+  linkage only; owner ruling on the narrowing is requested at merge
+  (see PR body).
 - **Parse edge behaviors:** the earlier claim "lines without the key
-  parse exactly as today" (spec test-plan line 85) holds for
+  parse exactly as today" (Task 1 design text, spec line 85) holds for
   well-formed lines, but three edge behaviors
   changed (documented in `log_md.rs::parse_event_id_comment`): an empty
   id and a bare `id:` prefix yield `None` (previously `Some("")`), and
