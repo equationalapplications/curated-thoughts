@@ -645,12 +645,13 @@ pub fn entry_not_forgotten_arm(conn: &Connection) -> Result<String> {
 pub fn entry_not_forgotten_arm_for(conn: &Connection, alias: &str) -> Result<String> {
     // The alias is interpolated into SQL: it must be a plain identifier and
     // must not re-bind the arm's own subquery aliases.
+    // SQL identifiers are case-insensitive, so `FE`/`Le` re-bind too.
     anyhow::ensure!(
         !alias.is_empty() && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "entry_not_forgotten_arm_for: alias must be a plain SQL identifier"
     );
     anyhow::ensure!(
-        alias != "fe" && alias != "le",
+        !alias.eq_ignore_ascii_case("fe") && !alias.eq_ignore_ascii_case("le"),
         "entry_not_forgotten_arm_for: alias must not collide with subquery aliases fe/le"
     );
     let arm = forgotten_entry_arm(&temporal_columns(conn, None)?);
@@ -1949,6 +1950,14 @@ mod tests {
             run(&conn, Some(0.5), 50, &[]).entries.iter().any(|e| e.id == "a"),
             "gated read works on the degraded shape"
         );
+    }
+
+    #[test]
+    fn arm_alias_guard_is_case_insensitive() {
+        let conn = open_in_memory().unwrap();
+        for bad in ["fe", "FE", "Le", "lE"] {
+            assert!(entry_not_forgotten_arm_for(&conn, bad).is_err(), "{bad}");
+        }
     }
 
     // ===== Issue #378 Task 2: forgotten-facts survival guard =====

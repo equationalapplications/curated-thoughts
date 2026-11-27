@@ -504,9 +504,11 @@ mod tests {
     }
 
     #[test]
-    fn forgotten_fact_does_not_supply_endpoint_label() {
+    fn forgotten_fact_is_dropped_from_labels_and_backlinks() {
         let mut conn = open_in_memory().unwrap();
         let referrer = make_entity(&mut conn, "Referrer", "");
+        seed_fact(&conn, &referrer, "f_gone2", "Gone2 title", "body");
+        seed_backing_event(&conn, &referrer, "ev_gone2", "f_gone2", Some(5));
         seed_fact(&conn, &referrer, "f_gone", "Gone title", "body");
         seed_backing_event(&conn, &referrer, "ev_gone", "f_gone", Some(5));
         seed_self_edge(&conn, &referrer, "f_gone");
@@ -514,6 +516,13 @@ mod tests {
         conn.execute(
             "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
              VALUES ('edge_live', ?1, 'f_live', 'f_live', 'related', 2)",
+            params![referrer],
+        )
+        .unwrap();
+        // live source -> fully-forgotten target must be dropped; live -> live stays.
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_to_gone', ?1, 'f_live', 'f_gone2', 'related', 3)",
             params![referrer],
         )
         .unwrap();
