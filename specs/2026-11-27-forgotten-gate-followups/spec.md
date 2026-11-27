@@ -1,6 +1,6 @@
 # Spec: forgotten-gate follow-ups — bundle round-trip, traversal hoist, live index (#398)
 
-**Status:** Reviewed (owner-approved 2026-11-27 — Kurt, Discord msg 1575947241263472833; two implementation notes folded into plan: strict comment-scoped `forgotten:` parsing with byte-identical id-only lines, and full traversal-entry-point sweep for arm pass-down. r1 2026-11-27: Opus-medium plan review REQUEST CHANGES → all findings verified and folded; spec amended: round-trip fixture redesign, pre-v19 export tolerance, dup reconciliation, one-way compat note, traversal-entry wording)
+**Status:** Reviewed (owner-approved 2026-11-27 — Kurt, Discord msg 1575947241263472833; two implementation notes folded into plan: strict comment-scoped `forgotten:` parsing with byte-identical id-only lines, and full traversal-entry-point sweep for arm pass-down. r1 2026-11-27: Opus-medium plan review REQUEST CHANGES → all findings verified and folded; spec amended: round-trip fixture redesign, pre-v19 export tolerance, dup reconciliation, one-way compat note, traversal-entry wording. r2 2026-11-27: delta review REQUEST CHANGES → folded; spec amended: TWO public traversal entries (`wiki_traverse_graph` + `wiki_context_in_scheme`), dup UPDATE column-guarded, `okf_bundle` integration gate added)
 **Date:** 2026-11-27
 **Ruling issue:** equationalapplications/curated-thoughts#398
 **Folded issues:** #399, #400, #401 (one PR, owner-directed single-delivery fold; owner directive 2026-11-27: no new issues this session — every new finding lands in this PR)
@@ -104,15 +104,18 @@ repeated. The PR fixes all four in one review-manageable diff.
   WHERE id = ? AND forgotten_at IS NULL`), or an already-synced brain
   keeps the resurrection alive forever. Tombstone wins on conflict: a
   target row already forgotten is never un-forgotten by an incoming
-  live event.
+  live event. The UPDATE is guarded by the same column probe as the
+  INSERT (r2-B2): a pre-v19 target never names the column, so a dup
+  import on a degraded shape cannot abort the transaction.
 
 ### Task 3 — compute gate arms once per traversal (#400, closes #399)
 
-- Build the three arm strings (`arm_s`, `arm_t`, entry arm) ONCE at the
-  public traversal entry — `wiki_traverse_graph`
-  (`src-tauri/src/wiki_graph.rs:779`; the only public entry —
-  `scoped_traverse` `:799` and `cross_partition_traverse` `:909` are
-  private dispatches under it, wording amended r1 to match the plan) —
+- Build the three arm strings (`arm_s`, `arm_t`, entry arm) ONCE at EACH
+  PUBLIC traversal entry (r2-B1: there are TWO — `wiki_traverse_graph`
+  `src-tauri/src/wiki_graph.rs:779` AND `wiki_context_in_scheme`
+  `src-tauri/src/wiki_graph.rs:2418`, which `wiki_context` `:2404`
+  delegates to; `wiki_context`'s `CompositeWalk::walk_seed` sites
+  `:2274/:2306/:2344` are production code and take the walk's gate) —
   and pass them down through
   `fetch_neighbors` into `fetch_outbound_neighbors` and
   `fetch_inbound_neighbors`, and to `load_live_entry` and
@@ -183,7 +186,10 @@ on the build-cache filesystem (repo AGENTS.md build discipline).
 4. **Traversal tests (existing, must stay green):
    `forgotten_gate_closes_graph_bypass_sites`,
    `forgotten_neighbor_edges_are_gated_in_traversal`.** Plus a new
-   no-meta-read test for gate probes (task 3).
+   no-meta-read characterization for gate probes (task 3): with
+   `llm_wiki_meta` dropped, both public traversals' gate arms work and
+   `wiki_context` still fails closed on its scoring-path scheme read
+   (r2-B1/M2).
 5. **Index tests:** a guard test mirroring
    `related_forgotten_idx_is_guarded_on_both_columns`
    (`src-tauri/src/db/connection.rs:8200`); `EXPLAIN QUERY PLAN` on the
@@ -195,9 +201,12 @@ on the build-cache filesystem (repo AGENTS.md build discipline).
    per the frontend-vitest-gates reference (jsdom builtin bundling,
    cold-cache repro rules).
 7. **Full gates:** `cargo --manifest-path src-tauri/Cargo.toml test
-   --lib --features test-utils` and `cargo --manifest-path
-   tools/Cargo.toml test --lib --features test-utils`, both green; no
-   new clippy findings versus the base commit.
+   --lib --features test-utils`, the INTEGRATION target `cargo
+   --manifest-path src-tauri/Cargo.toml test --test okf_bundle
+   --features test-utils` (r2-M1 — `--lib` gates cannot see it), and
+   `cargo --manifest-path tools/Cargo.toml test --lib --features
+   test-utils`, all green; no new clippy findings versus the base
+   commit.
 
 ## Non-goals
 
