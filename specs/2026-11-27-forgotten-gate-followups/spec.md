@@ -1,6 +1,6 @@
 # Spec: forgotten-gate follow-ups — bundle round-trip, traversal hoist, live index (#398)
 
-**Status:** Reviewed (owner-approved 2026-11-27 — Kurt, Discord msg 1575947241263472833; two implementation notes folded into plan: strict comment-scoped `forgotten:` parsing with byte-identical id-only lines, and full traversal-entry-point sweep for arm pass-down)
+**Status:** Reviewed (owner-approved 2026-11-27 — Kurt, Discord msg 1575947241263472833; two implementation notes folded into plan: strict comment-scoped `forgotten:` parsing with byte-identical id-only lines, and full traversal-entry-point sweep for arm pass-down. r1 2026-11-27: Opus-medium plan review REQUEST CHANGES → all findings verified and folded; spec amended: round-trip fixture redesign, pre-v19 export tolerance, dup reconciliation, one-way compat note, traversal-entry wording)
 **Date:** 2026-11-27
 **Ruling issue:** equationalapplications/curated-thoughts#398
 **Folded issues:** #399, #400, #401 (one PR, owner-directed single-delivery fold; owner directive 2026-11-27: no new issues this session — every new finding lands in this PR)
@@ -54,8 +54,12 @@ repeated. The PR fixes all four in one review-manageable diff.
   Rejected per #398: dropping forgotten rows from bundles loses
   tombstone data and changes backup semantics.
 - **New bundle format version or JSON sidecar for events.** Rejected:
-  format churn. The log-line grammar extension below is backward
-  compatible in both directions.
+  format churn. The log-line grammar extension is forward compatible
+  (old bundles import unchanged). It is ONE-WAY compatible backward:
+  an older binary importing a new bundle parses the extended comment as
+  an invalid id and imports the affected event under a generated id
+  (r1-M2, disclosed to owner 2026-11-27; affects only events carrying
+  the `forgotten:` key, and only cross-version bundle exchange).
 - **Memoize probes per connection instead of pass-down (#400).**
   Rejected: connection-level caches hide mid-life schema changes and
   add hidden state. Pass-down keeps one explicit shape resolution per
@@ -68,7 +72,10 @@ repeated. The PR fixes all four in one review-manageable diff.
 - Add `pub forgotten_at: Option<i64>` to `ExportEvent`
   (`src-tauri/src/okf/bundle_write.rs:18`).
 - `load_events` (`src-tauri/src/db/bundle_io.rs:222`) selects
-  `forgotten_at` and populates the field.
+  `forgotten_at` and populates the field. The export entry probes the
+  column ONCE with `existing_columns` and selects `NULL AS forgotten_at`
+  on a pre-v19 brain, so exporting never fails on a degraded shape
+  (r1-M1 — same tolerance every other surface shows).
 - Extend the event-line grammar. The log line today is
   `({event_type}) {summary} <!-- id: {event_id} -->`. When
   `forgotten_at` is `Some(ms)`, the comment gains a `forgotten:` key:
@@ -92,13 +99,21 @@ repeated. The PR fixes all four in one review-manageable diff.
   binaries (no `forgotten:` key): import as live events, exactly as
   today. Merge and Replace modes share the path and both carry the
   flag.
+- **Dup reconciliation (r1-M3):** a duplicate that arrives forgotten
+  must tombstone the target's live row (`UPDATE … SET forgotten_at = ?
+  WHERE id = ? AND forgotten_at IS NULL`), or an already-synced brain
+  keeps the resurrection alive forever. Tombstone wins on conflict: a
+  target row already forgotten is never un-forgotten by an incoming
+  live event.
 
 ### Task 3 — compute gate arms once per traversal (#400, closes #399)
 
-- Build the three arm strings (`arm_s`, `arm_t`, entry arm) once at
-  each traversal entry — `scoped_traverse`
-  (`src-tauri/src/wiki_graph.rs:799`) and `cross_partition_traverse`
-  (`src-tauri/src/wiki_graph.rs:909`) — and pass them down through
+- Build the three arm strings (`arm_s`, `arm_t`, entry arm) ONCE at the
+  public traversal entry — `wiki_traverse_graph`
+  (`src-tauri/src/wiki_graph.rs:779`; the only public entry —
+  `scoped_traverse` `:799` and `cross_partition_traverse` `:909` are
+  private dispatches under it, wording amended r1 to match the plan) —
+  and pass them down through
   `fetch_neighbors` into `fetch_outbound_neighbors` and
   `fetch_inbound_neighbors`, and to `load_live_entry` and
   `live_entry_exists`.
@@ -148,14 +163,20 @@ All Rust suites run with
 `CARGO_TARGET_DIR=<repo>/.cargo-shared-target` exported and ≥30G free
 on the build-cache filesystem (repo AGENTS.md build discipline).
 
-1. **Round-trip test (#398 acceptance):** seed an entry plus two
-   events in a temp brain, set `forgotten_at` on one event via the
-   engine-shape UPDATE, export a bundle, apply it to a fresh temp
-   brain, assert the imported event row carries `forgotten_at` and the
-   entry stays hidden by the gate on the importing brain.
+1. **Round-trip test (#398 acceptance, r1-B2):** the survival guard
+   keeps an entry alive when ANY live backing event exists, so the two
+   events must back DIFFERENT entries. Seed TWO live entries (`fact_a`,
+   `fact_b` — neither `user_stated`, `id = entity_id`, nor `tier_*`,
+   avoiding all carve-outs), link `evt_dead` (forgotten via the
+   engine-shape UPDATE) to `fact_a` and `evt_live` to `fact_b`, export,
+   apply to a fresh temp brain, and assert the imported `evt_dead` row
+   carries `forgotten_at`, `fact_a` is hidden by the gate on the
+   importing brain, and `fact_b` stays visible.
 2. **Back-compat tests:** a bundle with no `forgotten:` key imports as
    live events; applying to a pre-v19 target (column dropped) inserts
-   without error and unchanged counts.
+   without error and unchanged counts; exporting from a pre-v19 brain
+   succeeds (r1-M1); a duplicate arriving forgotten tombstones the
+   target's live row (r1-M3).
 3. **Grammar unit tests:** append/parse round trip with and without
    the key; non-numeric value parses as absent; existing id-only lines
    byte-identical.
