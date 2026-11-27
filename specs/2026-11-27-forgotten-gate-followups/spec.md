@@ -1,6 +1,6 @@
 # Spec: forgotten-gate follow-ups — bundle round-trip, traversal hoist, live index (#398)
 
-**Status:** Draft
+**Status:** Reviewed (owner-approved 2026-11-27 — Kurt, Discord msg 1575947241263472833; two implementation notes folded into plan: strict comment-scoped `forgotten:` parsing with byte-identical id-only lines, and full traversal-entry-point sweep for arm pass-down)
 **Date:** 2026-11-27
 **Ruling issue:** equationalapplications/curated-thoughts#398
 **Folded issues:** #399, #400, #401 (one PR, owner-directed single-delivery fold; owner directive 2026-11-27: no new issues this session — every new finding lands in this PR)
