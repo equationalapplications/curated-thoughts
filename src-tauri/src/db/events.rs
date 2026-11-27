@@ -58,6 +58,14 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
     let limit_param = 5 + kinds_count;
     let before_id_param = 6 + kinds_count;
 
+    // Issue #378 D1.1: drop forgotten wiki events; shape-conditional on the
+    // shared Temporal probe (pre-v19 has no column).
+    let forgotten_clause = if crate::wisdom_match::temporal_columns(conn, None)?.has_forgotten_at {
+        "WHERE e.forgotten_at IS NULL"
+    } else {
+        ""
+    };
+
     let sql = format!(
         r#"
         SELECT * FROM (
@@ -83,6 +91,7 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
             LEFT JOIN live_entities ce
               ON ce.id = COALESCE((SELECT merged_into FROM entity_redirects r
                                    WHERE r.entity_id = e.entity_id), e.entity_id)
+            {forgotten_clause}
 
             UNION ALL
 
@@ -192,6 +201,39 @@ mod tests {
 
     fn setup_test_db() -> Result<Connection> {
         open_in_memory()
+    }
+
+    /// Issue #378 D1.1: the unified timeline drops forgotten wiki events;
+    /// the pre-v19 shape (no column) returns everything.
+    #[test]
+    fn list_events_drops_forgotten_events() -> Result<()> {
+        let conn = setup_test_db()?;
+        for id in ["live_1", "gone_1"] {
+            conn.execute(
+                "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+                 VALUES (?1, 'ent_1', 'approved', 'e', 1000)",
+                params![id],
+            )?;
+        }
+        conn.execute(
+            "UPDATE llm_wiki_events SET forgotten_at = 5 WHERE id = 'gone_1'",
+            [],
+        )?;
+        let ids = |c: &Connection| -> Result<Vec<String>> {
+            Ok(list_events(c, &TimelineFilter::default())?
+                .into_iter()
+                .map(|e| e.id)
+                .collect())
+        };
+        assert_eq!(ids(&conn)?, vec!["live_1".to_string()]);
+
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
+             DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
+             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
+        )?;
+        assert_eq!(ids(&conn)?.len(), 2);
+        Ok(())
     }
 
     #[test]

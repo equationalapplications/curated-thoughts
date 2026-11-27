@@ -660,10 +660,17 @@ fn load_events(conn: &Connection, ids: &[String]) -> Result<Vec<EntityEvent>> {
     // worth a sweep across the codebase. See
     // procedures/curated-thoughts-improvement-backlog.md.
     // RECENT_EVENTS_LIMIT is a compile-time constant, formatted not bound.
+    // Issue #378 D1.1: forgotten events are dropped, shape-conditional on the
+    // shared Temporal probe (pre-v19 has no column).
+    let forgotten_clause = if crate::wisdom_match::temporal_columns(conn, None)?.has_forgotten_at {
+        "AND forgotten_at IS NULL"
+    } else {
+        ""
+    };
     let mut stmt = conn.prepare(&format!(
         "SELECT id, event_type, summary, related_entry_id, created_at
          FROM llm_wiki_events
-         WHERE entity_id IN ({})
+         WHERE entity_id IN ({}) {forgotten_clause}
          ORDER BY created_at DESC
          LIMIT {RECENT_EVENTS_LIMIT}",
         in_placeholders(ids)
@@ -1258,6 +1265,43 @@ mod tests {
                 .fact_count,
             1
         );
+    }
+
+    /// Issue #378 D1.1: the entity timeline drops forgotten events; the
+    /// pre-v19 shape (no column) returns everything.
+    #[test]
+    fn load_events_drops_forgotten_events() {
+        let mut conn = open_in_memory().unwrap();
+        let detail = create_entity(
+            &mut conn,
+            &CreateEntityInput {
+                name: "Forgetful".into(),
+                entity_type: None,
+                summary: None,
+            },
+        )
+        .unwrap();
+        seed_event(&conn, &detail.id, "evt-live", "Live.");
+        seed_event(&conn, &detail.id, "evt-gone", "Forgotten.");
+        conn.execute(
+            "UPDATE llm_wiki_events SET forgotten_at = 5 WHERE id = 'evt-gone'",
+            [],
+        )
+        .unwrap();
+
+        let ids = vec![detail.id.clone()];
+        let events = load_events(&conn, &ids).unwrap();
+        assert_eq!(events.len(), 1, "forgotten event dropped: {events:?}");
+        assert_eq!(events[0].id, "evt-live");
+
+        // Degraded pre-v19 shape: readers compile and return everything.
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
+             DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
+             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
+        )
+        .unwrap();
+        assert_eq!(load_events(&conn, &ids).unwrap().len(), 2);
     }
 
     #[test]
