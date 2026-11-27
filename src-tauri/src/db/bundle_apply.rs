@@ -384,6 +384,12 @@ pub fn apply_import(
     let tx = ImmediateTx::begin(conn)?;
     let mut result = ImportResult::default();
 
+    // #398: one column probe per import, not per event. Pre-v19 targets
+    // (no forgotten_at) import without the column — unchanged behavior.
+    let events_have_forgotten_at = crate::db::ddl_compat::existing_columns(&tx, "llm_wiki_events")?
+        .iter()
+        .any(|c| c == "forgotten_at");
+
     // v0.1 → v0.2 fallback (upstream §4.8): if a profile-1 fact has no `sources` key
     // but its body carries a `# Citations` list, synthesize `okf_sources` from
     // the URLs (capturing every URL, not just the first).
@@ -728,24 +734,59 @@ pub fn apply_import(
                 }
             };
             if is_dup {
+                if events_have_forgotten_at {
+                    if let (Some(ms), Some(id)) = (ev.forgotten_at, ev.event_id.as_deref()) {
+                        // #398: a dup whose source row is forgotten must tombstone the
+                        // target's live row — otherwise an already-synced brain keeps
+                        // the forgotten event alive forever (the exact resurrection
+                        // #398 fixes). Pre-v19 targets skip this (no column to set).
+                        // Tombstone wins on conflict (spec r1-M3): only a live target
+                        // row is tombstoned; a target row already forgotten is never
+                        // un-forgotten by an incoming live event. The reconciled dup
+                        // counts ONLY as events_skipped — the tombstone is
+                        // intentionally silent in ImportResult (r3 minor 6).
+                        tx.execute(
+                            "UPDATE llm_wiki_events SET forgotten_at = ?1
+                             WHERE id = ?2 AND forgotten_at IS NULL",
+                            params![ms, id],
+                        )?;
+                    }
+                }
                 result.events_skipped += 1;
                 continue;
             }
             let created_at = ms_from_utc_date(&ev.date).unwrap_or(now_ms);
             let related = ev.related_entry_id.as_deref().map(|id| mapped(id, &id_map));
-            tx.execute(
-                "INSERT OR IGNORE INTO llm_wiki_events
-                    (id, entity_id, event_type, summary, related_entry_id, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6)",
-                params![
-                    event_id,
-                    target_entity_id,
-                    ev.event_type,
-                    ev.summary,
-                    related,
-                    created_at
-                ],
-            )?;
+            if events_have_forgotten_at {
+                tx.execute(
+                    "INSERT OR IGNORE INTO llm_wiki_events
+                        (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![
+                        event_id,
+                        target_entity_id,
+                        ev.event_type,
+                        ev.summary,
+                        related,
+                        created_at,
+                        ev.forgotten_at
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT OR IGNORE INTO llm_wiki_events
+                        (id, entity_id, event_type, summary, related_entry_id, created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![
+                        event_id,
+                        target_entity_id,
+                        ev.event_type,
+                        ev.summary,
+                        related,
+                        created_at
+                    ],
+                )?;
+            }
             result.events_added += 1;
         }
 
@@ -1081,17 +1122,32 @@ mod tests {
                 )
                 .unwrap();
             }
-            conn.execute("UPDATE llm_wiki_entries SET deleted_at = 5 WHERE id = 't9_soft'", [])
-                .unwrap();
+            conn.execute(
+                "UPDATE llm_wiki_entries SET deleted_at = 5 WHERE id = 't9_soft'",
+                [],
+            )
+            .unwrap();
             assert_eq!(rows(&conn, "t9_soft"), 1);
             clear_one_entity_content(&conn, "ent_t9", 1).unwrap();
             let left: i64 = conn
-                .query_row("SELECT COUNT(*) FROM llm_wiki_entries WHERE entity_id = 'ent_t9'", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_wiki_entries WHERE entity_id = 'ent_t9'",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap();
             assert_eq!(left, 0, "entity wiped");
             let expected = i64::from(marker);
-            assert_eq!(rows(&conn, "t9_soft"), expected, "marker={marker}: soft row");
-            assert_eq!(rows(&conn, "t9_live"), expected, "marker={marker}: live row");
+            assert_eq!(
+                rows(&conn, "t9_soft"),
+                expected,
+                "marker={marker}: soft row"
+            );
+            assert_eq!(
+                rows(&conn, "t9_live"),
+                expected,
+                "marker={marker}: live row"
+            );
         }
     }
 
@@ -1781,5 +1837,197 @@ mod tests {
             empty_pid_rows, 0,
             "no evidence row may be written under an empty proposal_id"
         );
+    }
+
+    /// #398 acceptance: a bundle round-tripped through DISK TEXT (export →
+    /// write → read back → apply) must carry `forgotten_at` verbatim, and the
+    /// gate must hide the entry whose ONLY backing event is forgotten. The
+    /// survival guard keeps an entry alive if ANY live backing event exists,
+    /// so the two events back DIFFERENT entries (r1-B2).
+    #[test]
+    fn round_trip_preserves_forgotten_at_and_gate_hides_entry() {
+        // 1. Source brain: `open_in_memory()` already yields the v19 shape
+        //    (`engine9_migrated_fixture` is private to connection.rs). Seed
+        //    TWO live entries, both source_type NOT 'user_stated' (carve-out)
+        //    and neither id == entity_id nor tier_* (carve-outs).
+        let mut src = open_in_memory().unwrap();
+        src.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_src', 'ent_src', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        for fact_id in ["fact_a", "fact_b"] {
+            src.execute(
+                "INSERT INTO llm_wiki_entries (
+                    id, entity_id, title, body, tags, confidence, source_type,
+                    created_at, updated_at
+                 ) VALUES (?1, 'ent_src', 'T', 'B', '[]', 'certain', 'user_confirmed', 1, 1)",
+                [fact_id],
+            )
+            .unwrap();
+        }
+        src.execute(
+            "INSERT INTO llm_wiki_events
+                (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('evt_dead', 'ent_src', 'action', 'd', 'fact_a', 1, 1732713600000)",
+            [],
+        )
+        .unwrap();
+        src.execute(
+            "INSERT INTO llm_wiki_events
+                (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('evt_live', 'ent_src', 'action', 'l', 'fact_b', 1, NULL)",
+            [],
+        )
+        .unwrap();
+
+        // 2. Round-trip through DISK TEXT — never build the ParsedBundle in
+        //    memory (r3 minor 2): export → write_bundle → files on a temp dir
+        //    → read the files back → parse → apply on a FRESH brain.
+        let export = crate::db::bundle_io::load_export_entities(&src, None).unwrap();
+        let files = crate::okf::bundle_write::write_bundle(&export).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut back = Vec::new();
+        for f in &files {
+            let dst = tmp.path().join(&f.path);
+            if let Some(dir) = dst.parent() {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            std::fs::write(&dst, &f.content).unwrap();
+            back.push(crate::okf::types::OkfFile {
+                path: f.path.clone(),
+                content: std::fs::read_to_string(&dst).unwrap(),
+            });
+        }
+        let bundle = crate::okf::bundle_read::parse_bundle(&back).unwrap();
+        let mut conn = open_in_memory().unwrap();
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+        assert_eq!(result.events_added, 2, "both events import as new");
+
+        // 3. Assert with the REAL gate arm formatted in (no pseudo-SQL).
+        let arm = crate::wisdom_match::forgotten_entry_arm(
+            &crate::wisdom_match::temporal_columns_shape_only(&conn).unwrap(),
+        );
+        let visible = |id: &str| -> i64 {
+            let sql = format!(
+                "SELECT COUNT(*) FROM llm_wiki_entries e \
+                 WHERE e.id='{id}' AND e.deleted_at IS NULL{arm}"
+            );
+            conn.query_row(&sql, [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(visible("fact_a"), 0, "fact_a's only event is forgotten");
+        assert_eq!(visible("fact_b"), 1, "fact_b has a live backing event");
+        let dead: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_dead'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dead, Some(1732713600000), "evt_dead carries forgotten_at");
+        let live: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_live'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, None, "evt_live stays live");
+    }
+
+    /// r1-M3: the target already has evt_dead LIVE (imported before the
+    /// forget). A later bundle says evt_dead forgotten_at = Some(ms).
+    /// `event_exists` marks it dup — but the import must still tombstone the
+    /// target's live row, or an already-synced brain keeps the resurrection
+    /// alive forever. The reconciled dup counts only as `events_skipped` —
+    /// the tombstone is intentionally silent in `ImportResult` (r3 minor 6).
+    #[test]
+    fn dup_import_reconciles_a_forgotten_event() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_a', 'ent_a', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at
+             ) VALUES ('fact_x', 'ent_a', 'T', 'B', '[]', 'certain', 'user_confirmed', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_events
+                (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('evt_dead', 'ent_a', 'action', 'd', 'fact_x', 1, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let mut bundle = sample_bundle();
+        bundle.entities[0].events[0] = ParsedEvent {
+            event_id: Some("evt_dead".into()),
+            event_type: "action".into(),
+            summary: "d".into(),
+            related_entry_id: Some("fact_x".into()),
+            date: "1970-01-01".into(),
+            forgotten_at: Some(1732713600000),
+        };
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        assert_eq!(result.events_skipped, 1, "dup counted as skipped");
+        assert_eq!(result.events_added, 0, "no duplicate row inserted");
+        let forgotten: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_dead'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            forgotten,
+            Some(1732713600000),
+            "the dup's target row must be tombstoned"
+        );
+    }
+
+    /// r1-B3 / r2-B2: a pre-v19 target (no `forgotten_at` column) must import
+    /// without error, twice — the second pass is a dup and must skip cleanly
+    /// instead of aborting prepare with "no such column" and rolling back.
+    #[test]
+    fn pre_v19_target_imports_without_forgotten_column() {
+        let mut conn = open_in_memory().unwrap();
+        crate::db::test_support::drop_forgotten_column(&conn);
+
+        let mut bundle = sample_bundle();
+        bundle.entities[0].events[0].forgotten_at = Some(1732713600000);
+
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+        assert_eq!(result.events_added, 1, "first import adds the event");
+
+        // r2-B2: the SAME bundle again — now a dup (event_exists matches by
+        // id) with forgotten_at still Some(ms). Must not abort or roll back.
+        let second = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+        assert_eq!(second.events_skipped, 1, "dup skipped on re-import");
+        assert_eq!(second.events_added, 0);
+    }
+
+    /// A legacy bundle (no `forgotten:` key) imports live on a v19 brain.
+    #[test]
+    fn legacy_bundle_without_key_imports_live() {
+        let mut conn = open_in_memory().unwrap();
+        let result = apply_import(&mut conn, &sample_bundle(), ImportMode::Merge).unwrap();
+        assert_eq!(result.events_added, 1);
+        let forgotten: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(forgotten, None, "a legacy event must land live");
     }
 }
