@@ -263,21 +263,30 @@ QUERY PLAN
   2); carries a targeted `#[allow(clippy::too_many_arguments)]` rather
   than a signature refactor, to preserve the converged plan's
   prescribed shapes.
-- **Dup tombstone scope evolved past this text:** §102-era wording has
-  the dup UPDATE as `WHERE id = ? AND forgotten_at IS NULL`. The
-  shipped scope is `AND entity_id IN (<target cluster>)` — evolved in
-  two review folds (T1.5 r1: entity scoping against unrelated-entity
-  collisions; CodeRabbit CR-1 + T4 r1 M1: widened to the CLUSTER via
-  `entities::cluster_ids` so merged-loser-owned rows reconcile, and a
-  forgotten FRESH INSERT whose related entry sits outside the cluster
-  is downgraded to a live insert with a warning instead of hiding a
-  foreign entry — the survival guard is entity-agnostic).
-- **Parse edge behaviors:** §85's "lines without the key parse exactly
-  as today" holds for well-formed lines, but three edge behaviors
+- **Dup tombstone scope evolved past this text:** the test-plan line
+  102 wording has the dup UPDATE as `WHERE id = ? AND forgotten_at IS
+  NULL`. The shipped scope is `AND entity_id IN (<target cluster>)` —
+  evolved in two review folds (T1.5 r1: entity scoping against
+  unrelated-entity collisions; CodeRabbit CR-1 + T4 r1 M1: widened to
+  the CLUSTER via `entities::cluster_ids` so merged-loser-owned rows
+  reconcile). T4 r2 additionally gates the forgotten FRESH INSERT: a
+  tombstone whose related entry is owned outside the import's cluster
+  (or not locally resolvable) keeps the verbatim tombstone but drops
+  the LINKAGE (`related_entry_id = NULL`) with an import warning — a
+  forgotten event with no related id can neither hide nor back an
+  entry, and its re-import dup is a no-op (tombstone-wins).
+  Task-related related ids are kept (the guard joins entries only).
+  This slightly narrows "apply verbatim" for unprovable linkage only;
+  flagged to the owner in the merge ask.
+- **Parse edge behaviors:** the earlier claim "lines without the key
+  parse exactly as today" (spec test-plan line 85) holds for
+  well-formed lines, but three edge behaviors
   changed (documented in `log_md.rs::parse_event_id_comment`): an empty
   id and a bare `id:` prefix yield `None` (previously `Some("")`), and
   a trailing junk token yields `Some("<first token>")` (previously the
   whole comment was rejected).
-- **Files touched is wider than §151:** also `okf/event_line.rs`,
-  `db/test_support.rs`, `wisdom_match.rs`, `db/connection.rs`, and the
-  regenerated migrated-shape golden fixture noted above.
+- **Files touched is wider than the Files-touched section (line 151):**
+  also `okf/event_line.rs`, `db/test_support.rs`, `db/entities.rs`,
+  `db/events.rs`, `db/mod.rs`, `wisdom_match.rs`, `db/connection.rs`,
+  `tests/okf_bundle.rs`, and the regenerated migrated-shape golden
+  fixture noted above.
