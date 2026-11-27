@@ -1,3 +1,21 @@
+## [3.17.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.17.1...v3.17.2) (2026-11-27)
+
+### Bug Fixes
+
+* **confirmations:** consume the dual-gate dirty flag before the apply — closes the superseded-worker set-then-clear race (rung-3 major) ([#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([7b3bf0e](https://github.com/equationalapplications/curated-thoughts/commit/7b3bf0e0f4a3e54dbee1f191ca1f354d59681ab1))
+* **confirmations:** memo pre-read stat in the dual gate; rung-1 folds — ledger path text, race-rule wording ([#382](https://github.com/equationalapplications/curated-thoughts/issues/382), [#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([4f9e1ac](https://github.com/equationalapplications/curated-thoughts/commit/4f9e1ac8f65a4c6bee4e2601b6929a5f06fa1b80))
+* **confirmations:** recover the confirmations slot from a poisoned mutex — a panicking hook no longer disables the drain leg (rung-4 major) ([#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([8007446](https://github.com/equationalapplications/curated-thoughts/commit/80074468d2f13b8377a9bab5b7be9a19cf0e7453))
+* **restore_sync:** marker read failures propagate, destinations preserved byte-exact, rollback removes the marker first (CodeRabbit round 3 — 3 majors) ([584de6d](https://github.com/equationalapplications/curated-thoughts/commit/584de6da1b69e3fc66d9453c3c8aa5fbdb8d6c95))
+* **restore_sync:** marker retained until the config is persisted; failed startup alignment is fail-closed (CodeRabbit T4-follow-up round 2) ([220d25b](https://github.com/equationalapplications/curated-thoughts/commit/220d25b059a615212981e6147b46cbcfe8c2f9b6))
+* **restore_sync:** recovery aligns the config to the marker's destination root — closes the crash-window wrong-root rederive (CodeRabbit T4-follow-up Major) ([189be4a](https://github.com/equationalapplications/curated-thoughts/commit/189be4a6c7c71b3a06afa759b77c3b5114ffefbf))
+* **switch:** rederive stated-ledger keys after restore, unstamp on failure (spec §2-A, [#382](https://github.com/equationalapplications/curated-thoughts/issues/382)) ([2e64dba](https://github.com/equationalapplications/curated-thoughts/commit/2e64dba3c2f42cc73f983bf59cd5c7582e935223))
+* **switch:** T4 fold — structural rederive retry via staged-stamp clear; unstamp error propagated; test + spec hygiene ([#382](https://github.com/equationalapplications/curated-thoughts/issues/382), [#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([a7bb80e](https://github.com/equationalapplications/curated-thoughts/commit/a7bb80eecff10bdea341c0c63308204274dc66d4))
+
+### Performance Improvements
+
+* **confirmations:** replace the per-job dirty flag with an entries-table watermark — the §2-B skip branch becomes reachable ([#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([89cac2d](https://github.com/equationalapplications/curated-thoughts/commit/89cac2d6b8f51e4b0e9463fee9a88019b1be2413))
+* **confirmations:** skip idle-crossing scan unless ledger changed or entries written (spec §2-B, [#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([f9e690b](https://github.com/equationalapplications/curated-thoughts/commit/f9e690b2e633ec8ee27dfaf09983c83feaeadefe))
+
 ## [3.17.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.17.0...v3.17.1) (2026-11-26)
 
 ### Bug Fixes
