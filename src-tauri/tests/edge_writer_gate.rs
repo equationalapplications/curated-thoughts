@@ -46,7 +46,7 @@ const EXPECTED_PRODUCTION_WRITERS: &[(&str, &str)] = &[
 const EXPECTED_FIXTURE_COUNTS: &[(&str, usize)] = &[
     ("src/db/bundle_apply.rs", 4),
     ("src/db/commit.rs", 3),
-    ("src/db/connections.rs", 5), // +2 Task 7 fix-round-1 cluster-closure test fixtures
+    ("src/db/connections.rs", 8), // +2 Task 7 fix-round-1 cluster-closure test fixtures; +3 forgotten-gate label/backlink tests (6d); +3 dropped-edge test fixtures incl. self-edge seed (6f/6g)
     ("src/db/connection.rs", 11), // sso9 lane: seed fixture + late-write abort test (impl-review owxv) + round-3 window tests (rOZt swap, rOZh remap-only, rOZa inherited-manifest, rOZe mixed-case) + slx2 trailing-space fixture + unreadable-partition fixture + NULL-endpoint keep ruling fixture (E6) + ungated-NULL-count fixture (CodeRabbit CHk round on fa887299)
     ("src/db/edge_purge.rs", 2),
     ("src/db/bundle_io.rs", 2),
