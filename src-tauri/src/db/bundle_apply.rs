@@ -1850,7 +1850,7 @@ mod tests {
         //    (`engine9_migrated_fixture` is private to connection.rs). Seed
         //    TWO live entries, both source_type NOT 'user_stated' (carve-out)
         //    and neither id == entity_id nor tier_* (carve-outs).
-        let mut src = open_in_memory().unwrap();
+        let src = open_in_memory().unwrap();
         src.execute(
             "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
              VALUES ('ent_src', 'ent_src', 'concept', '', 1, 1)",
