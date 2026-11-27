@@ -70,6 +70,8 @@ Shared predicate: `entry_eligibility_where` (`src-tauri/src/wisdom_match.rs:577-
 
 Notes: there is **no FTS table over wiki entries** — the "FTS leg" of recall is the LIKE-based `rank_wiki_entries` (`tool_dispatch.rs:450-456`); grep for `fts5`/`MATCH` over wiki tables returns nothing. Every gap above is a WHERE-clause gap, not a post-fetch filter — which is what makes the pushed-into-SQL design (below) a drop-in.
 
+**Implementation outcome (2026-11-27, this lane):** every ❌ above ships gated by the shared arm (`forgotten_entry_arm` / `entry_not_forgotten_arm[_for]` — one SQL definition). Surfaces found and gated during the review cycle (absent from the original map): the tools-crate twins `wiki_rows` / `wiki_entry_sql` + MCP sidecar `curated_get_wiki_entry` (`tools/src/queries.rs`, `tools/src/bin/curated_thoughts_mcp.rs`), traversal edge joins (`wiki_graph.rs` `fetch_outbound_neighbors`/`fetch_inbound_neighbors`, `s`/`t` aliases), entity endpoint labels + backlinks (`db/connections.rs`), and the entity facts payload + fact counts (`db/entities.rs` `load_facts`/`batched_cluster_counts`, serving `get_entity`). Known residual, tracked as issue #398 (deferred, out of approved scope): the OKF bundle export/import round-trip does not carry `forgotten_at`.
+
 ### E4. Cardinality: `related_entry_id` → entry is **many-to-one** (survival guard is mandatory)
 
 - **Schema:** `llm_wiki_events.related_entry_id TEXT` is a plain column with **no UNIQUE constraint and no index** (`okf_ddl.rs:135-145`; the only unique indexes in the DDL target other keys — `okf_ddl.rs:73`, `:130`, `:186`, `:414-415`). Nothing in the schema ties events 1:1 to entries.
