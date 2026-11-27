@@ -668,6 +668,18 @@ pub fn entry_not_forgotten_arm(conn: &Connection) -> Result<String> {
 /// rewritten; the subquery aliases `fe`/`le` are left alone. Empty on
 /// pre-v19 shapes.
 pub fn entry_not_forgotten_arm_for(conn: &Connection, alias: &str) -> Result<String> {
+    let t = temporal_columns_shape_only(conn)?;
+    entry_not_forgotten_arm_for_temporal(&t, alias)
+}
+
+/// Alias-parameterized arm derived from an ALREADY-RESOLVED Temporal.
+/// `entry_not_forgotten_arm_for` = shape probe + this. Traversal (issue
+/// #400) resolves the shape once per walk and calls this per alias.
+pub(crate) fn entry_not_forgotten_arm_for_temporal(
+    t: &Temporal,
+    alias: &str,
+) -> Result<String> {
+    let arm = forgotten_entry_arm(t);
     // The alias is interpolated into SQL: it must be a plain identifier and
     // must not re-bind the arm's own subquery aliases.
     // SQL identifiers are case-insensitive, so `FE`/`Le` re-bind too.
@@ -679,7 +691,6 @@ pub fn entry_not_forgotten_arm_for(conn: &Connection, alias: &str) -> Result<Str
         !alias.eq_ignore_ascii_case("fe") && !alias.eq_ignore_ascii_case("le"),
         "entry_not_forgotten_arm_for: alias must not collide with subquery aliases fe/le"
     );
-    let arm = forgotten_entry_arm(&temporal_columns_shape_only(conn)?);
     if arm.is_empty() || alias == "e" {
         return Ok(arm);
     }

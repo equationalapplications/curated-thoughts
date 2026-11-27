@@ -463,14 +463,43 @@ enum NodeSpace {
     Entity,
 }
 
+/// Walk-start gate arms (issue #400): resolved ONCE at each PUBLIC
+/// traversal entry and passed down. A mid-walk schema change observes the
+/// walk-start shape — accepted (spec §Task 3, amended r2). Owner note 2:
+/// there are TWO public entries (r2-B1) — `wiki_traverse_graph` and
+/// `wiki_context_in_scheme` (`wiki_context` delegates to it). Both resolve
+/// the gate before their walk and pass it down. The entity-space path
+/// (`fetch_entity_neighbors`) does NOT gate: it joins `curated_entities`,
+/// which has no `forgotten_at`.
+///
+/// No `Default` impl, ever: empty arms mean an inert gate, i.e. the walk
+/// FAILS OPEN on a v19 brain. `CompositeWalk` therefore has no
+/// `#[derive(Default)]` either — it is constructed only through
+/// `CompositeWalk::new(gate, truncated)`.
+struct TraversalGate {
+    entry_arm: String,
+    arm_s: String,
+    arm_t: String,
+}
+
+impl TraversalGate {
+    fn resolve(conn: &Connection) -> Result<Self> {
+        let t = crate::wisdom_match::temporal_columns_shape_only(conn)?;
+        let entry_arm = crate::wisdom_match::forgotten_entry_arm(&t);
+        Ok(Self {
+            arm_s: crate::wisdom_match::entry_not_forgotten_arm_for_temporal(&t, "s")?,
+            arm_t: crate::wisdom_match::entry_not_forgotten_arm_for_temporal(&t, "t")?,
+            entry_arm,
+        })
+    }
+}
+
 fn load_live_entry(
     conn: &Connection,
     entity_id: &str,
     id: &str,
+    arm: &str,
 ) -> Result<Option<WikiTraverseNode>> {
-    let arm = crate::wisdom_match::forgotten_entry_arm(
-        &crate::wisdom_match::temporal_columns_shape_only(conn)?,
-    );
     let mut stmt = conn.prepare(&format!(
         "SELECT e.id, e.title, e.entity_id FROM llm_wiki_entries e
          WHERE e.id = ?1 AND e.entity_id = ?2 AND e.deleted_at IS NULL{arm}"
@@ -526,10 +555,11 @@ fn load_live_curated_entity(
 /// they did before heterogeneous traversal existed.
 fn load_live_node(
     conn: &Connection,
+    gate: &TraversalGate,
     entity_id: &str,
     id: &str,
 ) -> Result<Option<(WikiTraverseNode, NodeSpace)>> {
-    if let Some(node) = load_live_entry(conn, entity_id, id)? {
+    if let Some(node) = load_live_entry(conn, entity_id, id, &gate.entry_arm)? {
         return Ok(Some((node, NodeSpace::Entry)));
     }
     if let Some(node) = load_live_curated_entity(conn, Some(entity_id), id)? {
@@ -540,6 +570,7 @@ fn load_live_node(
 
 fn fetch_neighbors(
     conn: &Connection,
+    gate: &TraversalGate,
     entity_id: &str,
     node_id: &str,
     direction: TraverseDirection,
@@ -569,6 +600,7 @@ fn fetch_neighbors(
             if want_outbound {
                 fetch_outbound_neighbors(
                     conn,
+                    gate,
                     entity_id,
                     node_id,
                     &edge_filter,
@@ -579,6 +611,7 @@ fn fetch_neighbors(
             if want_inbound {
                 fetch_inbound_neighbors(
                     conn,
+                    gate,
                     entity_id,
                     node_id,
                     &edge_filter,
@@ -627,14 +660,15 @@ fn fetch_neighbors(
 
 fn fetch_outbound_neighbors(
     conn: &Connection,
+    gate: &TraversalGate,
     entity_id: &str,
     node_id: &str,
     edge_filter: &str,
     edge_types: &[&str],
     out: &mut Vec<(WikiTraverseEdge, String)>,
 ) -> Result<()> {
-    let arm_s = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "s")?;
-    let arm_t = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "t")?;
+    let arm_s = &gate.arm_s;
+    let arm_t = &gate.arm_t;
     let sql = format!(
         "SELECT e.source_id, e.target_id, e.edge_type, t.id, t.title, t.entity_id
          FROM llm_wiki_edges e
@@ -667,14 +701,15 @@ fn fetch_outbound_neighbors(
 
 fn fetch_inbound_neighbors(
     conn: &Connection,
+    gate: &TraversalGate,
     entity_id: &str,
     node_id: &str,
     edge_filter: &str,
     edge_types: &[&str],
     out: &mut Vec<(WikiTraverseEdge, String)>,
 ) -> Result<()> {
-    let arm_s = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "s")?;
-    let arm_t = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "t")?;
+    let arm_s = &gate.arm_s;
+    let arm_t = &gate.arm_t;
     let sql = format!(
         "SELECT e.source_id, e.target_id, e.edge_type, s.id, s.title, s.entity_id
          FROM llm_wiki_edges e
@@ -784,11 +819,18 @@ pub fn wiki_traverse_graph(
     direction: TraverseDirection,
     edge_types: &[&str],
 ) -> Result<WikiTraverseResult> {
+    let gate = TraversalGate::resolve(conn)?;
     match entity_id {
-        Some(entity_id) => {
-            scoped_traverse(conn, entity_id, source_id, max_depth, direction, edge_types)
-        }
-        None => cross_partition_traverse(conn, source_id, direction, edge_types),
+        Some(entity_id) => scoped_traverse(
+            conn,
+            &gate,
+            entity_id,
+            source_id,
+            max_depth,
+            direction,
+            edge_types,
+        ),
+        None => cross_partition_traverse(conn, &gate, source_id, direction, edge_types),
     }
 }
 
@@ -798,6 +840,7 @@ pub fn wiki_traverse_graph(
 /// branch only.
 fn scoped_traverse(
     conn: &Connection,
+    gate: &TraversalGate,
     entity_id: &str,
     source_id: &str,
     max_depth: usize,
@@ -805,7 +848,7 @@ fn scoped_traverse(
     edge_types: &[&str],
 ) -> Result<WikiTraverseResult> {
     let max_depth = clamp_max_depth(max_depth);
-    let Some((seed, space)) = load_live_node(conn, entity_id, source_id)? else {
+    let Some((seed, space)) = load_live_node(conn, gate, entity_id, source_id)? else {
         return Ok(WikiTraverseResult {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -844,6 +887,7 @@ fn scoped_traverse(
         }
         let pairs = fetch_neighbors(
             conn,
+            gate,
             entity_id,
             &current_id,
             direction,
@@ -872,7 +916,9 @@ fn scoped_traverse(
                 // under this partition. A walk must not cross spaces at the
                 // neighbor boundary either (spec section 3).
                 let resolved = match space {
-                    NodeSpace::Entry => load_live_entry(conn, entity_id, &neighbor_id)?,
+                    NodeSpace::Entry => {
+                        load_live_entry(conn, entity_id, &neighbor_id, &gate.entry_arm)?
+                    }
                     NodeSpace::Entity => {
                         load_live_curated_entity(conn, Some(entity_id), &neighbor_id)?
                     }
@@ -908,6 +954,7 @@ fn scoped_traverse(
 /// unchanged.
 fn cross_partition_traverse(
     conn: &Connection,
+    gate: &TraversalGate,
     source_id: &str,
     direction: TraverseDirection,
     edge_types: &[&str],
@@ -918,7 +965,7 @@ fn cross_partition_traverse(
     let seed = match load_live_curated_entity(conn, None, source_id)? {
         Some(seed) => seed,
         None => {
-            let hint = if live_entry_exists(conn, source_id)? {
+            let hint = if live_entry_exists(conn, source_id, &gate.entry_arm)? {
                 "resolves in entry space"
             } else {
                 "not found"
@@ -1147,13 +1194,10 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
 /// Only used to tell "entry-space seed" from "unknown id" in the
 /// cross-partition rejection message, so it answers a bool and reads no
 /// columns; cross-partition mode never traverses entry space.
-fn live_entry_exists(conn: &Connection, id: &str) -> Result<bool> {
+fn live_entry_exists(conn: &Connection, id: &str, arm: &str) -> Result<bool> {
     if !table_exists(conn, "llm_wiki_entries")? {
         return Ok(false);
     }
-    let arm = crate::wisdom_match::forgotten_entry_arm(
-        &crate::wisdom_match::temporal_columns_shape_only(conn)?,
-    );
     let mut stmt = conn.prepare(&format!(
         "SELECT 1 FROM llm_wiki_entries e WHERE e.id = ?1 AND e.deleted_at IS NULL{arm} LIMIT 1"
     ))?;
@@ -1221,10 +1265,19 @@ mod unit_tests {
         assert!(!ids.contains(&"gone"), "forgotten entry in search: {ids:?}");
         assert!(ids.contains(&"kept"), "survival-guard entry missing: {ids:?}");
 
-        assert!(load_live_entry(&conn, "ent", "gone").unwrap().is_none());
-        assert!(load_live_entry(&conn, "ent", "kept").unwrap().is_some());
-        assert!(!live_entry_exists(&conn, "gone").unwrap());
-        assert!(live_entry_exists(&conn, "kept").unwrap());
+        let gate = TraversalGate::resolve(&conn).unwrap();
+        // With the resolved arms, these now prove a RESOLVED gate excludes
+        // the forgotten entry (an empty arm would let "gone" through).
+        assert!(load_live_entry(&conn, "ent", "gone", &gate.entry_arm)
+            .unwrap()
+            .is_none());
+        assert!(
+            load_live_entry(&conn, "ent", "kept", &gate.entry_arm)
+                .unwrap()
+                .is_some()
+        );
+        assert!(!live_entry_exists(&conn, "gone", &gate.entry_arm).unwrap());
+        assert!(live_entry_exists(&conn, "kept", &gate.entry_arm).unwrap());
     }
 
     /// Issue #378 Task 6c: traversal edge joins must not expose a fully
@@ -2107,7 +2160,10 @@ mod unit_tests {
         )
         .unwrap();
 
-        let mut walk = CompositeWalk::default();
+        // r4 minor 2: the gate's origin is written out — resolved from this
+        // fixture, then handed to the walk.
+        let gate = TraversalGate::resolve(&conn).unwrap();
+        let mut walk = CompositeWalk::new(gate, false);
         walk.walk_seed(&conn, "e_lose", "e_lose", 1, TraverseDirection::Both, &[])
             .unwrap();
         assert!(
@@ -2175,6 +2231,143 @@ mod unit_tests {
         );
         assert!(x.get("verified").is_none());
     }
+
+    /// Issue #400 Task 5: the traversal gate probe never reads
+    /// `llm_wiki_meta`. Closes #399 item 1's verification claim. r1 minor 6:
+    /// DROP the meta table entirely — a corrupt VALUE only proves the gate
+    /// doesn't error; a missing TABLE proves the gate never reads it (any
+    /// read would error "no such table"). Key name wisdom_active_scheme
+    /// confirmed at embed_scheme.rs:67.
+    ///
+    /// r2-M2 expectation, stated honestly: the gate probes are ALREADY
+    /// shape-only on main (4ac2ca12) — this test is a CHARACTERIZATION that
+    /// passes before AND after; the only red driving this task is the
+    /// TraversalGate compile failure. The test pins the invariant against
+    /// regression; it does not prove the hoist.
+    ///
+    /// Coverage (r2-B1 + r3 M-A2), with llm_wiki_meta dropped on a v19
+    /// fixture:
+    ///   - wiki_traverse_graph (entry-space seed) → Ok, forgotten entries
+    ///     excluded; live_entry_exists → Ok (gate arms inert of meta);
+    ///   - wiki_context → ERRORS fail-closed: it resolves reader_scheme at
+    ///     :2411 for SCORING — a deliberate meta read OUTSIDE the gate;
+    ///     failing closed on a missing meta table is correct and unchanged;
+    ///   - wiki_context_in_scheme(&conn, …, Some(Scheme::Raw)) → Ok with
+    ///     the gate LIVE (r3 M-A2: caller-resolved scheme bypasses the
+    ///     meta read, so this is the only case that exercises the second
+    ///     entry's gate with meta gone). Assert: forgotten entries absent
+    ///     from the result's entities, survival-guard entries present. A
+    ///     regression that reads meta inside the CompositeWalk gate path
+    ///     fails this case.
+    #[test]
+    fn gate_probe_never_touches_llm_wiki_meta() {
+        let conn = open_in_memory().unwrap();
+        // Survival-guard fixtures need TWO entries per guarded id: "kept"
+        // carries one forgotten AND one live event, so the survival-guard
+        // arm keeps it; "gone" carries only a forgotten one, so the gate
+        // hides it. "ent" is the structural container (id == entity_id) the
+        // walk seeds from.
+        seed_entry(&conn, "ent", "ent");
+        seed_entry(&conn, "ent", "kept");
+        seed_entry(&conn, "ent", "gone");
+        seed_ev(&conn, "e1", "gone", Some(5));
+        seed_ev(&conn, "e2", "kept", Some(5));
+        seed_ev(&conn, "e3", "kept", None);
+        seed_edge(&conn, "ent", "ent", "kept", "relates_to");
+        seed_edge(&conn, "ent", "ent", "gone", "relates_to");
+
+        // Missing TABLE, not corrupt VALUE: any gate read of `llm_wiki_meta`
+        // would error "no such table" here.
+        conn.execute("DROP TABLE llm_wiki_meta", []).unwrap();
+
+        // FIRST entry — wiki_traverse_graph stays Ok with meta gone.
+        let result =
+            wiki_traverse_graph(&conn, Some("ent"), "ent", 2, TraverseDirection::Both, &[])
+                .unwrap();
+        assert!(
+            result.nodes.iter().any(|n| n.id == "kept"),
+            "survival-guard entry missing from traversal: {:?}",
+            result.nodes
+        );
+        assert!(
+            result.nodes.iter().all(|n| n.id != "gone"),
+            "forgotten entry leaked via traversal: {:?}",
+            result.nodes
+        );
+        let gate = TraversalGate::resolve(&conn).unwrap();
+        assert!(
+            !live_entry_exists(&conn, "gone", &gate.entry_arm).unwrap(),
+            "forgotten entry reported live"
+        );
+        assert!(live_entry_exists(&conn, "kept", &gate.entry_arm).unwrap());
+
+        // SECOND entry, scoring leg: `wiki_context` resolves reader_scheme
+        // for SCORING — a deliberate meta read OUTSIDE the gate — so a
+        // missing meta table fails closed. Correct and unchanged.
+        assert!(
+            wiki_context(&conn, &[1.0f32; 8], None, 1, 10).is_err(),
+            "wiki_context must fail closed when llm_wiki_meta is gone"
+        );
+
+        // SECOND entry, gate leg: caller-resolved scheme bypasses the meta
+        // read, so this exercises the CompositeWalk gate with meta gone.
+        let ctx = wiki_context_in_scheme(
+            &conn,
+            &[1.0f32; 8],
+            None,
+            1,
+            10,
+            Some(crate::embed_scheme::Scheme::Raw),
+        )
+        .unwrap();
+        assert!(
+            ctx.entities.iter().any(|n| n.id == "kept"),
+            "survival-guard entry missing from wiki_context entities: {:?}",
+            ctx.entities
+        );
+        assert!(
+            ctx.entities.iter().all(|n| n.id != "gone"),
+            "forgotten entry leaked via wiki_context entities: {:?}",
+            ctx.entities
+        );
+        assert!(
+            ctx.edges
+                .iter()
+                .all(|e| e.source_id != "gone" && e.target_id != "gone"),
+            "forgotten entry leaked via wiki_context edges: {:?}",
+            ctx.edges
+        );
+    }
+
+    /// Issue #400 Task 5: `TraversalGate::resolve` produces arms for BOTH
+    /// schema shapes. Unit test on TraversalGate::resolve: v19 fixture → all
+    /// three arms non-empty; pre-v19 fixture (drop_forgotten_column helper)
+    /// → all three arms EMPTY (gate inert, behavior identical to today).
+    ///
+    /// r1-M4: the once-per-walk property is enforced STRUCTURALLY, not by a
+    /// trace counter — every gate consumer takes &TraversalGate or &str arm
+    /// params, so no per-node probe path exists to call (rusqlite's `trace`
+    /// feature is not enabled — workspace Cargo.toml:30 — and
+    /// `Connection::trace` takes a fn pointer; oracle declined).
+    #[test]
+    fn traversal_gate_resolves_both_shapes() {
+        use crate::db::test_support::drop_forgotten_column;
+
+        // v19 shape (live fixture): all three arms armed.
+        let conn = open_in_memory().unwrap();
+        let gate = TraversalGate::resolve(&conn).unwrap();
+        assert!(!gate.entry_arm.is_empty(), "entry_arm empty on v19 shape");
+        assert!(!gate.arm_s.is_empty(), "arm_s empty on v19 shape");
+        assert!(!gate.arm_t.is_empty(), "arm_t empty on v19 shape");
+
+        // pre-v19 shape: all three arms EMPTY — the gate is inert.
+        let conn = open_in_memory().unwrap();
+        drop_forgotten_column(&conn);
+        let gate = TraversalGate::resolve(&conn).unwrap();
+        assert!(gate.entry_arm.is_empty(), "entry_arm non-empty on pre-v19");
+        assert!(gate.arm_s.is_empty(), "arm_s non-empty on pre-v19");
+        assert!(gate.arm_t.is_empty(), "arm_t non-empty on pre-v19");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2231,7 +2424,6 @@ pub struct WikiContextResult {
 /// reason: an edge is owned by the partition it was written under, and two
 /// partitions can hold the same `(source_id, target_id, edge_type)` without
 /// the two being the same edge.
-#[derive(Default)]
 struct CompositeWalk {
     nodes: HashMap<(String, String), WikiTraverseNode>,
     edges: Vec<WikiTraverseEdge>,
@@ -2245,9 +2437,29 @@ struct CompositeWalk {
     /// on what is legal. Resolved per entity because one `wiki_context` call
     /// can seed from several partitions, each with its own manifest.
     edge_vocabularies: HashMap<String, Option<crate::db::commit::EdgeVocabulary>>,
+    /// Walk-start forgotten-gate arms (issue #400), resolved ONCE by the
+    /// public entry (`wiki_context_in_scheme`) and shared by every seed of
+    /// the walk. No `Default`: an all-empty-arms walk would fail open.
+    gate: TraversalGate,
 }
 
 impl CompositeWalk {
+    /// The ONLY constructor: every field is initialized explicitly. There is
+    /// deliberately no `Default` impl — a defaulted `gate` would carry empty
+    /// arms, i.e. an inert gate, i.e. the walk FAILS OPEN on a v19 brain
+    /// (issue #400, r3 M-A4).
+    fn new(gate: TraversalGate, truncated: bool) -> Self {
+        Self {
+            nodes: HashMap::new(),
+            edges: Vec::new(),
+            edge_keys: HashSet::new(),
+            visited: HashSet::new(),
+            truncated,
+            edge_vocabularies: HashMap::new(),
+            gate,
+        }
+    }
+
     fn at_capacity(&self) -> bool {
         self.nodes.len() >= MAX_TRAVERSAL_NODES
     }
@@ -2271,7 +2483,7 @@ impl CompositeWalk {
             self.truncated = true;
             return Ok(());
         }
-        let Some((seed, space)) = load_live_node(conn, entity_id, source_id)? else {
+        let Some((seed, space)) = load_live_node(conn, &self.gate, entity_id, source_id)? else {
             return Ok(());
         };
 
@@ -2305,6 +2517,7 @@ impl CompositeWalk {
                 });
             let pairs = fetch_neighbors(
                 conn,
+                &self.gate,
                 entity_id,
                 &current_id,
                 direction,
@@ -2341,7 +2554,9 @@ impl CompositeWalk {
                     // Resolve in the walk's own space, never across it — the
                     // #134 neighbor-boundary contract.
                     let resolved = match space {
-                        NodeSpace::Entry => load_live_entry(conn, entity_id, &neighbor_id)?,
+                        NodeSpace::Entry => {
+                            load_live_entry(conn, entity_id, &neighbor_id, &self.gate.entry_arm)?
+                        }
                         NodeSpace::Entity => {
                             load_live_curated_entity(conn, Some(entity_id), &neighbor_id)?
                         }
@@ -2425,26 +2640,25 @@ pub fn wiki_context_in_scheme(
 ) -> Result<WikiContextResult> {
     let max_facts = max_facts.clamp(1, MAX_CONTEXT_FACTS);
     let clamped_depth = clamp_max_depth(depth);
+    // Walk-start gate arms (issue #400): resolved ONCE at this public entry,
+    // before the seed loop (up to 25 seeds), and handed to the CompositeWalk.
+    let gate = TraversalGate::resolve(conn)?;
 
     // The default all-live-entries contract from #133 is preserved: entity_ids
     // stays `None`, and `tier` narrows only when the caller asked it to.
     let facts = wiki_search_in_scheme(conn, query_vec, None, tier, max_facts, scheme)?;
 
-    let mut walk = CompositeWalk {
-        // `truncated` means the walk is **narrower** than the caller asked
-        // for, so the neighborhood may be incomplete. A clamped depth that
-        // is *wider* than the caller asked for (e.g. `depth: 0` clamps to
-        // 1) is not truncation — the walk returned more than requested, and
-        // the caller does not have a partial-neighbourhood hazard to
-        // reason about. Report truncation only when the cap shrank the
-        // walk, which happens inside `walk_seed` once the node budget is
-        // exhausted.
-        truncated: clamped_depth < depth,
-        // Edge vocabularies are resolved inside `walk_seed`, per seed
-        // entity: `wiki_search` can return facts from several entity_ids,
-        // and each partition's strict manifest gates only its own edges.
-        ..Default::default()
-    };
+    // `truncated` means the walk is **narrower** than the caller asked
+    // for, so the neighborhood may be incomplete. A clamped depth that
+    // is *wider* than the caller asked for (e.g. `depth: 0` clamps to
+    // 1) is not truncation — the walk returned more than requested, and
+    // the caller does not have a partial-neighbourhood hazard to
+    // reason about. Report truncation only when the cap shrank the
+    // walk, which happens inside `walk_seed` once the node budget is
+    // exhausted. Edge vocabularies are resolved inside `walk_seed`, per
+    // seed entity: `wiki_search` can return facts from several entity_ids,
+    // and each partition's strict manifest gates only its own edges.
+    let mut walk = CompositeWalk::new(gate, clamped_depth < depth);
 
     // Seeds are deduplicated: several facts commonly share one entity, and
     // re-walking it would spend the shared node budget on work already done.
