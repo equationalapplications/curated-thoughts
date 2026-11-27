@@ -94,8 +94,26 @@ pub struct PipelineWorker {
 
 /// Hook run on the worker's own connection once the queue has drained.
 pub type ConfirmationsHook = Box<dyn Fn(&Connection) -> Result<()> + Send>;
+
 /// Shared install slot between `PipelineHandle` and its worker.
 pub type ConfirmationsSlot = Arc<std::sync::Mutex<Option<ConfirmationsHook>>>;
+
+/// Lock the confirmations slot, recovering from a poisoned mutex. The
+/// production hook is write-once (`start_pipeline` installs an immutable `Fn`
+/// capturing only `Arc`/`PathBuf` state), and a panicking HOOK leaves the
+/// gate's memo at its pre-read pair, so recovery is sound for that hook:
+/// without it, the one hook panic the `catch_unwind` leg exists to survive
+/// would poison the slot and permanently disable the drain hook (a plain
+/// `lock()` on the probe path would read "not installed" for the life of
+/// the pipeline).
+fn lock_confirmations_slot(
+    slot: &ConfirmationsSlot,
+) -> std::sync::MutexGuard<'_, Option<ConfirmationsHook>> {
+    match slot.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
 
 /// After a counted job leaves `pending` at 0, the worker waits this long for
 /// a straggler before treating the queue as drained (`PendingCount(0)` alone
@@ -215,7 +233,7 @@ impl PipelineWorker {
                 Some(j) => j,
                 None => {
                     let hook_installed =
-                        probe && self.stated_confirmations.lock().is_ok_and(|g| g.is_some());
+                        probe && lock_confirmations_slot(&self.stated_confirmations).is_some();
                     let received = if hook_installed {
                         match self.rx.recv_timeout(DRAIN_PROBE) {
                             Ok(j) => Some(j),
@@ -235,13 +253,15 @@ impl PipelineWorker {
                                 // retries.
                                 let fired =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        if let Ok(g) = self.stated_confirmations.lock() {
-                                            if let Some(hook) = g.as_ref() {
-                                                if let Err(e) = hook(&conn) {
-                                                    eprintln!(
-                                                        "[pipeline] stated confirmations hook: {e:#}"
-                                                    );
-                                                }
+                                        // Poison-recovering lock: a panicking
+                                        // hook must not disable this leg (see
+                                        // `lock_confirmations_slot`).
+                                        let g = lock_confirmations_slot(&self.stated_confirmations);
+                                        if let Some(hook) = g.as_ref() {
+                                            if let Err(e) = hook(&conn) {
+                                                eprintln!(
+                                                    "[pipeline] stated confirmations hook: {e:#}"
+                                                );
                                             }
                                         }
                                     }));
@@ -386,7 +406,6 @@ impl PipelineWorker {
                 let msg = format!("panic processing {}: {:?}", job_path, e);
                 eprintln!("[pipeline] {}", msg);
             }
-
             if count_pending {
                 // CAS loop instead of `fetch_update`: the newer Rust
                 // toolchain (1.97+) denies the method outright (renamed to
@@ -1386,10 +1405,10 @@ impl PipelineHandle {
     /// Install the post-drain hook. `start_pipeline` installs it for every
     /// rooted handle; it fires on every 1→0 drain crossing until the worker
     /// is superseded.
-    pub fn install_stated_confirmations(&self, hook: ConfirmationsHook) {
-        if let Ok(mut g) = self.stated_confirmations.lock() {
-            *g = Some(hook);
-        }
+    fn install_stated_confirmations(&self, hook: ConfirmationsHook) {
+        // Poison-recovering lock: the slot data is write-once and this runs on
+        // the handle's install path (see `lock_confirmations_slot`).
+        *lock_confirmations_slot(&self.stated_confirmations) = Some(hook);
     }
 
     /// Rebuild the channel and spawn a replacement worker, returning the new
@@ -1434,6 +1453,7 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
     let pending = Arc::new(AtomicUsize::new(0));
     let heartbeat = Arc::new(watchdog::heartbeat::Heartbeat::new());
     let stated_confirmations: ConfirmationsSlot = Arc::new(std::sync::Mutex::new(None));
+    let confirmations_gate = Arc::new(ConfirmationsGate::new());
     let worker = PipelineWorker::new_with_vault(
         db_path.clone(),
         rx,
@@ -1465,11 +1485,101 @@ pub fn start_pipeline(db_path: PathBuf, vault_root: Option<PathBuf>) -> Pipeline
     // gets it (#381). `root` is already canonical at every caller; do not
     // re-canonicalize.
     if let Some(root) = handle.vault_root.clone() {
+        let ledger_path = root
+            .join(crate::db::stated_ledger::STATED_DIR)
+            .join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER);
         handle.install_stated_confirmations(Box::new(move |conn| {
-            crate::db::stated_ledger::apply_stored_confirmations(conn, &root).map(|_| ())
+            let watermark = crate::db::stated_ledger::entries_watermark(conn)?;
+            confirmations_gate.fire(&ledger_path, watermark, || {
+                crate::db::stated_ledger::apply_stored_confirmations(conn, &root)
+            })
         }));
     }
     handle
+}
+
+/// Gate for the post-drain confirmations hook (spec §2-B, Q2=2 as refined by
+/// the 2026-11-26 owner ruling): the scan runs on the first fire, when the
+/// ledger file's stat changed, OR when the live `llm_wiki_entries` table
+/// changed — detected by the caller-supplied entries watermark
+/// (`stated_ledger::entries_watermark`), which moves for every insert and
+/// delete — two bounded miss classes are accepted (T4 n1): in-place
+/// title/body rewrites and a hard-delete-plus-insert that reuses the rowid;
+/// such a crossing may skip once and the miss heals on the next writer or
+/// ledger append (see the field doc below for the full statement).
+/// (worker ingests as well as out-of-worker deposits, approvals, and
+/// synthesis). Memoized state survives respawns; the hook is the only
+/// caller.
+/// A gate memo pair: the ledger file's `(mtime_nanos, len)` plus the live
+/// entries-table watermark `(row_count, max_rowid)`, both captured pre-read.
+type GateMemo = ((u64, u64), (i64, i64));
+
+pub struct ConfirmationsGate {
+    memo: std::sync::Mutex<Option<GateMemo>>,
+}
+
+/// `(mtime_nanos, len)` of the ledger file; `(0, 0)` when absent/unreadable.
+fn ledger_stat(path: &std::path::Path) -> (u64, u64) {
+    std::fs::metadata(path)
+        .map(|m| {
+            let nanos = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            (nanos, m.len())
+        })
+        .unwrap_or((0, 0))
+}
+
+impl ConfirmationsGate {
+    fn new() -> Self {
+        ConfirmationsGate {
+            memo: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn fire<F>(&self, ledger: &std::path::Path, watermark: (i64, i64), apply: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<usize>,
+    {
+        let cur = ledger_stat(ledger);
+        let memo = self.memo.lock().ok().and_then(|g| *g);
+        // The apply reads TWO inputs, and BOTH are captured pre-read:
+        // the ledger file (stat'd above) and the live `llm_wiki_entries`
+        // table (watermark, read by the hook before this call — the table
+        // can change without the ledger stat moving, which is the whole
+        // point of the second trigger). A write that lands at or after
+        // either capture moves that trigger, forcing a rescan on the next
+        // fire; a write the apply's SELECT already saw is captured as seen.
+        // Nothing is consumed, so nothing can be lost to a concurrent
+        // writer — including a superseded worker's mid-apply ingest (T4 M1
+        // lineage): a failed or panicking apply leaves the memo untouched,
+        // so the next fire retries.
+        if memo == Some((cur, watermark)) {
+            return Ok(());
+        }
+        // A panic must not advance the memo (the drain probe runs the hook
+        // under catch_unwind and retries the leg); an Err propagates with
+        // the memo equally untouched — the next fire retries either way.
+        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(apply));
+        match applied {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+        // Memo the PRE-read pair (`cur`, `watermark`): any ledger append or
+        // entries-table write that lands at or after these captures — during
+        // or after the apply — moves its trigger and forces a rescan on the
+        // next fire. Capturing AFTER the reads instead would record
+        // not-yet-applied state as already seen (the unsafe direction), so
+        // the capture order is stat/watermark-before-read.
+        if let Ok(mut g) = self.memo.lock() {
+            *g = Some((cur, watermark));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1998,6 +2108,62 @@ mod watchdog_integration_tests {
         .unwrap()
     }
 
+    /// Write a one-line confirmations ledger confirming fact `f1` at the
+    /// content hash of (`title`, `body`).
+    fn seed_confirmation_ledger(root: &std::path::Path, title: &str, body: &str) {
+        let line = crate::db::stated_ledger::ConfirmationLine {
+            fact_id: "f1".into(),
+            content_hash: crate::db::stated_ledger::confirmation_content_hash(title, body),
+            by: "human:kurt".into(),
+            at: "2026-10-21T00:00:00.000Z".into(),
+        };
+        let stated = root.join("stated");
+        std::fs::create_dir_all(&stated).unwrap();
+        std::fs::write(
+            stated.join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER),
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .unwrap();
+    }
+
+    fn write_raw_ledger(root: &std::path::Path, content: &str) {
+        let stated = root.join("stated");
+        std::fs::create_dir_all(&stated).unwrap();
+        std::fs::write(
+            stated.join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER),
+            content,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn zero_byte_ledger_applies_nothing() {
+        with_rooted_fixture(|db_path, root| {
+            let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
+            seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
+            write_raw_ledger(root, "");
+            assert_eq!(
+                crate::db::stated_ledger::apply_stored_confirmations(&conn, root).unwrap(),
+                0
+            );
+            assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
+        });
+    }
+
+    #[test]
+    fn blank_lines_only_ledger_applies_nothing() {
+        with_rooted_fixture(|db_path, root| {
+            let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
+            seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
+            write_raw_ledger(root, "\n\n  \n");
+            assert_eq!(
+                crate::db::stated_ledger::apply_stored_confirmations(&conn, root).unwrap(),
+                0
+            );
+            assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
+        });
+    }
+
     fn call_installed_hook(handle: &PipelineHandle, conn: &Connection) -> Result<()> {
         let g = handle.stated_confirmations.lock().unwrap();
         let hook = g.as_ref().expect("hook installed");
@@ -2041,20 +2207,7 @@ mod watchdog_integration_tests {
         with_rooted_fixture(|db_path, root| {
             let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
             seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
-            let h = crate::db::stated_ledger::confirmation_content_hash("Alpha", "Alpha body");
-            let line = crate::db::stated_ledger::ConfirmationLine {
-                fact_id: "f1".into(),
-                content_hash: h,
-                by: "human:kurt".into(),
-                at: "2026-10-21T00:00:00.000Z".into(),
-            };
-            let stated = root.join("stated");
-            std::fs::create_dir_all(&stated).unwrap();
-            std::fs::write(
-                stated.join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER),
-                format!("{}\n", serde_json::to_string(&line).unwrap()),
-            )
-            .unwrap();
+            seed_confirmation_ledger(root, "Alpha", "Alpha body");
 
             let handle = start_pipeline(db_path.to_path_buf(), Some(root.to_path_buf()));
             assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
@@ -2072,20 +2225,7 @@ mod watchdog_integration_tests {
         with_rooted_fixture(|db_path, root| {
             let conn = crate::db::connection::open_app_db(db_path, None).unwrap();
             seed_unconfirmed_fact(&conn, "f1", "Alpha", "Alpha body");
-            let h = crate::db::stated_ledger::confirmation_content_hash("Alpha", "Alpha body");
-            let line = crate::db::stated_ledger::ConfirmationLine {
-                fact_id: "f1".into(),
-                content_hash: h,
-                by: "human:kurt".into(),
-                at: "2026-10-21T00:00:00.000Z".into(),
-            };
-            let stated = root.join("stated");
-            std::fs::create_dir_all(&stated).unwrap();
-            std::fs::write(
-                stated.join(crate::db::stated_ledger::CONFIRMATIONS_LEDGER),
-                format!("{}\n", serde_json::to_string(&line).unwrap()),
-            )
-            .unwrap();
+            seed_confirmation_ledger(root, "Alpha", "Alpha body");
             let doc = root.join("doc.md");
             std::fs::write(&doc, "hello world").unwrap();
 
@@ -2122,6 +2262,203 @@ mod watchdog_integration_tests {
             assert_eq!(source_type_of(&conn, "f1"), "librarian_inferred");
             shut_down(handle);
         });
+    }
+
+    #[test]
+    fn panicking_hook_is_reinvoked_on_the_next_crossing() {
+        // The hook runs under `catch_unwind` with the slot's MutexGuard held
+        // across it, so ONE panicking hook poisons the slot mutex — and every
+        // later `lock()` on the probe path reads as "not installed",
+        // permanently disabling the drain hook. This test pins the slot-lock
+        // recovery only: the worker is built WITHOUT the gate, so gate-level
+        // retry is covered by
+        // `panicking_apply_leaves_memo_untouched_and_next_fire_retries`.
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+                // Same pin as every sibling worker-driven test: the two
+                // ingests must not reach a real embed provider.
+                ("CURATED_EMBED_STUB", Some("constant8")),
+            ],
+            || {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let db_path = tmp.path().join("brain.db");
+                crate::db::connection::open_app_db(&db_path, None).unwrap();
+                let doc = tmp.path().join("documents").join("a.md");
+                std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+                std::fs::write(&doc, "hello world").unwrap();
+
+                let slot: ConfirmationsSlot = Arc::new(std::sync::Mutex::new(None));
+                let calls = Arc::new(AtomicUsize::new(0));
+                {
+                    let calls = calls.clone();
+                    *slot.lock().unwrap() = Some(Box::new(move |_conn| {
+                        let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                        if n == 1 {
+                            panic!("first fire blows up");
+                        }
+                        Ok(())
+                    }));
+                }
+
+                let (tx, rx) = sync_channel::<PipelineJob>(8);
+                let heartbeat = Arc::new(Heartbeat::new());
+                let pending = Arc::new(AtomicUsize::new(0));
+                let (status_tx, _status_rx) = mpsc::channel();
+                let worker = PipelineWorker::new_with_vault(
+                    db_path, rx, pending, None, status_tx, heartbeat,
+                )
+                .with_confirmations_slot(slot);
+                let join = std::thread::spawn(move || worker.run());
+
+                // Crossing 1: the hook fires and panics; the worker continues.
+                tx.send(PipelineJob::ingest_counted(
+                    doc.to_string_lossy().to_string(),
+                ))
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while calls.load(Ordering::SeqCst) < 1 && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                assert!(
+                    calls.load(Ordering::SeqCst) >= 1,
+                    "hook never fired on the first crossing"
+                );
+
+                // Crossing 2: the hook must fire AGAIN despite the panic.
+                tx.send(PipelineJob::ingest_counted(
+                    doc.to_string_lossy().to_string(),
+                ))
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while calls.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    2,
+                    "hook dead after one panic — the poisoned slot disabled the drain hook"
+                );
+
+                drop(tx);
+                join.join().unwrap();
+            },
+        );
+    }
+
+    #[test]
+    fn drain_skips_the_hook_apply_when_nothing_changed() {
+        // The #385 m1 deliverable (T4 M1; owner ruling: watermark): crossing 1
+        // ingests a document (the entries table changes) and the hook's apply
+        // runs; crossing 2 re-ingests the SAME unchanged bytes — a no-op that
+        // writes no entries — so neither the ledger stat nor the entries
+        // watermark moved, and the hook's apply must be SKIPPED. The old
+        // job-tail flag was set on every job unconditionally, so this apply
+        // always ran and the skip branch was dead.
+        let brain_tmp = tempfile::TempDir::new().unwrap();
+        let brain = brain_tmp.path().to_string_lossy().into_owned();
+        temp_env::with_vars(
+            [
+                ("CURATED_BRAIN_DIR", Some(brain.as_str())),
+                ("CURATED_BRAIN_CONFIG", None::<&str>),
+                ("CURATED_BRAIN_DB", None::<&str>),
+                ("CURATED_EMBED_STUB", Some("constant8")),
+            ],
+            || {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let db_path = tmp.path().join("brain.db");
+                crate::db::connection::open_app_db(&db_path, None).unwrap();
+                let doc = tmp.path().join("documents").join("a.md");
+                std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+                std::fs::write(&doc, "hello world").unwrap();
+                let ledger_tmp = tempfile::TempDir::new().unwrap();
+                let ledger = ledger_tmp.path().join(".confirmations.jsonl");
+                std::fs::write(&ledger, "{}\n").unwrap();
+
+                let slot: ConfirmationsSlot = Arc::new(std::sync::Mutex::new(None));
+                let gate = Arc::new(ConfirmationsGate::new());
+                let applies = Arc::new(AtomicUsize::new(0));
+                let hook_calls = Arc::new(AtomicUsize::new(0));
+                let hook_gate = gate.clone();
+                {
+                    let applies = applies.clone();
+                    let hook_calls = hook_calls.clone();
+                    let ledger = ledger.clone();
+                    *slot.lock().unwrap() = Some(Box::new(move |conn| {
+                        hook_calls.fetch_add(1, Ordering::SeqCst);
+                        let watermark = crate::db::stated_ledger::entries_watermark(conn)?;
+                        hook_gate.fire(&ledger, watermark, || {
+                            applies.fetch_add(1, Ordering::SeqCst);
+                            Ok(0)
+                        })
+                    }));
+                }
+
+                let (tx, rx) = sync_channel::<PipelineJob>(8);
+                let heartbeat = Arc::new(Heartbeat::new());
+                let pending = Arc::new(AtomicUsize::new(0));
+                let (status_tx, _status_rx) = mpsc::channel();
+                let worker = PipelineWorker::new_with_vault(
+                    db_path,
+                    rx,
+                    pending,
+                    None,
+                    status_tx,
+                    heartbeat,
+                )
+                .with_confirmations_slot(slot);
+                let join = std::thread::spawn(move || worker.run());
+
+                // Crossing 1: a real ingest (entries written) — the apply runs.
+                tx.send(PipelineJob::ingest_counted(
+                    doc.to_string_lossy().to_string(),
+                ))
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while applies.load(Ordering::SeqCst) < 1 && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                assert!(
+                    applies.load(Ordering::SeqCst) >= 1,
+                    "the apply never ran on the first crossing"
+                );
+
+                // Crossing 2: the SAME unchanged bytes — a no-op job. The
+                // hook must fire (it is invoked on every crossing) but its
+                // apply must be SKIPPED: neither the ledger stat nor the
+                // entries watermark moved.
+                tx.send(PipelineJob::ingest_counted(
+                    doc.to_string_lossy().to_string(),
+                ))
+                .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while hook_calls.load(Ordering::SeqCst) < 2
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                assert!(
+                    hook_calls.load(Ordering::SeqCst) >= 2,
+                    "the hook never fired on the second crossing"
+                );
+
+                // The applies assertion waits for the worker to EXIT: asserting
+                // while the second hook may still be in flight would pass even
+                // if a regression re-ran the apply right after the check (T4
+                // follow-up minor). The completed skip case reports one apply.
+                drop(tx);
+                join.join().unwrap();
+                assert_eq!(
+                    applies.load(Ordering::SeqCst),
+                    1,
+                    "the apply re-ran on an unchanged crossing — the skip branch is still dead"
+                );
+            },
+        );
     }
 }
 
@@ -3066,5 +3403,149 @@ mod diff_swap_tests {
                 "mismatch must map to the clean retryable error, got: {msg}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod confirmations_gate_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn ledger() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = tmp.path().join(".confirmations.jsonl");
+        std::fs::write(&p, "a\n").unwrap();
+        (tmp, p)
+    }
+
+    fn bump(n: &Cell<u32>) -> Result<usize> {
+        n.set(n.get() + 1);
+        Ok(0)
+    }
+
+    #[test]
+    fn unchanged_inputs_skip_the_second_scan() {
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, (0, 0), || bump(&n)).unwrap();
+        gate.fire(&p, (0, 0), || bump(&n)).unwrap();
+        assert_eq!(n.get(), 1, "first fire applies, second is skipped");
+    }
+
+    #[test]
+    fn entries_watermark_change_reruns_scan_despite_unchanged_ledger() {
+        // The #385 m1 trigger (owner ruling: watermark): entries written
+        // outside the worker — deposits, approvals, synthesis — move the
+        // table watermark without touching the ledger file, and the scan
+        // must re-run.
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, (5, 5), || bump(&n)).unwrap();
+        gate.fire(&p, (6, 5), || bump(&n)).unwrap();
+        assert_eq!(n.get(), 2);
+        gate.fire(&p, (6, 5), || bump(&n)).unwrap();
+        assert_eq!(n.get(), 2, "unchanged watermark clears the trigger");
+    }
+
+    #[test]
+    fn changed_ledger_stat_reruns_scan() {
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, (0, 0), || bump(&n)).unwrap();
+        std::fs::write(&p, "a\nbb\n").unwrap();
+        gate.fire(&p, (0, 0), || bump(&n)).unwrap();
+        assert_eq!(n.get(), 2);
+    }
+
+    #[test]
+    fn append_during_apply_rescans_on_next_fire() {
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        let during = p.clone();
+        gate
+            .fire(&p, (0, 0), || {
+                n.set(n.get() + 1);
+                // A confirmation appends to the ledger while the apply's read
+                // is in flight: not covered by this apply, and the memo must
+                // NOT record its (post-append) stat as already seen.
+                std::fs::write(&during, "a\nb\n").unwrap();
+                Ok(0)
+            })
+            .unwrap();
+        gate.fire(&p, (0, 0), || bump(&n)).unwrap();
+        assert_eq!(
+            n.get(),
+            2,
+            "an append that landed during the apply must rescan on the next fire"
+        );
+    }
+
+    #[test]
+    fn failed_apply_retries_on_the_next_fire() {
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, (0, 0), || bump(&n)).unwrap();
+        let r = gate.fire(&p, (1, 1), || {
+            n.set(n.get() + 1);
+            Err(anyhow::anyhow!("boom"))
+        });
+        assert!(r.is_err());
+        gate.fire(&p, (1, 1), || bump(&n)).unwrap();
+        assert_eq!(n.get(), 3, "failed apply must retry on the next fire");
+        gate.fire(&p, (1, 1), || bump(&n)).unwrap();
+        assert_eq!(n.get(), 3, "success clears the gate");
+    }
+
+    #[test]
+    fn failed_apply_keeps_pre_read_memo_so_a_change_still_rescans() {
+        // The inputs changed but the apply failed — the memo must stay at the
+        // PRE-read pair (never advance past a failed apply), so the next fire
+        // retries on the difference alone.
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, (0, 0), || bump(&n)).unwrap();
+        std::fs::write(&p, "a\nbb\n").unwrap();
+        let r = gate.fire(&p, (0, 0), || {
+            n.set(n.get() + 1);
+            Err(anyhow::anyhow!("boom"))
+        });
+        assert!(r.is_err());
+        gate.fire(&p, (0, 0), || bump(&n)).unwrap();
+        assert_eq!(
+            n.get(),
+            3,
+            "the changed-inputs retry survives a failed apply"
+        );
+        gate.fire(&p, (0, 0), || bump(&n)).unwrap();
+        assert_eq!(n.get(), 3, "successful apply clears the memo trigger");
+    }
+
+    #[test]
+    fn panicking_apply_leaves_memo_untouched_and_next_fire_retries() {
+        // The drain probe runs the hook under catch_unwind and retries the
+        // leg: a panic must not advance the memo, so the next fire retries.
+        let (_t, p) = ledger();
+        let gate = ConfirmationsGate::new();
+        let n = Cell::new(0);
+        gate.fire(&p, (0, 0), || bump(&n)).unwrap();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            gate.fire(&p, (2, 2), || {
+                n.set(n.get() + 1);
+                panic!("hook blew up")
+            })
+        }));
+        assert!(r.is_err());
+        gate.fire(&p, (2, 2), || bump(&n)).unwrap();
+        assert_eq!(
+            n.get(),
+            3,
+            "the changed-inputs trigger must survive a panicking apply"
+        );
     }
 }
