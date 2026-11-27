@@ -60,7 +60,7 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
 
     // Issue #378 D1.1: drop forgotten wiki events; shape-conditional on the
     // shared Temporal probe (pre-v19 has no column).
-    let forgotten_clause = if crate::wisdom_match::temporal_columns(conn, None)?.has_forgotten_at {
+    let forgotten_clause = if crate::wisdom_match::temporal_columns_shape_only(conn)?.has_forgotten_at {
         "WHERE e.forgotten_at IS NULL"
     } else {
         ""

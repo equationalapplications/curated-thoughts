@@ -447,9 +447,9 @@ pub(crate) fn rank_wiki_entries(
         return Ok(Vec::new());
     }
 
-    let arm = crate::wisdom_match::forgotten_entry_arm(&crate::wisdom_match::temporal_columns(
-        conn, None,
-    )?);
+    let arm = crate::wisdom_match::forgotten_entry_arm(
+        &crate::wisdom_match::temporal_columns_shape_only(conn)?,
+    );
     let mut stmt = conn.prepare(&format!(
         "SELECT e.id, e.entity_id, e.title, e.body, e.source_ref, e.confidence, e.source_type,
                 e.okf_verified, e.updated_at
@@ -741,7 +741,7 @@ pub async fn dispatch_curated_get_wiki_entry(
         let conn_guard = lock_conn(&conn)?;
 
         let arm = crate::wisdom_match::forgotten_entry_arm(
-            &crate::wisdom_match::temporal_columns(&conn_guard, None)?,
+            &crate::wisdom_match::temporal_columns_shape_only(&conn_guard)?,
         );
         let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(ref eid) = entity_id
         {

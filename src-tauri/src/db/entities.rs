@@ -669,7 +669,7 @@ fn load_events(conn: &Connection, ids: &[String]) -> Result<Vec<EntityEvent>> {
     // RECENT_EVENTS_LIMIT is a compile-time constant, formatted not bound.
     // Issue #378 D1.1: forgotten events are dropped, shape-conditional on the
     // shared Temporal probe (pre-v19 has no column).
-    let forgotten_clause = if crate::wisdom_match::temporal_columns(conn, None)?.has_forgotten_at {
+    let forgotten_clause = if crate::wisdom_match::temporal_columns_shape_only(conn)?.has_forgotten_at {
         "AND forgotten_at IS NULL"
     } else {
         ""
@@ -1349,6 +1349,55 @@ mod tests {
         let listed =
             list_entities(&conn, EntitySort::default(), &EntityListFilter::default()).unwrap();
         assert_eq!(listed[0].fact_count, 2, "count excludes forgotten fact");
+    }
+
+    /// CodeRabbit PR #395 thread on `entities.rs` (folded 2026-11-27): the
+    /// forgotten gate's probes are COLUMN-SHAPE-only and must not resolve the
+    /// reader scheme — a corrupt `wisdom_active_scheme` meta value fails
+    /// scheme-using reads (recall, wisdom_match, wiki_context) but not entity
+    /// detail reads, which never use embeddings. (Before the shape-only probe,
+    /// the shared arm went through `temporal_columns`, whose fail-closed
+    /// scheme resolution aborted `load_facts`/`batched_cluster_counts`/
+    /// `load_events`/`list_events` on a corrupt meta value.)
+    #[test]
+    fn gate_reads_survive_corrupt_active_scheme_meta() {
+        let mut conn = open_in_memory().unwrap();
+        let detail = create_entity(
+            &mut conn,
+            &CreateEntityInput {
+                name: "Corrupt scheme".into(),
+                entity_type: None,
+                summary: None,
+            },
+        )
+        .unwrap();
+        seed_fact(&conn, &detail.id, "f-gone", "Gone.");
+        seed_fact(&conn, &detail.id, "f-plain", "Plain.");
+        let link = |id: &str, entry: &str, forgotten: Option<i64>| {
+            conn.execute(
+                "INSERT INTO llm_wiki_events
+                   (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+                 VALUES (?1, ?2, 'synthesized', 's', ?3, 100, ?4)",
+                params![id, detail.id, entry, forgotten],
+            )
+            .unwrap();
+        };
+        link("ev-gone", "f-gone", Some(5));
+        // `open_in_memory` already seeds `wisdom_active_scheme` (UNIQUE key);
+        // corrupt the EXISTING value rather than inserting a duplicate.
+        conn.execute(
+            "UPDATE llm_wiki_meta SET value = 'not-a-real-scheme' WHERE key = 'wisdom_active_scheme'",
+            [],
+        )
+        .unwrap();
+
+        let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
+        let ids: Vec<&str> = loaded.facts.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["f-plain"],
+            "gate reads must work AND stay gated under corrupt scheme meta"
+        );
     }
 
     #[test]

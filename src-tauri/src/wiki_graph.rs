@@ -390,9 +390,9 @@ pub fn wiki_search_in_scheme(
     // omits the filter — those rows are de-facto raw — mirroring the
     // temporal-column degradation.
     let scheme_filter = crate::embed_scheme::scheme_filter_sql(scheme);
-    let arm = crate::wisdom_match::forgotten_entry_arm(&crate::wisdom_match::temporal_columns(
-        conn, scheme,
-    )?);
+    let arm = crate::wisdom_match::forgotten_entry_arm(
+        &crate::wisdom_match::temporal_columns_shape_only(conn)?,
+    );
     let sql = format!(
         "SELECT e.id, e.entity_id, e.title, e.embedding_blob, e.tier, e.confidence, e.source_type, e.okf_verified
          FROM llm_wiki_entries e
@@ -468,9 +468,9 @@ fn load_live_entry(
     entity_id: &str,
     id: &str,
 ) -> Result<Option<WikiTraverseNode>> {
-    let arm = crate::wisdom_match::forgotten_entry_arm(&crate::wisdom_match::temporal_columns(
-        conn, None,
-    )?);
+    let arm = crate::wisdom_match::forgotten_entry_arm(
+        &crate::wisdom_match::temporal_columns_shape_only(conn)?,
+    );
     let mut stmt = conn.prepare(&format!(
         "SELECT e.id, e.title, e.entity_id FROM llm_wiki_entries e
          WHERE e.id = ?1 AND e.entity_id = ?2 AND e.deleted_at IS NULL{arm}"
@@ -1151,9 +1151,9 @@ fn live_entry_exists(conn: &Connection, id: &str) -> Result<bool> {
     if !table_exists(conn, "llm_wiki_entries")? {
         return Ok(false);
     }
-    let arm = crate::wisdom_match::forgotten_entry_arm(&crate::wisdom_match::temporal_columns(
-        conn, None,
-    )?);
+    let arm = crate::wisdom_match::forgotten_entry_arm(
+        &crate::wisdom_match::temporal_columns_shape_only(conn)?,
+    );
     let mut stmt = conn.prepare(&format!(
         "SELECT 1 FROM llm_wiki_entries e WHERE e.id = ?1 AND e.deleted_at IS NULL{arm} LIMIT 1"
     ))?;

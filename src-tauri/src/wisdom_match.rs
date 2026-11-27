@@ -308,6 +308,31 @@ pub(crate) has_valid_to: bool,
     scheme: Option<Scheme>,
 }
 
+/// Column probes ONLY — no scheme resolution. [`temporal_columns`] resolves
+/// the reader scheme next to the column probes so scheme-derived call paths
+/// share ONE resolution; the forgotten arm's TEXT is shape-conditional only
+/// (`has_forgotten_at`), so its builder (`entry_not_forgotten_arm_for`) uses
+/// this probe instead: a corrupt `wisdom_active_scheme` meta value fails
+/// scheme-using reads (recall, wisdom_match, wiki_context) but must not fail
+/// gate reads that never use embeddings (entity details, fact counts, event
+/// timelines, graph walks). CodeRabbit PR #395 thread on `entities.rs`
+/// (adjudicated + folded 2026-11-27; same class as T3 r3 m3's traversal
+/// finding — the perf half stays in issue #400).
+pub(crate) fn temporal_columns_shape_only(conn: &Connection) -> Result<Temporal> {
+    let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
+    let event_cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")?;
+    Ok(Temporal {
+        has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
+        has_valid_to: cols.iter().any(|c| c == "valid_to"),
+        has_area: cols.iter().any(|c| c == "area"),
+        // Both columns: the arm's subqueries reference `related_entry_id`
+        // (same guard as the okf_ddl index).
+        has_forgotten_at: event_cols.iter().any(|c| c == "forgotten_at")
+            && event_cols.iter().any(|c| c == "related_entry_id"),
+        scheme: None,
+    })
+}
+
 /// Column probes plus the call's ONE scheme resolution. `declared` is a
 /// scheme the caller already resolved (and derived its query text / floor
 /// from); `None` resolves the active `wisdom_active_scheme` here.
@@ -654,7 +679,7 @@ pub fn entry_not_forgotten_arm_for(conn: &Connection, alias: &str) -> Result<Str
         !alias.eq_ignore_ascii_case("fe") && !alias.eq_ignore_ascii_case("le"),
         "entry_not_forgotten_arm_for: alias must not collide with subquery aliases fe/le"
     );
-    let arm = forgotten_entry_arm(&temporal_columns(conn, None)?);
+    let arm = forgotten_entry_arm(&temporal_columns_shape_only(conn)?);
     if arm.is_empty() || alias == "e" {
         return Ok(arm);
     }
