@@ -1389,6 +1389,30 @@ mod tests {
     }
 
     #[test]
+    fn replace_import_carries_forgotten_at_on_fresh_insert() {
+        // T1.5 r2 MINOR 3: Replace mode hard-deletes the target's events, so
+        // the dup-tombstone path is unreachable there — the forgotten flag
+        // must ride the fresh INSERT. Merge and Replace share the
+        // carry-the-flag contract (spec).
+        let mut conn = open_in_memory().unwrap();
+        let mut bundle = sample_bundle();
+        bundle.entities[0].events[0].forgotten_at = Some(1732713600000);
+        apply_import(&mut conn, &bundle, ImportMode::Replace).unwrap();
+        let forgotten: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            forgotten,
+            Some(1732713600000),
+            "fresh INSERT in Replace mode carries forgotten_at verbatim"
+        );
+    }
+
+    #[test]
     fn clone_remaps_every_id() {
         let mut conn = open_in_memory().unwrap();
         apply_import(&mut conn, &sample_bundle(), ImportMode::Merge).unwrap();
@@ -1915,9 +1939,9 @@ mod tests {
         let visible = |id: &str| -> i64 {
             let sql = format!(
                 "SELECT COUNT(*) FROM llm_wiki_entries e \
-                 WHERE e.id='{id}' AND e.deleted_at IS NULL{arm}"
+                 WHERE e.id=?1 AND e.deleted_at IS NULL{arm}"
             );
-            conn.query_row(&sql, [], |r| r.get(0)).unwrap()
+            conn.query_row(&sql, params![id], |r| r.get(0)).unwrap()
         };
         assert_eq!(visible("fact_a"), 0, "fact_a's only event is forgotten");
         assert_eq!(visible("fact_b"), 1, "fact_b has a live backing event");

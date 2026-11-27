@@ -31,9 +31,12 @@ pub fn build_log_md(entries: &[OkfLogEntry]) -> String {
 }
 
 pub fn append_event_id_comment(text: &str, event_id: &str) -> String {
-    if event_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    // Same non-empty guard as `append_event_id_comment_forgotten`: an empty
+    // id must never mint a junk `<!-- id:  -->` comment (T1.5 r2 MINOR 2).
+    if !event_id.is_empty()
+        && event_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
     {
         format!("{text} <!-- id: {event_id} -->")
     } else {
