@@ -1,6 +1,6 @@
 # Spec: read-time gate for forgotten facts (`forgotten_at`) — #378
 
-**Status:** Reviewed (owner-approved 2026-11-26 21:32 ET — OQ1 survival guard + OQ4 OR predicate folded; cleared for implementation)
+**Status:** Implemented (owner-approved 2026-11-26 21:32 ET — OQ1 survival guard + OQ4 OR predicate folded; SDD lane complete 2026-11-27: 6 tasks + fix cycle, controller-verified gates, independent review + delta ALL FINDINGS RESOLVED)
 **Date:** 2026-11-26
 **Ruling issue:** equationalapplications/curated-thoughts#378
 **All file:line evidence against `origin/main` @ `bbe15dc2` (3.16.4).**
