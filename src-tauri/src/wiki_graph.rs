@@ -390,10 +390,13 @@ pub fn wiki_search_in_scheme(
     // omits the filter — those rows are de-facto raw — mirroring the
     // temporal-column degradation.
     let scheme_filter = crate::embed_scheme::scheme_filter_sql(scheme);
+    let arm = crate::wisdom_match::forgotten_entry_arm(&crate::wisdom_match::temporal_columns(
+        conn, scheme,
+    )?);
     let sql = format!(
-        "SELECT id, entity_id, title, embedding_blob, tier, confidence, source_type, okf_verified
-         FROM llm_wiki_entries
-         WHERE {entity_filter}{tier_filter}deleted_at IS NULL AND embedding_blob IS NOT NULL{scheme_filter}"
+        "SELECT e.id, e.entity_id, e.title, e.embedding_blob, e.tier, e.confidence, e.source_type, e.okf_verified
+         FROM llm_wiki_entries e
+         WHERE {entity_filter}{tier_filter}e.deleted_at IS NULL AND e.embedding_blob IS NOT NULL{scheme_filter}{arm}"
     );
     let mut stmt = conn.prepare(&sql)?;
     // Bind order matches the clause order built above: entity ids, then tier.
@@ -465,10 +468,13 @@ fn load_live_entry(
     entity_id: &str,
     id: &str,
 ) -> Result<Option<WikiTraverseNode>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, entity_id FROM llm_wiki_entries
-         WHERE id = ?1 AND entity_id = ?2 AND deleted_at IS NULL",
-    )?;
+    let arm = crate::wisdom_match::forgotten_entry_arm(&crate::wisdom_match::temporal_columns(
+        conn, None,
+    )?);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT e.id, e.title, e.entity_id FROM llm_wiki_entries e
+         WHERE e.id = ?1 AND e.entity_id = ?2 AND e.deleted_at IS NULL{arm}"
+    ))?;
     let mut rows = stmt.query(rusqlite::params![id, entity_id])?;
     let Some(row) = rows.next()? else {
         return Ok(None);
@@ -1141,8 +1147,12 @@ fn live_entry_exists(conn: &Connection, id: &str) -> Result<bool> {
     if !table_exists(conn, "llm_wiki_entries")? {
         return Ok(false);
     }
-    let mut stmt = conn
-        .prepare("SELECT 1 FROM llm_wiki_entries WHERE id = ?1 AND deleted_at IS NULL LIMIT 1")?;
+    let arm = crate::wisdom_match::forgotten_entry_arm(&crate::wisdom_match::temporal_columns(
+        conn, None,
+    )?);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT 1 FROM llm_wiki_entries e WHERE e.id = ?1 AND e.deleted_at IS NULL{arm} LIMIT 1"
+    ))?;
     Ok(stmt.exists(rusqlite::params![id])?)
 }
 
@@ -1171,6 +1181,46 @@ mod unit_tests {
             params![id, entity_id, embedding_blob],
         )
         .unwrap();
+    }
+
+    fn seed_ev(conn: &Connection, id: &str, entry: &str, forgotten_at: Option<i64>) {
+        conn.execute(
+            "INSERT INTO llm_wiki_events
+               (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES (?1, 'ent', 'synthesized', 's', ?2, 100, ?3)",
+            params![id, entry, forgotten_at],
+        )
+        .unwrap();
+    }
+
+    /// Issue #378 Task 3: graph read paths honor the forgotten gate; the
+    /// survival-guard entry (one live + one forgotten event) stays reachable.
+    #[test]
+    fn forgotten_gate_closes_graph_bypass_sites() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "ent", "gone");
+        seed_entry(&conn, "ent", "kept");
+        seed_ev(&conn, "e1", "gone", Some(5));
+        seed_ev(&conn, "e2", "kept", Some(5));
+        seed_ev(&conn, "e3", "kept", None);
+
+        let hits = wiki_search_in_scheme(
+            &conn,
+            &[1.0; 8],
+            None,
+            None,
+            10,
+            crate::embed_scheme::reader_scheme(&conn).unwrap(),
+        )
+        .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert!(!ids.contains(&"gone"), "forgotten entry in search: {ids:?}");
+        assert!(ids.contains(&"kept"), "survival-guard entry missing: {ids:?}");
+
+        assert!(load_live_entry(&conn, "ent", "gone").unwrap().is_none());
+        assert!(load_live_entry(&conn, "ent", "kept").unwrap().is_some());
+        assert!(!live_entry_exists(&conn, "gone").unwrap());
+        assert!(live_entry_exists(&conn, "kept").unwrap());
     }
 
     fn seed_edge(conn: &Connection, entity_id: &str, source: &str, target: &str, edge_type: &str) {
