@@ -297,7 +297,8 @@ pub(crate) has_valid_to: bool,
     /// `e.area` ONLY when this holds — pre-V30 degraded shapes keep today's
     /// column list exactly.
     pub(crate) has_area: bool,
-    /// Events-table `forgotten_at` column present (engine v19; issue #378 D2).
+    /// Events-table `forgotten_at` AND `related_entry_id` columns present
+    /// (engine v19; issue #378 D2) — the arm references both.
     pub(crate) has_forgotten_at: bool,
     /// Read scheme for the SELECT filter — `None` on the pre-V27 shape (no
     /// `embed_scheme` column). Resolved once per call, next to the column
@@ -323,7 +324,10 @@ pub(crate) fn temporal_columns(conn: &Connection, declared: Option<Scheme>) -> R
         has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
         has_valid_to: cols.iter().any(|c| c == "valid_to"),
         has_area: cols.iter().any(|c| c == "area"),
-        has_forgotten_at: event_cols.iter().any(|c| c == "forgotten_at"),
+        // Both columns: the arm's subqueries reference `related_entry_id`
+        // (same guard as the okf_ddl index).
+        has_forgotten_at: event_cols.iter().any(|c| c == "forgotten_at")
+            && event_cols.iter().any(|c| c == "related_entry_id"),
         scheme,
     })
 }
@@ -643,7 +647,7 @@ pub fn entry_not_forgotten_arm_for(conn: &Connection, alias: &str) -> Result<Str
     if arm.is_empty() || alias == "e" {
         return Ok(arm);
     }
-    assert!(
+    anyhow::ensure!(
         arm.starts_with(" AND (e.source_type = "),
         "forgotten arm shape changed; update entry_not_forgotten_arm_for"
     );
@@ -1913,6 +1917,27 @@ mod tests {
         assert!(
             !temporal_columns(&conn, Some(Scheme::Raw)).unwrap().has_forgotten_at,
             "pre-v19 shape probes false"
+        );
+    }
+
+    /// T3 N2: the arm's subqueries reference `related_entry_id`, so the probe
+    /// must agree with the index guard in okf_ddl: BOTH columns or no arm.
+    #[test]
+    fn forgotten_probe_requires_related_entry_id() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
+             ALTER TABLE llm_wiki_events DROP COLUMN related_entry_id;",
+        )
+        .unwrap();
+        let t = temporal_columns(&conn, Some(Scheme::Raw)).unwrap();
+        assert!(!t.has_forgotten_at, "forgotten_at without related_entry_id probes false");
+        assert!(forgotten_entry_arm(&t).is_empty());
+        assert!(entry_not_forgotten_arm_for(&conn, "s").unwrap().is_empty());
+        seed(&conn, "a", "ent-a", &at(0.9));
+        assert!(
+            run(&conn, Some(0.5), 50, &[]).entries.iter().any(|e| e.id == "a"),
+            "gated read works on the degraded shape"
         );
     }
 
