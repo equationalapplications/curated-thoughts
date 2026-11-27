@@ -1125,32 +1125,17 @@ mod tests {
                 )
                 .unwrap();
             }
-            conn.execute(
-                "UPDATE llm_wiki_entries SET deleted_at = 5 WHERE id = 't9_soft'",
-                [],
-            )
-            .unwrap();
+            conn.execute("UPDATE llm_wiki_entries SET deleted_at = 5 WHERE id = 't9_soft'", [])
+                .unwrap();
             assert_eq!(rows(&conn, "t9_soft"), 1);
             clear_one_entity_content(&conn, "ent_t9", 1).unwrap();
             let left: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM llm_wiki_entries WHERE entity_id = 'ent_t9'",
-                    [],
-                    |r| r.get(0),
-                )
+                .query_row("SELECT COUNT(*) FROM llm_wiki_entries WHERE entity_id = 'ent_t9'", [], |r| r.get(0))
                 .unwrap();
             assert_eq!(left, 0, "entity wiped");
             let expected = i64::from(marker);
-            assert_eq!(
-                rows(&conn, "t9_soft"),
-                expected,
-                "marker={marker}: soft row"
-            );
-            assert_eq!(
-                rows(&conn, "t9_live"),
-                expected,
-                "marker={marker}: live row"
-            );
+            assert_eq!(rows(&conn, "t9_soft"), expected, "marker={marker}: soft row");
+            assert_eq!(rows(&conn, "t9_live"), expected, "marker={marker}: live row");
         }
     }
 

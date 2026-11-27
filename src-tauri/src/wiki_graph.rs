@@ -2253,8 +2253,9 @@ mod unit_tests {
     /// fixture:
     ///   - wiki_traverse_graph (entry-space seed) → Ok, forgotten entries
     ///     excluded; live_entry_exists → Ok (gate arms inert of meta);
-    ///   - wiki_context → ERRORS fail-closed: it resolves reader_scheme at
-    ///     :2411 for SCORING — a deliberate meta read OUTSIDE the gate;
+    ///   - wiki_context → ERRORS fail-closed: it resolves reader_scheme in
+    ///     `wiki_context_in_scheme` (now around :2637) for SCORING — a
+    ///     deliberate meta read OUTSIDE the gate;
     ///     failing closed on a missing meta table is correct and unchanged;
     ///   - wiki_context_in_scheme(&conn, …, Some(Scheme::Raw)) → Ok with
     ///     the gate LIVE (r3 M-A2: caller-resolved scheme bypasses the
