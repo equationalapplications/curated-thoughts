@@ -1,6 +1,6 @@
 # Spec: read-time gate for forgotten facts (`forgotten_at`) — #378
 
-**Status:** Implemented (owner-approved 2026-11-26 21:32 ET — OQ1 survival guard + OQ4 OR predicate folded; SDD lane complete 2026-11-27: 6 tasks + fix cycle, controller-verified gates, independent review + delta ALL FINDINGS RESOLVED)
+**Status:** Implemented (owner-approved 2026-11-26 21:32 ET — OQ1 survival guard + OQ4 OR predicate folded; SDD lane complete 2026-11-27: 6 tasks + fix cycle, controller-verified gates, independent review + delta ALL FINDINGS RESOLVED; T3 re-review r3 2026-11-27 APPROVE WITH CHANGES → folded per owner rulings: synthesis reader gated, coverage claim made explicit, OR-ordering wording hedged)
 **Date:** 2026-11-26
 **Ruling issue:** equationalapplications/curated-thoughts#378
 **All file:line evidence against `origin/main` @ `bbe15dc2` (3.16.4).**
@@ -70,7 +70,11 @@ Shared predicate: `entry_eligibility_where` (`src-tauri/src/wisdom_match.rs:577-
 
 Notes: there is **no FTS table over wiki entries** — the "FTS leg" of recall is the LIKE-based `rank_wiki_entries` (`tool_dispatch.rs:450-456`); grep for `fts5`/`MATCH` over wiki tables returns nothing. Every gap above is a WHERE-clause gap, not a post-fetch filter — which is what makes the pushed-into-SQL design (below) a drop-in.
 
-**Implementation outcome (2026-11-27, this lane):** every ❌ above ships gated by the shared arm (`forgotten_entry_arm` / `entry_not_forgotten_arm[_for]` — one SQL definition). Surfaces found and gated during the review cycle (absent from the original map): the tools-crate twins `wiki_rows` / `wiki_entry_sql` + MCP sidecar `curated_get_wiki_entry` (`tools/src/queries.rs`, `tools/src/bin/curated_thoughts_mcp.rs`), traversal edge joins (`wiki_graph.rs` `fetch_outbound_neighbors`/`fetch_inbound_neighbors`, `s`/`t` aliases), entity endpoint labels + backlinks (`db/connections.rs`), and the entity facts payload + fact counts (`db/entities.rs` `load_facts`/`batched_cluster_counts`, serving `get_entity`). Known residual, tracked as issue #398 (deferred, out of approved scope): the OKF bundle export/import round-trip does not carry `forgotten_at`. Related count disagreement, also intended and recorded here beside #398: `ct status` entry counts (`tools/src/bin/ct.rs:1118`) total vault content and stay ungated, while `ct wiki list` is gated — the two commands disagree after a forget by design (observability totals vs read-path answers).
+**Implementation outcome (2026-11-27, this lane):** every ❌ above ships gated by the shared arm (`forgotten_entry_arm` / `entry_not_forgotten_arm[_for]` — one SQL definition). Surfaces found and gated during the review cycle (absent from the original map): the tools-crate twins `wiki_rows` / `wiki_entry_sql` + MCP sidecar `curated_get_wiki_entry` (`tools/src/queries.rs`, `tools/src/bin/curated_thoughts_mcp.rs`), traversal edge joins (`wiki_graph.rs` `fetch_outbound_neighbors`/`fetch_inbound_neighbors`, `s`/`t` aliases), entity endpoint labels + backlinks (`db/connections.rs`), the entity facts payload + fact counts (`db/entities.rs` `load_facts`/`batched_cluster_counts`, serving `get_entity`), and the librarian synthesis candidate facts (`librarian/synthesis.rs` `load_candidate_entities` — gated per the 2026-11-27 owner ruling on T3 re-review r3 M1: a fully-forgotten fact fed into the synthesis prompt can be paraphrased back into a new live row the gate cannot hide, so forget must cover synthesis too).
+
+**Coverage claim, stated exactly (T3 r3 M2):** every entry/event READ path that serves facts to users or to the LLM ships gated by the shared arm. Deliberately ungated, each listed on purpose: the OKF bundle export/import round-trip does not carry `forgotten_at` (issue #398, deferred, out of approved scope); `ct status` vault totals (`tools/src/bin/ct.rs:1118`) and the `ct heal` refusal live-count (`tools/src/bin/ct.rs:960`, `source_type = 'librarian_inferred'`) are operational censuses, not fact reads. Consequence, intended and recorded here: after a forget, those census commands and the gated read paths disagree by the number of hidden rows (observability totals vs read-path answers).
+
+Known pre-existing mismatch preserved as-is by this lane (both sides now carry the identical forgotten arm): the MCP sidecar's by-entity lookup (`tools/src/queries.rs` `wiki_entry_sql`, `entity_id = ?1` only) matches more narrowly than the in-app `curated_get_wiki_entry` (`tool_dispatch.rs:756`, `entity_id = ?1 OR id = ?1`). Aligning the match semantics is follow-up material, not part of this gate.
 
 ### E4. Cardinality: `related_entry_id` → entry is **many-to-one** (survival guard is mandatory)
 
@@ -124,9 +128,13 @@ Notes: there is **no FTS table over wiki entries** — the "FTS leg" of recall i
    equivalent to the ruling's "has backing events and none live" wording
    (a forgotten event is itself a backing event), and the rewritten form lets
    the `NOT EXISTS (forgotten)` arm use the D2 partial index (the subquery's
-   WHERE implies the index's `forgotten_at IS NOT NULL`) and short-circuit
-   there; the `EXISTS (live)` arm only runs for entries that actually have a
-   forgotten event (T3 plan review M1, 2026-11-26). Entries with no linked
+   WHERE implies the index's `forgotten_at IS NOT NULL`) and, in practice,
+   short-circuit there; the `EXISTS (live)` arm then only needs to run for
+   entries that actually have a forgotten event (T3 plan review M1,
+   2026-11-26). SQLite does not document OR-term evaluation order, so this is
+   a cost property observed in practice, not a correctness dependency — the
+   arms are pure keep/hide disjuncts and the predicate's result is
+   order-independent (T3 re-review r3 m5, 2026-11-27). Entries with no linked
    events are never hidden by event-forget. The `user_stated` carve-out uses
    `source_type` (`commit.rs:3111`, `lib.rs:5922-5926`); the belt-and-braces
    attestation variant (spare any entry whose source document carries a
@@ -141,7 +149,7 @@ Notes: there is **no FTS table over wiki entries** — the "FTS leg" of recall i
    `has_superseded_by` / `has_valid_to` at `wisdom_match.rs:596-605`), so
    pre-v19 shapes compile the fragment without the arm.
 
-3. **Close the bypasses.** `rank_wiki_entries` (`tool_dispatch.rs:450`), `curated_get_wiki_entry` (`tool_dispatch.rs:722`), and `wiki_search_in_scheme` (`wiki_graph.rs:391`) build their own SQL. Each interpolates the same shared fragment (or, for the two entity-id/topic lookups, a small `entry_not_forgotten_where(conn)` helper that returns the identical arm text) so all read paths share ONE definition. The `wiki_graph` entry-existence probes (`:1145`, `:2227`, `:469`) get the same arm so a forgotten fact cannot re-enter via graph traversal.
+3. **Close the bypasses.** `rank_wiki_entries` (`tool_dispatch.rs:450`), `curated_get_wiki_entry` (`tool_dispatch.rs:722`), and `wiki_search_in_scheme` (`wiki_graph.rs:391`) build their own SQL. Each interpolates the same shared fragment (or, for the two entity-id/topic lookups, a small `entry_not_forgotten_where(conn)` helper that returns the identical arm text) so all read paths share ONE definition. The `wiki_graph` entry-existence probes (`:1145`, `:2227`, `:469`) get the same arm so a forgotten fact cannot re-enter via graph traversal. The librarian synthesis candidate-fact loader (`librarian/synthesis.rs` `load_candidate_entities`) interpolates the same arm on its fact query (T3 re-review r3 M1 + owner ruling 2026-11-27: gate, do not disclose — see the E3 coverage claim).
 
 ### D2. Indexing
 
@@ -157,7 +165,7 @@ Partial and forgotten-only, so it stays tiny and serves exactly the anti-join.
 
 ### D3. Top-k starvation strategy
 
-The predicate is pushed **into the candidate-selection WHERE** (D1.2/D1.3) — the anti-join removes only dead candidates *before* scoring, so cosine/LIKE top-k is computed over the live candidate set and live results are never crowded out by post-fetch filtering. No LIMIT-then-filter pattern is introduced anywhere. The keep-condition's first survival arm (`NOT EXISTS (forgotten)`) is served by the D2 partial index and short-circuits: on databases with no forgotten events (the common case) the partial index is empty, that arm is true on a single probe per candidate, and the `EXISTS (live)` arm never runs — negligible. (T3 plan review M1, 2026-11-26: the earlier two-subquery form implied neither the index's WHERE and would have full-scanned `llm_wiki_events` per candidate; the equivalence rewrite fixes both.)
+The predicate is pushed **into the candidate-selection WHERE** (D1.2/D1.3) — the anti-join removes only dead candidates *before* scoring, so cosine/LIKE top-k is computed over the live candidate set and live results are never crowded out by post-fetch filtering. No LIMIT-then-filter pattern is introduced anywhere. The keep-condition's first survival arm (`NOT EXISTS (forgotten)`) is served by the D2 partial index and, in practice, short-circuits: on databases with no forgotten events (the common case) the partial index is empty, that arm is true on a single probe per candidate, and the `EXISTS (live)` arm never runs — negligible. SQLite does not document OR-term evaluation order; this is a cost property, not a correctness dependency (see D1.2). (T3 plan review M1, 2026-11-26: the earlier two-subquery form implied neither the index's WHERE and would have full-scanned `llm_wiki_events` per candidate; the equivalence rewrite fixes both.)
 
 ### D4. UI parity (ruling #2.2)
 
@@ -171,9 +179,10 @@ The Tauri UI reads the wiki DB **exclusively via Rust commands** — no direct T
 4. **Degraded shapes:** same fixtures on a pre-v19 shape (no `forgotten_at` column) — queries compile, arm omitted, behavior identical to today (mirrors `connection.rs:8062` column probing).
 5. **Event readers:** `load_events` and `list_events` hide forgotten events; `queue.rs` replay still sees them.
 6. **Starvation guard:** seed 1 fully-forgotten + 5 live entries where the forgotten one scores highest; assert the returned top-k contains 5 live entries (no hole), not 4 + a gap.
-7. **Graph traversal:** a fully-forgotten entry never appears as a fact/node seed via `wiki_context` / `wiki_traverse_graph`; a survival-guard entry (mixed live/forgotten events) still does.
+7. **Graph traversal:** a fully-forgotten entry never appears as a fact/node seed via `wiki_context` / `wiki_traverse_graph`; a survival-guard entry (mixed live/forgotten events) still does. (End-to-end `wiki_context` coverage added in the T3 r3 fold: `forgotten_context_end_to_end_hides_forgotten_entry` — m7 previously flagged test-plan 7 as covered only indirectly.)
 8. **Index mirror:** schema-guard test asserts `llm_wiki_events_related_forgotten_idx` present when columns exist, absent otherwise (pattern: `connection.rs:8192`).
 9. **Cross-surface agreement:** engine (TS, via `core-llm-wiki` test harness) forgets an event → Rust recall and UI both stop returning the event; entry visibility follows the survival guard identically in CLI/MCP and UI (UI assertion optional/manual; the Rust assertion is the gate).
+10. **Librarian synthesis (T3 r3 M1 fold):** a fully-forgotten fact never appears in `load_candidate_entities` candidate facts (owner ruling 2026-11-27: gate, not disclose — paraphrasing could resurrect it as a new live row); an event-less fact still does (`candidate_facts_exclude_fully_forgotten_fact`).
 
 ## Open questions
 

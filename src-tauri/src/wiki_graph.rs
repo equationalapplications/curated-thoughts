@@ -1271,6 +1271,42 @@ mod unit_tests {
         );
     }
 
+    /// Issue #378 test plan 7, end to end: the FULL `wiki_context` call — not
+    /// just its fact leg — hides a fully-forgotten entry and keeps a
+    /// survival-guard one (T3 re-review r3 m7: previously covered only
+    /// indirectly via `wiki_search_in_scheme` and the traversal tests).
+    #[test]
+    fn forgotten_context_end_to_end_hides_forgotten_entry() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "ent", "gone");
+        seed_entry(&conn, "ent", "kept");
+        seed_ev(&conn, "e1", "gone", Some(5));
+        seed_ev(&conn, "e2", "kept", Some(5));
+        seed_ev(&conn, "e3", "kept", None);
+
+        let result = wiki_context(&conn, &[1.0; 8], None, 1, 10).unwrap();
+        let fact_ids: Vec<&str> = result.facts.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            !fact_ids.contains(&"gone"),
+            "fully-forgotten fact surfaced in wiki_context facts: {fact_ids:?}"
+        );
+        assert!(
+            fact_ids.contains(&"kept"),
+            "survival-guard fact missing from wiki_context facts: {fact_ids:?}"
+        );
+        assert!(
+            result.entities.iter().all(|n| n.id != "gone"),
+            "forgotten entry leaked via wiki_context nodes"
+        );
+        assert!(
+            result
+                .edges
+                .iter()
+                .all(|e| e.source_id != "gone" && e.target_id != "gone"),
+            "forgotten entry leaked via wiki_context edges"
+        );
+    }
+
     fn seed_edge(conn: &Connection, entity_id: &str, source: &str, target: &str, edge_type: &str) {
         // Deterministic per-call id keeps tests diff-friendly. The primary-key
         // collision we have to dodge is between two calls within one test, not

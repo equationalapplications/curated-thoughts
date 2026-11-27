@@ -489,10 +489,13 @@ mod tests {
         .unwrap();
     }
 
-    /// Issue #378: a fully-forgotten fact supplies neither an endpoint label
-    /// nor a backlink match; a fact with one live backing event survives.
+    /// Issue #378: a fully-forgotten fact supplies no backlink match; a fact
+    /// with one live backing event survives. (The endpoint-label path is
+    /// covered by `forgotten_fact_is_dropped_from_labels_and_backlinks` below
+    /// — T3 re-review r3 m7 renamed this test so its name no longer claims
+    /// both paths.)
     #[test]
-    fn forgotten_fact_is_gated_from_endpoint_labels_and_backlinks() {
+    fn forgotten_fact_is_gated_from_endpoint_backlinks() {
         let mut conn = open_in_memory().unwrap();
         let alpha = make_entity(&mut conn, "Alpha", "");
         let referrer = make_entity(&mut conn, "Referrer", "");
