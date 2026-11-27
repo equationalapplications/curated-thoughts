@@ -1,6 +1,6 @@
 # Spec: forgotten-gate follow-ups — bundle round-trip, traversal hoist, live index (#398)
 
-**Status:** Reviewed (owner-approved 2026-11-27 — Kurt, Discord msg 1575947241263472833; two implementation notes folded into plan: strict comment-scoped `forgotten:` parsing with byte-identical id-only lines, and full traversal-entry-point sweep for arm pass-down. r1 2026-11-27: Opus-medium plan review REQUEST CHANGES → all findings verified and folded; spec amended: round-trip fixture redesign, pre-v19 export tolerance, dup reconciliation, one-way compat note, traversal-entry wording. r2 2026-11-27: delta review REQUEST CHANGES → folded; spec amended: TWO public traversal entries (`wiki_traverse_graph` + `wiki_context_in_scheme`), dup UPDATE column-guarded, `okf_bundle` integration gate added)
+**Status:** Reviewed (owner-approved 2026-11-27 — Kurt, Discord msg 1575947241263472833; two implementation notes folded into plan: strict comment-scoped `forgotten:` parsing with byte-identical id-only lines, and full traversal-entry-point sweep for arm pass-down. r1 2026-11-27: Opus-medium plan review REQUEST CHANGES → all findings verified and folded; spec amended: round-trip fixture redesign, pre-v19 export tolerance, dup reconciliation, one-way compat note, traversal-entry wording. r2 2026-11-27: delta review REQUEST CHANGES → folded; spec amended: TWO public traversal entries (`wiki_traverse_graph` + `wiki_context_in_scheme`), dup UPDATE column-guarded, `okf_bundle` integration gate added. r3 2026-11-27: delta review REQUEST CHANGES (0 blockers) → folded; spec test-plan amended: tools gate plain `--lib`, second-entry gate coverage via caller-resolved scheme)
 **Date:** 2026-11-27
 **Ruling issue:** equationalapplications/curated-thoughts#398
 **Folded issues:** #399, #400, #401 (one PR, owner-directed single-delivery fold; owner directive 2026-11-27: no new issues this session — every new finding lands in this PR)
@@ -204,9 +204,9 @@ on the build-cache filesystem (repo AGENTS.md build discipline).
    --lib --features test-utils`, the INTEGRATION target `cargo
    --manifest-path src-tauri/Cargo.toml test --test okf_bundle
    --features test-utils` (r2-M1 — `--lib` gates cannot see it), and
-   `cargo --manifest-path tools/Cargo.toml test --lib --features
-   test-utils`, all green; no new clippy findings versus the base
-   commit.
+   `cargo --manifest-path tools/Cargo.toml test --lib` PLAIN (r3 M-A1 —
+   the tools crate declares no features), all green; no new clippy
+   findings versus the base commit.
 
 ## Non-goals
 

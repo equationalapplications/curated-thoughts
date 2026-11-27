@@ -15,6 +15,7 @@
 **Revision history:**
 - r1 (2026-11-27, Opus-medium plan review, $0.90/24 turns, REQUEST CHANGES — all findings verified, folded): B1 parser token loop dropped ids → id-first extraction; B2 round-trip fixture defeated by the survival guard → two-entry fixture; B3 new index breaks five DROP COLUMN sites → drop-list + helper; M1 export SELECT unconditional → probe + `NULL AS forgotten_at`; M2 old-binary id loss → one-way compat in spec; M3 dup-skip resurrection → UPDATE reconciliation; M4 trace-oracle uncompilable → DROP TABLE oracle + structural pass-down; minors 1–8 folded.
 - r2 (2026-11-27, Opus-medium delta review, $1.02/25 turns, REQUEST CHANGES — all findings verified, folded): **B1** `wiki_context` is a SECOND public traversal (`wiki_graph.rs:2404/2418`; `CompositeWalk::walk_seed` sites `:2274/:2306/:2344` are PRODUCTION code past `mod unit_tests`' end at `:2178`, misclassified r1 as tests) → gate resolved in both public entries, `CompositeWalk` carries it; **B2** dup-UPDATE lacked the column guard → guarded, pre-v19 test extended to the dup case; **M1** integration test `ExportEvent` literal (`tests/okf_bundle.rs:137`) breaks compile and `--lib` gates are blind → literal updated + integration gate added; **M2** Step 2 promised a red that cannot happen (gate probes already shape-only on main) → expectation corrected to characterization; minors 1–5 folded.
+- r3 (2026-11-27, Opus-medium delta review, $1.08/22 turns, REQUEST CHANGES — 0 BLOCKER, 4 MAJOR + 6 MINOR, all verified, folded): **M-A1** tools crate has no `[features]` table → tools gate runs plain `cargo test --lib` (no `--features test-utils`); **M-A2** the meta test never exercised the second entry's gate → added `wiki_context_in_scheme(…, Some(Scheme::Raw))` case (meta dropped → `Ok`, forgotten entries absent); **M-A3** helper ordering — `test_support.rs` + `db/mod.rs` declaration move to Task 2; **M-A4** `CompositeWalk::new(gate, truncated)` shape spelled out (`#[derive(Default)]` removed; `Default` on `TraversalGate` forbidden — an empty-arm default fails open); minors 1–6 folded (mod.rs in commit, round-trip through disk text, helper in guard test, stale `:1965` clause deleted, `load_live_node(conn, gate: &TraversalGate, …)`, dup reconciliation documented as intentionally silent).
 
 ## Global Constraints
 
@@ -23,7 +24,7 @@
 - `temporal_columns_shape_only` is the ONLY probe the gate uses; gate reads never touch `llm_wiki_meta`.
 - Owner note 1 (Kurt 2026-11-27): parse `forgotten:` strictly inside the trailing `<!-- … -->` comment; summary text containing `forgotten:` is never parsed; existing id-only lines byte-identical.
 - Owner note 2 (Kurt 2026-11-27): EVERY public traversal entry point passes walk-start arms down. There are TWO (r2-B1): `wiki_traverse_graph` (`wiki_graph.rs:779`) and `wiki_context_in_scheme` (`:2418`; `wiki_context` `:2404` delegates to it). Both resolve the gate once at entry.
-- **DROP COLUMN + partial index (r1-B3):** SQLite refuses `ALTER TABLE … DROP COLUMN` while a partial index's WHERE clause uses the column. The live index adds a THIRD index to drop at every pre-v19-shape test fixture: `connection.rs:8212-8214`, `entities.rs:1306-1308`, `events.rs:231-233`, `wisdom_match.rs:1948-1950`, `wisdom_match.rs:2133-2135` (and the sibling near `:1965` if it drops the column). Add ONE shared test helper `drop_forgotten_column(conn)` (drops all three indexes, then the column) in a FIXED location — `src-tauri/src/db/test_support.rs` (r2 minor 3: a named module, not copy-per-module) — and use it at every site.
+- **DROP COLUMN + partial index (r1-B3):** SQLite refuses `ALTER TABLE … DROP COLUMN` while a partial index's WHERE clause uses the column. The live index adds a THIRD index to drop at every pre-v19-shape test fixture: `connection.rs:8212-8214`, `entities.rs:1306-1308`, `events.rs:231-233`, `wisdom_match.rs:1948-1950`, `wisdom_match.rs:2133-2135` (r3 minor 4: the `:1965` sibling drops `related_entry_id`, not `forgotten_at` — no change needed there). ONE shared test helper `drop_forgotten_column(conn)` (drops all three indexes, then the column) lives in `src-tauri/src/db/test_support.rs` (r2 minor 3: a named module) and is created in TASK 2 (r3 M-A3 — Tasks 2 and 4 use it before Task 6 exists; the `DROP INDEX IF EXISTS` lines make it correct before the live index exists).
 - No new issues from this lane — findings fold into PR #402.
 - Spec's `Errata` section is the durable home for EQP measurements (plan.md/LEDGER.md are deleted at cleanup).
 
@@ -185,6 +186,7 @@ git commit -m "feat(okf): forgotten: key in the event-line id comment grammar (#
 - Modify: `src-tauri/src/db/bundle_io.rs` (`load_export_entities` `:11` probe site; `load_events` `:222-241` SELECT)
 - Modify: `src-tauri/tests/okf_bundle.rs:137-143` (`ExportEvent` literal — r2-M1)
 - Modify: `src-tauri/src/okf/event_line.rs:11-27` (build_event_text), `:60-110` (tests)
+- Create: `src-tauri/src/db/test_support.rs` + `#[cfg(test)] pub(crate) mod test_support;` in `src-tauri/src/db/mod.rs` (r3 M-A3 + minor 1 — Task 2's own test needs the helper, so the helper lands HERE, not Task 6)
 
 **Interfaces:**
 - Consumes: `append_event_id_comment_forgotten` (Task 1).
@@ -227,8 +229,26 @@ Expected: FAIL (arity; probe/test missing).
 `append_event_id_comment_forgotten(&core, event_id, forgotten_at)`.
 `bundle_write.rs:18-29`: add `pub forgotten_at: Option<i64>,` to `ExportEvent` (doc comment: `/// Engine `forget()` tombstone, ms epoch; `None` = live. Rides the id comment on export (#398).`).
 `bundle_write.rs:172` (`build_event_text(...)` call in the log_entries map): pass `ev.forgotten_at`.
-`bundle_io.rs` (r1-M1, site named per r2 minor 4): probe ONCE in `load_export_entities` (`bundle_io.rs:11`) BEFORE the per-cluster loop (`:55` calls `load_events` per cluster — the probe must NOT sit inside it) via `crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")`, and pass `has_forgotten: bool` into `load_events`; the SELECT appends `, forgotten_at` when present, `, NULL AS forgotten_at` when not (so `let forgotten_at: Option<i64> = r.get(5)?;` works for both shapes). A pre-v19 brain exports without error — matching the codebase's degraded-shape tolerance everywhere else (spec r1-M1 ruling).
+bundle_io.rs (r1-M1, site named per r2 minor 4): probe ONCE in `load_export_entities` (`bundle_io.rs:11`) BEFORE the per-cluster loop (`:55` calls `load_events` per cluster — the probe must NOT sit inside it) via `crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")`, and pass `has_forgotten: bool` into `load_events`; the SELECT appends `, forgotten_at` when present, `, NULL AS forgotten_at` when not (so `let forgotten_at: Option<i64> = r.get(5)?;` works for both shapes). A pre-v19 brain exports without error — matching the codebase's degraded-shape tolerance everywhere else (spec r1-M1 ruling).
 `tests/okf_bundle.rs:137-143` (r2-M1): the `ExportEvent { … }` literal gains `forgotten_at: ev.forgotten_at` — this is a `ParsedEvent → ExportEvent` round-trip helper, so pass the flag through (no E0063, no silent drop).
+`db/test_support.rs` (r3 M-A3 + minor 1): create NOW (Tasks 2/4 need it; Task 6 only converts sites) with `drop_forgotten_column`, and declare `#[cfg(test)] pub(crate) mod test_support;` in `src-tauri/src/db/mod.rs` (submodules declared at `mod.rs:1-43`; follow the existing `pub mod x;` pattern):
+
+```rust
+//! Test-only DB shape helpers shared across db test modules.
+//! Drop the three forgotten_at partial indexes, then the column — the
+//! exact order SQLite requires before ALTER TABLE … DROP COLUMN (r1-B3).
+//! `DROP INDEX IF EXISTS` keeps this correct before the live index
+//! exists (Task 6 adds it later).
+#[cfg(test)]
+pub(crate) fn drop_forgotten_column(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS llm_wiki_events_related_live_idx;
+         DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
+         DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
+         ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
+    ).unwrap();
+}
+```
 
 - [ ] **Step 4: Run to green**
 
@@ -240,7 +260,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src-tauri/src/okf/event_line.rs src-tauri/src/okf/bundle_write.rs src-tauri/src/db/bundle_io.rs src-tauri/tests/okf_bundle.rs
+git add src-tauri/src/okf/event_line.rs src-tauri/src/okf/bundle_write.rs src-tauri/src/db/bundle_io.rs src-tauri/tests/okf_bundle.rs src-tauri/src/db/test_support.rs src-tauri/src/db/mod.rs
 git commit -m "feat(bundle): export carries forgotten_at in ExportEvent + log-line grammar (#398)"
 ```
 
@@ -306,10 +326,11 @@ fn round_trip_preserves_forgotten_at_and_gate_hides_entry() {
     //    evt_dead (related_entry_id='fact_a', forgotten_at set via the
     //    engine-shape UPDATE) and evt_live (related_entry_id='fact_b',
     //    forgotten_at NULL).
-    // 2. Export via bundle_io (copy the existing export test's invocation)
-    //    to a temp dir.
-    // 3. Apply to a FRESH temp brain via apply_import(&mut conn, &bundle,
-    //    ImportMode::Merge).
+    // 2. Round-trip through DISK TEXT (r3 minor 2 — skipping this drops
+    //    the Task 1-3 grammar from the #398 acceptance): bundle_io
+    //    export → bundle_write to a temp dir → bundle_read parse the
+    //    files back → apply_import(&mut conn, &bundle, ImportMode::Merge)
+    //    on the FRESH temp brain. Never build the ParsedBundle in memory.
     // 4. Assert (format! the arm in — no pseudo-SQL):
     //      let arm = crate::wisdom_match::forgotten_entry_arm(
     //          &crate::wisdom_match::temporal_columns_shape_only(&conn)?);
@@ -407,7 +428,7 @@ if events_have_forgotten_at {
 }
 ```
 
-Semantics note (spec r1-M3 ruling): tombstone wins on conflict — a target row already forgotten is never un-forgotten by an incoming live event; only a live target row is tombstoned by an incoming forgotten event. Update the `:1137` test fixture's `ParsedEvent` construction with `forgotten_at: None`.
+Semantics note (spec r1-M3 ruling): tombstone wins on conflict — a target row already forgotten is never un-forgotten by an incoming live event; only a live target row is tombstoned by an incoming forgotten event. Reporting note (r3 minor 6): a reconciled dup counts only as `events_skipped` — the tombstone is INTENTIONALLY silent in `ImportResult` (documented here and in the code comment; no new counter). Update the `:1137` test fixture's `ParsedEvent` construction with `forgotten_at: None`.
 
 - [ ] **Step 4: Run to green** — `cargo test --manifest-path src-tauri/Cargo.toml --lib bundle_apply` PASS (all four new tests + existing).
 
@@ -445,12 +466,20 @@ fn gate_probe_never_touches_llm_wiki_meta() {
     // TraversalGate compile failure. The test pins the invariant against
     // regression; it does not prove the hoist.
     //
-    // Coverage (r2-B1), with llm_wiki_meta dropped on a v19 fixture:
+    // Coverage (r2-B1 + r3 M-A2), with llm_wiki_meta dropped on a v19
+    // fixture:
     //   - wiki_traverse_graph (entry-space seed) → Ok, forgotten entries
     //     excluded; live_entry_exists → Ok (gate arms inert of meta);
     //   - wiki_context → ERRORS fail-closed: it resolves reader_scheme at
-    //     :2405 for SCORING — a deliberate meta read OUTSIDE the gate;
-    //     failing closed on a missing meta table is correct and unchanged.
+    //     :2411 for SCORING — a deliberate meta read OUTSIDE the gate;
+    //     failing closed on a missing meta table is correct and unchanged;
+    //   - wiki_context_in_scheme(&conn, …, Some(Scheme::Raw)) → Ok with
+    //     the gate LIVE (r3 M-A2: caller-resolved scheme bypasses the
+    //     meta read, so this is the only case that exercises the second
+    //     entry's gate with meta gone). Assert: forgotten entries absent
+    //     from the result's entities, survival-guard entries present. A
+    //     regression that reads meta inside the CompositeWalk gate path
+    //     fails this case.
 }
 
 #[test]
@@ -522,12 +551,15 @@ Pass-down for the FIRST entry — `wiki_traverse_graph`:
 - `live_entry_exists` (:1150): take `arm: &str`, drop its probe.
 
 Pass-down for the SECOND entry — `wiki_context_in_scheme` (r2-B1):
-- `let gate = TraversalGate::resolve(conn)?;` BEFORE the seed loop (up to 25 seeds), then hand it to `CompositeWalk`: replace the `#[derive(Default)]` construction with a `CompositeWalk::new(gate: TraversalGate)` constructor storing the gate by value, and add a `gate: TraversalGate` field.
-- `walk_seed` (:2261) uses `self.gate`: `:2274` `load_live_node` (pass `&self.gate` — thread the arm minimal-churn, consistent with the other signatures), `:2306` `fetch_neighbors(..., &self.gate, ...)`, `:2344` `load_live_entry(..., &self.gate.entry_arm)`.
-- Reclassification (r2-B1): `:2274/:2306/:2344` are PRODUCTION sites, NOT test call sites. The genuine test call site is `:2111` (`walk.walk_seed(&conn, …)`) — update it for `CompositeWalk::new`.
+- `let gate = TraversalGate::resolve(conn)?;` BEFORE the seed loop (up to 25 seeds), then hand it to `CompositeWalk` — r3 M-A4 shape, exact:
+  - REMOVE `#[derive(Default)]` from `CompositeWalk` (`:2234`) — a `gate: TraversalGate` field has no Default, and deriving Default on `TraversalGate` is FORBIDDEN: empty arms mean an inert gate, i.e. the walk FAILS OPEN on a v19 brain. Put that reasoning in a comment on `TraversalGate` and add `impl` nothing — no Default impl for it.
+  - Add `fn new(gate: TraversalGate, truncated: bool) -> Self` initializing EVERY field (`nodes`, `edges`, `edge_keys`, `visited`, `truncated`, `per_seed_vocabs`, `gate`).
+  - Production site `:2433-2447` (the struct literal with `truncated: clamped_depth < depth` + `..Default::default()`): replace with `CompositeWalk::new(gate, clamped_depth < depth)`.
+  - Test site `:2110` (`CompositeWalk::default()`): replace with `CompositeWalk::new(gate, false)` — note `:2111` is the `walk_seed` CALL; the construction is `:2110` (r3 M-A4 citation fix).
+- `walk_seed` (:2261) uses `self.gate`: `:2274` `load_live_node(&conn, &self.gate, …)` (r3 minor 5 — DECIDED signature: `load_live_node(conn, gate: &TraversalGate, …)`, which passes `&gate.entry_arm` to `load_live_entry`; applied at BOTH callers `:808` and `:2274`), `:2306` `fetch_neighbors(..., &self.gate, ...)`, `:2344` `load_live_entry(..., &self.gate.entry_arm)`.
+- Reclassification (r2-B1): `:2274/:2306/:2344` are PRODUCTION sites, NOT test call sites. The genuine test call site is `:2110-2111` (`CompositeWalk::new` + `walk.walk_seed`).
 - `wiki_context` (:2404) needs no separate resolve — it delegates to `wiki_context_in_scheme`.
-
-- Update ALL in-file test call sites with the new signatures (r1 minor 5 + r2-B1): `:1224-1227` (load_live_entry, live_entry_exists), `:2111` (walk_seed / CompositeWalk construction).
+- `scoped_traverse`'s `load_live_node` call (`:808`) gets the same `&TraversalGate` signature.
 
 - [ ] **Step 4: Run to green** — `cargo test --manifest-path src-tauri/Cargo.toml --lib wiki_graph` PASS.
 
@@ -543,8 +575,7 @@ git commit -m "perf(traversal): gate arms resolved once per walk in both public 
 **Files:**
 - Modify: `src-tauri/src/db/okf_ddl.rs:379-401`
 - Modify: `src-tauri/src/db/connection.rs:8186-8215` (expected list + guard test)
-- Modify: `src-tauri/src/db/test_support.rs` (new — shared helper, r2 minor 3)
-- Modify: the five pre-v19-shape test sites (see Global Constraints) to use the helper
+- Modify: the five pre-v19-shape test sites (see Global Constraints) to use the `drop_forgotten_column` helper (created in Task 2 — r3 M-A3)
 - Modify: `src/__tests__/engine9-setup-compat.test.ts:247-256` (CT_OWNED set)
 
 **Interfaces:** none consumed; produces index `llm_wiki_events_related_live_idx`.
@@ -588,24 +619,7 @@ engine9-setup-compat.test.ts — add to `CT_OWNED`:
 
 Add `("index", "llm_wiki_events_related_live_idx")` to the Rust expected list (r2 minor 5: after `("index", "llm_wiki_events_related_forgotten_idx")` at `:8193`, BEFORE the trigger row at `:8194`).
 
-Shared helper — FIXED location (r2 minor 3), new file `src-tauri/src/db/test_support.rs` (wire it with a `#[cfg(test)] pub(crate) mod test_support;` declaration following db's existing submodule declaration pattern):
-
-```rust
-//! Test-only DB shape helpers shared across db test modules.
-//! Drop the three forgotten_at partial indexes, then the column — the
-//! exact order SQLite requires before ALTER TABLE … DROP COLUMN (r1-B3).
-#[cfg(test)]
-pub(crate) fn drop_forgotten_column(conn: &rusqlite::Connection) {
-    conn.execute_batch(
-        "DROP INDEX IF EXISTS llm_wiki_events_related_live_idx;
-         DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
-         DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
-         ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
-    ).unwrap();
-}
-```
-
-Convert all five sites to `crate::db::test_support::drop_forgotten_column(&conn)`: `connection.rs:8212-8214` (the forgotten guard test), `entities.rs:1306-1308`, `events.rs:231-233`, `wisdom_match.rs:1948-1950`, `wisdom_match.rs:2133-2135`.
+The shared helper already exists (`db/test_support.rs`, created in Task 2 — r3 M-A3). Use it HERE too (r3 minor 3 — one source of truth for the drop order): the guard test above replaces its inline `DROP INDEX` batch with `crate::db::test_support::drop_forgotten_column(&conn);` followed by the column-drop assertion flow — keep the re-apply block verbatim. Convert all five sites to the helper: `connection.rs:8212-8214` (the forgotten guard test), `entities.rs:1306-1308`, `events.rs:231-233`, `wisdom_match.rs:1948-1950`, `wisdom_match.rs:2133-2135`.
 
 - [ ] **Step 2: Run to verify failure** — `CARGO_TARGET_DIR=… cargo test --manifest-path src-tauri/Cargo.toml --lib related_live_idx`. Expected: FAIL (index not created).
 
@@ -643,7 +657,7 @@ git commit -m "perf(gate): live-half partial index llm_wiki_events_related_live_
 
 - [ ] **Step 1:** `CARGO_TARGET_DIR=… cargo test --manifest-path src-tauri/Cargo.toml --lib --features test-utils` — green.
 - [ ] **Step 2:** `CARGO_TARGET_DIR=… cargo test --manifest-path src-tauri/Cargo.toml --test okf_bundle --features test-utils` — green (r2-M1: the INTEGRATION target — `--lib` gates cannot see it).
-- [ ] **Step 3:** `CARGO_TARGET_DIR=… cargo test --manifest-path tools/Cargo.toml --lib --features test-utils` — green (tools crate consumes `entry_not_forgotten_arm`; unchanged signature, but verify).
+- [ ] **Step 3:** `CARGO_TARGET_DIR=… cargo test --manifest-path tools/Cargo.toml --lib` — green (r3 M-A1: the tools crate has NO `[features]` table — `--features test-utils` fails with "package does not contain this feature". Plain `--lib`; its consumers of `entry_not_forgotten_arm` see an unchanged signature).
 - [ ] **Step 4:** `CARGO_TARGET_DIR=… cargo clippy --manifest-path src-tauri/Cargo.toml --lib --features test-utils -- -D warnings` — no NEW findings vs base.
 - [ ] **Step 5:** `npm test` (full vitest) — green.
 - [ ] **Step 6:** Flip spec status to `Implemented`; final LEDGER entry; push; CI green on the head commit; then `gh pr ready 402` ONLY after implementation + local gates complete (board rule: ready flip is `gh pr ready <N>` ONLY — never REST PATCH).
