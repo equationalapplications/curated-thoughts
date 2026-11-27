@@ -745,10 +745,13 @@ pub fn apply_import(
                         // un-forgotten by an incoming live event. The reconciled dup
                         // counts ONLY as events_skipped — the tombstone is
                         // intentionally silent in ImportResult (r3 minor 6).
+                        // Scoped to the importing entity (T1.5 r1 MAJOR): ids are
+                        // PRIMARY KEY but a colliding id may belong to ANOTHER
+                        // entity's row — bundle content must never mutate it.
                         tx.execute(
                             "UPDATE llm_wiki_events SET forgotten_at = ?1
-                             WHERE id = ?2 AND forgotten_at IS NULL",
-                            params![ms, id],
+                             WHERE id = ?2 AND entity_id = ?3 AND forgotten_at IS NULL",
+                            params![ms, id, target_entity_id],
                         )?;
                     }
                 }
@@ -1991,6 +1994,71 @@ mod tests {
             forgotten,
             Some(1732713600000),
             "the dup's target row must be tombstoned"
+        );
+    }
+
+    #[test]
+    fn dup_with_colliding_id_on_another_entity_stays_live() {
+        // T1.5 r1 MAJOR regression: bundle content naming an event id that
+        // exists under a DIFFERENT entity must not mutate that row — the dup
+        // tombstone is scoped to the importing entity. Before the
+        // reconciliation existed, such a dup was skipped with no mutation;
+        // the tombstone must not widen that reach.
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_a', 'ent_a', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_b', 'ent_b', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        // ent_b's LIVE event carries the id the bundle will collide with.
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at
+             ) VALUES ('fact_b', 'ent_b', 'T', 'B', '[]', 'certain', 'user_confirmed', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_events
+                (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('evt_coll', 'ent_b', 'action', 'd', 'fact_b', 1, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let mut bundle = sample_bundle();
+        bundle.entities[0].events[0] = ParsedEvent {
+            event_id: Some("evt_coll".into()),
+            event_type: "action".into(),
+            summary: "d".into(),
+            related_entry_id: Some("fact_1".into()),
+            date: "1970-01-01".into(),
+            forgotten_at: Some(1732713600000),
+        };
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        assert_eq!(
+            result.events_skipped, 1,
+            "id-collision counted as skipped"
+        );
+        let forgotten: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_coll'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            forgotten, None,
+            "the OTHER entity's live row must stay live"
         );
     }
 
