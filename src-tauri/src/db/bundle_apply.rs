@@ -745,14 +745,29 @@ pub fn apply_import(
                         // un-forgotten by an incoming live event. The reconciled dup
                         // counts ONLY as events_skipped — the tombstone is
                         // intentionally silent in ImportResult (r3 minor 6).
-                        // Scoped to the importing entity (T1.5 r1 MAJOR): ids are
-                        // PRIMARY KEY but a colliding id may belong to ANOTHER
-                        // entity's row — bundle content must never mutate it.
-                        tx.execute(
-                            "UPDATE llm_wiki_events SET forgotten_at = ?1
-                             WHERE id = ?2 AND entity_id = ?3 AND forgotten_at IS NULL",
-                            params![ms, id, target_entity_id],
+                        // Scoped to the import's entity CLUSTER (T1.5 r1 MAJOR +
+                        // CodeRabbit CR-1): a colliding id may belong to another
+                        // entity's row — bundle content must never mutate it —
+                        // but a row owned by a merged-away loser (entity_id =
+                        // loser, redirect → target) IS part of this import
+                        // (export loads the whole cluster via entity_id IN),
+                        // so scoping to the survivor alone would leave the
+                        // forgotten event live and resurrect its entry.
+                        let cluster = crate::db::entities::cluster_ids(
+                            &tx,
+                            &target_entity_id,
                         )?;
+                        let placeholders =
+                            crate::db::entities::in_placeholders(&cluster);
+                        let sql = format!(
+                            "UPDATE llm_wiki_events SET forgotten_at = ?1 \
+                             WHERE id = ?2 AND forgotten_at IS NULL \
+                             AND entity_id IN ({placeholders})"
+                        );
+                        let mut params: Vec<&dyn rusqlite::ToSql> =
+                            vec![&ms, &id];
+                        params.extend(cluster.iter().map(|c| c as &dyn rusqlite::ToSql));
+                        tx.execute(&sql, params.as_slice())?;
                     }
                 }
                 result.events_skipped += 1;
@@ -2068,6 +2083,66 @@ mod tests {
         assert_eq!(
             forgotten, None,
             "the OTHER entity's live row must stay live"
+        );
+    }
+
+    #[test]
+    fn dup_tombstone_reaches_merged_loser_rows() {
+        // CodeRabbit CR-1: export loads the survivor's WHOLE cluster (via
+        // entity_id IN, losers included), and loser rows keep
+        // entity_id = loser. A forgotten dup owned by a merged-away loser
+        // must be reconciled — scoping the tombstone to the survivor alone
+        // would leave it live and resurrect its entry after the import.
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_s', 'ent_s', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_a', 'ent_a', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entity_redirects (entity_id, merged_into, created_at)
+             VALUES ('ent_a', 'ent_s', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_events
+                (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('evt_m', 'ent_a', 'action', 'd', NULL, 1, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let mut bundle = sample_bundle();
+        bundle.entities[0].events[0] = ParsedEvent {
+            event_id: Some("evt_m".into()),
+            event_type: "action".into(),
+            summary: "d".into(),
+            related_entry_id: Some("fact_1".into()),
+            date: "1970-01-01".into(),
+            forgotten_at: Some(1732713600000),
+        };
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        assert_eq!(result.events_skipped, 1, "dup counted as skipped");
+        let forgotten: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_m'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            forgotten,
+            Some(1732713600000),
+            "the merged-loser's row must be tombstoned by the import"
         );
     }
 

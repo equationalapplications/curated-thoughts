@@ -200,11 +200,11 @@ on the build-cache filesystem (repo AGENTS.md build discipline).
    (`src/__tests__/engine9-setup-compat.test.ts`) must pass; run it
    per the frontend-vitest-gates reference (jsdom builtin bundling,
    cold-cache repro rules).
-7. **Full gates:** `cargo --manifest-path src-tauri/Cargo.toml test
-   --lib --features test-utils`, the INTEGRATION target `cargo
-   --manifest-path src-tauri/Cargo.toml test --test okf_bundle
+7. **Full gates:** `cargo test --manifest-path src-tauri/Cargo.toml
+   --lib --features test-utils`, the INTEGRATION target `cargo test
+   --manifest-path src-tauri/Cargo.toml --test okf_bundle
    --features test-utils` (r2-M1 — `--lib` gates cannot see it), and
-   `cargo --manifest-path tools/Cargo.toml test --lib` PLAIN (r3 M-A1 —
+   `cargo test --manifest-path tools/Cargo.toml --lib` PLAIN (r3 M-A1 —
    the tools crate declares no features), all green; no new clippy
    findings versus the base commit.
 
