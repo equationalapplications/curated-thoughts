@@ -509,10 +509,15 @@ fn batched_cluster_counts(
         }
     }
     let mut out: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+    // Issue #378 ruling #1: the same shared arm the retrieval gate uses
+    // (shape-conditional; `?` fails closed on a probe error).
+    let forgotten_arm = crate::wisdom_match::entry_not_forgotten_arm(conn)?;
     {
         let mut stmt = conn.prepare(
-            "SELECT entity_id, COUNT(*) FROM llm_wiki_entries
-             WHERE deleted_at IS NULL GROUP BY entity_id",
+            &format!(
+                "SELECT e.entity_id, COUNT(*) FROM llm_wiki_entries e
+                 WHERE e.deleted_at IS NULL{forgotten_arm} GROUP BY e.entity_id"
+            ),
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
@@ -541,13 +546,15 @@ fn batched_cluster_counts(
 /// Load facts for a cluster (`survivor ∪ redirected losers`, r13-m3
 /// transitive closure). Callers pass [`cluster_ids`].
 fn load_facts(conn: &Connection, ids: &[String]) -> Result<Vec<EntityWisdom>> {
+    // Issue #378 ruling #1: shared forgotten arm (aliases `e.`).
+    let forgotten_arm = crate::wisdom_match::entry_not_forgotten_arm(conn)?;
     let sql = format!(
         "SELECT id, title, body, tags, confidence, source_type, source_ref, updated_at,
                 lifecycle_status, stale_after, generated_by, okf_sources, okf_verified,
                 okf_usage_window, last_verified_at, last_verified_by
-         FROM llm_wiki_entries
-         WHERE entity_id IN ({}) AND deleted_at IS NULL
-         ORDER BY updated_at DESC",
+         FROM llm_wiki_entries e
+         WHERE e.entity_id IN ({}) AND e.deleted_at IS NULL{forgotten_arm}
+         ORDER BY e.updated_at DESC",
         in_placeholders(ids)
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -1302,6 +1309,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_events(&conn, &ids).unwrap().len(), 2);
+    }
+
+    /// Issue #378 ruling #1: the entity detail view and the fact-count
+    /// summary hide a fact whose every backing event is forgotten, and keep
+    /// one with a surviving live event.
+    #[test]
+    fn entity_facts_and_counts_honor_forgotten_gate() {
+        let mut conn = open_in_memory().unwrap();
+        let detail = create_entity(
+            &mut conn,
+            &CreateEntityInput {
+                name: "Gated".into(),
+                entity_type: None,
+                summary: None,
+            },
+        )
+        .unwrap();
+        seed_fact(&conn, &detail.id, "f-gone", "Gone.");
+        seed_fact(&conn, &detail.id, "f-kept", "Kept.");
+        seed_fact(&conn, &detail.id, "f-plain", "Plain.");
+        let link = |id: &str, entry: &str, forgotten: Option<i64>| {
+            conn.execute(
+                "INSERT INTO llm_wiki_events
+                   (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+                 VALUES (?1, ?2, 'synthesized', 's', ?3, 100, ?4)",
+                params![id, detail.id, entry, forgotten],
+            )
+            .unwrap();
+        };
+        link("ev-gone", "f-gone", Some(5));
+        link("ev-k1", "f-kept", Some(5));
+        link("ev-k2", "f-kept", None);
+
+        let loaded = get_entity(&conn, &detail.id).unwrap().unwrap();
+        let mut ids: Vec<&str> = loaded.facts.iter().map(|f| f.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["f-kept", "f-plain"], "detail drops fully-forgotten fact");
+        let listed =
+            list_entities(&conn, EntitySort::default(), &EntityListFilter::default()).unwrap();
+        assert_eq!(listed[0].fact_count, 2, "count excludes forgotten fact");
     }
 
     #[test]

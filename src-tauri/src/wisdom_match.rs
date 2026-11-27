@@ -624,6 +624,14 @@ pub(crate) fn forgotten_entry_arm(t: &Temporal) -> String {
         .to_string()
 }
 
+/// Connection-taking export of [`forgotten_entry_arm`] for crates that cannot
+/// see `pub(crate)` items (the tools crate: MCP sidecar, `ct` CLI). Probes the
+/// shape itself; empty on pre-v19 shapes. Aliases `e.` for `llm_wiki_entries`.
+/// Errors propagate so callers fail closed rather than serve forgotten rows.
+pub fn entry_not_forgotten_arm(conn: &Connection) -> Result<String> {
+    Ok(forgotten_entry_arm(&temporal_columns(conn, None)?))
+}
+
 /// The shared predicate as a standalone query (spec §3.2): Rust-side consumers
 /// (Task 3's stage-1 complement) get the eligible id set from the SAME
 /// fragment `gated_entries` interpolates.
@@ -1972,7 +1980,7 @@ mod tests {
     /// forgotten_at IS NULL`), invoked by forget({eventId}) at :12582 — then
     /// asserts the Rust gate and event readers agree it is forgotten.
     #[test]
-    fn engine_forget_write_agrees_with_rust_gate_and_event_readers() {
+    fn engine_forget_write_shape_is_honored_by_rust_gate_and_event_readers() {
         let conn = open_in_memory().unwrap();
         seed(&conn, "a", "ent-a", &at(0.9));
         seed_event(&conn, "ev1", "a", None);
