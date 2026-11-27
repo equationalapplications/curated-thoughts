@@ -8280,20 +8280,20 @@ mod tests {
     }
 
     /// Spec test-plan item 5 (T3 r1 MINOR 2): EXPLAIN QUERY PLAN on the
-    /// survival guard's LIVE half — the correlated subquery the entry arm
-    /// emits — must be served by `llm_wiki_events_related_live_idx`, so a
-    /// future arm-SQL or DDL change that loses the index fails a test
-    /// instead of silently regressing to a SCAN.
+    /// survival guard's LIVE half must be served by
+    /// `llm_wiki_events_related_live_idx`, so a future change to the arm SQL
+    /// (it interpolates the SHARED `FORGOTTEN_ENTRY_ARM_SQL` constant, T3 r2
+    /// MINOR 2) or to the DDL that loses the index fails a test instead of
+    /// silently regressing to a SCAN.
     #[test]
     fn eqp_live_subquery_uses_related_live_idx() {
         let (_tmp, conn) = engine9_migrated_fixture();
-        let mut stmt = conn
-            .prepare(
-                "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM llm_wiki_entries e \
-                 WHERE EXISTS (SELECT 1 FROM llm_wiki_events le \
-                 WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL)",
-            )
-            .unwrap();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM llm_wiki_entries e \
+             WHERE 1=1{}",
+            crate::wisdom_match::FORGOTTEN_ENTRY_ARM_SQL
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
         let mut saw_live_idx = false;
         let mut rows = stmt.query([]).unwrap();
         while let Some(row) = rows.next().unwrap() {

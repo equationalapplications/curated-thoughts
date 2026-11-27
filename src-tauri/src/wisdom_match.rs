@@ -642,6 +642,15 @@ pub(crate) fn forgotten_entry_arm(t: &Temporal) -> String {
     if !t.has_forgotten_at {
         return String::new();
     }
+    FORGOTTEN_ENTRY_ARM_SQL.to_string()
+}
+
+/// The arm's SQL body as ONE shared constant (T3 r2 MINOR 2): the EQP
+/// regression test in `db/connection.rs` interpolates THIS, so a future
+/// edit to the arm text that loses the planner's index fails the test
+/// instead of silently regressing to a SCAN. Keep the `e.` alias — every
+/// bypass site interpolates this verbatim.
+pub(crate) const FORGOTTEN_ENTRY_ARM_SQL: &str =
     " AND (e.source_type = 'user_stated' \
        OR e.id = e.entity_id \
        OR e.id GLOB 'tier_*' \
@@ -649,9 +658,7 @@ pub(crate) fn forgotten_entry_arm(t: &Temporal) -> String {
        OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe \
                       WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) \
        OR EXISTS (SELECT 1 FROM llm_wiki_events le \
-                  WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))"
-        .to_string()
-}
+                  WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))";
 
 /// Connection-taking export of [`forgotten_entry_arm`] for crates that cannot
 /// see `pub(crate)` items (the tools crate: MCP sidecar, `ct` CLI). Probes the
