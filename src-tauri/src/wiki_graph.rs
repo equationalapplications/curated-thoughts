@@ -633,11 +633,13 @@ fn fetch_outbound_neighbors(
     edge_types: &[&str],
     out: &mut Vec<(WikiTraverseEdge, String)>,
 ) -> Result<()> {
+    let arm_s = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "s")?;
+    let arm_t = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "t")?;
     let sql = format!(
         "SELECT e.source_id, e.target_id, e.edge_type, t.id, t.title, t.entity_id
          FROM llm_wiki_edges e
-         JOIN llm_wiki_entries s ON s.id = e.source_id AND s.deleted_at IS NULL AND s.entity_id = ?1
-         JOIN llm_wiki_entries t ON t.id = e.target_id AND t.deleted_at IS NULL AND t.entity_id = ?1
+         JOIN llm_wiki_entries s ON s.id = e.source_id AND s.deleted_at IS NULL AND s.entity_id = ?1{arm_s}
+         JOIN llm_wiki_entries t ON t.id = e.target_id AND t.deleted_at IS NULL AND t.entity_id = ?1{arm_t}
          WHERE e.entity_id = ?1 AND e.source_id = ?2{edge_filter}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -671,11 +673,13 @@ fn fetch_inbound_neighbors(
     edge_types: &[&str],
     out: &mut Vec<(WikiTraverseEdge, String)>,
 ) -> Result<()> {
+    let arm_s = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "s")?;
+    let arm_t = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "t")?;
     let sql = format!(
         "SELECT e.source_id, e.target_id, e.edge_type, s.id, s.title, s.entity_id
          FROM llm_wiki_edges e
-         JOIN llm_wiki_entries s ON s.id = e.source_id AND s.deleted_at IS NULL AND s.entity_id = ?1
-         JOIN llm_wiki_entries t ON t.id = e.target_id AND t.deleted_at IS NULL AND t.entity_id = ?1
+         JOIN llm_wiki_entries s ON s.id = e.source_id AND s.deleted_at IS NULL AND s.entity_id = ?1{arm_s}
+         JOIN llm_wiki_entries t ON t.id = e.target_id AND t.deleted_at IS NULL AND t.entity_id = ?1{arm_t}
          WHERE e.entity_id = ?1 AND e.target_id = ?2{edge_filter}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -1221,6 +1225,50 @@ mod unit_tests {
         assert!(load_live_entry(&conn, "ent", "kept").unwrap().is_some());
         assert!(!live_entry_exists(&conn, "gone").unwrap());
         assert!(live_entry_exists(&conn, "kept").unwrap());
+    }
+
+    /// Issue #378 Task 6c: traversal edge joins must not expose a fully
+    /// forgotten neighbor (id + linkage) in either direction; a neighbor with
+    /// one forgotten and one live event survives.
+    #[test]
+    fn forgotten_neighbor_edges_are_gated_in_traversal() {
+        let conn = open_in_memory().unwrap();
+        seed_entry(&conn, "ent", "a");
+        seed_entry(&conn, "ent", "gone");
+        seed_entry(&conn, "ent", "kept");
+        seed_ev(&conn, "e0", "a", None);
+        seed_ev(&conn, "e1", "gone", Some(5));
+        seed_ev(&conn, "e2", "kept", Some(5));
+        seed_ev(&conn, "e3", "kept", None);
+        seed_edge(&conn, "ent", "a", "gone", "relates_to");
+        seed_edge(&conn, "ent", "a", "kept", "relates_to");
+        seed_edge(&conn, "ent", "gone", "a", "relates_to");
+
+        for direction in [
+            TraverseDirection::Outbound,
+            TraverseDirection::Inbound,
+            TraverseDirection::Both,
+        ] {
+            let result =
+                wiki_traverse_graph(&conn, Some("ent"), "a", 2, direction, &[]).unwrap();
+            assert!(
+                !result
+                    .edges
+                    .iter()
+                    .any(|e| e.source_id == "gone" || e.target_id == "gone"),
+                "forgotten neighbor leaked via edge: {:?}",
+                result.edges
+            );
+        }
+        let both = wiki_traverse_graph(&conn, Some("ent"), "a", 2, TraverseDirection::Both, &[])
+            .unwrap();
+        assert!(
+            both.edges
+                .iter()
+                .any(|e| e.source_id == "a" && e.target_id == "kept"),
+            "survival-guard neighbor edge missing: {:?}",
+            both.edges
+        );
     }
 
     fn seed_edge(conn: &Connection, entity_id: &str, source: &str, target: &str, edge_type: &str) {

@@ -629,7 +629,29 @@ pub(crate) fn forgotten_entry_arm(t: &Temporal) -> String {
 /// shape itself; empty on pre-v19 shapes. Aliases `e.` for `llm_wiki_entries`.
 /// Errors propagate so callers fail closed rather than serve forgotten rows.
 pub fn entry_not_forgotten_arm(conn: &Connection) -> Result<String> {
-    Ok(forgotten_entry_arm(&temporal_columns(conn, None)?))
+    entry_not_forgotten_arm_for(conn, "e")
+}
+
+/// Alias-parameterized variant of [`entry_not_forgotten_arm`] for joins that
+/// alias `llm_wiki_entries` as something other than `e` (e.g. the traversal
+/// edge joins' `s`/`t`). Derived mechanically from the SAME arm text — the
+/// SQL is never copied. Only the `e.` references to the entries table are
+/// rewritten; the subquery aliases `fe`/`le` are left alone. Empty on
+/// pre-v19 shapes.
+pub fn entry_not_forgotten_arm_for(conn: &Connection, alias: &str) -> Result<String> {
+    let arm = forgotten_entry_arm(&temporal_columns(conn, None)?);
+    if arm.is_empty() || alias == "e" {
+        return Ok(arm);
+    }
+    assert!(
+        arm.starts_with(" AND (e.source_type = "),
+        "forgotten arm shape changed; update entry_not_forgotten_arm_for"
+    );
+    // Entries-table refs are `(e.` or ` e.`; subquery aliases (`fe.`, `le.`)
+    // are preceded by a letter and so never match.
+    Ok(arm
+        .replace("(e.", &format!("({alias}."))
+        .replace(" e.", &format!(" {alias}.")))
 }
 
 /// The shared predicate as a standalone query (spec §3.2): Rust-side consumers

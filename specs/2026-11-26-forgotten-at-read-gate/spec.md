@@ -157,7 +157,7 @@ The predicate is pushed **into the candidate-selection WHERE** (D1.2/D1.3) — t
 
 ### D4. UI parity (ruling #2.2)
 
-The Tauri UI reads the wiki DB **exclusively via Rust commands** — no direct TS SQL exists (`E5`: `src/lib/wikiAdapter.ts:21-33` passthrough of `wiki_exec`/`wiki_get_all`/`wiki_get_first`; `src/lib/wiki.ts` uses only `invoke` and the engine API). Because the shared-predicate gate lives inside the Rust SQL builders those commands execute, UI, CLI, and MCP inherit the identical gate — they cannot agree to disagree. Engine-mediated TS reads continue to see forgotten-event-linked entries (engine `forget({ eventId })` does not hide entries anywhere), which is accepted per ruling #2 ("Since engine forget() leaves the entry visible in core-llm-wiki"): CT's gate is the read-time choke point on the CT side.
+The Tauri UI reads the wiki DB **exclusively via Rust commands** — no direct TS SQL exists (`E5`: `src/lib/wikiAdapter.ts:21-33` passthrough of `wiki_exec`/`wiki_get_all`/`wiki_get_first`; `src/lib/wiki.ts` uses only `invoke` and the engine API). Because the shared-predicate gate lives inside the Rust SQL builders those commands execute, the Rust-gated surfaces (UI adapter passthrough, CLI, MCP) inherit the identical gate and cannot disagree with each other. The residual, stated plainly: engine-mediated TS SQL passthroughs (`wiki_exec`/`wiki_get_all`/`wiki_get_first`) bypass the Rust gate, and the engine itself never hides entries (`E1`; engine `forget({ eventId })` does not hide entries anywhere) — a consumer using those paths sees forgotten-linked entries. This is accepted under ruling #2.2 ("Since engine forget() leaves the entry visible in core-llm-wiki"): CT's gate is the read-time choke point on the Rust side only.
 
 ## Test plan
 
