@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (rusqlite, src-tauri crate), TypeScript vitest (engine-parity allowlist).
 
-**Spec:** `specs/2026-11-27-forgotten-gate-followups/spec.md` (owner-approved 2026-11-27; amended r1 and r2 — see revision history; the plan argues from the amended text).
+**Spec:** `specs/2026-11-27-forgotten-gate-followups/spec.md` (owner-approved 2026-11-27; amended r1–r4 — see revision history; the plan argues from the amended text).
 
 **Evidence base:** all file:line against `origin/main @ fc715239`.
 
@@ -16,6 +16,7 @@
 - r1 (2026-11-27, Opus-medium plan review, $0.90/24 turns, REQUEST CHANGES — all findings verified, folded): B1 parser token loop dropped ids → id-first extraction; B2 round-trip fixture defeated by the survival guard → two-entry fixture; B3 new index breaks five DROP COLUMN sites → drop-list + helper; M1 export SELECT unconditional → probe + `NULL AS forgotten_at`; M2 old-binary id loss → one-way compat in spec; M3 dup-skip resurrection → UPDATE reconciliation; M4 trace-oracle uncompilable → DROP TABLE oracle + structural pass-down; minors 1–8 folded.
 - r2 (2026-11-27, Opus-medium delta review, $1.02/25 turns, REQUEST CHANGES — all findings verified, folded): **B1** `wiki_context` is a SECOND public traversal (`wiki_graph.rs:2404/2418`; `CompositeWalk::walk_seed` sites `:2274/:2306/:2344` are PRODUCTION code past `mod unit_tests`' end at `:2178`, misclassified r1 as tests) → gate resolved in both public entries, `CompositeWalk` carries it; **B2** dup-UPDATE lacked the column guard → guarded, pre-v19 test extended to the dup case; **M1** integration test `ExportEvent` literal (`tests/okf_bundle.rs:137`) breaks compile and `--lib` gates are blind → literal updated + integration gate added; **M2** Step 2 promised a red that cannot happen (gate probes already shape-only on main) → expectation corrected to characterization; minors 1–5 folded.
 - r3 (2026-11-27, Opus-medium delta review, $1.08/22 turns, REQUEST CHANGES — 0 BLOCKER, 4 MAJOR + 6 MINOR, all verified, folded): **M-A1** tools crate has no `[features]` table → tools gate runs plain `cargo test --lib` (no `--features test-utils`); **M-A2** the meta test never exercised the second entry's gate → added `wiki_context_in_scheme(…, Some(Scheme::Raw))` case (meta dropped → `Ok`, forgotten entries absent); **M-A3** helper ordering — `test_support.rs` + `db/mod.rs` declaration move to Task 2; **M-A4** `CompositeWalk::new(gate, truncated)` shape spelled out (`#[derive(Default)]` removed; `Default` on `TraversalGate` forbidden — an empty-arm default fails open); minors 1–6 folded (mod.rs in commit, round-trip through disk text, helper in guard test, stale `:1965` clause deleted, `load_live_node(conn, gate: &TraversalGate, …)`, dup reconciliation documented as intentionally silent).
+- r4 (2026-11-27, Opus-medium delta review, $0.87/14 turns, REQUEST CHANGES — 0 BLOCKER, 1 MAJOR + 7 MINOR, all verified, folded): **M-A5** Task 5 missed the characterization test's own call sites `wiki_graph.rs:1224-1227` (E0061 once signatures change; resolution prescribed: `let gate = TraversalGate::resolve(&conn).unwrap();` then `&gate.entry_arm` args, keeping the is_none/!exists assertions — they now prove a resolved gate excludes the forgotten entry); minors 1–7 folded (`edge_vocabularies` field name, gate origin at `:2110`, three stale Task-6 mentions, `open_in_memory()` fixtures prescribed — `engine9_migrated_fixture` is private to connection.rs tests, `event_line.rs:65/:107` callers named, `test_support` sibling noted, revision-header staleness). Reviewer prescribed a TEXT-ONLY confirm for r5 rather than a full round.
 
 ## Global Constraints
 
@@ -41,7 +42,7 @@
 - `src-tauri/src/wiki_graph.rs` — `TraversalGate` + pass-down (both public entries + CompositeWalk) + tests. Task 5.
 - `src-tauri/src/db/okf_ddl.rs` — live-half index. Task 6.
 - `src-tauri/src/db/connection.rs` — guard test + expected-list row. Task 6.
-- `src-tauri/src/db/test_support.rs` (new) — `drop_forgotten_column` helper. Task 6.
+- `src-tauri/src/db/test_support.rs` (new, created in TASK 2 — r3 M-A3) — `drop_forgotten_column` helper (r3 minor 6: name collides only as a sibling with `crate::db::proposals::test_support`; paths disjoint, noted for grep).
 - `src/__tests__/engine9-setup-compat.test.ts` — CT_OWNED allowlist row. Task 6.
 
 ---
@@ -206,14 +207,15 @@ fn build_event_text_carries_forgotten_key() {
 }
 ```
 
-bundle_io.rs (r1-M1 — pre-v19 export tolerance; follow the module's existing fixture pattern):
+bundle_io.rs (r1-M1 — pre-v19 export tolerance; fixture: r4 minor 4 — `engine9_migrated_fixture` is PRIVATE to connection.rs's test module, so use `open_in_memory()` here, which already yields the v19 shape):
 
 ```rust
 #[test]
 fn export_tolerates_pre_v19_shape_without_forgotten_column() {
-    // Engine9-migrated fixture, then drop the column via the
-    // drop_forgotten_column helper (Task 6 — all three indexes first).
-    // Export must succeed; events export with forgotten_at == None.
+    // open_in_memory() fixture (v19 shape), then drop the column via the
+    // drop_forgotten_column helper (created THIS task, r3 M-A3 — all
+    // three indexes first). Export must succeed; events export with
+    // forgotten_at == None.
 }
 ```
 
@@ -227,6 +229,7 @@ Expected: FAIL (arity; probe/test missing).
 
 `event_line.rs`: add the `forgotten_at: Option<i64>` param; final line becomes
 `append_event_id_comment_forgotten(&core, event_id, forgotten_at)`.
+Both existing test callers of `build_event_text` (r4 minor 5 — `event_line.rs:65` and `:107`) gain `None` as the fifth argument.
 `bundle_write.rs:18-29`: add `pub forgotten_at: Option<i64>,` to `ExportEvent` (doc comment: `/// Engine `forget()` tombstone, ms epoch; `None` = live. Rides the id comment on export (#398).`).
 `bundle_write.rs:172` (`build_event_text(...)` call in the log_entries map): pass `ev.forgotten_at`.
 bundle_io.rs (r1-M1, site named per r2 minor 4): probe ONCE in `load_export_entities` (`bundle_io.rs:11`) BEFORE the per-cluster loop (`:55` calls `load_events` per cluster — the probe must NOT sit inside it) via `crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")`, and pass `has_forgotten: bool` into `load_events`; the SELECT appends `, forgotten_at` when present, `, NULL AS forgotten_at` when not (so `let forgotten_at: Option<i64> = r.get(5)?;` works for both shapes). A pre-v19 brain exports without error — matching the codebase's degraded-shape tolerance everywhere else (spec r1-M1 ruling).
@@ -319,8 +322,9 @@ fn round_trip_preserves_forgotten_at_and_gate_hides_entry() {
     // backing event exists (forgotten_entry_arm's `OR EXISTS … IS NULL`),
     // so the two events must back DIFFERENT entries:
     //
-    // 1. Source brain (engine9_migrated fixture pattern — copy from the
-    //    connection.rs guard test): seed TWO live entries `fact_a` and
+    // 1. Source brain (r4 minor 4: `engine9_migrated_fixture` is private
+    //    to connection.rs's test module — use `open_in_memory()`, which
+    //    already yields the v19 shape): seed TWO live entries `fact_a` and
     //    `fact_b`, both source_type NOT 'user_stated' (carve-out!) and
     //    neither id == entity_id nor tier_* (carve-outs!). Events:
     //    evt_dead (related_entry_id='fact_a', forgotten_at set via the
@@ -443,7 +447,7 @@ git commit -m "feat(bundle): import applies forgotten_at verbatim, reconciles du
 
 **Files:**
 - Modify: `src-tauri/src/wisdom_match.rs:675-700` (`entry_not_forgotten_arm_for` split)
-- Modify: `src-tauri/src/wiki_graph.rs` — `load_live_entry` (:466-490), `load_live_node` (:527-541), `fetch_neighbors` + outbound/inbound (:541-707), `wiki_traverse_graph` (:779) + private walkers (:799-1010), `live_entry_exists` (:1150-1162), **production composite walk** (`CompositeWalk` :2235, `walk_seed` :2261 with PRODUCTION sites :2274/:2306/:2344, `wiki_context` :2404, `wiki_context_in_scheme` :2418), test call site :2111 (r2-B1)
+- Modify: `src-tauri/src/wiki_graph.rs` — `load_live_entry` (:466-490), `load_live_node` (:527-541), `fetch_neighbors` + outbound/inbound (:541-707), `wiki_traverse_graph` (:779) + private walkers (:799-1010), `live_entry_exists` (:1150-1162), characterization-test call sites :1224-1227 (r4 M-A5), **production composite walk** (`CompositeWalk` :2235, `walk_seed` :2261 with PRODUCTION sites :2274/:2306/:2344, `wiki_context` :2404, `wiki_context_in_scheme` :2418), test call site :2110-2111 (r2-B1)
 
 **Interfaces:**
 - Produces (wisdom_match.rs): `pub(crate) fn entry_not_forgotten_arm_for_temporal(t: &Temporal, alias: &str) -> Result<String>` — the alias-validation + rewrite half of `entry_not_forgotten_arm_for`, factored verbatim.
@@ -553,9 +557,10 @@ Pass-down for the FIRST entry — `wiki_traverse_graph`:
 Pass-down for the SECOND entry — `wiki_context_in_scheme` (r2-B1):
 - `let gate = TraversalGate::resolve(conn)?;` BEFORE the seed loop (up to 25 seeds), then hand it to `CompositeWalk` — r3 M-A4 shape, exact:
   - REMOVE `#[derive(Default)]` from `CompositeWalk` (`:2234`) — a `gate: TraversalGate` field has no Default, and deriving Default on `TraversalGate` is FORBIDDEN: empty arms mean an inert gate, i.e. the walk FAILS OPEN on a v19 brain. Put that reasoning in a comment on `TraversalGate` and add `impl` nothing — no Default impl for it.
-  - Add `fn new(gate: TraversalGate, truncated: bool) -> Self` initializing EVERY field (`nodes`, `edges`, `edge_keys`, `visited`, `truncated`, `per_seed_vocabs`, `gate`).
+  - Add `fn new(gate: TraversalGate, truncated: bool) -> Self` initializing EVERY existing field (`:2236-2247` — r4 minor 1: the vocab field is named `edge_vocabularies`, not `per_seed_vocabs`) plus `gate`.
   - Production site `:2433-2447` (the struct literal with `truncated: clamped_depth < depth` + `..Default::default()`): replace with `CompositeWalk::new(gate, clamped_depth < depth)`.
-  - Test site `:2110` (`CompositeWalk::default()`): replace with `CompositeWalk::new(gate, false)` — note `:2111` is the `walk_seed` CALL; the construction is `:2110` (r3 M-A4 citation fix).
+  - Test site `:2110` (`CompositeWalk::default()`): replace with `let gate = TraversalGate::resolve(&conn).unwrap(); CompositeWalk::new(gate, false)` (r4 minor 2 — the gate's origin is written out) — note `:2111` is the `walk_seed` CALL; the construction is `:2110` (r3 M-A4 citation fix).
+  - Characterization-test call sites `:1224-1227` (r4 M-A5 — `forgotten_gate_closes_graph_bypass_sites` calls both functions directly and must compile + stay green): `let gate = TraversalGate::resolve(&conn).unwrap();` then `load_live_entry(&conn, "ent", "gone", &gate.entry_arm)` / `live_entry_exists(&conn, "gone", &gate.entry_arm)`, same for `"kept"`. KEEP the `is_none` / `!exists` assertions — with the arm parameter they now prove a RESOLVED gate excludes the forgotten entry (an empty arm would let `"gone"` through).
 - `walk_seed` (:2261) uses `self.gate`: `:2274` `load_live_node(&conn, &self.gate, …)` (r3 minor 5 — DECIDED signature: `load_live_node(conn, gate: &TraversalGate, …)`, which passes `&gate.entry_arm` to `load_live_entry`; applied at BOTH callers `:808` and `:2274`), `:2306` `fetch_neighbors(..., &self.gate, ...)`, `:2344` `load_live_entry(..., &self.gate.entry_arm)`.
 - Reclassification (r2-B1): `:2274/:2306/:2344` are PRODUCTION sites, NOT test call sites. The genuine test call site is `:2110-2111` (`CompositeWalk::new` + `walk.walk_seed`).
 - `wiki_context` (:2404) needs no separate resolve — it delegates to `wiki_context_in_scheme`.
@@ -649,7 +654,7 @@ Then: `CARGO_TARGET_DIR=… cargo test --manifest-path src-tauri/Cargo.toml --li
 Then: `npm test -- engine9-setup-compat   # frontend parity gate (vitest run)`
 
 ```bash
-git add src-tauri/src/db/okf_ddl.rs src-tauri/src/db/connection.rs src-tauri/src/db/test_support.rs src-tauri/src/db/entities.rs src-tauri/src/db/events.rs src-tauri/src/wisdom_match.rs src/__tests__/engine9-setup-compat.test.ts
+git add src-tauri/src/db/okf_ddl.rs src-tauri/src/db/connection.rs src-tauri/src/db/entities.rs src-tauri/src/db/events.rs src-tauri/src/wisdom_match.rs src/__tests__/engine9-setup-compat.test.ts
 git commit -m "perf(gate): live-half partial index llm_wiki_events_related_live_idx + parity allowlist (#401)"
 ```
 
@@ -666,6 +671,6 @@ git commit -m "perf(gate): live-half partial index llm_wiki_events_related_live_
 ## Self-Review
 
 - Spec coverage: Task 1-4 = spec Tasks 1-2 (round-trip, incl. r1-M1 export probe + guarded dup reconciliation); Task 5 = spec Task 3 (+ closes #399 with the DROP TABLE meta characterization; both public entries per r2-B1); Task 6 = spec Task 4 (+ r1-B3 helper, r2 minor 2 correlated EQP). Test plan items 1-7 map to Tasks 4,1,1,5,6,6,7. ✓
-- Type consistency: `append_event_id_comment_forgotten(Option<i64>)` Tasks 1→2; `parse_event_id_comment` 3-tuple Task 1→3; `entry_not_forgotten_arm_for_temporal(&Temporal, &str)` Task 5 internal; `TraversalGate` resolved in both public entries, held by `CompositeWalk`; `drop_forgotten_column` Task 6 shared by Tasks 2/4/6 tests. ✓
+- Type consistency: `append_event_id_comment_forgotten(Option<i64>)` Tasks 1→2; `parse_event_id_comment` 3-tuple Task 1→3; `entry_not_forgotten_arm_for_temporal(&Temporal, &str)` Task 5 internal; `TraversalGate` resolved in both public entries, held by `CompositeWalk`; `drop_forgotten_column` created in Task 2 (r3 M-A3), used by Tasks 2/4/6. ✓
 - Placeholders: the two test blocks with prose bodies (bundle_read fixture, connection.rs re-apply) explicitly instruct verbatim-copy of existing in-file fixtures — permitted pattern (copy, don't invent). ✓
-- r1 + r2 findings: all BLOCKERs, MAJORs, and minors folded with `r1-*`/`r2-*` tags inline. ✓
+- r1 + r2 + r3 + r4 findings: all BLOCKERs, MAJORs, and minors folded with `r1-*`…`r4-*` tags inline. ✓
