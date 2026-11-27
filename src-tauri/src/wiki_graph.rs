@@ -568,6 +568,10 @@ fn load_live_node(
     Ok(None)
 }
 
+// `gate` is resolved once per walk at the public entries and passed down
+// verbatim (owner note 2); grouping args into a struct would deviate from the
+// converged plan's prescribed signatures.
+#[allow(clippy::too_many_arguments)]
 fn fetch_neighbors(
     conn: &Connection,
     gate: &TraversalGate,
