@@ -297,6 +297,9 @@ pub(crate) has_valid_to: bool,
     /// `e.area` ONLY when this holds — pre-V30 degraded shapes keep today's
     /// column list exactly.
     pub(crate) has_area: bool,
+    /// Events-table `forgotten_at` column present (engine v19; issue #378 D2).
+    #[allow(dead_code)] // read by the forgotten-at gate arm (plan Task 2)
+    pub(crate) has_forgotten_at: bool,
     /// Read scheme for the SELECT filter — `None` on the pre-V27 shape (no
     /// `embed_scheme` column). Resolved once per call, next to the column
     /// probes, so every scheme-derived tuple member of the call path (floor,
@@ -316,10 +319,12 @@ pub(crate) fn temporal_columns(conn: &Connection, declared: Option<Scheme>) -> R
     // declared-instr1-on-pre-V27 refusal) lives once in `embed_scheme`.
     let scheme = resolve_reader_scheme(conn, declared)?;
     let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
+    let event_cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")?;
     Ok(Temporal {
         has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
         has_valid_to: cols.iter().any(|c| c == "valid_to"),
         has_area: cols.iter().any(|c| c == "area"),
+        has_forgotten_at: event_cols.iter().any(|c| c == "forgotten_at"),
         scheme,
     })
 }
@@ -1836,6 +1841,26 @@ mod tests {
 
     fn param_names(p: &[(String, rusqlite::types::Value)]) -> Vec<&str> {
         p.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    /// Issue #378 D2: the probe reads the EVENTS table's `forgotten_at`.
+    #[test]
+    fn temporal_probe_has_forgotten_at_follows_events_shape() {
+        let conn = open_in_memory().unwrap();
+        assert!(
+            temporal_columns(&conn, Some(Scheme::Raw)).unwrap().has_forgotten_at,
+            "v19 shape probes true"
+        );
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
+             DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
+             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
+        )
+        .unwrap();
+        assert!(
+            !temporal_columns(&conn, Some(Scheme::Raw)).unwrap().has_forgotten_at,
+            "pre-v19 shape probes false"
+        );
     }
 
     #[test]

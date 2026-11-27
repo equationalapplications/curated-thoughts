@@ -387,6 +387,14 @@ pub fn apply_llm_wiki_v18_v19_partial_indexes(conn: &rusqlite::Connection) -> ru
             "CREATE INDEX IF NOT EXISTS llm_wiki_events_forgotten_idx ON llm_wiki_events(entity_id, forgotten_at) WHERE forgotten_at IS NOT NULL",
             [],
         )?;
+        // Issue #378 D2: CT-owned anti-join index for the forgotten-at read
+        // gate; needs both columns (`related_entry_id` is a template column).
+        if events.iter().any(|c| c == "related_entry_id") {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS llm_wiki_events_related_forgotten_idx ON llm_wiki_events(related_entry_id) WHERE forgotten_at IS NOT NULL AND related_entry_id IS NOT NULL",
+                [],
+            )?;
+        }
     }
     Ok(())
 }
