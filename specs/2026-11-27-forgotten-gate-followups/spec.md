@@ -1,6 +1,6 @@
 # Spec: forgotten-gate follow-ups — bundle round-trip, traversal hoist, live index (#398)
 
-**Status:** Reviewed (owner-approved 2026-11-27 — Kurt, Discord msg 1575947241263472833; two implementation notes folded into plan: strict comment-scoped `forgotten:` parsing with byte-identical id-only lines, and full traversal-entry-point sweep for arm pass-down. r1 2026-11-27: Opus-medium plan review REQUEST CHANGES → all findings verified and folded; spec amended: round-trip fixture redesign, pre-v19 export tolerance, dup reconciliation, one-way compat note, traversal-entry wording. r2 2026-11-27: delta review REQUEST CHANGES → folded; spec amended: TWO public traversal entries (`wiki_traverse_graph` + `wiki_context_in_scheme`), dup UPDATE column-guarded, `okf_bundle` integration gate added. r3 2026-11-27: delta review REQUEST CHANGES (0 blockers) → folded; spec test-plan amended: tools gate plain `--lib`, second-entry gate coverage via caller-resolved scheme)
+**Status:** Implemented (2026-11-27 — all 7 plan tasks landed TDD-first and task-reviewed; gates green. Originally Reviewed: owner-approved 2026-11-27 — Kurt, Discord msg 1575947241263472833; two implementation notes folded into plan: strict comment-scoped `forgotten:` parsing with byte-identical id-only lines, and full traversal-entry-point sweep for arm pass-down. r1 2026-11-27: Opus-medium plan review REQUEST CHANGES → all findings verified and folded; spec amended: round-trip fixture redesign, pre-v19 export tolerance, dup reconciliation, one-way compat note, traversal-entry wording. r2 2026-11-27: delta review REQUEST CHANGES → folded; spec amended: TWO public traversal entries (`wiki_traverse_graph` + `wiki_context_in_scheme`), dup UPDATE column-guarded, `okf_bundle` integration gate added. r3 2026-11-27: delta review REQUEST CHANGES (0 blockers) → folded; spec test-plan amended: tools gate plain `--lib`, second-entry gate coverage via caller-resolved scheme)
 **Date:** 2026-11-27
 **Ruling issue:** equationalapplications/curated-thoughts#398
 **Folded issues:** #399, #400, #401 (one PR, owner-directed single-delivery fold; owner directive 2026-11-27: no new issues this session — every new finding lands in this PR)
@@ -216,3 +216,50 @@ on the build-cache filesystem (repo AGENTS.md build discipline).
 - #397 and #390 stay out (rejected alternatives above).
 - Per Kurt's 2026-11-27 directive: no new issues from this lane — any
   new finding lands in this PR if review-manageable.
+
+## Errata
+
+### EQP on the arm's live subquery (correlated-query form, per r2 minor 2)
+
+sqlite 3.53.4, real correlated query from the plan's Task 6 Step 4 —
+BEFORE (arm subquery scans `llm_wiki_events`):
+
+```
+QUERY PLAN
+|--SCAN e
+|--CORRELATED SCALAR SUBQUERY 1
+|  `--SEARCH fe USING INDEX llm_wiki_events_related_forgotten_idx (related_entry_id=?)
+`--CORRELATED SCALAR SUBQUERY 2
+   `--SCAN le
+```
+
+AFTER (`llm_wiki_events_related_live_idx` serves the live half):
+
+```
+QUERY PLAN
+|--SCAN e
+|--CORRELATED SCALAR SUBQUERY 1
+|  `--SEARCH fe USING INDEX llm_wiki_events_related_forgotten_idx (related_entry_id=?)
+`--CORRELATED SCALAR SUBQUERY 2
+   `--SEARCH le USING INDEX llm_wiki_events_related_live_idx (related_entry_id=?)
+```
+
+### Mid-flight deltas folded during implementation (2026-11-27)
+
+- **Plan r3 minor 4 was stale:** the `wisdom_match.rs` fixture at the old
+  `:1965` anchor (`forgotten_probe_requires_related_entry_id`, which drops
+  COLUMN `related_entry_id`) DID need a change once
+  `llm_wiki_events_related_live_idx` exists — the index's WHERE clause
+  references `related_entry_id`, so SQLite refuses the DROP COLUMN (same
+  r1-B3 constraint as `forgotten_at`). Its batch now adds
+  `DROP INDEX IF EXISTS llm_wiki_events_related_live_idx;` (verified
+  minimal + semantics-preserving at task review).
+- The generated migrated-shape golden fixture
+  (`src-tauri/src/db/testdata/ct-engine9-migrated.llm_wiki.schema.sql`)
+  was regenerated via the prescribed `CT_REGEN_FIXTURES=1` path (+3
+  lines: the new index block) — forced fallout of the new index.
+- clippy `-D warnings`: `fetch_neighbors` (wiki_graph.rs) reached 8
+  arguments when the per-walk `TraversalGate` param landed (owner note
+  2); carries a targeted `#[allow(clippy::too_many_arguments)]` rather
+  than a signature refactor, to preserve the converged plan's
+  prescribed shapes.
