@@ -1,6 +1,6 @@
 # Spec: read-time gate for forgotten facts (`forgotten_at`) — #378
 
-**Status:** Approved (owner, 2026-11-26 21:32 ET — OQ1 survival guard + OQ4 OR predicate folded; cleared for implementation)
+**Status:** Reviewed (owner-approved 2026-11-26 21:32 ET — OQ1 survival guard + OQ4 OR predicate folded; cleared for implementation)
 **Date:** 2026-11-26
 **Ruling issue:** equationalapplications/curated-thoughts#378
 **All file:line evidence against `origin/main` @ `bbe15dc2` (3.16.4).**
@@ -37,7 +37,7 @@
 
 - `llm_wiki_events.forgotten_at INTEGER` is the only column: `src-tauri/src/db/okf_ddl.rs:135-145` (declared at `:143`).
 - `llm_wiki_entries` has **no** `forgotten_at` column: full DDL at `src-tauri/src/db/okf_ddl.rs:14-52`.
-- `entries.derived_events TEXT` (JSON, `okf_ddl.rs:51`) and `llm_wiki_events.related_entry_id TEXT` (`okf_ddl.rs:141`) are the two available join keys. `related_entry_id` is the engine-populated, indexed-by-insert path; `derived_events` is an opaque JSON blob written by CT's entry pipeline — the join should use `related_entry_id`.
+- `entries.derived_events TEXT` (JSON, `okf_ddl.rs:51`) and `llm_wiki_events.related_entry_id TEXT` (`okf_ddl.rs:140`) are the two available join keys. `related_entry_id` is the engine-populated, indexed-by-insert path; `derived_events` is an opaque JSON blob written by CT's entry pipeline — the join should use `related_entry_id`.
 - **Who writes it:** nothing in `src-tauri/src` sets `forgotten_at` (grep over `src-tauri/src` for `SET forgotten_at` / `forgotten_at =` returns only DDL/migration/test lines). The engine writes it: core-llm-wiki 9.18.0 `dist/index.js:5547` (`UPDATE … SET forgotten_at = ? WHERE … AND forgotten_at IS NULL`), invoked by `forget({ eventId })` at `:12582`. CT is therefore a pure **read-side** consumer of the flag.
 - **Engine semantics:** `forget({ eventId })` tombstones an **event**, not its entry. The engine filters `forgotten_at IS NULL` on all its own event readers (exactly 11 occurrences in the 9.18.0 dist `index.js:5343-5533`) and never hides the linked entry. Engine `forget({ sourceRef })` / `clearAll` hard-delete entries through a different path (CT's mirror: `src-tauri/src/db/wiki_forget.rs:25`).
 
@@ -94,22 +94,48 @@ Notes: there is **no FTS table over wiki entries** — the "FTS leg" of recall i
 2. **Entries-table readers — extend `entry_eligibility_where` with the survival-guard arm (ruling #2).** When the shape has the `forgotten_at` column, the fragment gains a hidden-iff-all-backing-events-forgotten anti-join plus the never-hide carve-outs:
 
    ```sql
-   AND e.source_type != 'user_stated'
-   AND NOT (  -- structural container carve-out (OQ4 ruling #3: OR of both signals)
-     e.id = e.entity_id                    -- signal 1: self-referential container root
-     OR e.id LIKE 'tier%'                  -- signal 2: reserved tier-entity namespace
-     OR e.entity_id LIKE 'tier%'           --   (tier_fact / tier_wisdom constants,
-   )                                       --    tier_working::<hash> runtime-derived; wiki.ts:52-60)
-   AND (  -- survival guard: hidden iff it HAS backing events and NONE are live
-     NOT EXISTS (SELECT 1 FROM llm_wiki_events be
-                 WHERE be.related_entry_id = e.id)
-     OR EXISTS  (SELECT 1 FROM llm_wiki_events le
-                 WHERE le.related_entry_id = e.id
-                   AND le.forgotten_at IS NULL)
+   AND (
+     e.source_type = 'user_stated'        -- carve-out: never hide stated rows
+     OR e.id = e.entity_id                -- carve-out: never hide structural containers
+     OR e.id GLOB 'tier_*'                --   (OQ4 ruling #3: OR of both signals —
+     OR e.entity_id GLOB 'tier_*'         --    tier_fact / tier_wisdom constants,
+                                          --    tier_working::<hash> runtime-derived; wiki.ts:52-60;
+                                          --    GLOB: case-sensitive, matches exactly the tier_ namespace)
+     OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe  -- survival guard: hidden iff
+                    WHERE fe.related_entry_id = e.id  -- it has a forgotten event
+                    AND fe.forgotten_at IS NOT NULL)  -- and none live. A forgotten
+     OR EXISTS     (SELECT 1 FROM llm_wiki_events le  -- event is itself a backing
+                    WHERE le.related_entry_id = e.id  -- event, so this equals
+                    AND le.forgotten_at IS NULL)      -- "all backing events forgotten".
    )
    ```
 
-   Rationale: `related_entry_id` → entry is many-to-one (E4), so a naive `NOT EXISTS (forgotten event)` would collateral-delete shared rules after one session event; the guard hides an event-backed entry only when **zero** live events remain, per ruling #2.1. Entries with no linked events are never hidden by event-forget. The `user_stated` carve-out uses `source_type` (`commit.rs:3111`, `lib.rs:5922-5926`); the belt-and-braces attestation variant additionally spares any entry whose source document carries a `stated_attestations` row (join pattern: `commit.rs:3009-3013`, `documents.path`/`hash` ⇄ `stated_attestations.document_path`/`content_hash`). This automatically covers `gated_entries`, `eligible_entry_ids`, `candidate_set`, and the two-stage legs (all four interpolate the shared fragment — E3 map). The fragment body stays shape-conditional via the existing `Temporal`-style probe (new field on the probe struct, mirroring `has_superseded_by` / `has_valid_to` at `wisdom_match.rs:596-605`), so pre-v19 shapes compile the fragment without the arm.
+   The whole block is ONE `OR` group appended to the AND chain: each arm is an
+   escape hatch that keeps the row. Chaining the carve-outs as plain `AND`
+   clauses would instead DROP every stated and container row unconditionally
+   (T3 plan review B1, 2026-11-26) — never do that.
+
+   Rationale: `related_entry_id` → entry is many-to-one (E4), so a naive
+   any-forgotten-event hide would collateral-delete shared rules after one
+   session event; the guard hides an event-backed entry only when **zero**
+   live events remain, per ruling #2.1. The two subquery arms are logically
+   equivalent to the ruling's "has backing events and none live" wording
+   (a forgotten event is itself a backing event), and the rewritten form lets
+   the `NOT EXISTS (forgotten)` arm use the D2 partial index (the subquery's
+   WHERE implies the index's `forgotten_at IS NOT NULL`) and short-circuit
+   there; the `EXISTS (live)` arm only runs for entries that actually have a
+   forgotten event (T3 plan review M1, 2026-11-26). Entries with no linked
+   events are never hidden by event-forget. The `user_stated` carve-out uses
+   `source_type` (`commit.rs:3111`, `lib.rs:5922-5926`); the belt-and-braces
+   attestation variant additionally spares any entry whose source document
+   carries a `stated_attestations` row (join pattern: `commit.rs:3009-3013`,
+   `documents.path`/`hash` ⇄ `stated_attestations.document_path`/`content_hash`).
+   This automatically covers `gated_entries`, `eligible_entry_ids`,
+   `candidate_set`, and the two-stage legs (all four interpolate the shared
+   fragment — E3 map). The fragment body stays shape-conditional via the
+   existing `Temporal`-style probe (new field on the probe struct, mirroring
+   `has_superseded_by` / `has_valid_to` at `wisdom_match.rs:596-605`), so
+   pre-v19 shapes compile the fragment without the arm.
 
 3. **Close the bypasses.** `rank_wiki_entries` (`tool_dispatch.rs:450`), `curated_get_wiki_entry` (`tool_dispatch.rs:722`), and `wiki_search_in_scheme` (`wiki_graph.rs:391`) build their own SQL. Each interpolates the same shared fragment (or, for the two entity-id/topic lookups, a small `entry_not_forgotten_where(conn)` helper that returns the identical arm text) so all read paths share ONE definition. The `wiki_graph` entry-existence probes (`:1145`, `:2227`, `:469`) get the same arm so a forgotten fact cannot re-enter via graph traversal.
 
@@ -127,7 +153,7 @@ Partial and forgotten-only, so it stays tiny and serves exactly the anti-join.
 
 ### D3. Top-k starvation strategy
 
-The predicate is pushed **into the candidate-selection WHERE** (D1.2/D1.3) — the anti-join removes only dead candidates *before* scoring, so cosine/LIKE top-k is computed over the live candidate set and live results are never crowded out by post-fetch filtering. No LIMIT-then-filter pattern is introduced anywhere. The NOT-EXISTS is per-row indexed (D2); on databases with no forgotten events (the common case) the partial index is empty and the arm is a single index probe per candidate — negligible.
+The predicate is pushed **into the candidate-selection WHERE** (D1.2/D1.3) — the anti-join removes only dead candidates *before* scoring, so cosine/LIKE top-k is computed over the live candidate set and live results are never crowded out by post-fetch filtering. No LIMIT-then-filter pattern is introduced anywhere. The keep-condition's first survival arm (`NOT EXISTS (forgotten)`) is served by the D2 partial index and short-circuits: on databases with no forgotten events (the common case) the partial index is empty, that arm is true on a single probe per candidate, and the `EXISTS (live)` arm never runs — negligible. (T3 plan review M1, 2026-11-26: the earlier two-subquery form implied neither the index's WHERE and would have full-scanned `llm_wiki_events` per candidate; the equivalence rewrite fixes both.)
 
 ### D4. UI parity (ruling #2.2)
 
@@ -137,7 +163,7 @@ The Tauri UI reads the wiki DB **exclusively via Rust commands** — no direct T
 
 1. **Shared-fragment parity** (extends `wisdom_match` tests): seed an entry + event with `related_entry_id` and `forgotten_at` set; assert `gated_entries`, `eligible_entry_ids`, `candidate_set`, `rank_wiki_entries`, `wiki_search_in_scheme`, and `curated_get_wiki_entry` all exclude it; assert clearing `forgotten_at` restores eligibility everywhere (single-source-of-truth regression trap).
 2. **Survival guard (ruling #2.1):** seed one entry with two linked events; forget exactly one (`forgotten_at` set, other NULL) — the entry MUST remain visible in every gated path (collateral-delete regression). Then forget the second — the entry disappears. Re-add an event with `forgotten_at IS NULL` — the entry resurfaces. Same for an entry with two events forgotten in either order.
-3. **Carve-outs:** a `user_stated` entry (`source_type = 'user_stated'`, `MANUAL_SOURCE_REF` sentinel) and an entry whose source document has a `stated_attestations` row are NEVER hidden even with all linked events forgotten. Structural containers (OQ4 ruling #3: `e.id = e.entity_id` OR `e.id`/`e.entity_id` in the reserved `tier%` namespace) are never hidden — seed a fixture row hitting each of the three arms and assert it stays visible; on the production schema both signals match zero leaf rows (2026-11-26 live census: 0/1458), so the guard is expected to be a no-op on real data.
+3. **Carve-outs:** a `user_stated` entry (`source_type = 'user_stated'`, `MANUAL_SOURCE_REF` sentinel) and an entry whose source document has a `stated_attestations` row are NEVER hidden even with all linked events forgotten. Structural containers (OQ4 ruling #3: `e.id = e.entity_id` OR `e.id`/`e.entity_id` in the reserved `tier_` namespace, matched with `GLOB 'tier_*'`) are never hidden — seed a fixture row hitting each of the three arms and assert it stays visible; on the production schema both signals match zero leaf rows (2026-11-26 live census: 0/1458), so the guard is expected to be a no-op on real data.
 4. **Degraded shapes:** same fixtures on a pre-v19 shape (no `forgotten_at` column) — queries compile, arm omitted, behavior identical to today (mirrors `connection.rs:8062` column probing).
 5. **Event readers:** `load_events` and `list_events` hide forgotten events; `queue.rs` replay still sees them.
 6. **Starvation guard:** seed 1 fully-forgotten + 5 live entries where the forgotten one scores highest; assert the returned top-k contains 5 live entries (no hole), not 4 + a gap.

@@ -30,7 +30,8 @@ ships in SQL; the attestation join stays documented as the owner's optional wide
   `wiki_search_in_scheme` at `wiki_graph.rs:366`).
 - Cargo is SERIAL machine-wide. Build location authority: repo `AGENTS.md` wins.
   Export `CARGO_TARGET_DIR=/home/kv-thinkpad-t420-ubuntu/code/github/equationalapplications/curated-thoughts/.cargo-shared-target`
-  (ABSOLUTE, primary checkout, 13G warm cache). Pre-flight: `df -h /` ≥ 30G.
+  (ABSOLUTE, primary checkout, 13G warm cache). Pre-flight: `df -h "$(dirname "$CARGO_TARGET_DIR")"` ≥ 30G
+  (the AGENTS.md form — the target dir lives at the primary checkout on `/`).
   Export `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0` on every cargo run.
 - Wrap every full-suite gate in `~/.hermes/bin/heavy-build` (`heavy-build -- <cmd>`;
   script files, not inline pipes; `--need-mb 2000-3000`). Targeted module tests may
@@ -91,12 +92,14 @@ ships in SQL; the attestation join stays documented as the owner's optional wide
 
 **Files:**
 - Modify: `src-tauri/src/wisdom_match.rs` — `entry_eligibility_where` (near `:577`).
-  When the shape has `forgotten_at`, the fragment gains the carve-out block and the
-  survival-guard block from spec D1.2, verbatim in logic: never hide
-  `source_type = 'user_stated'`; never hide a structural container
-  (`e.id = e.entity_id` OR `e.id LIKE 'tier%'` OR `e.entity_id LIKE 'tier%'`);
-  hidden iff `EXISTS` a backing event AND `NOT EXISTS` a live one
-  (`related_entry_id = e.id`, `forgotten_at IS NULL` for live).
+  When the shape has `forgotten_at`, the fragment gains ONE appended `OR` group
+  from spec D1.2 — follow the corrected spec block exactly (T3 r1 B1: chaining
+  the carve-outs as plain ANDs drops the protected rows): keep-row arms are
+  `source_type = 'user_stated'`, the three container carve-outs (`id = entity_id`,
+  `id GLOB 'tier_*'`, `entity_id GLOB 'tier_*'`), `NOT EXISTS (forgotten event)`
+  (partial-index-served, short-circuits), and `EXISTS (live event)`. Hidden iff
+  it has a forgotten event and none live — equivalent to all-backing-events-
+  forgotten, since a forgotten event is itself a backing event.
 - Test: `src-tauri/src/wisdom_match.rs` tests (shared-fragment parity trap).
 
 - [ ] **Step 1 (RED):** seed fixtures per spec test plan 1–3: (a) parity — an entry
