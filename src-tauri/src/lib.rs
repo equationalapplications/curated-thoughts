@@ -2340,10 +2340,8 @@ async fn switch_vault(
             // the install would be replayed against the outgoing database.
             db::restore_sync::publish_sidecar(&db_path)
                 .map_err(|e| format!("publishing the restore-sync capture failed: {e}"))?;
-            // The install committed; the outgoing journal and the marker
-            // have both done their job.
+            // The install committed; the outgoing journal has done its job.
             db::restore_sync::discard_outgoing_wal(&db_path);
-            db::restore_sync::clear_install_marker(&db_path);
             // S5b: the config must name the NEW vault BEFORE the reopen —
             // every root-dependent step of the open resolves its root from it.
             vault_state
@@ -2353,6 +2351,13 @@ async fn switch_vault(
                 .set_vault_path(&new_path)
                 .map_err(|e| e.to_string())?;
             pending_config_align_to = None;
+            // The marker is removed ONLY after the config names the new
+            // vault (T4-follow-up round 2): a process exit before
+            // `set_vault_path` must leave the marker — with its recorded
+            // destination — on disk, so the next startup's reconciliation can
+            // still align the config. Removing it earlier re-opens the
+            // crash window this marker exists to close.
+            db::restore_sync::clear_install_marker(&db_path);
         } else {
             // No file replacement happens here, so the journals are NOT
             // removed: deleting the -wal would silently drop rows committed
@@ -4465,7 +4470,19 @@ pub fn run() {
     // brain is opened, so the database is never read with its -wal missing or
     // an owed capture left unpublished. No marker is the normal case and
     // costs one `stat`.
-    crate::db::restore_sync::reconcile_interrupted_install(&db_path, &config_path);
+    if let Err(e) = crate::db::restore_sync::reconcile_interrupted_install(&db_path, &config_path) {
+        // Fail-closed (T4-follow-up round 2): the install committed but the
+        // config could not be aligned to the recorded destination. Opening
+        // now would rederive — and stamp complete — the wrong root over the
+        // restored brain. Exit so the next start retries the alignment; the
+        // marker (and its recorded destination) is retained on disk.
+        eprintln!(
+            "error: restore-sync reconciliation could not align the config to the \
+             recorded restore destination: {e}; refusing to open the vault until \
+             the alignment succeeds (restart to retry)"
+        );
+        std::process::exit(1);
+    }
     let db = AppDb::open_with_config(&db_path, &config_path).expect("failed to open database");
     // A switch that crashed between the backup copy and its replica sync left
     // a capture sidecar behind; finish it now. No sidecar is the normal case
