@@ -1944,6 +1944,66 @@ mod tests {
         assert!(visible_everywhere(&conn, "a"), "re-added live event resurfaces");
     }
 
+    /// Issue #378 D3 / test plan 6: a fully-forgotten entry scoring highest must
+    /// not occupy a top-k slot — the predicate lives in candidate selection.
+    #[test]
+    fn starvation_forgotten_top_scorer_leaves_no_hole_in_top_k() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "gone", "ent-gone", &at(0.99));
+        seed_event(&conn, "ev-gone", "gone", Some(5));
+        for (i, c) in [0.9f32, 0.85, 0.8, 0.75, 0.7].iter().enumerate() {
+            seed(&conn, &format!("live{i}"), &format!("ent-l{i}"), &at(*c));
+        }
+        let ids: Vec<String> = run(&conn, Some(0.5), 5, &[])
+            .entries
+            .iter()
+            .map(|e| e.id.clone())
+            .collect();
+        assert_eq!(ids.len(), 5, "no hole in top-5: {ids:?}");
+        assert!(!ids.contains(&"gone".to_string()), "forgotten hidden: {ids:?}");
+        for i in 0..5 {
+            assert!(ids.contains(&format!("live{i}")), "live{i} present: {ids:?}");
+        }
+    }
+
+    /// Issue #378 test plan 9 (Rust side). Replicates the engine 9.18.0 forget
+    /// write exactly as issued — core-llm-wiki dist/index.js:5547
+    /// (`UPDATE llm_wiki_events SET forgotten_at = ?2 WHERE id = ?1 AND
+    /// forgotten_at IS NULL`), invoked by forget({eventId}) at :12582 — then
+    /// asserts the Rust gate and event readers agree it is forgotten.
+    #[test]
+    fn engine_forget_write_agrees_with_rust_gate_and_event_readers() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "a", "ent-a", &at(0.9));
+        seed_event(&conn, "ev1", "a", None);
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, created_at)
+             VALUES ('tl1', 'ent-a', 'approved', 'e', 1000)",
+            [],
+        )
+        .unwrap();
+        assert!(visible_everywhere(&conn, "a"));
+
+        let engine_forget = |id: &str| {
+            conn.execute(
+                "UPDATE llm_wiki_events SET forgotten_at = ?2 WHERE id = ?1 AND forgotten_at IS NULL",
+                params![id, 42_i64],
+            )
+            .unwrap()
+        };
+        assert_eq!(engine_forget("ev1"), 1);
+        assert_eq!(engine_forget("tl1"), 1);
+        assert_eq!(engine_forget("ev1"), 0, "engine guard: second forget is a no-op");
+
+        assert!(!visible_everywhere(&conn, "a"), "gate drops the forgotten entry");
+        let tl = crate::db::events::list_events(
+            &conn,
+            &crate::db::events::TimelineFilter::default(),
+        )
+        .unwrap();
+        assert!(tl.iter().all(|e| e.id != "tl1"), "event reader hides forgotten event");
+    }
+
     #[test]
     fn forgotten_carve_outs_stay_visible() {
         let conn = open_in_memory().unwrap();
