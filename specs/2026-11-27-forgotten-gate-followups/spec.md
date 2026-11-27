@@ -263,3 +263,21 @@ QUERY PLAN
   2); carries a targeted `#[allow(clippy::too_many_arguments)]` rather
   than a signature refactor, to preserve the converged plan's
   prescribed shapes.
+- **Dup tombstone scope evolved past this text:** §102-era wording has
+  the dup UPDATE as `WHERE id = ? AND forgotten_at IS NULL`. The
+  shipped scope is `AND entity_id IN (<target cluster>)` — evolved in
+  two review folds (T1.5 r1: entity scoping against unrelated-entity
+  collisions; CodeRabbit CR-1 + T4 r1 M1: widened to the CLUSTER via
+  `entities::cluster_ids` so merged-loser-owned rows reconcile, and a
+  forgotten FRESH INSERT whose related entry sits outside the cluster
+  is downgraded to a live insert with a warning instead of hiding a
+  foreign entry — the survival guard is entity-agnostic).
+- **Parse edge behaviors:** §85's "lines without the key parse exactly
+  as today" holds for well-formed lines, but three edge behaviors
+  changed (documented in `log_md.rs::parse_event_id_comment`): an empty
+  id and a bare `id:` prefix yield `None` (previously `Some("")`), and
+  a trailing junk token yields `Some("<first token>")` (previously the
+  whole comment was rejected).
+- **Files touched is wider than §151:** also `okf/event_line.rs`,
+  `db/test_support.rs`, `wisdom_match.rs`, `db/connection.rs`, and the
+  regenerated migrated-shape golden fixture noted above.

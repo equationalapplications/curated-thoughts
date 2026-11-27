@@ -185,6 +185,23 @@ fn fact_exists(conn: &Connection, id: &str) -> Result<bool> {
     row_exists(conn, "SELECT 1 FROM llm_wiki_entries WHERE id=?1", &[&id])
 }
 
+/// The import's entity cluster (survivor ∪ redirect losers), resolved once
+/// per entity and cached (T4 r1 m2 — same per-item-probe removal pattern
+/// Task 3 applies elsewhere). The dup tombstone AND the forgotten-fresh-INSERT
+/// gate both scope against this set.
+fn entity_cluster(
+    cache: &mut Option<Vec<String>>,
+    conn: &Connection,
+    survivor: &str,
+) -> Result<Vec<String>> {
+    if let Some(c) = cache {
+        return Ok(c.clone());
+    }
+    let c = crate::db::entities::cluster_ids(conn, survivor)?;
+    *cache = Some(c.clone());
+    Ok(c)
+}
+
 /// True iff `source_ref` is the normative token shape `^librarian-[0-9a-f]{32}$`
 /// (spec §2.2). Delegates to the canonical `commit::is_librarian_source_ref_token`
 /// — review round 5, finding 2: this local copy accepted UPPERCASE hex via
@@ -715,6 +732,9 @@ pub fn apply_import(
             result.edges_added += inserted as i64;
         }
 
+        // T4 r1 m2: one cluster resolution per entity, lazily computed on the
+        // first forgotten event that needs it.
+        let mut entity_cluster_cache: Option<Vec<String>> = None;
         for ev in &entity.events {
             let (event_id, is_dup) = match mode {
                 ImportMode::Clone => (generate_id("evt_"), false),
@@ -753,7 +773,8 @@ pub fn apply_import(
                         // (export loads the whole cluster via entity_id IN),
                         // so scoping to the survivor alone would leave the
                         // forgotten event live and resurrect its entry.
-                        let cluster = crate::db::entities::cluster_ids(
+                        let cluster = entity_cluster(
+                            &mut entity_cluster_cache,
                             &tx,
                             &target_entity_id,
                         )?;
@@ -775,6 +796,48 @@ pub fn apply_import(
             }
             let created_at = ms_from_utc_date(&ev.date).unwrap_or(now_ms);
             let related = ev.related_entry_id.as_deref().map(|id| mapped(id, &id_map));
+            // T4 r1 M1: a forgotten fresh INSERT can hide an entry whose id it
+            // names — the survival guard is entity-agnostic (`fe.related_entry_id
+            // = e.id AND fe.forgotten_at IS NOT NULL` hides any entry with no
+            // live backing event, whatever owns the event). Only keep the
+            // tombstone when the related entry is owned by the import's CLUSTER
+            // (survivor ∪ redirect losers, the same set export loads); a
+            // foreign or not-yet-existing entry would be hidden by content this
+            // bundle cannot prove it owns. Downgrade to a LIVE insert with a
+            // warning — content kept, unprovable tombstone dropped.
+            let mut forgotten_at = ev.forgotten_at;
+            if events_have_forgotten_at && forgotten_at.is_some() {
+                let keep = match related.as_deref() {
+                    // No related entry — the tombstone cannot hide anything.
+                    None => true,
+                    Some(rid) => {
+                        let owner: Option<String> = tx
+                            .query_row(
+                                "SELECT entity_id FROM llm_wiki_entries WHERE id=?1",
+                                [&rid],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        match owner {
+                            Some(o) => entity_cluster(
+                                &mut entity_cluster_cache,
+                                &tx,
+                                &target_entity_id,
+                            )?
+                            .iter()
+                            .any(|c| c == &o),
+                            None => false,
+                        }
+                    }
+                };
+                if !keep {
+                    result.warnings.push(format!(
+                        "event {event_id}: forgotten tombstone downgraded to a live \
+                         insert — related entry is outside the import's entity cluster"
+                    ));
+                    forgotten_at = None;
+                }
+            }
             if events_have_forgotten_at {
                 tx.execute(
                     "INSERT OR IGNORE INTO llm_wiki_events
@@ -787,7 +850,7 @@ pub fn apply_import(
                         ev.summary,
                         related,
                         created_at,
-                        ev.forgotten_at
+                        forgotten_at
                     ],
                 )?;
             } else {
@@ -1390,10 +1453,12 @@ mod tests {
 
     #[test]
     fn replace_import_carries_forgotten_at_on_fresh_insert() {
-        // T1.5 r2 MINOR 3: Replace mode hard-deletes the target's events, so
-        // the dup-tombstone path is unreachable there — the forgotten flag
-        // must ride the fresh INSERT. Merge and Replace share the
-        // carry-the-flag contract (spec).
+        // T1.5 r2 MINOR 3, T4 r1 m5: Replace mode hard-deletes only the
+        // SURVIVOR-owned rows (clear_one_entity_content filters
+        // entity_id = survivor), so merged-loser rows survive the clear and
+        // CAN still reach the dup-tombstone path — but a bundle-only event
+        // (no local dup) is a fresh INSERT, and the forgotten flag must ride
+        // it. Merge and Replace share the carry-the-flag contract (spec).
         let mut conn = open_in_memory().unwrap();
         let mut bundle = sample_bundle();
         bundle.entities[0].events[0].forgotten_at = Some(1732713600000);
@@ -2023,9 +2088,10 @@ mod tests {
 
     #[test]
     fn dup_with_colliding_id_on_another_entity_stays_live() {
-        // T1.5 r1 MAJOR regression: bundle content naming an event id that
-        // exists under a DIFFERENT entity must not mutate that row — the dup
-        // tombstone is scoped to the importing entity. Before the
+        // T1.5 r1 MAJOR regression, T4 r1 m5 wording: bundle content naming an
+        // event id that exists under an entity OUTSIDE the import's cluster
+        // must not mutate that row — the dup tombstone is scoped to the
+        // target's cluster (survivor ∪ redirect losers). Before the
         // reconciliation existed, such a dup was skipped with no mutation;
         // the tombstone must not widen that reach.
         let mut conn = open_in_memory().unwrap();
@@ -2143,6 +2209,176 @@ mod tests {
             forgotten,
             Some(1732713600000),
             "the merged-loser's row must be tombstoned by the import"
+        );
+    }
+
+    #[test]
+    fn forgotten_fresh_insert_pointing_outside_cluster_downgrades_live() {
+        // T4 r1 M1 regression: the survival guard is entity-agnostic, so a
+        // forgotten fresh INSERT naming a related entry owned OUTSIDE the
+        // import's cluster would HIDE that foreign entry. The tombstone is
+        // unprovable for such content — downgraded to a live insert with a
+        // warning; the foreign entry stays visible.
+        let mut conn = open_in_memory().unwrap();
+        // Import target.
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_s', 'ent_s', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        // FOREIGN entity owning the entry the bundle's event will name.
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_b', 'ent_b', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at
+             ) VALUES ('fact_b', 'ent_b', 'T', 'B', '[]', 'certain', 'user_confirmed', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        let mut bundle = sample_bundle();
+        bundle.entities[0].entity_id = "ent_s".into();
+        bundle.entities[0].facts[0].id = "fact_b".into(); // id collision → skipped
+        bundle.entities[0].events[0] = ParsedEvent {
+            event_id: Some("evt_c".into()),
+            event_type: "action".into(),
+            summary: "d".into(),
+            related_entry_id: Some("fact_b".into()), // FOREIGN entry
+            date: "1970-01-01".into(),
+            forgotten_at: Some(1732713600000),
+        };
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        let forgotten: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_c'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            forgotten, None,
+            "tombstone pointing outside the cluster must be downgraded to live"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("evt_c") && w.contains("downgraded")),
+            "the downgrade must surface as an import warning"
+        );
+    }
+
+    #[test]
+    fn tombstone_wins_incoming_live_dup_stays_forgotten() {
+        // T4 r1 m4: an incoming LIVE dup must not resurrect a target row that
+        // is already forgotten (spec r1-M3 tombstone-wins).
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_a', 'ent_a', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at
+             ) VALUES ('fact_x', 'ent_a', 'T', 'B', '[]', 'certain', 'user_confirmed', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_events
+                (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('evt_dead', 'ent_a', 'action', 'd', 'fact_x', 1, 1111111111111)",
+            [],
+        )
+        .unwrap();
+
+        let mut bundle = sample_bundle();
+        bundle.entities[0].events[0] = ParsedEvent {
+            event_id: Some("evt_dead".into()),
+            event_type: "action".into(),
+            summary: "d".into(),
+            related_entry_id: Some("fact_x".into()),
+            date: "1970-01-01".into(),
+            forgotten_at: None, // incoming event is LIVE
+        };
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        assert_eq!(result.events_skipped, 1);
+        let forgotten: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_dead'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            forgotten,
+            Some(1111111111111),
+            "a live dup must never resurrect an already-forgotten row"
+        );
+    }
+
+    #[test]
+    fn tombstone_keeps_original_timestamp_on_conflicting_ms() {
+        // T4 r1 m4: tombstone-wins keeps the TARGET's original timestamp — an
+        // incoming dup with a different forgotten_at never rewrites it.
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_a', 'ent_a', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at
+             ) VALUES ('fact_x', 'ent_a', 'T', 'B', '[]', 'certain', 'user_confirmed', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_events
+                (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('evt_dead', 'ent_a', 'action', 'd', 'fact_x', 1, 1111111111111)",
+            [],
+        )
+        .unwrap();
+
+        let mut bundle = sample_bundle();
+        bundle.entities[0].events[0] = ParsedEvent {
+            event_id: Some("evt_dead".into()),
+            event_type: "action".into(),
+            summary: "d".into(),
+            related_entry_id: Some("fact_x".into()),
+            date: "1970-01-01".into(),
+            forgotten_at: Some(2222222222222), // conflicting ms
+        };
+        let result = apply_import(&mut conn, &bundle, ImportMode::Merge).unwrap();
+
+        assert_eq!(result.events_skipped, 1);
+        let forgotten: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_dead'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            forgotten,
+            Some(1111111111111),
+            "the target's original tombstone timestamp must be kept"
         );
     }
 

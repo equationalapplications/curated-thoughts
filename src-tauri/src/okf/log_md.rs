@@ -30,14 +30,20 @@ pub fn build_log_md(entries: &[OkfLogEntry]) -> String {
     out
 }
 
-pub fn append_event_id_comment(text: &str, event_id: &str) -> String {
-    // Same non-empty guard as `append_event_id_comment_forgotten`: an empty
-    // id must never mint a junk `<!-- id:  -->` comment (T1.5 r2 MINOR 2).
-    if !event_id.is_empty()
+/// The ONE id-charset predicate (T4 r1 m6): non-empty, and only
+/// `[A-Za-z0-9._-]`. Shared by BOTH writer paths and the parser so the
+/// grammar cannot drift between write and read.
+fn is_valid_event_id(event_id: &str) -> bool {
+    !event_id.is_empty()
         && event_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-    {
+}
+
+pub fn append_event_id_comment(text: &str, event_id: &str) -> String {
+    // Same non-empty guard as `append_event_id_comment_forgotten`: an empty
+    // id must never mint a junk `<!-- id:  -->` comment (T1.5 r2 MINOR 2).
+    if is_valid_event_id(event_id) {
         format!("{text} <!-- id: {event_id} -->")
     } else {
         text.to_string()
@@ -51,10 +57,7 @@ pub fn append_event_id_comment_forgotten(
     event_id: &str,
     forgotten_at: Option<i64>,
 ) -> String {
-    let valid = !event_id.is_empty()
-        && event_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
+    let valid = is_valid_event_id(event_id);
     match (valid, forgotten_at) {
         (true, Some(ms)) if ms >= 0 => format!("{text} <!-- id: {event_id} forgotten:{ms} -->"),
         (true, _) => append_event_id_comment(text, event_id),
@@ -93,11 +96,7 @@ pub fn parse_event_id_comment(text: &str) -> (String, Option<String>, Option<i64
             Some((a, b)) => (a, b),
             None => (rest, ""),
         };
-        if !id_tok.is_empty()
-            && id_tok
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-        {
+        if is_valid_event_id(id_tok) {
             event_id = Some(id_tok.to_string());
             for tok in tail.split_whitespace() {
                 if let Some(v) = tok.strip_prefix("forgotten:") {
