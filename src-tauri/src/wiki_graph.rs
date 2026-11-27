@@ -1296,6 +1296,8 @@ mod unit_tests {
         );
         assert!(
             result.entities.iter().all(|n| n.id != "gone"),
+            // `WikiTraverseNode.id` is the ENTRY id (`load_live_entry` SELECTs
+            // `e.id`), so this catches a forgotten entry leaking as a node.
             "forgotten entry leaked via wiki_context nodes"
         );
         assert!(
@@ -1303,6 +1305,8 @@ mod unit_tests {
                 .edges
                 .iter()
                 .all(|e| e.source_id != "gone" && e.target_id != "gone"),
+            // Edge endpoints are entry ids (`llm_wiki_edges.source_id`/
+            // `.target_id`), so this catches a forgotten-edge leak.
             "forgotten entry leaked via wiki_context edges"
         );
     }
