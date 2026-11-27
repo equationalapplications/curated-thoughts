@@ -45,9 +45,12 @@ fn get_endpoint_labels_batch(
     // Load fact titles in one batch (cluster-closed: labels for the
     // survivor's redirected losers' rows resolve identically).
     let placeholders = record_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    // Forgotten-at gate (issue #378): a fully-forgotten fact must not supply
+    // a label. Fail-closed — arm errors propagate.
+    let forgotten_arm = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "e")?;
     let query_str = format!(
-        "SELECT id, title FROM llm_wiki_entries WHERE entity_id IN ({cluster_ph}) AND id IN ({})",
-        placeholders
+        "SELECT e.id, e.title FROM llm_wiki_entries e \
+         WHERE e.entity_id IN ({cluster_ph}) AND e.id IN ({placeholders}){forgotten_arm}"
     );
 
     let mut stmt = conn.prepare(&query_str)?;
@@ -195,15 +198,18 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
     };
 
     let pattern = format!("%[[{}]]%", escape_like(&name));
-    let mut stmt = conn.prepare(
+    // Forgotten-at gate (issue #378): a forgotten fact's body must not make
+    // an entity appear as a backlink. Fail-closed.
+    let forgotten_arm = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "f")?;
+    let mut stmt = conn.prepare(&format!(
         "SELECT e.id, e.name, e.entity_type FROM live_entities e
          WHERE e.id != ?1 AND e.deleted_at IS NULL
            AND (e.summary LIKE ?2 ESCAPE '\\'
                 OR EXISTS (SELECT 1 FROM llm_wiki_entries f
                            WHERE f.entity_id = e.id AND f.deleted_at IS NULL
-                             AND f.body LIKE ?2 ESCAPE '\\'))
-         ORDER BY e.name COLLATE NOCASE",
-    )?;
+                             AND f.body LIKE ?2 ESCAPE '\\'{forgotten_arm}))
+         ORDER BY e.name COLLATE NOCASE"
+    ))?;
     let backlinks = stmt
         .query_map(params![resolved, pattern], |r| {
             Ok(EntityBacklink {
@@ -406,6 +412,71 @@ mod tests {
             vec!["depends_on", "fabricated"],
             "non-strict brains must not be filtered"
         );
+    }
+
+    fn seed_backing_event(conn: &Connection, entity_id: &str, id: &str, fact: &str, forgotten: Option<i64>) {
+        conn.execute(
+            "INSERT INTO llm_wiki_events
+               (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES (?1, ?2, 'synthesized', 's', ?3, 100, ?4)",
+            params![id, entity_id, fact, forgotten],
+        )
+        .unwrap();
+    }
+
+    fn seed_self_edge(conn: &Connection, entity_id: &str, fact: &str) {
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_f', ?1, ?2, ?2, 'related', 1)",
+            params![entity_id, fact],
+        )
+        .unwrap();
+    }
+
+    /// Issue #378: a fully-forgotten fact supplies neither an endpoint label
+    /// nor a backlink match; a fact with one live backing event survives.
+    #[test]
+    fn forgotten_fact_is_gated_from_endpoint_labels_and_backlinks() {
+        let mut conn = open_in_memory().unwrap();
+        let alpha = make_entity(&mut conn, "Alpha", "");
+        let referrer = make_entity(&mut conn, "Referrer", "");
+        seed_fact(&conn, &referrer, "f_gone", "Gone title", "See [[Alpha]].");
+        seed_backing_event(&conn, &referrer, "ev_gone", "f_gone", Some(5));
+
+        let c = get_entity_connections(&conn, &alpha).unwrap();
+        assert!(c.backlinks.is_empty(), "forgotten body must not backlink");
+    }
+
+    #[test]
+    fn forgotten_fact_does_not_supply_endpoint_label() {
+        let mut conn = open_in_memory().unwrap();
+        let referrer = make_entity(&mut conn, "Referrer", "");
+        seed_fact(&conn, &referrer, "f_gone", "Gone title", "body");
+        seed_backing_event(&conn, &referrer, "ev_gone", "f_gone", Some(5));
+        seed_self_edge(&conn, &referrer, "f_gone");
+
+        let c = get_entity_connections(&conn, &referrer).unwrap();
+        assert_eq!(c.outgoing.len(), 1);
+        assert_ne!(
+            c.outgoing[0].source_label, "Gone title",
+            "forgotten fact must not supply an endpoint label"
+        );
+    }
+
+    #[test]
+    fn partially_forgotten_fact_survives_in_labels_and_backlinks() {
+        let mut conn = open_in_memory().unwrap();
+        let alpha = make_entity(&mut conn, "Alpha", "");
+        let referrer = make_entity(&mut conn, "Referrer", "");
+        seed_fact(&conn, &referrer, "f_kept", "Kept title", "See [[Alpha]].");
+        seed_backing_event(&conn, &referrer, "ev_1", "f_kept", Some(5));
+        seed_backing_event(&conn, &referrer, "ev_2", "f_kept", None);
+        seed_self_edge(&conn, &referrer, "f_kept");
+
+        let c = get_entity_connections(&conn, &alpha).unwrap();
+        assert_eq!(c.backlinks.len(), 1);
+        let c = get_entity_connections(&conn, &referrer).unwrap();
+        assert_eq!(c.outgoing[0].source_label, "Kept title");
     }
 
     /// Fix round 1 (Important 2, r13-m3): a stale loser link yields the
