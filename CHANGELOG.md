@@ -1,3 +1,23 @@
+## [3.18.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.17.2...v3.18.0) (2026-11-27)
+
+### Features
+
+* **db:** forgotten-event anti-join index mirror + shape probe (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([63b50d6](https://github.com/equationalapplications/curated-thoughts/commit/63b50d6023c15e752ff2a05d0aa7b47971742004))
+* **events:** event readers honor forgotten_at (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([e4409a8](https://github.com/equationalapplications/curated-thoughts/commit/e4409a846b34568b7781da351c8d286d9bedbef3))
+* **read-paths:** route all entry read paths through the forgotten gate (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([465f1b1](https://github.com/equationalapplications/curated-thoughts/commit/465f1b1d8412da25cae4c39a25c7ba2298fcd71e))
+* **wisdom_match:** forgotten-facts survival guard in the shared entry predicate (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([9e94deb](https://github.com/equationalapplications/curated-thoughts/commit/9e94debb3c2f6a9749cd6aee3928a07cdbf26b86))
+
+### Bug Fixes
+
+* **connections:** drop edges to forgotten endpoints; validate arm alias (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([ef5b512](https://github.com/equationalapplications/curated-thoughts/commit/ef5b512d2ae2be8d23289f08c4a411265027e97d))
+* **connections:** gate entity endpoint labels and backlinks against forgotten facts (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([68eb0ee](https://github.com/equationalapplications/curated-thoughts/commit/68eb0ee19c6d195d9f52420a0128599d91c66f97))
+* **forgotten-gate:** arm probe is column-shape-only, independent of the scheme resolver (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([4ac2ca1](https://github.com/equationalapplications/curated-thoughts/commit/4ac2ca12e16514117a26a9b6c9067cf16d6b25b7)), closes [#400](https://github.com/equationalapplications/curated-thoughts/issues/400)
+* **forgotten-gate:** gate librarian synthesis candidate facts; fold T3 re-review r3 (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([92af714](https://github.com/equationalapplications/curated-thoughts/commit/92af714564b9cd2ee33f06dfa362007752409732)), closes [#398](https://github.com/equationalapplications/curated-thoughts/issues/398)
+* **read-paths:** gate MCP sidecar, ct CLI, and entity-facts surfaces with the shared forgotten arm (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([4510d7e](https://github.com/equationalapplications/curated-thoughts/commit/4510d7ee6b8240ed8f7d97ca47bfa3263ea1d65a))
+* **wiki_graph:** gate traversal edge joins against forgotten facts (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([5db32c4](https://github.com/equationalapplications/curated-thoughts/commit/5db32c445eecccd3a7a7971146f9dd2366fba8d8))
+* **wisdom_match:** case-insensitive arm alias guard; connections test coverage (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([a725f5a](https://github.com/equationalapplications/curated-thoughts/commit/a725f5a9738159183458140bd627dc8c6369b003))
+* **wisdom_match:** probe requires related_entry_id with forgotten_at; arm-shape tripwire returns Err (issue [#378](https://github.com/equationalapplications/curated-thoughts/issues/378)) ([46bf4c7](https://github.com/equationalapplications/curated-thoughts/commit/46bf4c725229a3711e9a40746b343842c0ff31aa))
+
 ## [3.17.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.17.1...v3.17.2) (2026-11-27)
 
 ### Bug Fixes
