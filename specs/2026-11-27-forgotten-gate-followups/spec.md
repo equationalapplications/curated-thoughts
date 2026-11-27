@@ -264,9 +264,10 @@ QUERY PLAN
   than a signature refactor, to preserve the converged plan's
   prescribed shapes.
 - **Dup tombstone scope evolved past this text:** the Task 2 design text
-  (spec line 102) has the dup UPDATE as `WHERE id = ? AND forgotten_at
+  (spec line 104) has the dup UPDATE as `WHERE id = ? AND forgotten_at
   IS NULL`. The shipped scope is `AND entity_id IN (<target cluster>)`
-  — evolved in review folds (T1.5 r1: entity scoping against
+  AND the row's linkage must be NULL or cluster-owned — evolved in
+  review folds (T1.5 r1: entity scoping against
   unrelated-entity collisions; CodeRabbit CR-1 + T4 r1 M1: widened to
   the CLUSTER via `entities::cluster_ids` so merged-loser-owned rows
   reconcile). T4 r2/r3 additionally gate the LINKAGE on every fresh
