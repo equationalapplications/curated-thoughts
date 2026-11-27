@@ -561,6 +561,13 @@ fn load_candidate_entities(
     }
     ranked.truncate(MAX_CANDIDATES);
 
+    // Issue #378 (T3 re-review r3 M1, owner ruling 2026-11-27): the synthesis
+    // prompt is a READ path — a fully-forgotten fact fed in as a candidate
+    // fact can be paraphrased back into a new live row the gate cannot hide.
+    // The candidate-fact query below interpolates the SAME shared arm, never a
+    // copy; shape-probe errors propagate (fail-closed). Computed once for the
+    // whole candidate loop.
+    let forgotten_arm = crate::wisdom_match::entry_not_forgotten_arm(conn)?;
     let mut out = Vec::new();
     for (entity_id, _) in ranked {
         let row = conn.query_row(
@@ -583,9 +590,9 @@ fn load_candidate_entities(
             let cluster = crate::db::entities::cluster_ids(conn, &entity_id)?;
             let placeholders = crate::db::entities::in_placeholders(&cluster);
             let mut fact_stmt = conn.prepare(&format!(
-                "SELECT id, body FROM llm_wiki_entries
-                 WHERE entity_id IN ({placeholders}) AND deleted_at IS NULL
-                 ORDER BY updated_at DESC LIMIT {MAX_FACTS_PER_CANDIDATE}"
+                "SELECT e.id, e.body FROM llm_wiki_entries e
+                 WHERE e.entity_id IN ({placeholders}) AND e.deleted_at IS NULL{forgotten_arm}
+                 ORDER BY e.updated_at DESC LIMIT {MAX_FACTS_PER_CANDIDATE}"
             ))?;
             let facts = fact_stmt
                 .query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
@@ -2096,6 +2103,66 @@ mod tests {
             params![fact_id, entity_id],
         )
         .unwrap();
+    }
+
+    /// Issue #378 (T3 re-review r3 M1, owner ruling 2026-11-27): the synthesis
+    /// candidate-fact query honors the shared forgotten arm — a fully-forgotten
+    /// fact (all backing events forgotten) never reaches the synthesis prompt,
+    /// where paraphrasing could resurrect it as a new live row; an event-less
+    /// fact still does.
+    #[test]
+    fn candidate_facts_exclude_fully_forgotten_fact() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent-a', 'Alpha', 'concept', 'Summary text', 100, 100)",
+            [],
+        )
+        .unwrap();
+        for (fact_id, body) in [("f_gone", "Gone fact body"), ("f_live", "Live fact body")] {
+            conn.execute(
+                "INSERT INTO llm_wiki_entries (id, entity_id, title, body, tags, confidence, source_type, created_at, updated_at)
+                 VALUES (?1, 'ent-a', 'Fact', ?2, '[]', 'inferred', 'librarian_inferred', 100, 100)",
+                params![fact_id, body],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('ev_gone', 'ent-a', 'synthesized', 's', 'f_gone', 100, 50)",
+            [],
+        )
+        .unwrap();
+
+        let ranked = load_candidate_entities(
+            &conn,
+            "/vault/immutable-source-files/repo.md",
+            &[ChunkRow {
+                id: 1,
+                entity_id: "tier_working::abc".into(),
+                text: "Alpha ".into(),
+                symbol_name: None,
+                start_line: 1,
+                end_line: 1,
+                tier: "user_doc".into(),
+                path: "/vault/immutable-source-files/repo.md".into(),
+            }],
+            None,
+            None,
+        )
+        .unwrap();
+        let alpha = ranked
+            .iter()
+            .find(|c| c.id == "ent-a")
+            .expect("Alpha must rank as a candidate");
+        assert!(
+            alpha.facts.iter().all(|f| f.id != "f_gone"),
+            "fully-forgotten fact reached the synthesis prompt"
+        );
+        assert!(
+            alpha.facts.iter().any(|f| f.id == "f_live"),
+            "event-less fact must stay a candidate fact"
+        );
     }
 
     #[test]

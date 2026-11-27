@@ -262,24 +262,19 @@ impl VaultMcpServer {
         let Parameters(CuratedGetWikiEntryParams { topic, entity_id }) = args;
         let conn = lock_conn(&self.conn)?;
 
-        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(ref eid) = entity_id
+        let sql_err = |e: anyhow::Error| {
+            rmcp::ErrorData::internal_error(format!("build wiki entry query: {}", e), None)
+        };
+        let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(ref eid) =
+            entity_id
         {
             (
-                "SELECT body, 0 AS position, COALESCE(source_ref,''), NULL, NULL
-                 FROM llm_wiki_entries
-                 WHERE deleted_at IS NULL AND entity_id = ?1
-                 ORDER BY updated_at",
+                curated_thoughts_tools::queries::wiki_entry_sql(&conn, true).map_err(sql_err)?,
                 vec![Box::new(eid.clone())],
             )
         } else if let Some(ref topic) = topic {
             (
-                "SELECT body, 0 AS position, COALESCE(source_ref,''), NULL, NULL
-                 FROM llm_wiki_entries
-                 WHERE deleted_at IS NULL
-                   AND (title LIKE '%' || ?1 || '%'
-                        OR body LIKE '%' || ?1 || '%'
-                        OR tags LIKE '%' || ?1 || '%')
-                 ORDER BY confidence DESC, updated_at",
+                curated_thoughts_tools::queries::wiki_entry_sql(&conn, false).map_err(sql_err)?,
                 vec![Box::new(topic.clone())],
             )
         } else {
@@ -289,7 +284,7 @@ impl VaultMcpServer {
             ));
         };
 
-        let mut stmt = conn.prepare(sql).map_err(|e| {
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
             rmcp::ErrorData::internal_error(format!("prepare wiki entry query: {e}"), None)
         })?;
         let rows = stmt
@@ -685,6 +680,7 @@ mod tests {
                body TEXT NOT NULL,
                source_ref TEXT,
                confidence TEXT,
+               source_type TEXT,
                updated_at,
                deleted_at INTEGER
              );",

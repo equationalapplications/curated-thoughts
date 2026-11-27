@@ -252,6 +252,7 @@ describe.skipIf(!DatabaseSync && !process.env.CI)(
       "index:llm_wiki_idx_source_passages_entity",
       "index:llm_wiki_entries_deleted_idx",
       "index:llm_wiki_events_forgotten_idx",
+      "index:llm_wiki_events_related_forgotten_idx",
     ]);
     const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
     const bodies = (db: DatabaseSync) => {

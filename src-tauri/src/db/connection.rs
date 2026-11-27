@@ -8190,8 +8190,33 @@ mod tests {
         ("index", "llm_wiki_idx_source_documents_hash"),
         ("index", "llm_wiki_entries_deleted_idx"),
         ("index", "llm_wiki_events_forgotten_idx"),
+        ("index", "llm_wiki_events_related_forgotten_idx"),
         ("trigger", "llm_wiki_vector_removals_resurrect"),
     ];
+
+    /// Issue #378 D2: the anti-join partial index is gated on BOTH columns —
+    /// present on a v19 shape, absent (and no error) on a pre-v19 shape.
+    #[test]
+    fn related_forgotten_idx_is_guarded_on_both_columns() {
+        let idx_count = |c: &Connection| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='llm_wiki_events_related_forgotten_idx'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let (_tmp, conn) = engine9_migrated_fixture();
+        assert_eq!(idx_count(&conn), 1, "v19 shape carries the index");
+        conn.execute_batch(
+            "DROP INDEX llm_wiki_events_related_forgotten_idx;
+             DROP INDEX llm_wiki_events_forgotten_idx;
+             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
+        )
+        .unwrap();
+        crate::db::okf_ddl::apply_llm_wiki_v18_v19_partial_indexes(&conn).unwrap();
+        assert_eq!(idx_count(&conn), 0, "pre-v19 shape must not get the index");
+    }
 
     /// A fresh ROOTED file brain through CT's real open path.
     fn engine9_fresh_rooted_brain() -> (tempfile::TempDir, AppDb) {

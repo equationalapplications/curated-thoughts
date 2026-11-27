@@ -447,14 +447,17 @@ pub(crate) fn rank_wiki_entries(
         return Ok(Vec::new());
     }
 
-    let mut stmt = conn.prepare(
-        "SELECT id, entity_id, title, body, source_ref, confidence, source_type,
-                okf_verified, updated_at
-         FROM llm_wiki_entries
-         WHERE deleted_at IS NULL
-           AND (title LIKE '%' || ?1 || '%'
-                OR body LIKE '%' || ?1 || '%')",
-    )?;
+    let arm = crate::wisdom_match::forgotten_entry_arm(
+        &crate::wisdom_match::temporal_columns_shape_only(conn)?,
+    );
+    let mut stmt = conn.prepare(&format!(
+        "SELECT e.id, e.entity_id, e.title, e.body, e.source_ref, e.confidence, e.source_type,
+                e.okf_verified, e.updated_at
+         FROM llm_wiki_entries e
+         WHERE e.deleted_at IS NULL
+           AND (e.title LIKE '%' || ?1 || '%'
+                OR e.body LIKE '%' || ?1 || '%'){arm}"
+    ))?;
     // id -> (overlap_count, json_value, confidence_ordinal, updated_at)
     use std::collections::HashMap;
     let mut candidates: HashMap<String, (usize, Value, i64, i64)> = HashMap::new();
@@ -737,28 +740,35 @@ pub async fn dispatch_curated_get_wiki_entry(
     let result = tokio::task::spawn_blocking(move || -> Result<Value> {
         let conn_guard = lock_conn(&conn)?;
 
-        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(ref eid) = entity_id
+        let arm = crate::wisdom_match::forgotten_entry_arm(
+            &crate::wisdom_match::temporal_columns_shape_only(&conn_guard)?,
+        );
+        let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(ref eid) = entity_id
         {
             // The plan's precedence fixture passes the wiki ENTRY id ("w1")
             // as `entity_id`, so accept either the entity grouping id or the
             // per-entry id — entry ids are unique keys, so this only ever
             // widens the group with at most that one entry.
             (
-                "SELECT body, 0 AS position, COALESCE(source_ref,''), NULL, NULL
-                 FROM llm_wiki_entries
-                 WHERE deleted_at IS NULL AND (entity_id = ?1 OR id = ?1)
-                 ORDER BY updated_at",
+                format!(
+                    "SELECT e.body, 0 AS position, COALESCE(e.source_ref,''), NULL, NULL
+                 FROM llm_wiki_entries e
+                 WHERE e.deleted_at IS NULL AND (e.entity_id = ?1 OR e.id = ?1){arm}
+                 ORDER BY e.updated_at"
+                ),
                 vec![Box::new(eid.clone())],
             )
         } else if let Some(ref topic) = topic {
             (
-                "SELECT body, 0 AS position, COALESCE(source_ref,''), NULL, NULL
-                 FROM llm_wiki_entries
-                 WHERE deleted_at IS NULL
-                   AND (title LIKE '%' || ?1 || '%'
-                        OR body LIKE '%' || ?1 || '%'
-                        OR tags LIKE '%' || ?1 || '%')
-                 ORDER BY confidence DESC, updated_at",
+                format!(
+                    "SELECT e.body, 0 AS position, COALESCE(e.source_ref,''), NULL, NULL
+                 FROM llm_wiki_entries e
+                 WHERE e.deleted_at IS NULL
+                   AND (e.title LIKE '%' || ?1 || '%'
+                        OR e.body LIKE '%' || ?1 || '%'
+                        OR e.tags LIKE '%' || ?1 || '%'){arm}
+                 ORDER BY e.confidence DESC, e.updated_at"
+                ),
                 vec![Box::new(topic.clone())],
             )
         } else {
@@ -766,7 +776,7 @@ pub async fn dispatch_curated_get_wiki_entry(
         };
 
         let mut stmt = conn_guard
-            .prepare(sql)
+            .prepare(&sql)
             .map_err(|e| anyhow::anyhow!("prepare wiki entry query: {e}"))?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
@@ -2317,6 +2327,58 @@ mod curated_memory_tests {
             .as_str()
             .unwrap()
             .contains("immutable documents"));
+    }
+
+    /// Issue #378 Task 3: rank + get-entry honor the forgotten gate; the
+    /// survival-guard entry (live + forgotten event) stays reachable.
+    #[tokio::test]
+    async fn forgotten_gate_closes_rank_and_get_entry_bypass() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        for (id, ev, forgotten) in [
+            ("gone", "e1", Some(5)),
+            ("kept", "e2", Some(5)),
+            ("kept", "e3", None),
+        ] {
+            conn.execute(
+                "INSERT OR IGNORE INTO llm_wiki_entries
+                   (id, entity_id, title, body, tags, confidence, source_type,
+                    created_at, updated_at)
+                 VALUES (?1, 'ent', 'zebra marker', 'zebra body', '[]', 'inferred',
+                         'librarian_inferred', 100, 100)",
+                rusqlite::params![id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO llm_wiki_events
+                   (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+                 VALUES (?1, 'ent', 'synthesized', 's', ?2, 100, ?3)",
+                rusqlite::params![ev, id, forgotten],
+            )
+            .unwrap();
+        }
+        let hits = rank_wiki_entries(&conn, "zebra", 10).unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["kept"], "rank: {ids:?}");
+
+        let ctx = test_ctx(conn, dir.path());
+        let get = |eid: &str| {
+            dispatch_curated_get_wiki_entry(
+                &ctx,
+                CuratedGetWikiEntryParams {
+                    topic: None,
+                    entity_id: Some(eid.into()),
+                },
+            )
+        };
+        assert!(get("kept").await.unwrap()["full_text"]
+            .as_str()
+            .unwrap()
+            .contains("zebra"));
+        assert!(!get("gone").await.unwrap()["full_text"]
+            .as_str()
+            .unwrap()
+            .contains("zebra"));
     }
 
     #[tokio::test]

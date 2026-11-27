@@ -189,14 +189,16 @@ pub fn rank_wiki_entries(
         return Ok(Vec::new());
     }
 
-    let mut stmt = conn.prepare(
-        "SELECT id, entity_id, title, body, source_ref, confidence,
-                updated_at
-         FROM llm_wiki_entries
-         WHERE deleted_at IS NULL
-           AND (title LIKE '%' || ?1 || '%'
-                OR body LIKE '%' || ?1 || '%')",
-    )?;
+    // Issue #378 ruling #1: shared forgotten arm (aliases `e.`), fail-closed.
+    let forgotten_arm = tauri_app_lib::wisdom_match::entry_not_forgotten_arm(conn)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT e.id, e.entity_id, e.title, e.body, e.source_ref, e.confidence,
+                e.updated_at
+         FROM llm_wiki_entries e
+         WHERE e.deleted_at IS NULL{forgotten_arm}
+           AND (e.title LIKE '%' || ?1 || '%'
+                OR e.body LIKE '%' || ?1 || '%')"
+    ))?;
     // id -> (overlap_count, json_value, confidence_rank, updated_at)
     use std::collections::HashMap;
     let mut candidates: HashMap<String, (usize, serde_json::Value, String, i64)> = HashMap::new();
@@ -601,14 +603,41 @@ fn entity_lookup(conn: &Connection, chunk_id: i64) -> String {
 // Wiki — `ct wiki list` / `ct wiki get`.
 // ---------------------------------------------------------------------------
 
+/// SQL for the MCP sidecar's `curated_get_wiki_entry`: lookup by entity id
+/// (`by_entity = true`) or by topic LIKE. Single `?1` parameter.
+pub fn wiki_entry_sql(conn: &Connection, by_entity: bool) -> Result<String> {
+    // Issue #378 ruling #1: shared forgotten arm (aliases `e.`), fail-closed.
+    let forgotten_arm = tauri_app_lib::wisdom_match::entry_not_forgotten_arm(conn)?;
+    Ok(if by_entity {
+        format!(
+            "SELECT e.body, 0 AS position, COALESCE(e.source_ref,''), NULL, NULL
+             FROM llm_wiki_entries e
+             WHERE e.deleted_at IS NULL AND e.entity_id = ?1{forgotten_arm}
+             ORDER BY e.updated_at"
+        )
+    } else {
+        format!(
+            "SELECT e.body, 0 AS position, COALESCE(e.source_ref,''), NULL, NULL
+             FROM llm_wiki_entries e
+             WHERE e.deleted_at IS NULL{forgotten_arm}
+               AND (e.title LIKE '%' || ?1 || '%'
+                    OR e.body LIKE '%' || ?1 || '%'
+                    OR e.tags LIKE '%' || ?1 || '%')
+             ORDER BY e.confidence DESC, e.updated_at"
+        )
+    })
+}
+
 /// One wiki row as a JSON object (`ct wiki list --json`, eval-C2 gap).
 pub fn wiki_rows(conn: &Connection) -> Result<Vec<serde_json::Value>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, entity_id, title, body, confidence, updated_at
-         FROM llm_wiki_entries
-         WHERE deleted_at IS NULL
-         ORDER BY updated_at DESC",
-    )?;
+    // Issue #378 ruling #1: shared forgotten arm (aliases `e.`), fail-closed.
+    let forgotten_arm = tauri_app_lib::wisdom_match::entry_not_forgotten_arm(conn)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT e.id, e.entity_id, e.title, e.body, e.confidence, e.updated_at
+         FROM llm_wiki_entries e
+         WHERE e.deleted_at IS NULL{forgotten_arm}
+         ORDER BY e.updated_at DESC"
+    ))?;
     let rows = stmt.query_map([], |row| {
         Ok(json!({
             "id": row.get::<_, String>(0)?,
