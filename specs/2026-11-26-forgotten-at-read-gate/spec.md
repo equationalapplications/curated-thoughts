@@ -1,6 +1,6 @@
 # Spec: read-time gate for forgotten facts (`forgotten_at`) — #378
 
-**Status:** Reviewed (owner rulings 2026-11-26: read-time gate + survival guard + OQ4 container predicate)
+**Status:** Approved (owner, 2026-11-26 21:32 ET — OQ1 survival guard + OQ4 OR predicate folded; cleared for implementation)
 **Date:** 2026-11-26
 **Ruling issue:** equationalapplications/curated-thoughts#378
 **All file:line evidence against `origin/main` @ `bbe15dc2` (3.16.4).**
