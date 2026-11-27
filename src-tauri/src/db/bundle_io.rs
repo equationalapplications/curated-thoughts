@@ -39,6 +39,12 @@ pub fn load_export_entities(
         .transpose()?;
 
     let mut entities = Vec::new();
+    // Probe ONCE before the per-cluster loop (r1-M1): a pre-v19 brain has no
+    // `forgotten_at` column on `llm_wiki_events`, and export must tolerate
+    // that degraded shape like everywhere else in the codebase.
+    let has_forgotten = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")?
+        .iter()
+        .any(|c| c == "forgotten_at");
     for (id, name, summary) in rows {
         if let Some(wanted) = &wanted {
             if !wanted.contains(&id) {
@@ -52,7 +58,7 @@ pub fn load_export_entities(
             facts: load_facts(conn, &id, &cluster)?,
             tasks: load_tasks(conn, &id, &cluster)?,
             edges: load_edges(conn, &id, &cluster)?,
-            events: load_events(conn, &id, &cluster)?,
+            events: load_events(conn, &id, &cluster, has_forgotten)?,
             summary: if summary.trim().is_empty() {
                 None
             } else {
@@ -219,20 +225,34 @@ fn rekey_endpoint(conn: &Connection, id: &str) -> Result<String> {
     )
 }
 
-fn load_events(conn: &Connection, _survivor: &str, cluster: &[String]) -> Result<Vec<ExportEvent>> {
+fn load_events(
+    conn: &Connection,
+    _survivor: &str,
+    cluster: &[String],
+    has_forgotten: bool,
+) -> Result<Vec<ExportEvent>> {
     let placeholders = crate::db::entities::in_placeholders(cluster);
+    // `NULL AS forgotten_at` keeps `r.get(5)` uniform on pre-v19 shapes
+    // (r1-M1 degraded-shape tolerance).
+    let forgotten_select = if has_forgotten {
+        ", forgotten_at"
+    } else {
+        ", NULL AS forgotten_at"
+    };
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, event_type, summary, related_entry_id, created_at
+        "SELECT id, event_type, summary, related_entry_id, created_at{forgotten_select}
          FROM llm_wiki_events WHERE entity_id IN ({placeholders}) ORDER BY created_at, id"
     ))?;
     let rows = stmt.query_map(rusqlite::params_from_iter(cluster.iter()), |r| {
         let created_at: i64 = r.get(4)?;
+        let forgotten_at: Option<i64> = r.get(5)?;
         Ok(ExportEvent {
             event_id: r.get(0)?,
             event_type: r.get(1)?,
             summary: r.get(2)?,
             related_entry_id: r.get(3)?,
             date: utc_date_from_ms(created_at),
+            forgotten_at,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -324,6 +344,23 @@ mod tests {
         let entities = load_export_entities(&conn, Some(&["ent_lose".to_string()])).unwrap();
         assert_eq!(entities.len(), 1);
         assert_eq!(entities[0].entity_id, "ent_a");
+    }
+
+    /// Regression r1-M1: a pre-v19 brain (no `forgotten_at` column on
+    /// `llm_wiki_events`) still exports without error — events come out
+    /// with `forgotten_at == None` (degraded-shape tolerance).
+    #[test]
+    fn export_tolerates_pre_v19_shape_without_forgotten_column() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn);
+        // open_in_memory() fixture (v19 shape), then drop the column via the
+        // drop_forgotten_column helper (created THIS task, r3 M-A3 — all
+        // three indexes first). Export must succeed; events export with
+        // forgotten_at == None.
+        crate::db::test_support::drop_forgotten_column(&conn);
+        let entities = load_export_entities(&conn, None).unwrap();
+        assert_eq!(entities[0].events.len(), 1);
+        assert_eq!(entities[0].events[0].forgotten_at, None);
     }
 
     /// Regression test for issue #158 on the bundle-export read path.

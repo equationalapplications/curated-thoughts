@@ -1,0 +1,16 @@
+//! Test-only DB shape helpers shared across db test modules.
+//! Drop the three forgotten_at partial indexes, then the column — the
+//! exact order SQLite requires before ALTER TABLE … DROP COLUMN (r1-B3).
+//! `DROP INDEX IF EXISTS` keeps this correct before the live index
+//! exists (Task 6 adds it later).
+// No #[cfg(test)] here (r5 minor 5): the module declaration in mod.rs is
+// already cfg(test)-gated.
+pub(crate) fn drop_forgotten_column(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS llm_wiki_events_related_live_idx;
+         DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
+         DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
+         ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
+    )
+    .unwrap();
+}

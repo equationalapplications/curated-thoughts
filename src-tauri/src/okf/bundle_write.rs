@@ -24,6 +24,9 @@ pub struct ExportEvent {
     pub related_entry_id: Option<String>,
     /// UTC `YYYY-MM-DD`.
     pub date: String,
+    /// Engine `forget()` tombstone, ms epoch; `None` = live. Rides the id
+    /// comment on export (#398).
+    pub forgotten_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +177,7 @@ pub fn write_bundle_with_profile(
                         &ev.summary,
                         related_path.as_deref(),
                         &ev.event_id,
+                        ev.forgotten_at,
                     ),
                 }
             })

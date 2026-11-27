@@ -1,6 +1,6 @@
 //! Event-log line grammar (§7): `({event_type}) {summary-or-link} <!-- id: evt -->`.
 
-use crate::okf::log_md::{append_event_id_comment, parse_event_id_comment};
+use crate::okf::log_md::{append_event_id_comment_forgotten, parse_event_id_comment};
 use crate::okf::related_section::{escape_link_label, parse_inline_links};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -16,13 +16,14 @@ pub fn build_event_text(
     summary: &str,
     related_path: Option<&str>,
     event_id: &str,
+    forgotten_at: Option<i64>,
 ) -> String {
     let escaped = escape_link_label(summary);
     let core = match related_path {
         Some(path) => format!("({event_type}) [{escaped}]({path})"),
         None => format!("({event_type}) {escaped}"),
     };
-    append_event_id_comment(&core, event_id)
+    append_event_id_comment_forgotten(&core, event_id, forgotten_at)
 }
 
 pub fn parse_event_text(text: &str) -> Option<ParsedEventLine> {
@@ -67,6 +68,7 @@ mod tests {
             "Linked to alpha",
             Some("./facts/fact_alpha.md"),
             "evt_golden_1",
+            None,
         );
         assert_eq!(
             text,
@@ -104,8 +106,16 @@ mod tests {
 
     #[test]
     fn escapes_bracket_summaries() {
-        let text = build_event_text("action", "See [ref]", None, "evt_x");
+        let text = build_event_text("action", "See [ref]", None, "evt_x", None);
         let parsed = parse_event_text(&text).unwrap();
         assert_eq!(parsed.summary, "See [ref]");
+    }
+
+    #[test]
+    fn build_event_text_carries_forgotten_key() {
+        let text = build_event_text("action", "did a thing", None, "evt_x", Some(1000));
+        assert_eq!(text, "(action) did a thing <!-- id: evt_x forgotten:1000 -->");
+        let text = build_event_text("action", "did a thing", None, "evt_x", None);
+        assert_eq!(text, "(action) did a thing <!-- id: evt_x -->");
     }
 }
