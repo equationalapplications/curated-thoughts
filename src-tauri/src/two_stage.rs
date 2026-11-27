@@ -489,6 +489,24 @@ mod tests {
         assert!(!cs.doc_ids.contains(&3), "non-candidate doc excluded");
     }
 
+    /// Issue #378 Task 2: candidate_set consumes the SAME forgotten arm.
+    #[test]
+    fn candidate_set_drops_fully_forgotten_entry_and_restores_on_clear() {
+        let conn = fixture();
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('ev1', 'e1', 'synthesized', 's', 'f1', 0, 5)",
+            [],
+        )
+        .unwrap();
+        let cs = candidate_set(&conn, NOW_MS, None).unwrap().unwrap();
+        assert!(!cs.doc_ids.contains(&1), "f1 hidden -> doc1 edge gone");
+        conn.execute("UPDATE llm_wiki_events SET forgotten_at = NULL", [])
+            .unwrap();
+        let cs = candidate_set(&conn, NOW_MS, None).unwrap().unwrap();
+        assert!(cs.doc_ids.contains(&1), "cleared -> restored");
+    }
+
     #[test]
     fn stage1_search_dedupes_identical_vectors_at_result_level_only() {
         let conn = fixture();

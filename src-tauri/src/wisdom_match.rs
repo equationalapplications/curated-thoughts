@@ -298,7 +298,6 @@ pub(crate) has_valid_to: bool,
     /// column list exactly.
     pub(crate) has_area: bool,
     /// Events-table `forgotten_at` column present (engine v19; issue #378 D2).
-    #[allow(dead_code)] // read by the forgotten-at gate arm (plan Task 2)
     pub(crate) has_forgotten_at: bool,
     /// Read scheme for the SELECT filter — `None` on the pre-V27 shape (no
     /// `embed_scheme` column). Resolved once per call, next to the column
@@ -598,7 +597,31 @@ pub(crate) fn entry_eligibility_where(t: &Temporal) -> String {
     if t.has_valid_to {
         sql.push_str(" AND (e.valid_to IS NULL OR e.valid_to > :now)");
     }
+    if t.has_forgotten_at {
+        sql.push_str(&forgotten_entry_arm(t));
+    }
     sql
+}
+
+/// THE one definition of the forgotten-facts survival-guard arm (issue #378
+/// D1.2): ONE ` AND (... OR ...)` group of keep-row escape hatches — a row is
+/// hidden iff it has a forgotten backing event and no live one, and none of
+/// the carve-outs (stated rows, structural containers) apply. Empty when the
+/// events table lacks `forgotten_at` (pre-v19). Aliases `e.` for
+/// `llm_wiki_entries`; every bypass site interpolates THIS, never a copy.
+pub(crate) fn forgotten_entry_arm(t: &Temporal) -> String {
+    if !t.has_forgotten_at {
+        return String::new();
+    }
+    " AND (e.source_type = 'user_stated' \
+       OR e.id = e.entity_id \
+       OR e.id GLOB 'tier_*' \
+       OR e.entity_id GLOB 'tier_*' \
+       OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe \
+                      WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) \
+       OR EXISTS (SELECT 1 FROM llm_wiki_events le \
+                  WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))"
+        .to_string()
 }
 
 /// The shared predicate as a standalone query (spec §3.2): Rust-side consumers
@@ -1861,6 +1884,107 @@ mod tests {
             !temporal_columns(&conn, Some(Scheme::Raw)).unwrap().has_forgotten_at,
             "pre-v19 shape probes false"
         );
+    }
+
+    // ===== Issue #378 Task 2: forgotten-facts survival guard =====
+
+    fn seed_event(conn: &Connection, id: &str, entry: &str, forgotten_at: Option<i64>) {
+        conn.execute(
+            "INSERT INTO llm_wiki_events
+               (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES (?1, 'ent', 'synthesized', 's', ?2, 100, ?3)",
+            params![id, entry, forgotten_at],
+        )
+        .unwrap();
+    }
+
+    fn forget_event(conn: &Connection, id: &str, at: Option<i64>) {
+        conn.execute(
+            "UPDATE llm_wiki_events SET forgotten_at = ?2 WHERE id = ?1",
+            params![id, at],
+        )
+        .unwrap();
+    }
+
+    /// Visible through BOTH Rust consumers of the shared fragment.
+    fn visible_everywhere(conn: &Connection, id: &str) -> bool {
+        let t = temporal_columns(conn, Some(Scheme::Raw)).unwrap();
+        let in_ids = eligible_entry_ids(conn, &t, NOW)
+            .unwrap()
+            .iter()
+            .any(|i| i == id);
+        let in_gate = run(conn, Some(0.5), 50, &[])
+            .entries
+            .iter()
+            .any(|i| i.id == id);
+        assert_eq!(in_ids, in_gate, "gate/eligible_entry_ids parity for {id}");
+        in_ids
+    }
+
+    #[test]
+    fn forgotten_entry_hidden_and_restored_on_clear() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "a", "ent-a", &at(0.9));
+        seed_event(&conn, "ev1", "a", Some(5));
+        assert!(!visible_everywhere(&conn, "a"));
+        forget_event(&conn, "ev1", None);
+        assert!(visible_everywhere(&conn, "a"));
+    }
+
+    #[test]
+    fn survival_guard_one_of_two_forgotten_stays_visible() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "a", "ent-a", &at(0.9));
+        seed_event(&conn, "ev1", "a", Some(5));
+        seed_event(&conn, "ev2", "a", None);
+        assert!(visible_everywhere(&conn, "a"), "one live event survives");
+        forget_event(&conn, "ev2", Some(6));
+        assert!(!visible_everywhere(&conn, "a"), "both forgotten -> hidden");
+        seed_event(&conn, "ev3", "a", None);
+        assert!(visible_everywhere(&conn, "a"), "re-added live event resurfaces");
+    }
+
+    #[test]
+    fn forgotten_carve_outs_stay_visible() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "plain", "ent-plain", &at(0.9));
+        seed(&conn, "self-ref", "self-ref", &at(0.9));
+        seed(&conn, "tier_x", "ent-t1", &at(0.9));
+        seed(&conn, "leaf-t", "tier_working::h", &at(0.9));
+        seed(&conn, "stated", "ent-stated", &at(0.9));
+        conn.execute(
+            "UPDATE llm_wiki_entries SET source_type = 'user_stated' WHERE id = 'stated'",
+            [],
+        )
+        .unwrap();
+        for id in ["plain", "self-ref", "tier_x", "leaf-t", "stated"] {
+            seed_event(&conn, &format!("ev-{id}"), id, Some(5));
+        }
+        assert!(!visible_everywhere(&conn, "plain"), "control hidden");
+        for id in ["self-ref", "tier_x", "leaf-t", "stated"] {
+            assert!(visible_everywhere(&conn, id), "carve-out {id} stays visible");
+        }
+    }
+
+    #[test]
+    fn pre_v19_shape_arm_omitted_and_behaves_as_today() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "a", "ent-a", &at(0.9));
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
+             DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
+             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
+             VALUES ('ev1', 'ent', 'synthesized', 's', 'a', 100)",
+            [],
+        )
+        .unwrap();
+        let t = temporal_columns(&conn, Some(Scheme::Raw)).unwrap();
+        assert!(!entry_eligibility_where(&t).contains("forgotten_at"));
+        assert!(visible_everywhere(&conn, "a"));
     }
 
     #[test]
