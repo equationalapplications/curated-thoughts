@@ -643,6 +643,16 @@ pub fn entry_not_forgotten_arm(conn: &Connection) -> Result<String> {
 /// rewritten; the subquery aliases `fe`/`le` are left alone. Empty on
 /// pre-v19 shapes.
 pub fn entry_not_forgotten_arm_for(conn: &Connection, alias: &str) -> Result<String> {
+    // The alias is interpolated into SQL: it must be a plain identifier and
+    // must not re-bind the arm's own subquery aliases.
+    anyhow::ensure!(
+        !alias.is_empty() && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "entry_not_forgotten_arm_for: alias must be a plain SQL identifier"
+    );
+    anyhow::ensure!(
+        alias != "fe" && alias != "le",
+        "entry_not_forgotten_arm_for: alias must not collide with subquery aliases fe/le"
+    );
     let arm = forgotten_entry_arm(&temporal_columns(conn, None)?);
     if arm.is_empty() || alias == "e" {
         return Ok(arm);

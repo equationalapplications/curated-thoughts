@@ -110,6 +110,43 @@ fn get_endpoint_labels_batch(
     Ok(labels)
 }
 
+/// Endpoint ids that name a cluster entry the forgotten arm excludes
+/// (entries in the cluster minus entries the arm keeps). Fail-closed.
+fn forgotten_endpoint_ids(
+    conn: &Connection,
+    cluster: &[String],
+    ids: &[String],
+) -> Result<std::collections::HashSet<String>> {
+    let mut excluded = std::collections::HashSet::new();
+    if ids.is_empty() {
+        return Ok(excluded);
+    }
+    let arm = crate::wisdom_match::entry_not_forgotten_arm_for(conn, "e")?;
+    if arm.is_empty() {
+        return Ok(excluded);
+    }
+    let cluster_ph = crate::db::entities::in_placeholders(cluster);
+    let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let base = format!(
+        "SELECT e.id FROM llm_wiki_entries e \
+         WHERE e.entity_id IN ({cluster_ph}) AND e.id IN ({ph})"
+    );
+    let params: Vec<&String> = cluster.iter().chain(ids.iter()).collect();
+    let collect = |sql: String| -> Result<std::collections::HashSet<String>> {
+        let mut stmt = conn.prepare(&sql)?;
+        let set = stmt
+            .query_map(rusqlite::params_from_iter(params.iter().copied()), |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(set)
+    };
+    let all = collect(base.clone())?;
+    let kept = collect(format!("{base}{arm}"))?;
+    excluded.extend(all.difference(&kept).cloned());
+    Ok(excluded)
+}
+
 fn escape_like(input: &str) -> String {
     input
         .replace('\\', "\\\\")
@@ -157,6 +194,25 @@ pub fn get_entity_connections(conn: &Connection, entity_id: &str) -> Result<Enti
                 },
             )
             .collect();
+
+        // Forgotten-at gate (issue #378): drop edges whose source or target
+        // entry is excluded by the forgotten arm (agrees with traversal).
+        let rows = {
+            let mut endpoints: Vec<String> = rows
+                .iter()
+                .flat_map(|(_, s, t, _)| [s.clone(), t.clone()])
+                .collect();
+            endpoints.sort();
+            endpoints.dedup();
+            let excluded = forgotten_endpoint_ids(conn, &cluster, &endpoints)?;
+            if excluded.is_empty() {
+                rows
+            } else {
+                rows.into_iter()
+                    .filter(|(_, s, t, _)| !excluded.contains(s) && !excluded.contains(t))
+                    .collect()
+            }
+        };
 
         // Collect all endpoint IDs for batch-loading (deduplicated)
         let mut dedup_ids = std::collections::HashSet::new();
@@ -454,13 +510,22 @@ mod tests {
         seed_fact(&conn, &referrer, "f_gone", "Gone title", "body");
         seed_backing_event(&conn, &referrer, "ev_gone", "f_gone", Some(5));
         seed_self_edge(&conn, &referrer, "f_gone");
+        seed_fact(&conn, &referrer, "f_live", "Live title", "body");
+        conn.execute(
+            "INSERT INTO llm_wiki_edges (id, entity_id, source_id, target_id, edge_type, created_at)
+             VALUES ('edge_live', ?1, 'f_live', 'f_live', 'related', 2)",
+            params![referrer],
+        )
+        .unwrap();
 
         let c = get_entity_connections(&conn, &referrer).unwrap();
-        assert_eq!(c.outgoing.len(), 1);
-        assert_ne!(
-            c.outgoing[0].source_label, "Gone title",
-            "forgotten fact must not supply an endpoint label"
+        let ids: Vec<&str> = c.outgoing.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["edge_live"],
+            "edge to a forgotten endpoint must be dropped (agrees with traversal)"
         );
+        assert_eq!(c.outgoing[0].source_label, "Live title");
     }
 
     #[test]
