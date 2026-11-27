@@ -21,6 +21,7 @@ pub struct ParsedEvent {
     pub summary: String,
     pub related_entry_id: Option<String>,
     pub date: String,
+    pub forgotten_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -261,6 +262,7 @@ pub fn parse_bundle(files: &[OkfFile]) -> Result<ParsedBundle> {
                     summary: parsed.summary,
                     related_entry_id,
                     date: entry.date,
+                    forgotten_at: parsed.forgotten_at,
                 });
             }
         }
@@ -269,4 +271,37 @@ pub fn parse_bundle(files: &[OkfFile]) -> Result<ParsedBundle> {
     }
 
     Ok(bundle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Task 3 (§Task 3): the id comment's `forgotten:` key lands on
+    /// ParsedEvent — present only when the comment carries it.
+    #[test]
+    fn parse_populates_forgotten_from_comment() {
+        let files = vec![
+            OkfFile {
+                path: "entities/alpha/index.md".into(),
+                content: "# Alpha\n\nA test entity.\n".into(),
+            },
+            OkfFile {
+                path: "entities/alpha/log.md".into(),
+                content: "## 2026-07-05\n\n\
+                    - (action) did a thing <!-- id: evt_a forgotten:1732713600000 -->\n\
+                    - (action) did another thing <!-- id: evt_b -->\n\
+                    \n"
+                .into(),
+            },
+        ];
+
+        let bundle = parse_bundle(&files).unwrap();
+        let events = &bundle.entities[0].events;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_id.as_deref(), Some("evt_a"));
+        assert_eq!(events[0].forgotten_at, Some(1732713600000));
+        assert_eq!(events[1].event_id.as_deref(), Some("evt_b"));
+        assert_eq!(events[1].forgotten_at, None);
+    }
 }

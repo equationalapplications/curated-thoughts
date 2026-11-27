@@ -9,6 +9,7 @@ pub struct ParsedEventLine {
     pub summary: String,
     pub related_path: Option<String>,
     pub event_id: Option<String>,
+    pub forgotten_at: Option<i64>,
 }
 
 pub fn build_event_text(
@@ -27,7 +28,7 @@ pub fn build_event_text(
 }
 
 pub fn parse_event_text(text: &str) -> Option<ParsedEventLine> {
-    let (without_id, event_id, _forgotten) = parse_event_id_comment(text);
+    let (without_id, event_id, forgotten_at) = parse_event_id_comment(text);
     let rest = without_id.trim().strip_prefix('(')?;
     let close = rest.find(')')?;
     let event_type = rest[..close].trim().to_string();
@@ -42,6 +43,7 @@ pub fn parse_event_text(text: &str) -> Option<ParsedEventLine> {
                 summary: link.text,
                 related_path: Some(link.path),
                 event_id,
+                forgotten_at,
             });
         }
     }
@@ -54,6 +56,7 @@ pub fn parse_event_text(text: &str) -> Option<ParsedEventLine> {
         summary,
         related_path: None,
         event_id,
+        forgotten_at,
     })
 }
 

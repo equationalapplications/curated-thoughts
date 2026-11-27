@@ -1140,6 +1140,7 @@ mod tests {
                     summary: "Did a thing".into(),
                     related_entry_id: Some("fact_1".into()),
                     date: "2026-07-05".into(),
+                    forgotten_at: None,
                 }],
             }],
             ..ParsedBundle::default()
