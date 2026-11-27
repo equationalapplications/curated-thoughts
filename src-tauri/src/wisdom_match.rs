@@ -1955,12 +1955,7 @@ mod tests {
             temporal_columns(&conn, Some(Scheme::Raw)).unwrap().has_forgotten_at,
             "v19 shape probes true"
         );
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
-             DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
-             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
-        )
-        .unwrap();
+        crate::db::test_support::drop_forgotten_column(&conn);
         assert!(
             !temporal_columns(&conn, Some(Scheme::Raw)).unwrap().has_forgotten_at,
             "pre-v19 shape probes false"
@@ -1973,7 +1968,8 @@ mod tests {
     fn forgotten_probe_requires_related_entry_id() {
         let conn = open_in_memory().unwrap();
         conn.execute_batch(
-            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
+            "DROP INDEX IF EXISTS llm_wiki_events_related_live_idx;
+             DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
              ALTER TABLE llm_wiki_events DROP COLUMN related_entry_id;",
         )
         .unwrap();
@@ -2140,12 +2136,7 @@ mod tests {
     fn pre_v19_shape_arm_omitted_and_behaves_as_today() {
         let conn = open_in_memory().unwrap();
         seed(&conn, "a", "ent-a", &at(0.9));
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
-             DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
-             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
-        )
-        .unwrap();
+        crate::db::test_support::drop_forgotten_column(&conn);
         conn.execute(
             "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at)
              VALUES ('ev1', 'ent', 'synthesized', 's', 'a', 100)",

@@ -227,11 +227,7 @@ mod tests {
         };
         assert_eq!(ids(&conn)?, vec!["live_1".to_string()]);
 
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
-             DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
-             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
-        )?;
+        crate::db::test_support::drop_forgotten_column(&conn);
         assert_eq!(ids(&conn)?.len(), 2);
         Ok(())
     }

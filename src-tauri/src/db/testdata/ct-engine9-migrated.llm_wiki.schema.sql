@@ -46,6 +46,9 @@ CREATE INDEX llm_wiki_events_forgotten_idx ON llm_wiki_events(entity_id, forgott
 -- object: index llm_wiki_events_related_forgotten_idx
 CREATE INDEX llm_wiki_events_related_forgotten_idx ON llm_wiki_events(related_entry_id) WHERE forgotten_at IS NOT NULL AND related_entry_id IS NOT NULL;
 
+-- object: index llm_wiki_events_related_live_idx
+CREATE INDEX llm_wiki_events_related_live_idx ON llm_wiki_events(related_entry_id) WHERE forgotten_at IS NULL AND related_entry_id IS NOT NULL;
+
 -- object: index llm_wiki_idx_source_documents_hash
 CREATE UNIQUE INDEX llm_wiki_idx_source_documents_hash ON llm_wiki_source_documents (entity_id, source_hash);
 

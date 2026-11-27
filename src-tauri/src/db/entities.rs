@@ -1302,12 +1302,7 @@ mod tests {
         assert_eq!(events[0].id, "evt-live");
 
         // Degraded pre-v19 shape: readers compile and return everything.
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx;
-             DROP INDEX IF EXISTS llm_wiki_events_forgotten_idx;
-             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
-        )
-        .unwrap();
+        crate::db::test_support::drop_forgotten_column(&conn);
         assert_eq!(load_events(&conn, &ids).unwrap().len(), 2);
     }
 

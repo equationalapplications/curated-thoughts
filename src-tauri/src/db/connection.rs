@@ -8191,6 +8191,7 @@ mod tests {
         ("index", "llm_wiki_entries_deleted_idx"),
         ("index", "llm_wiki_events_forgotten_idx"),
         ("index", "llm_wiki_events_related_forgotten_idx"),
+        ("index", "llm_wiki_events_related_live_idx"),
         ("trigger", "llm_wiki_vector_removals_resurrect"),
     ];
 
@@ -8208,12 +8209,31 @@ mod tests {
         };
         let (_tmp, conn) = engine9_migrated_fixture();
         assert_eq!(idx_count(&conn), 1, "v19 shape carries the index");
-        conn.execute_batch(
-            "DROP INDEX llm_wiki_events_related_forgotten_idx;
-             DROP INDEX llm_wiki_events_forgotten_idx;
-             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
-        )
-        .unwrap();
+        crate::db::test_support::drop_forgotten_column(&conn);
+        crate::db::okf_ddl::apply_llm_wiki_v18_v19_partial_indexes(&conn).unwrap();
+        assert_eq!(idx_count(&conn), 0, "pre-v19 shape must not get the index");
+    }
+
+    /// #401: the survival guard's LIVE half (`forgotten_at IS NULL`) is served
+    /// by its own partial index, gated on both columns like the forgotten idx.
+    #[test]
+    fn related_live_idx_is_guarded_on_both_columns() {
+        let idx_count = |c: &Connection| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='llm_wiki_events_related_live_idx'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let (_tmp, conn) = engine9_migrated_fixture();
+        assert_eq!(idx_count(&conn), 1, "v19 shape carries the index");
+        // r1-B3 + r5 minor 4: ONE source of truth for the drop order — the
+        // shared helper (drops all three indexes, then the column; SQLite
+        // refuses ALTER TABLE … DROP COLUMN while a partial index's WHERE
+        // clause uses it).
+        crate::db::test_support::drop_forgotten_column(&conn);
+        assert_eq!(idx_count(&conn), 0, "pre-v19 shape carries no index");
         crate::db::okf_ddl::apply_llm_wiki_v18_v19_partial_indexes(&conn).unwrap();
         assert_eq!(idx_count(&conn), 0, "pre-v19 shape must not get the index");
     }
