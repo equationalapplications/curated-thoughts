@@ -266,26 +266,30 @@ QUERY PLAN
 - **Dup tombstone scope evolved past this text:** the Task 2 design text
   (spec line 104) has the dup UPDATE as `WHERE id = ? AND forgotten_at
   IS NULL`. The shipped scope is `AND entity_id IN (<target cluster>)`
-  AND the row's linkage must be NULL or cluster-owned — evolved in
-  review folds (T1.5 r1: entity scoping against
-  unrelated-entity collisions; CodeRabbit CR-1 + T4 r1 M1: widened to
-  the CLUSTER via `entities::cluster_ids` so merged-loser-owned rows
-  reconcile). T4 r2/r3 additionally gate the LINKAGE on every fresh
-  INSERT (live and forgotten): a tombstone/event whose related entry is
-  owned outside the import's cluster (or not locally resolvable) keeps
-  its verbatim tombstone but drops the linkage (`related_entry_id =
-  NULL`) with an import warning — a forgotten event with no related id
-  can neither hide nor back an entry, a live one cannot resurrect a
-  locally-forgotten foreign entry, and a re-import dup is a no-op
-  (tombstone-wins). Task-related related ids are kept (the guard joins
-  entries only). Known trade-off: if the referenced entry arrives in a
-  LATER import, the earlier tombstone no longer hides it (verbatim
-  linkage would have) — accepted, because the alternative lets bundle
-  content flip a foreign entry's visibility in either direction. The
-  dropped linkage is permanent (reported in `ImportResult.warnings`,
-  never persisted). This narrows "apply verbatim" for unprovable
-  linkage only; owner ruling on the narrowing is requested at merge
-  (see PR body).
+  AND refuse-if-foreign-linkage — evolved in review folds (T1.5 r1:
+  entity scoping against unrelated-entity collisions; CodeRabbit CR-1
+  + T4 r1 M1: widened to the CLUSTER via `entities::cluster_ids` so
+  merged-loser-owned rows reconcile). T4 r2–r4 additionally gate the
+  LINKAGE on every fresh INSERT — live and forgotten, on EVERY shape
+  including pre-v19 (whose imports therefore drop foreign linkage and
+  emit warnings, not "insert as today"): bundle content cannot change
+  the visibility of an entry it does not own, in either direction (a
+  forgotten event with foreign linkage would HIDE that entry; a live
+  one would RESURRECT a locally-forgotten one). The refused tombstone
+  itself stays verbatim; only the linkage is dropped, with an import
+  warning (the loss is permanent). Task-related related ids are kept
+  by the insert gate (the guard joins entries only; task ids are a
+  distinct namespace), and the dup tombstone keeps the same polarity:
+  it refuses ONLY rows whose linkage resolves to an entry owned
+  outside the cluster (T4 r5 M1 — refusing task/dangling ids would
+  resurrect those dups, the exact #398 failure). Accepted residual: a
+  pre-gate row with a DANGLING linkage passes the dup tombstone; new
+  inserts drop dangling linkage, so nothing mints such rows anymore.
+  Known trade-off: if the referenced entry arrives in a LATER import,
+  the earlier tombstone no longer hides it (verbatim linkage would
+  have) — accepted, same reason. This narrows "apply verbatim" for
+  unprovable linkage only; owner ruling on the narrowing is requested
+  at merge (see PR body).
 - **Parse edge behaviors:** the earlier claim "lines without the key
   parse exactly as today" (Task 1 design text, spec line 85) holds for
   well-formed lines, but three edge behaviors

@@ -780,29 +780,53 @@ pub fn apply_import(
                         )?;
                         let placeholders =
                             crate::db::entities::in_placeholders(&cluster);
-                        // T4 r4 M1: the tombstone must also refuse a row whose
-                        // LINKAGE names an entry outside the cluster (legacy
-                        // rows imported by pre-gate builds can still carry
-                        // foreign linkage) — tombstoning such a row would hide
-                        // a foreign entry. related_entry_id is an ENTRY id, so
-                        // the ownership check resolves it through
-                        // llm_wiki_entries (T4 r4 verification: comparing it
-                        // to entity ids directly never matches). NULL or
-                        // cluster-owned entries pass.
+                        // T4 r4 M1 + r5 M1: the tombstone must refuse a row
+                        // whose LINKAGE names an entry owned OUTSIDE the
+                        // cluster (tombstoning it would hide a foreign entry).
+                        // Polarity is refuse-on-foreign-only (r5): NULL and
+                        // task-related ids pass (the guard joins entries only;
+                        // refusing them would resurrect task-linked dups —
+                        // exactly what #398 fixes), and a dangling id passes
+                        // as an accepted residual (only legacy rows can carry
+                        // one; new inserts drop dangling linkage).
+                        // related_entry_id is an ENTRY id, so the ownership
+                        // check resolves it through llm_wiki_entries (T4 r4
+                        // verification: comparing it to entity ids directly
+                        // never matches).
                         let sql = format!(
                             "UPDATE llm_wiki_events SET forgotten_at = ?1 \
                              WHERE id = ?2 AND forgotten_at IS NULL \
                              AND entity_id IN ({placeholders}) \
-                             AND (related_entry_id IS NULL OR EXISTS ( \
+                             AND NOT EXISTS ( \
                                   SELECT 1 FROM llm_wiki_entries le \
                                   WHERE le.id = llm_wiki_events.related_entry_id \
-                                  AND le.entity_id IN ({placeholders})))"
+                                  AND le.entity_id NOT IN ({placeholders}))"
                         );
                         let mut params: Vec<&dyn rusqlite::ToSql> =
                             vec![&ms, &id];
                         params.extend(cluster.iter().map(|c| c as &dyn rusqlite::ToSql));
                         params.extend(cluster.iter().map(|c| c as &dyn rusqlite::ToSql));
-                        tx.execute(&sql, params.as_slice())?;
+                        let tombstoned = tx.execute(&sql, params.as_slice())?;
+                        // T4 r5 m1: a refused tombstone (0 rows, row still live
+                        // with non-NULL linkage) must not be fully silent —
+                        // the source's forget is not propagating.
+                        if tombstoned == 0 {
+                            let row: Option<(Option<i64>, Option<String>)> = tx
+                                .query_row(
+                                    "SELECT forgotten_at, related_entry_id \
+                                     FROM llm_wiki_events WHERE id = ?1",
+                                    [&id],
+                                    |r| Ok((r.get(0)?, r.get(1)?)),
+                                )
+                                .optional()?;
+                            if let Some((None, Some(rid))) = row {
+                                result.warnings.push(format!(
+                                    "event {id}: dup tombstone refused — related entry {rid} \
+                                     is owned outside the import's entity cluster; the source's \
+                                     forget is NOT propagated to this row"
+                                ));
+                            }
+                        }
                     }
                 }
                 result.events_skipped += 1;
@@ -848,14 +872,17 @@ pub fn apply_import(
                             // this runs for every fresh insert with a related
                             // entry.
                             let in_cluster = match entity_cluster_cache.as_ref() {
-                                Some(c) => c.iter().any(|c| c == &o),
+                                Some(cluster_ids) => {
+                                    cluster_ids.iter().any(|member| member == &o)
+                                }
                                 None => {
-                                    let c = crate::db::entities::cluster_ids(
+                                    let resolved = crate::db::entities::cluster_ids(
                                         &tx,
                                         &target_entity_id,
                                     )?;
-                                    let hit = c.iter().any(|c| c == &o);
-                                    entity_cluster_cache = Some(c);
+                                    let hit =
+                                        resolved.iter().any(|member| member == &o);
+                                    entity_cluster_cache = Some(resolved);
                                     hit
                                 }
                             };
@@ -2830,16 +2857,28 @@ mod tests {
             "the clone-mode linkage drop must surface as an import warning \
              (the event id is re-keyed in Clone, so match on the action, not the id)"
         );
+        // T4 r5 m5: pin the fixture shape — exactly one non-audit event on the
+        // clone, so the query_row above cannot silently pass on the wrong row.
+        let event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM llm_wiki_events \
+                 WHERE entity_id=?1 AND event_type <> 'imported'",
+                [&clone_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count, 1, "fixture: exactly one cloned event");
     }
 
     #[test]
     fn two_import_route_cannot_hide_a_visible_foreign_entry() {
-        // T4 r4 m1: fact_b starts VISIBLE (no local events). Import 1 brings a
-        // LIVE event naming it (linkage dropped). Import 2 brings the same
-        // event FORGOTTEN — the dup tombstone must REFUSE the row (its
-        // linkage is NULL... and even legacy foreign linkage is refused by
-        // the dup UPDATE's linkage guard), so fact_b stays visible and evt_c
-        // stays live.
+        // T4 r4 m1 (fixed per r5 m2): fact_b starts VISIBLE (no local events).
+        // Import 1 brings a LIVE event naming it — the linkage gate drops the
+        // linkage, so the row cannot hide or back anything. Import 2 brings
+        // the same event FORGOTTEN — the dup tombstone APPLIES to that
+        // linkage-less row, which is harmless (asserted). Only the legacy
+        // half below tests refusal (a row that still carries foreign
+        // linkage).
         let mut conn = open_in_memory().unwrap();
         conn.execute(
             "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
@@ -3014,6 +3053,73 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("evt_p") && w.contains("linkage dropped")),
             "the pre-v19 linkage drop must surface as an import warning"
+        );
+    }
+
+    #[test]
+    fn task_linked_dup_tombstone_still_applies_across_two_imports() {
+        // T4 r5 M1: task-related linkage is KEPT by the insert gate, so the
+        // dup tombstone must still apply to it (refusing it would resurrect
+        // the event on a synced brain — the exact #398 failure). A task
+        // cannot hide any entry, so applying is safe.
+        let mut conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES ('ent_s', 'ent_s', 'concept', '', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_tasks (id, entity_id, description, created_at, updated_at)
+             VALUES ('task_t', 'ent_s', 'd', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        let mut live_bundle = sample_bundle();
+        live_bundle.entities[0].entity_id = "ent_s".into();
+        live_bundle.entities[0].facts[0].id = "fact_new".into();
+        live_bundle.entities[0].events[0] = ParsedEvent {
+            event_id: Some("evt_t".into()),
+            event_type: "action".into(),
+            summary: "d".into(),
+            related_entry_id: Some("task_t".into()),
+            date: "1970-01-01".into(),
+            forgotten_at: None, // live
+        };
+        apply_import(&mut conn, &live_bundle, ImportMode::Merge).unwrap();
+
+        let mut forgotten_bundle = sample_bundle();
+        forgotten_bundle.entities[0].entity_id = "ent_s".into();
+        forgotten_bundle.entities[0].facts[0].id = "fact_new".into();
+        forgotten_bundle.entities[0].events[0] = ParsedEvent {
+            event_id: Some("evt_t".into()),
+            event_type: "action".into(),
+            summary: "d".into(),
+            related_entry_id: Some("task_t".into()),
+            date: "1970-01-01".into(),
+            forgotten_at: Some(1732713600000),
+        };
+        let result2 = apply_import(&mut conn, &forgotten_bundle, ImportMode::Merge).unwrap();
+        assert_eq!(result2.events_skipped, 1, "second import sees the dup");
+
+        let (forgotten, related): (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT forgotten_at, related_entry_id FROM llm_wiki_events \
+                 WHERE entity_id='ent_s' AND event_type <> 'imported'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            forgotten,
+            Some(1732713600000),
+            "the dup tombstone applies to task-linked rows — no #398 resurrection"
+        );
+        assert_eq!(
+            related.as_deref(),
+            Some("task_t"),
+            "task linkage is kept through the dup reconciliation"
         );
     }
 
