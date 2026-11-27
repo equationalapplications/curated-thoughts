@@ -26,7 +26,7 @@ pub fn build_event_text(
 }
 
 pub fn parse_event_text(text: &str) -> Option<ParsedEventLine> {
-    let (without_id, event_id) = parse_event_id_comment(text);
+    let (without_id, event_id, _forgotten) = parse_event_id_comment(text);
     let rest = without_id.trim().strip_prefix('(')?;
     let close = rest.find(')')?;
     let event_type = rest[..close].trim().to_string();
