@@ -1,23 +1,35 @@
 name: Dependency release age
 
-# Policy (dependency-supply-chain-sop.md): a PR's Cargo.lock delta vs the
+# Policy (docs/superpowers/specs/2026-08-27-supply-chain-version-policy.md,
+# Control 1 — 14-day release-age gate): a PR's Cargo.lock delta vs the
 # base branch must contain no registry version published in the last 14 days,
 # to limit exposure to poisoned upstream releases. A PR whose delta is empty
 # passes without a cooldown; whole-lockfile sweeps stay available as manual
-# `workflow_dispatch` audits. Fail-closed: a version whose registry timestamp
-# cannot be determined fails the check. Runs before any cargo/pip install, so
-# a too-new package's build scripts never execute in CI. The JS side is
-# already gated by pnpm-workspace.yaml `minimumReleaseAge` and is not
-# re-checked here. curated-thoughts has no Python lockfile today; the script
-# covers requirements*.txt / uv.lock / poetry.lock if one ever lands.
+# `workflow_dispatch` audits (timeout raised for that path — a full sweep of
+# ~750 crates costs one spaced request each, well past 10 minutes).
+# Fail-closed: a version whose registry timestamp cannot be determined fails
+# the check, and a new or source-changed dependency that is neither crates.io
+# nor a plain path/workspace entry fails (git deps have no registry timestamp;
+# foreign registries are unvetted). The PR runs the BASE branch's copy of the
+# gate script, so it cannot weaken the SCRIPT-level gate by editing the
+# script. (The workflow FILE itself is always run from the PR — GitHub
+# behavior — so weakening at that level is enforced by review and by marking
+# this check required in branch protection; a CODEOWNERS entry on the
+# workflow and script is recommended.) When the base branch predates the
+# script, the PR's copy is used (nothing committed to weaken). Runs
+# before any cargo/pip install, so a too-new package's build scripts never
+# execute in CI. The JS side is already gated by pnpm-workspace.yaml
+# `minimumReleaseAge` and is not re-checked here. curated-thoughts has no
+# Python lockfile today; the script covers requirements*.txt / uv.lock /
+# poetry.lock if one ever lands (the check loop already looks for them).
 on:
   pull_request:
-    paths:
-      - Cargo.lock
-      - "src-tauri/Cargo.toml"
-      - "tools/Cargo.toml"
-      - scripts/check-release-age-cargo-py.mjs
-      - .github/workflows/dependency-release-age.yml
+  # No paths: filter — a paths-filtered workflow can never be a required
+  # check in branch protection (PRs that don't touch lockfiles would never
+  # report it and would be blocked). Without the filter every PR reports the
+  # check, and the delta path costs ~1s when no lockfile changed. Mark this
+  # check REQUIRED in branch protection for the gate to be enforced rather
+  # than advisory.
   workflow_dispatch:
 
 permissions:
@@ -26,23 +38,52 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 45 || 10 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # Full history so the base branch ref is present for the delta
           # diff; `git show` afterwards needs no credentials.
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version: 22
       - name: Check minimum release age
         env:
           BASE_REF: origin/${{ github.event.pull_request.base.ref }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            node scripts/check-release-age-cargo-py.mjs --days 14 --lockfile Cargo.lock --base "$BASE_REF"
+            # The base ref must resolve; only a missing SCRIPT on a valid
+            # base may fall back to the PR's copy.
+            git rev-parse --verify "$BASE_REF^{commit}" >/dev/null || { echo "BASE_REF $BASE_REF does not resolve" >&2; exit 1; }
+            # Run the BASE branch's copy of the gate script so the PR under
+            # review cannot weaken its own gate by editing the script. When
+            # the base branch predates the script, the PR's copy is used
+            # (nothing committed to weaken).
+            if git cat-file -e "$BASE_REF:scripts/check-release-age-cargo-py.mjs" 2>/dev/null; then
+              git show "$BASE_REF:scripts/check-release-age-cargo-py.mjs" > "$RUNNER_TEMP/check-release-age-cargo-py.mjs"
+            else
+              echo "::warning::base branch has no committed gate script — using the PR's copy (nothing on base to weaken)"
+              cp scripts/check-release-age-cargo-py.mjs "$RUNNER_TEMP/check-release-age-cargo-py.mjs"
+            fi
+            GATE="$RUNNER_TEMP/check-release-age-cargo-py.mjs"
           else
-            node scripts/check-release-age-cargo-py.mjs --days 14 --lockfile Cargo.lock
+            GATE="scripts/check-release-age-cargo-py.mjs"
+          fi
+          # Check every lockfile present (Cargo.lock today; requirements*.txt
+          # / uv.lock / poetry.lock if one ever lands).
+          found=0
+          for lf in Cargo.lock requirements*.txt uv.lock poetry.lock; do
+            [ -f "$lf" ] || continue
+            found=1
+            if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+              node "$GATE" --days 14 --lockfile "$lf" --base "$BASE_REF"
+            else
+              node "$GATE" --days 14 --lockfile "$lf"
+            fi
+          done
+          if [ "$found" != 1 ]; then
+            echo "No lockfile found to age-check (expected Cargo.lock or a Python lockfile)" >&2
+            exit 1
           fi

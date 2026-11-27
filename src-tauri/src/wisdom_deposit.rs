@@ -769,6 +769,7 @@ async fn audit_and_seed_kick(
     tool: &'static str,
     path: String,
     initial_state: &'static str,
+    kick_error: Option<&'static str>,
     attribution: Option<DepositAttribution>,
     vault: &std::path::Path,
 ) -> Result<()> {
@@ -806,7 +807,10 @@ async fn audit_and_seed_kick(
             Some(audit_path.as_str()),
             "write",
         )?;
-        set_kick_state(&tx, &kick_rel, initial_state, None)?;
+        // `no_ingest_host` carries its CAUSE in the error column (#362):
+        // `blocked_by_privacy_mode` when strict privacy mode is what blocks
+        // the configured External provider, NULL for other causes.
+        set_kick_state(&tx, &kick_rel, initial_state, kick_error)?;
         // Deposit-time attribution index (Task 1, spec rev 4.1 §1): the
         // frontmatter is parsed HERE — inside the same transaction as the
         // audit + kick-ledger writes — so file, audit, ledger, and index all
@@ -842,7 +846,10 @@ async fn audit_and_seed_kick(
 /// config AND privacy mode" — a Strict-mode External provider lands here
 /// too (see `llm_generation_configured`), not only a truly unconfigured
 /// one. There is no automatic re-drive when privacy mode changes; the
-/// deposit re-kicks on the next deposit/supersession of that path.
+/// deposit re-kicks on the next deposit/supersession of that path. When
+/// privacy mode is the blocking cause, the seeded row records the marker
+/// `blocked_by_privacy_mode` in the ledger's existing `error` column
+/// (`llm_generation_privacy_blocked`); other causes leave `error` NULL.
 fn initial_kick_state(generation_configured: bool) -> &'static str {
     if generation_configured {
         "pending"
@@ -1112,11 +1119,19 @@ async fn deposit_inner(
     // hole: an audit row can no longer outlive a deposit whose kick-ledger
     // write failed right after the audit commit.
     let generation_configured = crate::librarian::llm_generation_configured();
+    let kick_error = if !generation_configured
+        && crate::librarian::llm_generation_privacy_blocked()
+    {
+        Some("blocked_by_privacy_mode")
+    } else {
+        None
+    };
     if let Err(e) = audit_and_seed_kick(
         ctx,
         "wisdom_deposit",
         rel.clone(),
         initial_kick_state(generation_configured),
+        kick_error,
         p.attribution.clone(),
         &vault,
     )
@@ -1418,11 +1433,19 @@ async fn supersession_inner(
     // compensating file removal as the deposit lane: a failure must leave
     // the caller able to retry rather than wedged on a path it never chose.
     let generation_configured = crate::librarian::llm_generation_configured();
+    let kick_error = if !generation_configured
+        && crate::librarian::llm_generation_privacy_blocked()
+    {
+        Some("blocked_by_privacy_mode")
+    } else {
+        None
+    };
     if let Err(e) = audit_and_seed_kick(
         ctx,
         "wisdom_propose_supersession",
         rel.clone(),
         initial_kick_state(generation_configured),
+        kick_error,
         None,
         &vault,
     )
@@ -2438,6 +2461,105 @@ mod tests {
                     .unwrap();
                 assert_eq!(state, "no_ingest_host");
             }
+        });
+    }
+
+    /// #362: strict privacy mode + a configured External provider is ONE of
+    /// the two causes folded into `no_ingest_host`; the ledger row must
+    /// record WHICH one in the existing `error` column. Config shape follows
+    /// synthesis.rs `completer_privacy_tests::with_external_provider`.
+    #[test]
+    fn strict_privacy_blocked_deposit_seeds_privacy_marker_in_kick_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            // Overwrite the seed config with External generation + Strict
+            // privacy (chosen), keeping the vault path intact.
+            let config = json!({
+                "vault_path": dir.to_str().unwrap(),
+                "generation": {
+                    "provider": "external",
+                    "external_url": "http://unit.test/v1",
+                    "api_key": "k",
+                    "model_name": "m"
+                },
+                "privacy": { "mode": "strict", "chosen": true }
+            });
+            std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+
+            let v = dispatch_wisdom_deposit(
+                &ctx,
+                WisdomDepositParams {
+                    repo_path: None,
+                    path: "immutable-source-files/agents/privacy-blocked.md".into(),
+                    title: "t".into(),
+                    body: "b".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["kick"], serde_json::json!("no_ingest_host"));
+            let conn = ctx.conn.lock().unwrap();
+            let (state, error): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                    [v["path"].as_str().unwrap()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state, "no_ingest_host");
+            assert_eq!(
+                error.as_deref(),
+                Some("blocked_by_privacy_mode"),
+                "strict-blocked External must mark the cause in the error column"
+            );
+        });
+    }
+
+    /// #362: a truly UNCONFIGURED provider is the other cause folded into
+    /// `no_ingest_host` — it must NOT be blamed on privacy mode, so the
+    /// seeded row keeps `error = NULL`.
+    #[test]
+    fn unconfigured_provider_seeds_null_kick_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir = dir.path().to_owned();
+        let dir_for_env = dir.clone();
+        with_brain(&dir_for_env, || async move {
+            let ctx = wisdom_ctx(&dir);
+            // wisdom_ctx's config.json has no `generation` key: provider is
+            // Unconfigured even though the effective privacy mode defaults
+            // to Strict.
+            let v = dispatch_wisdom_deposit(
+                &ctx,
+                WisdomDepositParams {
+                    repo_path: None,
+                    path: "immutable-source-files/agents/unconfigured.md".into(),
+                    title: "t".into(),
+                    body: "b".into(),
+                    tags: None,
+                    attribution: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(v["kick"], serde_json::json!("no_ingest_host"));
+            let conn = ctx.conn.lock().unwrap();
+            let (state, error): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT state, error FROM deposit_kick_state WHERE path = ?1",
+                    [v["path"].as_str().unwrap()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state, "no_ingest_host");
+            assert_eq!(
+                error, None,
+                "unconfigured provider must keep the error column NULL"
+            );
         });
     }
 

@@ -1456,6 +1456,36 @@ pub(crate) fn llm_generation_configured() -> bool {
     }
 }
 
+/// Whether generation is unusable SPECIFICALLY because strict privacy mode
+/// blocks a configured External provider (INTENT rule 11) — the observability
+/// twin of [`llm_generation_configured`], which folds this cause together
+/// with a truly unconfigured provider. False for `Unconfigured`/`Sidecar`
+/// (not privacy-caused) and on any config-load error. Uses the SAME lenient
+/// config path as [`build_llm_completer`] and the same fail-closed raw-mode
+/// read as its `GenerationProviderKind::External` arm.
+pub(crate) fn llm_generation_privacy_blocked() -> bool {
+    let brain_dir_str = crate::get_brain_dir_inner();
+    let brain_path = Path::new(&brain_dir_str);
+    let paths = crate::retrieval::BrainPaths {
+        brain_dir: brain_path.to_path_buf(),
+        config_path: crate::inference::config::config_path(brain_path),
+        db_path: brain_path.join("brain.db"),
+    };
+    let report = match crate::config::BrainConfig::load_lenient(&paths) {
+        Ok(report) => report,
+        // A config that fails to load blocks generation for a NON-privacy
+        // reason; the kick ledger must not blame privacy mode.
+        Err(_) => return false,
+    };
+    match &report.config.generation.provider {
+        GenerationProviderKind::Unconfigured | GenerationProviderKind::Sidecar => false,
+        GenerationProviderKind::External => {
+            let mode = crate::privacy::effective_mode(&report.config.privacy);
+            !crate::privacy::allows_external_generation(mode)
+        }
+    }
+}
+
 /// UNSCOPED completer seam: pre-areas signature, byte-identical behavior.
 /// Test-only since Task 6 — production rides
 /// [`run_synthesis_areas_with_completer`] with the hub read from

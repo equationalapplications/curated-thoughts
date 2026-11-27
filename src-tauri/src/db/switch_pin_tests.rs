@@ -127,6 +127,146 @@ fn inplace_switch_rederives_from_new_vault_via_open_rederive() {
     assert!(before.is_some());
 }
 
+/// Moved-root restore: the installed backup is A's brain (stamped, A-rooted
+/// keys) placed under B, config names B. The open skips the walk (stamp set).
+fn installed_backup_at_b(f: &Fixture) -> AppDb {
+    let b_db = f.b.join(".brain").join("brain.db");
+    std::fs::copy(&f.db_path, &b_db).unwrap();
+    VaultConfig::new(f.config_path.clone())
+        .set_vault_path(f.b.to_str().unwrap())
+        .unwrap();
+    crate::switch_reopen_paths(&b_db, &f.config_path).unwrap()
+}
+
+#[test]
+fn moved_root_restore_rederives_keys_from_new_root() {
+    let f = fixture();
+    {
+        let conn = rusqlite::Connection::open(&f.db_path).unwrap();
+        let p = f.b.parent().unwrap().join("A").join("notes").join("deposit-a.md");
+        conn.execute(
+            "INSERT OR REPLACE INTO stated_attestations VALUES (?1,'h','kurt','t')",
+            [p.to_str().unwrap()],
+        )
+        .unwrap();
+    }
+    // Positive pin (T4 m2): B carries a HASH-VALID attestation line, so the
+    // rebuild must re-insert a B-rooted key — the `LIKE '%/A/%' = 0` count
+    // alone would also pass on the rebuild's bare DELETE.
+    let b_note = f.b.join("notes").join("deposit-b.md");
+    let hash = crate::hasher::hash_bytes(&std::fs::read(&b_note).unwrap());
+    let att_path = f.b.join("stated").join(".attestations.jsonl");
+    std::fs::write(
+        &att_path,
+        format!(
+            "{{\"document_path\":\"notes/deposit-b.md\",\"content_hash\":\"{hash}\",\"by\":\"kurt\",\"at\":\"t\"}}\n"
+        ),
+    )
+    .unwrap();
+    let db = installed_backup_at_b(&f);
+    assert!(stamp(&db).is_some(), "backup carries the stamp; open skips the walk");
+    crate::restore_rederive_with(&db.0, &f.b.canonicalize().unwrap(), |c, r| {
+        stated_ledger::rebuild_rederive(c, r)
+    })
+    .unwrap();
+    let paths = deposit_paths(&db);
+    assert!(paths.iter().any(|p| p.contains("deposit-b.md")), "{paths:?}");
+    assert!(!paths.iter().any(|p| p.contains("deposit-a.md")), "{paths:?}");
+    let n: i64 = db
+        .0
+        .query_row("SELECT COUNT(*) FROM stated_attestations WHERE document_path LIKE '%/A/%'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "stated_attestations holds an A-rooted key");
+    // The B attestation survived the DELETE and was re-keyed under B.
+    let b_keys: Vec<String> = {
+        let mut stmt = db
+            .0
+            .prepare("SELECT document_path FROM stated_attestations WHERE document_path LIKE '%deposit-b%'")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert!(
+        !b_keys.is_empty(),
+        "no B-rooted stated_attestations key was rebuilt from the seeded line"
+    );
+}
+
+#[test]
+fn same_root_restore_rederives_and_keys_unchanged() {
+    // Spec §4 test-plan 2: a restore at the SAME root still rederives — the
+    // staged backup's stamp is cleared before the install (T4 M2) — and the
+    // keys stay A-rooted.
+    let f = fixture();
+    // Seed a HASH-VALID attestation line in A, so "keys unchanged" is a
+    // positive assertion (the fixture's own .attestations.jsonl is empty, and
+    // an empty rebuild result is the correct state there).
+    let a_note = f.db_path.parent().unwrap().parent().unwrap().join("notes").join("deposit-a.md");
+    let hash = crate::hasher::hash_bytes(&std::fs::read(&a_note).unwrap());
+    let att_path = f
+        .db_path
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("stated")
+        .join(".attestations.jsonl");
+    std::fs::write(
+        &att_path,
+        format!(
+            "{{\"document_path\":\"notes/deposit-a.md\",\"content_hash\":\"{hash}\",\"by\":\"kurt\",\"at\":\"t\"}}\n"
+        ),
+    )
+    .unwrap();
+    let backup = f._tmp.path().join("backup.db");
+    std::fs::copy(&f.db_path, &backup).unwrap();
+    let staged = crate::db::restore_sync::stage_backup(&backup, &f.db_path).unwrap();
+    crate::db::restore_sync::clear_staged_rederive_stamp(&staged).unwrap();
+    crate::db::restore_sync::commit_staged_backup(&staged, &f.db_path).unwrap();
+    let db = crate::switch_reopen_paths(&f.db_path, &f.config_path).unwrap();
+    let paths = deposit_paths(&db);
+    assert!(paths.iter().any(|p| p.contains("deposit-a.md")), "{paths:?}");
+    assert!(!paths.iter().any(|p| p.contains("deposit-b.md")), "{paths:?}");
+    let a_keys: Vec<String> = {
+        let mut stmt = db
+            .0
+            .prepare("SELECT document_path FROM stated_attestations WHERE document_path LIKE '%deposit-a%'")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert!(
+        !a_keys.is_empty(),
+        "the A attestation was not rebuilt after the same-root restore"
+    );
+    assert!(
+        stamp(&db).is_some(),
+        "the post-install open did not rederive-and-re-stamp"
+    );
+}
+
+#[test]
+fn restore_rederive_failure_unstamps_and_open_gate_retries() {
+    let f = fixture();
+    let b_db = f.b.join(".brain").join("brain.db");
+    let db = installed_backup_at_b(&f);
+    assert!(stamp(&db).is_some());
+    let r = crate::restore_rederive_with(&db.0, &f.b.canonicalize().unwrap(), |_, _| {
+        anyhow::bail!("injected")
+    });
+    assert!(r.is_err());
+    assert!(stamp(&db).is_none(), "failure must delete the stamp");
+    drop(db);
+    let db = crate::switch_reopen_paths(&b_db, &f.config_path).unwrap();
+    let paths = deposit_paths(&db);
+    assert!(paths.iter().any(|p| p.contains("deposit-b.md")), "{paths:?}");
+    assert!(!paths.iter().any(|p| p.contains("deposit-a.md")), "{paths:?}");
+}
+
 #[test]
 fn restore_branch_config_before_reopen_rederives_from_new_vault() {
     // Scope: the restore branch's ordering essence — production does NOT sweep

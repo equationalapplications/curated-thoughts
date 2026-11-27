@@ -95,6 +95,14 @@ export default defineConfig({
     get alias() {
       return tiptapTestAliases();
     },
-    exclude: ["**/node_modules/**", "**/dist/**", ".worktree/**", ".worktrees/**"],
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      ".worktree/**",
+      ".worktrees/**",
+      // scripts/*.test.mjs run under `node --test` (test:release-age), not
+      // vitest — vitest cannot bundle the node:test built-in.
+      "scripts/**",
+    ],
   },
 });

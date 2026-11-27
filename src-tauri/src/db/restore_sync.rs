@@ -275,16 +275,79 @@ pub fn stage_backup(backup_path: &Path, db_path: &Path) -> Result<PathBuf> {
     Ok(staged)
 }
 
+/// Delete the stated-ledger rederive stamp from the STAGED backup, before the
+/// install rename. This makes the restore's rederive structural (§2-A, T4 M2):
+/// whichever open comes next — the happy-path reopen, a failed-step recovery
+/// reopen (`restore_installed` is already true past the rename), or the
+/// startup reconciliation after a crash mid-install — finds no stamp and
+/// rederives from the root the config names. Callers run this BEFORE
+/// [`commit_staged_backup`], so a failed clear fails the switch while the
+/// outgoing database is still in place. "No such table" is success: a
+/// database without the meta table has no stamp either. The delete is
+/// checkpointed and fsynced so the rename cannot publish a half-journaled
+/// file.
+pub fn clear_staged_rederive_stamp(staged: &Path) -> Result<()> {
+    let conn = rusqlite::Connection::open(staged)
+        .with_context(|| format!("open staged backup {} for the stamp clear", staged.display()))?;
+    let cleared = conn.execute(
+        "DELETE FROM llm_wiki_meta WHERE key = 'stated_ledger_rederived'",
+        [],
+    );
+    match cleared {
+        Ok(_) => {}
+        Err(e) => {
+            if e.to_string().contains("no such table") {
+                // No meta table ⇒ no stamp to clear; the post-install open
+                // rederive is already unconditional for this database.
+            } else {
+                return Err(e).with_context(|| {
+                    format!("clear stated_ledger_rederived from {}", staged.display())
+                });
+            }
+        }
+    }
+    // Fold any WAL/journal content into the main file and fsync it: the
+    // install is a rename, so the staged main file must stand alone.
+    let _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", []);
+    drop(conn);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(staged)
+        .with_context(|| format!("reopen {} to fsync after the stamp clear", staged.display()))?;
+    file.sync_all()
+        .with_context(|| format!("fsync {} after the stamp clear", staged.display()))?;
+    Ok(())
+}
+
 /// Record, durably and before anything destructive happens, that an install
 /// is in flight. See [`install_marker_path`] for how recovery reads it.
-pub fn write_install_marker(db_path: &Path) -> Result<()> {
+pub fn write_install_marker(db_path: &Path, destination_root: &str) -> Result<()> {
     let marker = install_marker_path(db_path);
-    std::fs::write(&marker, b"").with_context(|| format!("write {}", marker.display()))?;
+    std::fs::write(&marker, destination_root.as_bytes())
+        .with_context(|| format!("write {}", marker.display()))?;
     let f = std::fs::File::open(&marker)
         .with_context(|| format!("reopen {} to fsync", marker.display()))?;
     f.sync_all()
         .with_context(|| format!("fsync {}", marker.display()))?;
     fsync_parent_dir(&marker)
+}
+
+/// The DESTINATION vault root recorded in the install marker, if any.
+/// ONLY a zero-byte marker is the legacy empty case → `Ok(None)`; a nonempty
+/// marker's contents are returned EXACTLY — no trimming — because a valid
+/// destination can end with whitespace and recovery must align the config to
+/// the root the restore actually targeted. Read/decode errors propagate
+/// (`Err`) so reconciliation can retain the marker and stop startup instead
+/// of silently opening under the outgoing config (T4-follow-up round 3).
+pub fn read_install_marker_destination(db_path: &Path) -> Result<Option<String>> {
+    let bytes = std::fs::read(install_marker_path(db_path))
+        .with_context(|| format!("read {}", install_marker_path(db_path).display()))?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .with_context(|| "install marker destination is not valid UTF-8")
 }
 
 /// Remove the install marker. Best effort; a stray marker with no staged file
@@ -510,14 +573,23 @@ pub fn run_pending(conn: &Connection, db_path: &Path, now_ms: i64) -> Result<boo
 /// |        |         | had begun; clear any strays.                        |
 ///
 /// Idempotent, and cheap in the common case: one `stat` that finds no marker.
-pub fn reconcile_interrupted_install(db_path: &Path) {
+/// Resolve which side of the install commit point a crash landed on, and
+/// align the persisted config to the recorded destination when the install
+/// committed. Returns `Err` — with the marker RETAINED on disk — when the
+/// committed branch's config alignment fails: the caller (startup) must then
+/// refuse the rooted open, because an unstamped installed brain opened under
+/// the outgoing config would rederive — and stamp complete — the wrong root.
+/// The next start retries the alignment; the marker is removed only once the
+/// config is persisted (or the install never committed, or the marker carries
+/// no destination and there is nothing to align to).
+pub fn reconcile_interrupted_install(db_path: &Path, config_path: &Path) -> Result<()> {
     let marker = install_marker_path(db_path);
     if !marker.exists() {
         // A crash this early left at most stray artifacts; the outgoing
         // database is untouched.
         discard_pending_sidecar(db_path);
         let _ = std::fs::remove_file(staged_backup_path(db_path));
-        return;
+        return Ok(());
     }
     if !staged_backup_path(db_path).exists() {
         // Committed: the rename consumed the staged file.
@@ -528,12 +600,51 @@ pub fn reconcile_interrupted_install(db_path: &Path) {
                  published ({e}); the replica may diverge for the outgoing vault"
             );
         }
+        // The installed database is the DESTINATION vault's, but the
+        // persisted config still names the outgoing vault until
+        // `set_vault_path` runs — and it never runs if the process exited
+        // inside the post-rename window. The marker records that destination:
+        // align the config HERE, before the startup's first rooted open, so
+        // the open-time rederive (the stamp was cleared from the staged
+        // backup) runs from the root the restore targeted instead of
+        // re-deriving — and stamping complete — the outgoing root over the
+        // new vault's keys. Read BEFORE the marker is removed, below. An
+        // empty (pre-recording) marker leaves the config untouched.
+        let dest = read_install_marker_destination(db_path)?;
+        if let Some(dest) = dest {
+            if let Err(e) = crate::vault::config::VaultConfig::new(config_path.to_path_buf())
+                .set_vault_path(&dest)
+            {
+                // Keep the marker: the destination is still recoverable for
+                // the next start, which must retry the alignment instead of
+                // opening the vault under the outgoing config.
+                return Err(anyhow::anyhow!(
+                    "install committed mid-switch but aligning the config to the \
+                     recorded destination {dest} failed: {e}; the install marker is \
+                     retained and startup is refused"
+                ));
+            }
+            eprintln!(
+                "[restore_sync] install committed mid-switch: config aligned to the recorded destination {dest}"
+            );
+        }
     } else {
         restore_outgoing_wal(db_path);
         discard_pending_sidecar(db_path);
+        // Remove the MARKER first (propagating its error), THEN the staged
+        // backup (best-effort): a crash or failure between the staged
+        // removal and the marker removal would leave marker-without-staged,
+        // which the committed branch above misreads as "install committed" —
+        // aligning the config to the recorded destination while the OUTGOING
+        // database is still at db_path. Marker-first means any leftover
+        // staged file lands in the no-marker branch, which discards it
+        // without touching the config (T4-follow-up round 3, Major 3).
+        std::fs::remove_file(&marker)
+            .with_context(|| format!("remove install marker {}", marker.display()))?;
         let _ = std::fs::remove_file(staged_backup_path(db_path));
     }
     let _ = std::fs::remove_file(&marker);
+    Ok(())
 }
 
 fn reassert_entries(conn: &Connection, now_ms: i64) -> Result<()> {
@@ -1259,7 +1370,9 @@ mod tests {
         std::fs::write(install_marker_path(&db_path), b"").unwrap();
         std::fs::write(outgoing_wal_path(&db_path), b"stale wal").unwrap();
 
-        reconcile_interrupted_install(&db_path);
+        let config_path = tmp.path().join("config.json");
+        reconcile_interrupted_install(&db_path, &config_path)
+            .expect("an empty marker has no destination to align; reconcile must succeed");
 
         assert!(
             sidecar_path(&db_path).exists(),
@@ -1290,12 +1403,14 @@ mod tests {
         let wal = sibling(&db_path, "-wal");
         std::fs::write(&wal, b"journal with committed rows").unwrap();
         std::fs::write(staged_backup_path(&db_path), b"staged").unwrap();
-        write_install_marker(&db_path).unwrap();
+        write_install_marker(&db_path, "").unwrap();
         preserve_outgoing_wal(&db_path).unwrap();
         assert!(outgoing_wal_path(&db_path).exists());
         std::fs::remove_file(&wal).unwrap(); // sidecar removal
 
-        reconcile_interrupted_install(&db_path);
+        let config_path = tmp.path().join("config.json");
+        reconcile_interrupted_install(&db_path, &config_path)
+            .expect("a never-committed install has nothing to align; reconcile must succeed");
 
         assert_eq!(
             std::fs::read(&wal).unwrap(),
@@ -1313,6 +1428,190 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_committed_install_aligns_the_config_to_the_destination_root() {
+        // The crash window the T4-follow-up Major covers: the install rename
+        // ran (staged file consumed, marker present) but the process exited
+        // BEFORE `set_vault_path` — the persisted config still names the
+        // outgoing vault, while the installed database (whose rederive stamp
+        // was cleared pre-rename) belongs to the destination. Recovery must
+        // align the config to the DESTINATION the marker recorded, before the
+        // startup's first rooted open rederives from the wrong root and
+        // stamps that result complete.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let config_path = tmp.path().join("config.json");
+        crate::vault::config::VaultConfig::new(config_path.clone())
+            .set_vault_path(tmp.path().join("vault-a").to_str().unwrap())
+            .unwrap();
+
+        // Committed-install leftovers: no staged file (the rename consumed
+        // it) and a marker that records the destination root.
+        std::fs::write(install_marker_path(&db_path), b"vault-b").unwrap();
+
+        reconcile_interrupted_install(&db_path, &config_path)
+            .expect("the committed install's alignment must succeed here");
+
+        let named = crate::vault::config::VaultConfig::new(config_path)
+            .get_vault_path()
+            .unwrap();
+        assert_eq!(
+            named.as_deref(),
+            Some("vault-b"),
+            "recovery left the config on the outgoing vault — the unstamped \
+             installed brain would rederive (and stamp) the wrong root"
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_the_marker_when_the_marker_read_fails() {
+        // T4-follow-up round 3, Major 1: the marker here is a DIRECTORY, so
+        // reading it FAILS — which must be distinguished from "no marker". A
+        // read failure means recovery cannot know the destination; reconcile
+        // must retain the marker and propagate, so startup stops instead of
+        // opening under the outgoing config and stamping the wrong root.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let config_path = tmp.path().join("config.json");
+        crate::vault::config::VaultConfig::new(config_path.clone())
+            .set_vault_path(tmp.path().join("vault-a").to_str().unwrap())
+            .unwrap();
+        // The install committed (no staged file) and its marker is unreadable.
+        std::fs::create_dir_all(install_marker_path(&db_path)).unwrap();
+
+        let outcome = reconcile_interrupted_install(&db_path, &config_path);
+
+        assert!(
+            outcome.is_err(),
+            "a marker read failure must be propagated, not treated as no-destination"
+        );
+        assert!(
+            install_marker_path(&db_path).exists(),
+            "the marker must be retained for the next start's retry"
+        );
+    }
+
+    #[test]
+    fn reconcile_preserves_the_destination_exactly_no_trim() {
+        // T4-follow-up round 3, Major 2: a valid Unix destination can end
+        // with whitespace — `switch_vault` records it unchanged, and recovery
+        // must align the config to it EXACTLY. Trimming would persist a
+        // different root than the restore targeted.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let config_path = tmp.path().join("config.json");
+        crate::vault::config::VaultConfig::new(config_path.clone())
+            .set_vault_path(tmp.path().join("vault-a").to_str().unwrap())
+            .unwrap();
+        // Committed-install leftovers with a trailing-space destination.
+        std::fs::write(install_marker_path(&db_path), b"/tmp/vault-b ").unwrap();
+
+        let _ = reconcile_interrupted_install(&db_path, &config_path);
+
+        let named = crate::vault::config::VaultConfig::new(config_path)
+            .get_vault_path()
+            .unwrap();
+        assert_eq!(
+            named.as_deref(),
+            Some("/tmp/vault-b "),
+            "the destination root must be preserved byte-exact"
+        );
+    }
+
+    #[test]
+    fn reconcile_removes_the_marker_before_the_staged_backup_on_rollback() {
+        // T4-follow-up round 3, Major 3: a crash (or removal failure) between
+        // "staged removed" and "marker removed" leaves marker-without-staged,
+        // which the committed branch misreads as a committed install —
+        // aligning the config to the recorded destination while the OUTGOING
+        // database is still at db_path. The marker must go FIRST: any
+        // leftover staged file then lands in the no-marker branch, which
+        // discards it without touching the config.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let config_path = tmp.path().join("config.json");
+        crate::vault::config::VaultConfig::new(config_path.clone())
+            .set_vault_path(tmp.path().join("vault-a").to_str().unwrap())
+            .unwrap();
+        std::fs::write(staged_backup_path(&db_path), b"staged").unwrap();
+        // A DIRECTORY as the marker: `remove_file` on it fails, simulating
+        // an unremovable marker.
+        std::fs::create_dir_all(install_marker_path(&db_path)).unwrap();
+
+        let outcome = reconcile_interrupted_install(&db_path, &config_path);
+
+        assert!(
+            outcome.is_err(),
+            "a marker-removal failure during rollback must be propagated"
+        );
+        assert!(
+            staged_backup_path(&db_path).exists(),
+            "the staged backup must be retained when the marker cannot be \
+             removed — its absence would be misread as a committed install"
+        );
+        let named = crate::vault::config::VaultConfig::new(config_path)
+            .get_vault_path()
+            .unwrap();
+        assert!(
+            !named.as_deref().unwrap_or("").contains("vault-b"),
+            "a rolled-back install must not move the config (names {named:?})"
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_the_marker_when_the_config_alignment_fails() {
+        // T4-follow-up round 2: an alignment failure must be PROPAGATED and
+        // the marker RETAINED — the destination is still recoverable for the
+        // next start, which must retry the alignment instead of opening the
+        // vault under the outgoing config (an unstamped installed brain
+        // opened under the wrong root would rederive — and stamp complete —
+        // the wrong root). The config path here is a DIRECTORY, so every
+        // config write fails.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let config_dir = tmp.path().join("config.json");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        // Committed-install leftovers: no staged file, marker records the
+        // destination root.
+        std::fs::write(install_marker_path(&db_path), b"vault-b").unwrap();
+
+        let r = reconcile_interrupted_install(&db_path, &config_dir);
+
+        assert!(r.is_err(), "an alignment failure must be propagated");
+        assert!(
+            install_marker_path(&db_path).exists(),
+            "the marker must survive a failed alignment — it is the only record \
+             of the destination root"
+        );
+    }
+
+    #[test]
+    fn reconcile_never_committed_leaves_the_outgoing_config_alone() {
+        // The "never happened" side: staged file present ⇒ the install rename
+        // did NOT run, so the config must keep naming the outgoing vault even
+        // though a destination was recorded.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("brain.db");
+        let config_path = tmp.path().join("config.json");
+        crate::vault::config::VaultConfig::new(config_path.clone())
+            .set_vault_path(tmp.path().join("vault-a").to_str().unwrap())
+            .unwrap();
+        std::fs::write(staged_backup_path(&db_path), b"staged").unwrap();
+        write_install_marker(&db_path, "vault-b").unwrap();
+
+        reconcile_interrupted_install(&db_path, &config_path)
+            .expect("the committed install's alignment must succeed here");
+
+        let named = crate::vault::config::VaultConfig::new(config_path)
+            .get_vault_path()
+            .unwrap();
+        assert!(
+            !named.as_deref().unwrap_or("").contains("vault-b"),
+            "a never-committed install must not move the config (names {named:?})"
+        );
+    }
+
+    #[test]
     fn reconcile_clears_strays_when_the_crash_predates_the_marker() {
         // The crash: capture written, staged copy half-written, marker never
         // reached the disk. Nothing was replaced; nothing is owed.
@@ -1322,7 +1621,9 @@ mod tests {
         std::fs::write(pending_sidecar_path(&db_path), b"{}").unwrap();
         std::fs::write(staged_backup_path(&db_path), b"partial").unwrap();
 
-        reconcile_interrupted_install(&db_path);
+        let config_path = tmp.path().join("config.json");
+        reconcile_interrupted_install(&db_path, &config_path)
+            .expect("no marker: nothing to align; reconcile must succeed");
 
         assert!(!pending_sidecar_path(&db_path).exists());
         assert!(!staged_backup_path(&db_path).exists());

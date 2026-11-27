@@ -213,6 +213,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Release-age gate script tests
+        run: pnpm run test:release-age
+
       - name: Typecheck + Vite build
         run: pnpm run build
 

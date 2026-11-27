@@ -1,3 +1,49 @@
+## [3.17.2](https://github.com/equationalapplications/curated-thoughts/compare/v3.17.1...v3.17.2) (2026-11-27)
+
+### Bug Fixes
+
+* **confirmations:** consume the dual-gate dirty flag before the apply — closes the superseded-worker set-then-clear race (rung-3 major) ([#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([7b3bf0e](https://github.com/equationalapplications/curated-thoughts/commit/7b3bf0e0f4a3e54dbee1f191ca1f354d59681ab1))
+* **confirmations:** memo pre-read stat in the dual gate; rung-1 folds — ledger path text, race-rule wording ([#382](https://github.com/equationalapplications/curated-thoughts/issues/382), [#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([4f9e1ac](https://github.com/equationalapplications/curated-thoughts/commit/4f9e1ac8f65a4c6bee4e2601b6929a5f06fa1b80))
+* **confirmations:** recover the confirmations slot from a poisoned mutex — a panicking hook no longer disables the drain leg (rung-4 major) ([#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([8007446](https://github.com/equationalapplications/curated-thoughts/commit/80074468d2f13b8377a9bab5b7be9a19cf0e7453))
+* **restore_sync:** marker read failures propagate, destinations preserved byte-exact, rollback removes the marker first (CodeRabbit round 3 — 3 majors) ([584de6d](https://github.com/equationalapplications/curated-thoughts/commit/584de6da1b69e3fc66d9453c3c8aa5fbdb8d6c95))
+* **restore_sync:** marker retained until the config is persisted; failed startup alignment is fail-closed (CodeRabbit T4-follow-up round 2) ([220d25b](https://github.com/equationalapplications/curated-thoughts/commit/220d25b059a615212981e6147b46cbcfe8c2f9b6))
+* **restore_sync:** recovery aligns the config to the marker's destination root — closes the crash-window wrong-root rederive (CodeRabbit T4-follow-up Major) ([189be4a](https://github.com/equationalapplications/curated-thoughts/commit/189be4a6c7c71b3a06afa759b77c3b5114ffefbf))
+* **switch:** rederive stated-ledger keys after restore, unstamp on failure (spec §2-A, [#382](https://github.com/equationalapplications/curated-thoughts/issues/382)) ([2e64dba](https://github.com/equationalapplications/curated-thoughts/commit/2e64dba3c2f42cc73f983bf59cd5c7582e935223))
+* **switch:** T4 fold — structural rederive retry via staged-stamp clear; unstamp error propagated; test + spec hygiene ([#382](https://github.com/equationalapplications/curated-thoughts/issues/382), [#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([a7bb80e](https://github.com/equationalapplications/curated-thoughts/commit/a7bb80eecff10bdea341c0c63308204274dc66d4))
+
+### Performance Improvements
+
+* **confirmations:** replace the per-job dirty flag with an entries-table watermark — the §2-B skip branch becomes reachable ([#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([89cac2d](https://github.com/equationalapplications/curated-thoughts/commit/89cac2d6b8f51e4b0e9463fee9a88019b1be2413))
+* **confirmations:** skip idle-crossing scan unless ledger changed or entries written (spec §2-B, [#385](https://github.com/equationalapplications/curated-thoughts/issues/385)) ([f9e690b](https://github.com/equationalapplications/curated-thoughts/commit/f9e690b2e633ec8ee27dfaf09983c83feaeadefe))
+
+## [3.17.1](https://github.com/equationalapplications/curated-thoughts/compare/v3.17.0...v3.17.1) (2026-11-26)
+
+### Bug Fixes
+
+* **ci:** exclude scripts/ from vitest — node:test files broke the frontend job ([c3f830a](https://github.com/equationalapplications/curated-thoughts/commit/c3f830a9d7a4b69f63c3a0fa11c8e6963c1022e5))
+* **ci:** harden release-age gate per review r1 ([2d2b5ab](https://github.com/equationalapplications/curated-thoughts/commit/2d2b5ab59320ef584c0038559c9f134be73013c0)), closes [#revision](https://github.com/equationalapplications/curated-thoughts/issues/revision)
+* **ci:** pin gate actions by SHA, clamp Retry-After, retry transient 5xx, youngest-file PyPI timestamps ([a9b3da9](https://github.com/equationalapplications/curated-thoughts/commit/a9b3da9028efa693e021f1b14bdf9033aa411dcf))
+* **ci:** report the gate on every PR so it can be a required check ([9862bc0](https://github.com/equationalapplications/curated-thoughts/commit/9862bc06c744b9ba355bb0b39f9d142915d46340))
+* **ci:** wire Python lockfiles into the release-age trigger and check loop ([f6f1ad1](https://github.com/equationalapplications/curated-thoughts/commit/f6f1ad159c2642fb183cfd14b9de370e116710b3))
+* **gate:** delta keys include source; same-version source swaps fail closed ([972cef8](https://github.com/equationalapplications/curated-thoughts/commit/972cef88d8d9528942c95e15772111187251e3f0)), closes [lands-via-#388](https://github.com/equationalapplications/lands-via-/issues/388)
+* **gate:** delta-nit folds — drop duplicate 503 retry branch, cite PR [#391](https://github.com/equationalapplications/curated-thoughts/issues/391) in policy doc, pin pip comment semantics ([8a2cdb9](https://github.com/equationalapplications/curated-thoughts/commit/8a2cdb90b78d385a84b6c6cb4c3f156fe489b948))
+* **gate:** fail closed on poetry [package.source]; uv local members skip; test hygiene ([6e0f3af](https://github.com/equationalapplications/curated-thoughts/commit/6e0f3afb2dae92a569efb91f96542c306a4c3c9f))
+* **gate:** fold CodeRabbit threads — fail-closed requirements includes, stable problem identities, poetry source retention, comment-aware continuations, attached short options, inherited index carry, network-free test ([81cf1cb](https://github.com/equationalapplications/curated-thoughts/commit/81cf1cbf5cf5d06c4432daa888f2cf615c54be71))
+* **gate:** pip-exact continuations, optparse abbreviation canonicalization, include-graph delta auditing (CodeRabbit round 2) ([4245e7a](https://github.com/equationalapplications/curated-thoughts/commit/4245e7a4cb2964ea2766293f789134e2274625d3))
+* **gate:** Python parsers now honor the delta fail-closed source rule ([4482304](https://github.com/equationalapplications/curated-thoughts/commit/4482304097ee0d138c4e7986c403bf976911149a))
+* **gate:** T3 r5 confirmation folds — per-table poetry problems, BASE_REF verify, label fix ([86f4e2a](https://github.com/equationalapplications/curated-thoughts/commit/86f4e2a6e25971250d3bf50867b38093b78e1158))
+* **gate:** token-scan option lines, fail delta on inherited includes, keep poetry source identity in entry delta ([75c2438](https://github.com/equationalapplications/curated-thoughts/commit/75c24385a4df8bf3c4d00e0e1bed933bb57b9a5a))
+
+## [3.17.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.4...v3.17.0) (2026-11-26)
+
+### Features
+
+* **deposit:** record blocked_by_privacy_mode in kick ledger error column ([#362](https://github.com/equationalapplications/curated-thoughts/issues/362)) ([ebdbf8b](https://github.com/equationalapplications/curated-thoughts/commit/ebdbf8b8cf556f17d18147b1b4d2130aae0f0550))
+
+### Bug Fixes
+
+* **privacy:** make Strict card copy honest about embeddings ([024fcf9](https://github.com/equationalapplications/curated-thoughts/commit/024fcf92ec2d6b0ee379537dac15b4399f50b380))
+
 ## [3.16.4](https://github.com/equationalapplications/curated-thoughts/compare/v3.16.3...v3.16.4) (2026-11-26)
 
 ### Bug Fixes
