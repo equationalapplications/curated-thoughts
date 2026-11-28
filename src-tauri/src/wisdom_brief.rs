@@ -129,6 +129,167 @@ pub fn fit(c: Vec<Candidate>, budget: usize) -> (Vec<Candidate>, Omitted) {
     (kept, omitted)
 }
 
+// ---- covered-topics index (spec 3.5) ------------------------------------
+
+/// Names (hubs, areas) are cut to this many chars in the index.
+const NAME_CUT: usize = 40;
+/// At most this many areas are listed.
+const MAX_AREAS: usize = 8;
+const HINT: &str = "More on demand: ct wisdom match --path=<file>, or wiki_context.";
+const AREAS_LEAD: &str = "Areas not listed, surfaced when you work on their files:";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AreaCount {
+    pub name: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Counts {
+    pub repo: usize,
+    pub org: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Index {
+    pub text: String,
+    pub areas: Vec<AreaCount>,
+    pub counts: Counts,
+}
+
+/// One band's line: its (optional) hub display name, eligible count and shown.
+#[derive(Debug, Clone)]
+pub struct BandInfo {
+    pub name: Option<String>,
+    pub count: usize,
+    pub shown: usize,
+}
+
+/// Everything the index renders from.
+#[derive(Debug, Clone)]
+pub struct IndexInput {
+    pub repo: Option<BandInfo>,
+    pub org: Option<BandInfo>,
+    /// Repo-hub area facts as `(area name, eligible count)`, any order.
+    pub areas: Vec<(String, usize)>,
+}
+
+/// How much of the index is kept. Ladder (spec 3.5): areas shed from the
+/// tail, then hub names, then the area clause, then the hint, then everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShedLevel {
+    /// 0 full, 1 no hub names, 2 no area clause, 3 no hint, 4 empty.
+    stage: u8,
+    /// Areas listed (stage 0 only; stage 1 keeps the same value).
+    areas_kept: usize,
+}
+
+fn cut(s: &str) -> String {
+    s.chars().take(NAME_CUT).collect()
+}
+
+fn sorted_areas(input: &IndexInput) -> Vec<(String, usize)> {
+    let mut a: Vec<(String, usize)> = input.areas.iter().map(|(n, c)| (cut(n), *c)).collect();
+    a.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+    a
+}
+
+/// Index cost in the budget: text plus the `\n\n` separator, 0 when empty.
+pub fn index_cost(index: &Index) -> usize {
+    if index.text.is_empty() {
+        0
+    } else {
+        utf16(&index.text) + 2
+    }
+}
+
+/// Index cap for a given `max_chars` (spec 3.4).
+pub fn index_cap(max_chars: usize) -> usize {
+    INDEX_CAP.min(max_chars / 4)
+}
+
+/// Re-render at a fixed shed level with the input's `shown` values. Never
+/// sheds further: a smaller `shown` is never wider than the one the level was
+/// chosen for.
+pub fn render_index_at(level: ShedLevel, input: &IndexInput) -> Index {
+    let all = sorted_areas(input);
+    let listed: Vec<AreaCount> = all
+        .iter()
+        .take(MAX_AREAS)
+        .map(|(n, c)| AreaCount { name: n.clone(), count: *c })
+        .collect();
+    let counts = Counts {
+        repo: input.repo.as_ref().map_or(0, |b| b.count),
+        org: input.org.as_ref().map_or(0, |b| b.count),
+    };
+    let nothing = counts.repo + counts.org == 0 && all.is_empty();
+    if nothing || level.stage >= 4 {
+        return Index { text: String::new(), areas: listed, counts };
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let named = level.stage == 0;
+    let band = |label: &str, b: &BandInfo, first: bool| {
+        let name = match (&b.name, named) {
+            (Some(n), true) => format!(" {}", cut(n)),
+            _ => String::new(),
+        };
+        if first {
+            format!("{label}{name} ({} statements, {} shown)", b.count, b.shown)
+        } else {
+            format!("{label}{name} ({}, {} shown)", b.count, b.shown)
+        }
+    };
+    let mut bands: Vec<String> = Vec::new();
+    if let Some(b) = &input.repo {
+        bands.push(band("repo", b, true));
+    }
+    if let Some(b) = &input.org {
+        bands.push(band("org", b, input.repo.is_none()));
+    }
+    if !bands.is_empty() {
+        parts.push(format!("Covered: {}.", bands.join("; ")));
+    }
+    if level.stage <= 1 && !all.is_empty() {
+        let kept = level.areas_kept.min(listed.len());
+        let mut items: Vec<String> = listed
+            .iter()
+            .take(kept)
+            .map(|a| format!("{} ({})", a.name, a.count))
+            .collect();
+        let more = all.len() - kept;
+        if more > 0 {
+            items.push(format!("... +{more} more"));
+        }
+        parts.push(format!("{AREAS_LEAD} {}.", items.join(", ")));
+    }
+    if level.stage <= 2 {
+        parts.push(HINT.to_string());
+    }
+    Index { text: parts.join(" "), areas: listed, counts }
+}
+
+/// Build the index at the finest level whose text fits `cap` (UTF-16 units).
+/// Call with `shown == count` (k := n) to fix the reserve and shed level; the
+/// caller then fits statements and re-renders at the SAME level (spec 3.4).
+pub fn build_index(input: &IndexInput, cap: usize) -> (Index, ShedLevel) {
+    let kmax = input.areas.len().min(MAX_AREAS);
+    let mut levels: Vec<ShedLevel> = (0..=kmax)
+        .rev()
+        .map(|k| ShedLevel { stage: 0, areas_kept: k })
+        .collect();
+    levels.push(ShedLevel { stage: 1, areas_kept: 0 });
+    levels.push(ShedLevel { stage: 2, areas_kept: 0 });
+    levels.push(ShedLevel { stage: 3, areas_kept: 0 });
+    for level in levels {
+        let idx = render_index_at(level, input);
+        if utf16(&idx.text) <= cap {
+            return (idx, level);
+        }
+    }
+    let level = ShedLevel { stage: 4, areas_kept: 0 };
+    (render_index_at(level, input), level)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +445,137 @@ mod tests {
     fn index_reserve_is_subtracted_first() {
         assert_eq!(statement_budget(2200, 100), 2100);
         assert_eq!(statement_budget(600, 700), 0);
+    }
+
+    fn input(repo_n: usize, org_n: usize, areas: &[(&str, usize)]) -> IndexInput {
+        IndexInput {
+            repo: Some(BandInfo { name: Some("Repo Hub".into()), count: repo_n, shown: repo_n }),
+            org: Some(BandInfo { name: Some("Company".into()), count: org_n, shown: org_n }),
+            areas: areas.iter().map(|(n, c)| (n.to_string(), *c)).collect(),
+        }
+    }
+
+    #[test]
+    fn index_lists_areas_count_desc_name_asc() {
+        let (idx, _) = build_index(&input(3, 1, &[("b", 2), ("a", 2), ("z", 5)]), 400);
+        assert!(idx.text.contains("z (5), a (2), b (2)"), "{}", idx.text);
+        assert_eq!(idx.areas[0], AreaCount { name: "z".into(), count: 5 });
+        assert!(idx.text.starts_with("Covered: repo Repo Hub (3 statements, 3 shown); org Company (1, 1 shown)."));
+        assert!(idx.text.ends_with(HINT));
+    }
+
+    #[test]
+    fn index_caps_areas_at_eight_with_more() {
+        let areas: Vec<(String, usize)> = (0..11).map(|i| (format!("area{i:02}"), 20 - i)).collect();
+        let mut inp = input(3, 0, &[]);
+        inp.areas = areas;
+        let (idx, _) = build_index(&inp, 1000);
+        assert_eq!(idx.areas.len(), 8);
+        assert!(idx.text.contains("... +3 more"), "{}", idx.text);
+        assert!(!idx.text.contains("area08"));
+    }
+
+    #[test]
+    fn index_sheds_areas_then_names_to_fit_cap() {
+        let areas: Vec<(String, usize)> = (0..8).map(|i| (format!("area-number-{i}"), 9)).collect();
+        let mut inp = input(30, 20, &[]);
+        inp.areas = areas;
+        let (full, l0) = build_index(&inp, 1000);
+        assert_eq!(l0.stage, 0);
+        let cap = utf16(&full.text) - 1;
+        let (less, l1) = build_index(&inp, cap);
+        assert!(utf16(&less.text) <= cap);
+        assert!(l1.areas_kept < 8 || l1.stage > 0);
+        // Tight cap: names go before the area clause.
+        let (tight, l2) = build_index(&inp, 150);
+        assert!(utf16(&tight.text) <= 150);
+        assert!(l2.stage >= 1, "{:?}", l2);
+        assert!(!tight.text.contains("Repo Hub"));
+    }
+
+    #[test]
+    fn index_empty_when_nothing_to_say() {
+        let inp = IndexInput { repo: None, org: None, areas: vec![] };
+        let (idx, _) = build_index(&inp, 400);
+        assert_eq!(idx.text, "");
+        let zero = input(0, 0, &[]);
+        assert_eq!(build_index(&zero, 400).0.text, "");
+    }
+
+    #[test]
+    fn index_text_never_exceeds_cap() {
+        for cap in [0usize, 20, 60, 100, 150, 400] {
+            let (idx, _) = build_index(&input(12, 5, &[("auth", 3), ("deploy", 2)]), cap);
+            assert!(utf16(&idx.text) <= cap, "cap {cap}: {}", idx.text);
+        }
+    }
+
+    #[test]
+    fn index_cap_is_min_400_quarter_of_max() {
+        assert_eq!(index_cap(600), 150);
+        assert_eq!(index_cap(2200), 400.min(550));
+        assert_eq!(index_cap(2200), 400);
+        assert_eq!(index_cap(8000), 400);
+    }
+
+    #[test]
+    fn index_cost_zero_when_text_empty() {
+        let e = Index { text: String::new(), areas: vec![], counts: Counts::default() };
+        assert_eq!(index_cost(&e), 0);
+        let f = Index { text: "ab".into(), areas: vec![], counts: Counts::default() };
+        assert_eq!(index_cost(&f), 4);
+    }
+
+    #[test]
+    fn index_k_crossing_digit_boundary_n10_k9() {
+        let mut inp = input(10, 0, &[]);
+        inp.org = None;
+        let (full, level) = build_index(&inp, 400);
+        inp.repo.as_mut().unwrap().shown = 9;
+        let real = render_index_at(level, &inp);
+        assert!(utf16(&real.text) <= utf16(&full.text));
+        assert!(real.text.contains("9 shown"));
+        // And the other way: n=100 -> k=99 is shorter.
+        let mut big = input(100, 0, &[]);
+        big.org = None;
+        let (f2, l2) = build_index(&big, 400);
+        big.repo.as_mut().unwrap().shown = 99;
+        assert!(utf16(&render_index_at(l2, &big).text) < utf16(&f2.text));
+    }
+
+    #[test]
+    fn index_at_max_chars_600_fits_non_empty() {
+        let cap = index_cap(600);
+        let long = "n".repeat(60);
+        let mut inp = input(9999, 9999, &[("auth", 3)]);
+        inp.repo.as_mut().unwrap().name = Some(long.clone());
+        inp.org.as_mut().unwrap().name = Some(long);
+        let (idx, _) = build_index(&inp, cap);
+        assert!(!idx.text.is_empty());
+        assert!(utf16(&idx.text) <= cap);
+        // Shortest realistic form: repo only, 40-char name, hint kept.
+        let mut one = input(9999, 0, &[]);
+        one.org = None;
+        one.repo.as_mut().unwrap().name = Some("x".repeat(40));
+        let (i1, _) = build_index(&one, cap);
+        assert!(i1.text.ends_with(HINT), "{}", i1.text);
+    }
+
+    #[test]
+    fn index_shed_ladder_ends_hint_then_empty() {
+        let inp = input(12, 5, &[("auth", 3)]);
+        let (a, la) = build_index(&inp, 400);
+        assert_eq!(la.stage, 0);
+        assert!(a.text.contains(HINT));
+        // Just the bare counts line fits, no hint.
+        let bare = render_index_at(ShedLevel { stage: 3, areas_kept: 0 }, &inp);
+        assert!(!bare.text.contains(HINT) && !bare.text.is_empty());
+        let (b, lb) = build_index(&inp, utf16(&bare.text));
+        assert_eq!(lb.stage, 3);
+        assert_eq!(b.text, bare.text);
+        let (c, lc) = build_index(&inp, utf16(&bare.text) - 1);
+        assert_eq!(lc.stage, 4);
+        assert_eq!(c.text, "");
+        assert_eq!(index_cost(&c), 0);
     }
 }
