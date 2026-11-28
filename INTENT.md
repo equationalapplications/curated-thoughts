@@ -294,6 +294,7 @@ nearest-neighbor search (ANN) can wait until about 100,000.
    and its review, 2026-10-01). That vault is separate from this repo.
 3. **Review, then merge.** Two independent AI reviews (GLM and Opus), CI
    green, then merge. Unresolved questions hold the pull request.
+   *Owner ruling 2026-11-27: the GLM rung may be replaced by a second Claude review (Fable design+code review plus /code-review), recorded in the spec and PR body.*
 4. **Benchmarks gate behavior changes.**
    - Recall and injection changes must pass: no superseded fact is ever
      injected; LongMemEval hit rate and abstention precision; paraphrase
@@ -304,5 +305,6 @@ nearest-neighbor search (ANN) can wait until about 100,000.
      twice creates no duplicates.
    - Benchmarks run on scratch brains with real embeddings. Fake
      embeddings are only for unit tests.
+   *Owner ruling 2026-11-27: a compliance or eligibility fix whose matcher SQL stays byte-identical may waive the LongMemEval, abstention and paraphrase runs by owner ruling, recorded in the spec and PR body; the no-superseded, exactly-once and byte-identical tests still apply.*
 5. **Never touch the live brain** outside the app. Tests use scratch
    profiles.
