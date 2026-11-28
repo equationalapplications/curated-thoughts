@@ -11,4 +11,5 @@
 | 6 CLI brief | done | 03d79225 | ct_wisdom_brief 14 passed; ct_wisdom_match 26 passed after helper move (seed_fact already in common; moved seeded_fact_with_entity, seed_entity, with_scoped_brain) |
 | 7 delivery_log | done | 69b6a327 | delivery_log unit 11 passed; no unwrap/expect outside cfg(test) |
 | 8 log brief | done | dc25256f | ct_wisdom_brief 19 passed |
-| 9 log match | done (sha in next row) | - | ct_wisdom_match 30 passed (26 existing unmodified + 4 new); activity_helper_parity 3; message_mode_output_byte_identical 1 |
+| 9 log match | done | a69b4cfc | ct_wisdom_match 30 passed (26 existing unmodified + 4 new); activity_helper_parity 3; message_mode_output_byte_identical 1 |
+| 10 timeline | done (sha in next row) | - | timeline_excludes_wisdom_delivery_rows 1 passed; db::events lib filter 15 passed |

@@ -110,6 +110,9 @@ pub fn list_events(conn: &Connection, filter: &TimelineFilter) -> Result<Vec<Tim
             LEFT JOIN live_entities ce
               ON ce.id = COALESCE((SELECT merged_into FROM entity_redirects r
                                    WHERE r.entity_id = a.entity_id), a.entity_id)
+            -- Delivery audit rows (ct wisdom brief / match) are not agent
+            -- activity the person did; keep them off the timeline.
+            WHERE a.tool NOT IN ('wisdom_brief', 'wisdom_match')
 
             UNION ALL
 
@@ -233,6 +236,23 @@ mod tests {
              ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
         )?;
         assert_eq!(ids(&conn)?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn timeline_excludes_wisdom_delivery_rows() -> Result<()> {
+        let conn = setup_test_db()?;
+        for tool in ["wisdom_brief", "wisdom_match", "wiki_get"] {
+            conn.execute(
+                "INSERT INTO curated_agent_log (client, tool, operation, entity_id, created_at)
+                 VALUES ('ct-cli', ?1, 'read', 'ent_1', 1500)",
+                params![tool],
+            )?;
+        }
+        let events = list_events(&conn, &TimelineFilter::default())?;
+        let agent: Vec<_> = events.iter().filter(|e| e.kind == "agent_access").collect();
+        assert_eq!(agent.len(), 1);
+        assert!(agent[0].raw_type == "wiki_get", "{}", agent[0].raw_type);
         Ok(())
     }
 
