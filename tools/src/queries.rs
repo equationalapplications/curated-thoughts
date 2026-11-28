@@ -914,6 +914,7 @@ pub fn print_two_stage_audit(o: &wm::TwoStageOutcome) {
 /// appends one best-effort audit row to `curated_agent_log` when it delivers.
 /// Exit 0 on success including zero matches and an uncalibrated gate;
 /// every error propagates (exit 1). Never returns EXIT_NO_RESULTS.
+#[allow(clippy::too_many_arguments)]
 pub fn wisdom_match_cmd(
     text: &str,
     kind: wm::QueryKind,

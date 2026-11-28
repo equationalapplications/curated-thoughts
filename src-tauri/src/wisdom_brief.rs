@@ -785,7 +785,6 @@ mod tests {
     #[test]
     fn index_cap_is_min_400_quarter_of_max() {
         assert_eq!(index_cap(600), 150);
-        assert_eq!(index_cap(2200), 400.min(550));
         assert_eq!(index_cap(2200), 400);
         assert_eq!(index_cap(8000), 400);
     }
