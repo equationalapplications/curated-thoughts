@@ -55,9 +55,11 @@ Byte pin: because absent means skipped, `message_mode_output_byte_identical` (`t
 
 ### 3.4 Confidence ordinal (D)
 
-The CLI copy takes the app copy's ordinal (`confirmed=3, inferred=2, other=0`), defined once in the shared item helper (`confidence_ordinal`). **Final mapping pending OQ-B:** the app ordinal maps engine-native `certain` and legacy `verified` to 0, below `inferred`. Proposed: map `certain` (and `verified`) to the top rank. The ordinal table here is the single reference the tests derive from.
+Both copies use ONE ordinal, defined once in the shared item helper (`confidence_ordinal`): `confirmed`, `certain`, `verified` = 3; `inferred` = 2; anything else (incl. `tentative`, NULL) = 0. **Owner ruling OQ-B (2026-11-27):** engine-native `certain` and legacy `verified` take the top rank. This changes the app copy's order too (it previously mapped them to 0). The ordinal table here is the single reference the tests derive from.
 
-D changes CLI/sidecar ordering. The existing sidecar test `recall_wiki_tolerates_mixed_updated_at_types` (`tools/src/bin/curated_thoughts_mcp.rs:713-730`) asserts `["middle","newest","unknown"]`; `middle` has confidence `verified`, which the current ordinal maps to 0, so the expectation becomes `["newest","unknown","middle"]` under the current table. RE-DERIVE AFTER OQ-B (if `verified` maps to the top rank the old order stands). Its stale comment ("ties broken by confidence ('certain' first)") is fixed. Its fixture (`open_fixture_db`, `:672-688`, lacking `okf_type`/`okf_verified`/temporal columns) is the named degraded-shape canary.
+**Deterministic tie-break (owner ruling OQ-C, 2026-11-27).** Both copies order by (term overlap desc, ordinal desc, `updated_at` desc, `id` asc). The final `id` key makes output order a pure function of the rows, so the same brain always yields the same bytes (CTI rule 2; PR-2's brief relies on it). Pin tests assert order on rows that tie on every key but `id`.
+
+D changes CLI/sidecar ordering. The existing sidecar test `recall_wiki_tolerates_mixed_updated_at_types` (`tools/src/bin/curated_thoughts_mcp.rs:713-730`) asserts `["middle","newest","unknown"]`; `middle` has confidence `verified`, which the current ordinal maps to 0, so the implementer re-derives the expectation from the final table above (with `verified` = 3 the old order is expected to stand) and records the derivation in the test comment. Its stale comment ("ties broken by confidence ('certain' first)") is fixed. Its fixture (`open_fixture_db`, `:672-688`, lacking `okf_type`/`okf_verified`/temporal columns) is the named degraded-shape canary.
 
 ### 3.5 Wiki leg when the chunk leg is empty (E)
 
@@ -96,8 +98,8 @@ D changes CLI/sidecar ordering. The existing sidecar test `recall_wiki_tolerates
 
 - **No superseded fact is ever injected: MANDATORY**, satisfied by test group 2 plus an end-to-end `ct recall` case.
 - **Exactly-once / cached output byte-identical:** satisfied by the byte pin (test 6) and test 1.
-- **LongMemEval hit rate, abstention precision, 200-prompt paraphrase: WAIVER PROPOSED, PENDING OWNER RATIFICATION (OQ-A).** INTENT step 4 has no waiver clause, so this is not self-granting. This PR does two things that change retrieval output: D changes CLI/sidecar ordering (confirmed above inferred), and E adds results on zero-chunk brains. Rationale for waiving anyway: (1) the gate SQL is byte-pinned (test 1), so `ct wisdom match` selection is untouched; (2) LongMemEval, abstention and paraphrase measure the untouched `wisdom match` gate; (3) D aligns the CLI to the shipped app ordinal rather than introducing a new ranking; (4) the wiki leg uses no embeddings, so there is no embedding/floor surface to measure. No in-repo LongMemEval runner exists (`docs/benchmarks/2026-11-13-working-memory-age-hit-rate.md:57`); the in-repo harnesses calibrate `ct wisdom match` floors, which this PR does not touch. If the owner declines, the run is controller-side on a scratch brain with real embeddings, never the live brain.
-- **Review rungs:** the owner waived the GLM review rung (2026-11-27). The two reviews are Fable (design + code) and /code-review.
+- **LongMemEval hit rate, abstention precision, 200-prompt paraphrase: WAIVED by owner ruling (OQ-A, 2026-11-27).** INTENT step 4 had no waiver clause, so this PR carries a one-line dated INTENT amendment (§8) allowing owner-ruled waivers for compliance/eligibility fixes whose matcher SQL stays byte-identical; the ruling is also recorded in the PR body. This PR does two things that change retrieval output: D changes CLI/sidecar ordering (confirmed above inferred), and E adds results on zero-chunk brains. Rationale for waiving anyway: (1) the gate SQL is byte-pinned (test 1), so `ct wisdom match` selection is untouched; (2) LongMemEval, abstention and paraphrase measure the untouched `wisdom match` gate; (3) D aligns the CLI to the shipped app ordinal rather than introducing a new ranking; (4) the wiki leg uses no embeddings, so there is no embedding/floor surface to measure. No in-repo LongMemEval runner exists (`docs/benchmarks/2026-11-13-working-memory-age-hit-rate.md:57`); the in-repo harnesses calibrate `ct wisdom match` floors, which this PR does not touch. If the owner declines, the run is controller-side on a scratch brain with real embeddings, never the live brain.
+- **Review rungs:** the owner waived the GLM review rung (2026-11-27). The two reviews are Fable (design + code) and /code-review. The same INTENT amendment records this in step 3.
 
 ## 7. Resolved questions (reviewer answers) and owner decisions
 
@@ -110,12 +112,12 @@ Resolved (Fable design review):
 6. **Performance:** fine (one LIKE scan per term, as before).
 7. **Sidecar:** CTI parses `wiki_entries[].id` and passes the rest through (`ct_wisdom_cc.py:536-553`); the additive keys are safe.
 
-## 7a. Owner decisions (pending)
+## 7a. Owner decisions (ruled 2026-11-27)
 
-- **OQ-A:** ratify the step-4 waiver (§6).
-- **OQ-B:** the ordinal maps engine-native `certain` and legacy `verified` below `inferred`. Proposed: map `certain` (and `verified`) to the top rank. Gates the sidecar test expectation (§3.4).
-- **OQ-C:** add a deterministic `id` tie-break after `updated_at` to both copies.
-- **OQ-D:** sibling surfaces still serve superseded/expired facts (`curated_get_wiki_entry`, `ct wiki list|get` at `tools/src/queries.rs:608-640`, `wiki_graph.rs` has no temporal filter). Out of scope here; follow-up issue.
+- **OQ-A:** step-4 benchmark waiver RATIFIED for this PR (§6), with a one-line dated INTENT amendment (§8).
+- **OQ-B:** `certain` and `verified` map to the top rank (§3.4).
+- **OQ-C:** deterministic `id` asc tie-break after `updated_at` in both copies (§3.4).
+- **OQ-D:** sibling surfaces that still serve superseded/expired facts (`curated_get_wiki_entry`, `ct wiki list|get` at `tools/src/queries.rs:608-640`, `wiki_graph.rs`) stay out of scope; tracked in a follow-up issue (linked in the PR body).
 
 ## 8. Files touched
 
@@ -127,7 +129,8 @@ Resolved (Fable design review):
 - `tools/src/bin/calibrate_two_stage.rs`: `WisdomItem` literal (`:1246`).
 - Tests: `tools/tests/ct_search_recall_code.rs`, `tools/tests/forgotten_read_gate.rs`, `tools/tests/ct_wisdom_match.rs`, `tools/tests/calibrate_two_stage_harness.rs` (must stay green).
 - `specs/2026-11-27-recall-eligibility-provenance/` (this folder).
-- NOT touched: INTENT.md (no rule changes; rules 3/5/10 already state the target), the live brain.
+- `INTENT.md` "How changes are made": one dated amendment line each in steps 3 and 4 recording the 2026-11-27 owner rulings (GLM rung waived; step-4 waiver for compliance/eligibility fixes with byte-identical matcher SQL). No rule text changes; rules 3/5/10 already state the target.
+- NOT touched: the live brain.
 
 ## 9. Rejected alternatives
 
