@@ -271,9 +271,9 @@ QUERY PLAN
   + T4 r1 M1: widened to the CLUSTER via `entities::cluster_ids` so
   merged-loser-owned rows reconcile). T4 r2–r4 additionally gate the
   LINKAGE on every fresh INSERT — live and forgotten, on EVERY shape
-  including pre-v19 (whose
-  imports therefore drop foreign linkage and emit warnings, not
-  "insert as today"): bundle content cannot change the visibility of
+  including pre-v19, whose imports therefore drop foreign linkage and
+  emit warnings instead of inserting exactly as today: bundle content
+  cannot change the visibility of
   an entry it does not own, in either direction (a forgotten event
   with foreign linkage would HIDE that entry; a live one would
   RESURRECT a locally-forgotten one). The INSERTED tombstone stays
@@ -286,12 +286,13 @@ QUERY PLAN
   resurrect those dups, the exact #398 failure). A refused dup
   tombstone emits an `ImportResult` warning naming the event (T4 r6);
   an applied one stays silent. Accepted residual: a row with a
-  DANGLING linkage — whether from a legacy import or orphaned by a
-  later hard-delete of the referenced entry — passes the dup
-  tombstone, so a foreign entity re-using that id later could be
-  hidden; new inserts drop dangling linkage, so nothing mints such
-  rows anymore, and the narrowness is why this is accepted rather than
-  refused.
+  DANGLING linkage passes the dup tombstone. No import path mints
+  dangling linkage anymore, but hard-delete orphaning of the
+  referenced entry still can — and if a foreign-owned entry is later
+  minted under that id, the tombstone would hide it. Accepted (not
+  refused) because refusing dangling/task ids resurrects their dups —
+  the exact #398 failure — while the hide requires a later, unrelated
+  id re-use.
   Known trade-off: if the referenced entry arrives in a LATER import,
   the earlier tombstone no longer hides it (verbatim linkage would
   have) — accepted, same reason. This narrows "apply verbatim" for

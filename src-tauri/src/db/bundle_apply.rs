@@ -811,10 +811,9 @@ pub fn apply_import(
                         let tombstoned = tx.execute(&sql, params.as_slice())?;
                         // T4 r5 m1 + r6 m1: a refused tombstone must not be
                         // fully silent — the source's forget is not
-                        // propagating. The UPDATE has TWO refusal causes and
-                        // the warning names the right one (r6 m1): the row is
-                        // owned outside the cluster, or its linkage resolves
-                        // to a foreign-owned entry.
+                        // propagating. The UPDATE has TWO refusal causes
+                        // (r6 m1): the row is owned outside the cluster, or
+                        // its linkage resolves to a foreign-owned entry.
                         if tombstoned == 0 {
                             let row: Option<(Option<i64>, Option<String>, String)> = tx
                                 .query_row(
@@ -825,14 +824,9 @@ pub fn apply_import(
                                 )
                                 .optional()?;
                             if let Some((None, related_entry, owner)) = row {
+                                // T4 r7 m3: `cluster` is already resolved above.
                                 let owned_outside =
-                                    !entity_cluster(
-                                        &mut entity_cluster_cache,
-                                        &tx,
-                                        &target_entity_id,
-                                    )?
-                                    .iter()
-                                    .any(|c| c == &owner);
+                                    !cluster.iter().any(|c| c == &owner);
                                 let detail = if owned_outside {
                                     "the row is owned by an entity outside the import's \
                                      entity cluster"
@@ -843,14 +837,14 @@ pub fn apply_import(
                                          entity cluster"
                                     )
                                 } else {
-                                    "the row is already forgotten or unresolvable".to_string()
+                                    // Unreachable: in-cluster + NULL linkage
+                                    // would have matched the UPDATE (T4 r7 m2).
+                                    "unresolvable refusal cause".to_string()
                                 };
-                                if owned_outside || related_entry.is_some() {
-                                    result.warnings.push(format!(
-                                        "event {id}: dup tombstone refused — {detail}; \
-                                         the source's forget is NOT propagated to this row"
-                                    ));
-                                }
+                                result.warnings.push(format!(
+                                    "event {id}: dup tombstone refused — {detail}; \
+                                     the source's forget is NOT propagated to this row"
+                                ));
                             }
                         }
                     }
@@ -3026,8 +3020,52 @@ mod tests {
             result3
                 .warnings
                 .iter()
-                .any(|w| w.contains("evt_legacy") && w.contains("dup tombstone refused")),
-            "the refused dup tombstone must surface as an import warning"
+                .any(|w| w.contains("evt_legacy")
+                    && w.contains("dup tombstone refused")
+                    && w.contains("related entry fact_b")),
+            "the refused dup tombstone must surface as an import warning \
+             naming the foreign-related entry (T4 r7 m1)"
+        );
+        // T4 r7 m1: the OWNED-OUTSIDE refusal cause gets its own test — an id
+        // collision with a foreign entity's live row (any linkage) is refused
+        // and warns with the owned-outside message.
+        conn.execute(
+            "INSERT INTO llm_wiki_events
+                (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('evt_f', 'ent_b', 'action', 'd', NULL, 1, NULL)",
+            [],
+        )
+        .unwrap();
+        let mut foreign_bundle = sample_bundle();
+        foreign_bundle.entities[0].entity_id = "ent_s".into();
+        foreign_bundle.entities[0].facts[0].id = "fact_new4".into();
+        foreign_bundle.entities[0].events[0] = ParsedEvent {
+            event_id: Some("evt_f".into()),
+            event_type: "action".into(),
+            summary: "d".into(),
+            related_entry_id: None,
+            date: "1970-01-01".into(),
+            forgotten_at: Some(1732713600000),
+        };
+        let result4 = apply_import(&mut conn, &foreign_bundle, ImportMode::Merge).unwrap();
+        assert_eq!(result4.events_skipped, 1, "id collision seen as a dup");
+        let foreign_forgotten: Option<i64> = conn
+            .query_row(
+                "SELECT forgotten_at FROM llm_wiki_events WHERE id='evt_f'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            foreign_forgotten, None,
+            "a foreign entity's live row must not be tombstoned by bundle content"
+        );
+        assert!(
+            result4
+                .warnings
+                .iter()
+                .any(|w| w.contains("evt_f") && w.contains("owned by an entity outside")),
+            "the owned-outside refusal must name its cause (previously silent)"
         );
         assert_eq!(
             visible(&conn),
