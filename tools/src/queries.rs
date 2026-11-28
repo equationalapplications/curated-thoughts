@@ -910,9 +910,11 @@ pub fn print_two_stage_audit(o: &wm::TwoStageOutcome) {
     );
 }
 
-/// Relevance-gated, read-only wisdom match (spec 2026-10-06-issue265).
+/// Relevance-gated wisdom match (spec 2026-10-06-issue265). Writes no facts;
+/// appends one best-effort audit row to `curated_agent_log` when it delivers.
 /// Exit 0 on success including zero matches and an uncalibrated gate;
 /// every error propagates (exit 1). Never returns EXIT_NO_RESULTS.
+#[allow(clippy::too_many_arguments)]
 pub fn wisdom_match_cmd(
     text: &str,
     kind: wm::QueryKind,
@@ -921,7 +923,9 @@ pub fn wisdom_match_cmd(
     json_mode: bool,
     stage_mode: WisdomStageMode,
     path: Option<&str>,
+    target_kind: &str,
 ) -> Result<i32> {
+    let started = std::time::Instant::now();
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
     // Active Verification Prompting root (issue #344 OQ1): the same vault the
@@ -1071,7 +1075,15 @@ pub fn wisdom_match_cmd(
                     print_two_stage_audit(&run.outcome);
                     print_gate_decision(read_scheme, &run.result);
                     print_wisdom_match(&run.result, json_mode);
-                    emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &run.result);
+                    finish_match_delivery(
+                        vault_root.as_deref(),
+                        conn,
+                        text,
+                        &run.result,
+                        started,
+                        &brain.paths.db_path,
+                        target_kind,
+                    );
                     return Ok(0);
                 }
                 // Post-embed degradation (rev-8/9/10 M1): the attempt's
@@ -1091,7 +1103,15 @@ pub fn wisdom_match_cmd(
                     json_mode,
                     bindings,
                 )?;
-                emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &fallback_result);
+                finish_match_delivery(
+                    vault_root.as_deref(),
+                    conn,
+                    text,
+                    &fallback_result,
+                    started,
+                    &brain.paths.db_path,
+                    target_kind,
+                );
                 return Ok(0);
             }
             // Cell != 4 (uncalibrated / degraded BEFORE any embed): fall
@@ -1173,8 +1193,144 @@ pub fn wisdom_match_cmd(
         json_mode,
         bindings,
     )?;
-    emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &message_result);
+    finish_match_delivery(
+        vault_root.as_deref(),
+        conn,
+        text,
+        &message_result,
+        started,
+        &brain.paths.db_path,
+        target_kind,
+    );
     Ok(0)
+}
+
+/// The shared tail of every `wisdom_match_cmd` exit, in the order the spec
+/// requires: `emit_wisdom_unverified` (needs the connection), flush stdout
+/// (CTI reads it only at exit), drop the connection, then the best-effort
+/// delivery row. Takes the connection by value so it cannot be used after.
+fn finish_match_delivery(
+    vault_root: Option<&std::path::Path>,
+    conn: Connection,
+    query: &str,
+    result: &wm::WisdomMatch,
+    started: std::time::Instant,
+    db_path: &std::path::Path,
+    target_kind: &str,
+) {
+    emit_wisdom_unverified(vault_root, &conn, query, result);
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    drop(conn);
+    let ids: Vec<String> = result.entries.iter().map(|e| e.id.clone()).collect();
+    let corrections: Vec<String> = result
+        .corrections
+        .iter()
+        .take(crate::delivery_log::MAX_IDS)
+        .map(|c| c.id.clone())
+        .collect();
+    crate::delivery_log::record_delivery_since(
+        started,
+        db_path,
+        "wisdom_match",
+        None,
+        crate::delivery_log::summary(
+            "match",
+            &ids,
+            vec![
+                ("target", json!(target_kind)),
+                ("corrections", json!(corrections)),
+            ],
+        ),
+    );
+}
+
+/// `ct wisdom brief` (spec 2026-11-28-wisdom-brief 3.1, 3.6): the standing
+/// statements for a project plus the covered-topics index. No query, no
+/// embedding profile, no network. Exit 0 on success including "nothing to
+/// say"; every error propagates (exit 1). `repo_path` is never printed.
+pub fn wisdom_brief_cmd(json_mode: bool, repo_path: &str, max_chars: usize) -> Result<i32> {
+    use tauri_app_lib::wisdom_brief as wb;
+    let started = std::time::Instant::now();
+    anyhow::ensure!(
+        (600..=8000).contains(&max_chars),
+        "--max-chars must be between 600 and 8000"
+    );
+    let brain = resolve()?;
+    let conn = open_ro(&brain)?;
+    conn.busy_timeout(std::time::Duration::from_secs(1))?;
+    let cfg = match tauri_app_lib::config::BrainConfig::load_lenient(&brain.paths) {
+        Ok(report) => {
+            for d in &report.diagnostics {
+                print_brief_diagnostic(d);
+            }
+            report.config.wisdom
+        }
+        Err(e) => {
+            print_brief_diagnostic(&format!("brain config load failed: {e}"));
+            None
+        }
+    };
+    let abs = tauri_app_lib::config::canonicalize_lenient(repo_path);
+    let scope = tauri_app_lib::config::hub_resolver::resolve_brief_scope(&conn, cfg.as_ref(), &abs);
+    for d in &scope.diagnostics {
+        print_brief_diagnostic(d);
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let brief = wb::build_brief_at(&conn, &scope, &wb::BriefOpts { max_chars }, now_ms)?;
+    if json_mode {
+        print_json(&brief);
+    } else {
+        print_brief_human(&brief);
+    }
+    // CTI reads stdout only at exit, so the log write is on the critical
+    // path: flush first, drop the read connection (a rollback-journal brain
+    // would block our own writer), then log. Never changes output or exit.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    drop(conn);
+    let ids: Vec<String> = brief
+        .statements
+        .iter()
+        .filter_map(|s| s["id"].as_str().map(str::to_string))
+        .collect();
+    let hub = scope
+        .repo_group
+        .as_ref()
+        .and_then(|g| g.first())
+        .or_else(|| scope.org_group.as_ref().and_then(|g| g.first()));
+    crate::delivery_log::record_delivery_since(
+        started,
+        &brain.paths.db_path,
+        "wisdom_brief",
+        hub.map(String::as_str),
+        crate::delivery_log::summary("brief", &ids, Vec::new()),
+    );
+    Ok(0)
+}
+
+/// `wisdom_brief_diagnostic\t<text>` on stderr (the `wisdom_scoped_diagnostic`
+/// house form). Callers pass entity ids and reasons, never the repo path.
+fn print_brief_diagnostic(text: &str) {
+    eprintln!("wisdom_brief_diagnostic\t{text}");
+}
+
+fn print_brief_human(b: &tauri_app_lib::wisdom_brief::Brief) {
+    println!("scope: {}", b.scope);
+    if let Some(r) = b.scope_reason {
+        println!("scope_reason: {r}");
+    }
+    for s in &b.statements {
+        let band = s["band"].as_str().unwrap_or("");
+        let title = s["title"].as_str().unwrap_or("");
+        let text = s["text"].as_str().unwrap_or("");
+        let id = s["id"].as_str().unwrap_or("");
+        println!("[{band}] {title} ({id})\n  {text}");
+    }
+    if !b.index.text.is_empty() {
+        println!("{}", b.index.text);
+    }
 }
 
 /// Active Verification Prompting from the `ct wisdom match` surface (issue

@@ -432,7 +432,8 @@ enum WisdomCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Relevance-gated, read-only match of wisdom facts against a message
+    /// Relevance-gated match of wisdom facts (writes no facts; appends a
+    /// best-effort audit row when it delivers) against a message
     /// OR an activity target (issues #265 + #282; consumer: CTI live
     /// delivery). The message goes after `--`; an activity target goes in
     /// `--path=`/`--command=`/`--pattern=` (exactly one of the four — the
@@ -477,6 +478,19 @@ enum WisdomCmd {
         /// an activity flag is used (rev-3 m3).
         #[arg(last = true, group = "activity_target")]
         text: Vec<String>,
+    },
+    /// The standing statements for a project (repo hub + company hub) plus a
+    /// covered-topics index. No query, no embedding. Read-only on facts.
+    Brief {
+        #[arg(long)]
+        json: bool,
+        /// Checkout this brief is for. Relative paths are resolved against
+        /// the current directory. Never printed.
+        #[arg(long = "repo-path", default_value = ".")]
+        repo_path: String,
+        /// Output budget in UTF-16 units (600..=8000).
+        #[arg(long = "max-chars", default_value_t = 2200)]
+        max_chars: usize,
     },
     /// Embed-scheme administration (issue #265 cutover): status / sweep / activate.
     Scheme {
@@ -895,6 +909,15 @@ fn run(cmd: Cmd) -> Result<i32> {
                 // the SCOPED resolver consumes `--path=` verbatim, so the
                 // activity-kind match borrows it and the call hands the
                 // owned value over afterwards.
+                let target_kind = if path.is_some() {
+                    "path"
+                } else if command.is_some() {
+                    "command"
+                } else if pattern.is_some() {
+                    "pattern"
+                } else {
+                    "message"
+                };
                 let (kind, target) = if let Some(t) = path.as_deref() {
                     (tauri_app_lib::wisdom_match::QueryKind::Activity, t.to_owned())
                 } else if let Some(t) = command {
@@ -907,8 +930,22 @@ fn run(cmd: Cmd) -> Result<i32> {
                         text.join(" "),
                     )
                 };
-                cli_common::wisdom_match_cmd(&target, kind, max, &exclude, json, mode, path.as_deref())
+                cli_common::wisdom_match_cmd(
+                    &target,
+                    kind,
+                    max,
+                    &exclude,
+                    json,
+                    mode,
+                    path.as_deref(),
+                    target_kind,
+                )
             }
+            WisdomCmd::Brief {
+                json,
+                repo_path,
+                max_chars,
+            } => cli_common::wisdom_brief_cmd(json, &repo_path, max_chars),
             WisdomCmd::Scheme { cmd } => match cmd {
                 SchemeCmd::Status { json } => cli_common::wisdom_scheme_status_cmd(json),
                 SchemeCmd::Sweep { max_batches, json } => {

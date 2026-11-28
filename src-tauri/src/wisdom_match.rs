@@ -453,6 +453,8 @@ pub struct RecallArms {
     pub has_source_type: bool,
     pub has_okf_type: bool,
     pub has_okf_verified: bool,
+    /// `area` column present (V30+); the brief's band predicate needs it.
+    pub has_area: bool,
 }
 
 /// Public, connection-taking export of [`temporal_arms_sql`] for crates that
@@ -477,6 +479,7 @@ pub fn entry_recall_arms(conn: &Connection) -> Result<RecallArms> {
         has_source_type: cols.iter().any(|c| c == "source_type"),
         has_okf_type: t.has_okf_type,
         has_okf_verified: cols.iter().any(|c| c == "okf_verified"),
+        has_area: t.has_area,
     })
 }
 
@@ -4394,6 +4397,19 @@ mod tests {
         let a = entry_recall_arms(&c).unwrap();
         assert_eq!(a.sql, "");
         assert!(!a.needs_now);
+    }
+
+    #[test]
+    fn recall_arms_reports_has_area() {
+        let conn = open_in_memory().unwrap();
+        assert!(entry_recall_arms(&conn).unwrap().has_area);
+        let d = Connection::open_in_memory().unwrap();
+        d.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT);
+             CREATE TABLE llm_wiki_events (id TEXT);",
+        )
+        .unwrap();
+        assert!(!entry_recall_arms(&d).unwrap().has_area);
     }
 
     #[test]

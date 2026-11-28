@@ -6,29 +6,13 @@
 
 mod common;
 
-use common::{run_ct, with_seeded_brain};
-use rusqlite::params;
+use common::{
+    run_ct, run_ct_with_env, seed_entity, seed_fact, with_scoped_brain, with_seeded_brain,
+};
 
 fn brain_db() -> rusqlite::Connection {
     let dir = std::env::var("CURATED_BRAIN_DIR").expect("with_seeded_brain sets it");
     rusqlite::Connection::open(std::path::Path::new(&dir).join("brain.db")).unwrap()
-}
-
-fn seed_fact(id: &str) {
-    let mut v = [0f32; 8];
-    v[0] = 1.0;
-    let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
-    brain_db()
-        .execute(
-            "INSERT INTO llm_wiki_entries (
-                id, entity_id, title, body, tags, confidence, source_type,
-                source_hash, source_ref, created_at, updated_at, last_accessed_at,
-                access_count, deleted_at, embedding_blob, embedding
-             ) VALUES (?1, 'ent_t', ?2, ?3, '[]', 'inferred', 'librarian_inferred',
-                       NULL, NULL, 100, 100, NULL, 0, NULL, ?4, NULL)",
-            params![id, format!("Title {id}"), format!("Body {id}"), blob],
-        )
-        .unwrap();
 }
 
 fn json_of(out: &std::process::Output) -> serde_json::Value {
@@ -554,98 +538,6 @@ fn entry_ids(v: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-fn seeded_fact_with_entity(id: &str, entity_id: &str, area: Option<&str>) {
-    let mut v = [0f32; 8];
-    v[0] = 1.0;
-    let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
-    brain_db()
-        .execute(
-            "INSERT INTO llm_wiki_entries (
-                id, entity_id, area, title, body, tags, confidence, source_type,
-                source_hash, source_ref, created_at, updated_at, last_accessed_at,
-                access_count, deleted_at, embedding_blob, embedding
-             ) VALUES (?1, ?2, ?3, ?4, ?5, '[]', 'inferred', 'librarian_inferred',
-                       NULL, NULL, 100, 100, NULL, 0, NULL, ?6, NULL)",
-            params![
-                id,
-                entity_id,
-                area,
-                format!("Title {id}"),
-                format!("Body {id}"),
-                blob
-            ],
-        )
-        .unwrap();
-}
-
-fn seed_entity(id: &str) {
-    brain_db()
-        .execute(
-            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
-             VALUES (?1, ?1, 'repo', '', 100, 100)",
-            params![id],
-        )
-        .unwrap();
-}
-
-/// The scoped fixture: a real checkout dir with `.ct-areas.yaml`
-/// (`auth: ["src/auth/**"]`), live `hub-1` + `other-1` entities, facts in
-/// the auth area / whole-repo / foreign repo — and the brain's config.json
-/// rewritten with the `wisdom` block pointing at the areas file.
-/// `org` chooses the configured `org_entity_id` (live `org-1`, a dead id,
-/// or absent → no org band configured).
-fn with_scoped_brain<F: FnOnce(&std::path::Path)>(org: Option<&str>, f: F) {
-    with_seeded_brain(|| {
-        let brain_dir = std::env::var("CURATED_BRAIN_DIR").unwrap();
-        // tempdir(): the fixture checkout drops with the closure (m1 — no
-        // `ct-scoped-fixture-*` leakage under the system temp dir).
-        let checkout_tmp = tempfile::tempdir().unwrap();
-        let checkout = checkout_tmp.path();
-        std::fs::create_dir_all(checkout.join("src/auth")).unwrap();
-        std::fs::create_dir_all(checkout.join("docs")).unwrap();
-        std::fs::write(
-            checkout.join(".ct-areas.yaml"),
-            "areas:\n  auth:\n    - \"src/auth/**\"\n",
-        )
-        .unwrap();
-        seed_entity("hub-1");
-        seed_entity("other-1");
-        if org == Some("org-1") {
-            seed_entity("org-1");
-        }
-        seeded_fact_with_entity("fact_area", "hub-1", Some("auth"));
-        seeded_fact_with_entity("fact_repo", "hub-1", None);
-        seeded_fact_with_entity("fact_foreign", "other-1", None);
-        let areas_file = checkout.join(".ct-areas.yaml");
-        // json!-built config (m2): entity-id keys are literals, paths are
-        // VALUES — no display()-splicing quoting/backslash hazards.
-        let mut areas_paths = serde_json::Map::new();
-        areas_paths.insert(
-            "hub-1".to_string(),
-            serde_json::Value::String(areas_file.display().to_string()),
-        );
-        let mut wisdom = serde_json::Map::new();
-        wisdom.insert(
-            "areas_paths".to_string(),
-            serde_json::Value::Object(areas_paths),
-        );
-        if let Some(id) = org {
-            wisdom.insert(
-                "org_entity_id".to_string(),
-                serde_json::Value::String(id.to_string()),
-            );
-        }
-        let config =
-            serde_json::json!({ "wisdom": serde_json::Value::Object(wisdom) }).to_string();
-        std::fs::write(
-            std::path::Path::new(&brain_dir).join("config.json"),
-            config,
-        )
-        .unwrap();
-        f(checkout);
-    });
-}
-
 /// The §9.3 SCOPED hit: a `--path=` under the configured checkout matching a
 /// glob returns ONLY the matching-area + whole-repo facts of the bound group
 /// — the foreign repo's fact is band-excluded, the area-band item carries
@@ -939,5 +831,94 @@ fn org_omission_diagnostic_is_printed_and_scoped_results_deliver() {
         let mut ids = entry_ids(&v);
         ids.sort();
         assert_eq!(ids, vec!["fact_area".to_string(), "fact_repo".to_string()]);
+    });
+}
+
+// ---- delivery log (PR-2 Task 9) ------------------------------------------
+
+fn last_log_row() -> Option<(String, String, serde_json::Value)> {
+    brain_db()
+        .query_row(
+            "SELECT client, tool, summary FROM curated_agent_log ORDER BY id DESC LIMIT 1",
+            [],
+            |r| {
+                let s: String = r.get(2)?;
+                Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&s).unwrap()))
+            },
+        )
+        .ok()
+}
+
+fn log_count() -> i64 {
+    brain_db()
+        .query_row("SELECT COUNT(*) FROM curated_agent_log", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn match_delivery_writes_row_with_ids_and_target_kind_only() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let cases: [(Vec<&str>, &str); 4] = [
+            (vec!["--", "secret query words"], "message"),
+            (vec!["--path=/tmp/secret_path.rs"], "path"),
+            (vec!["--command=git secret-cmd"], "command"),
+            (vec!["--pattern=secret-pat"], "pattern"),
+        ];
+        for (i, (extra, kind)) in cases.iter().enumerate() {
+            let mut args = vec!["wisdom", "match", "--json"];
+            // The message goes after `--`; activity flags go before it.
+            args.extend(extra.iter().copied());
+            let out = run_ct(&args);
+            assert_eq!(out.status.code(), Some(0), "{kind}");
+            let v = json_of(&out);
+            assert!(!entry_ids(&v).is_empty(), "{kind}: stub gate should hit");
+            assert_eq!(log_count(), i as i64 + 1, "{kind}");
+            let (client, tool, sum) = last_log_row().unwrap();
+            assert_eq!((client.as_str(), tool.as_str()), ("ct-cli", "wisdom_match"));
+            assert_eq!(sum["surface"], "match");
+            assert_eq!(sum["target"], *kind);
+            assert_eq!(sum["ids"], serde_json::json!(entry_ids(&v)));
+            assert!(sum["corrections"].is_array());
+            let text = sum.to_string();
+            assert!(!text.contains("secret"), "{kind}: {text}");
+        }
+    });
+}
+
+#[test]
+fn match_zero_hits_writes_no_row() {
+    with_seeded_brain(|| {
+        let out = run_ct(&["wisdom", "match", "--json", "--", "anything"]);
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(log_count(), 0);
+    });
+}
+
+#[test]
+fn match_stdout_and_exit_identical_with_log_off() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let args = ["wisdom", "match", "--json", "--", "how do I deploy"];
+        let on = run_ct(&args);
+        let off = run_ct_with_env(&args, [("CURATED_DELIVERY_LOG", "0")]);
+        assert_eq!(on.stdout, off.stdout);
+        assert_eq!(on.status.code(), off.status.code());
+        assert_eq!(log_count(), 1);
+    });
+}
+
+#[test]
+fn match_fail_open_when_log_table_dropped() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let args = ["wisdom", "match", "--json", "--", "how do I deploy"];
+        let before = run_ct(&args);
+        brain_db().execute_batch("DROP TABLE curated_agent_log").unwrap();
+        let after = run_ct(&args);
+        assert_eq!(after.status.code(), Some(0));
+        assert_eq!(before.stdout, after.stdout);
+        assert!(String::from_utf8_lossy(&after.stderr)
+            .contains("wisdom_delivery_log_skipped\tno_table"));
     });
 }
