@@ -7,7 +7,7 @@
 mod common;
 
 use common::{
-    run_ct, seed_entity, seed_fact, with_scoped_brain, with_seeded_brain,
+    run_ct, run_ct_with_env, seed_entity, seed_fact, with_scoped_brain, with_seeded_brain,
 };
 
 fn brain_db() -> rusqlite::Connection {
@@ -831,5 +831,94 @@ fn org_omission_diagnostic_is_printed_and_scoped_results_deliver() {
         let mut ids = entry_ids(&v);
         ids.sort();
         assert_eq!(ids, vec!["fact_area".to_string(), "fact_repo".to_string()]);
+    });
+}
+
+// ---- delivery log (PR-2 Task 9) ------------------------------------------
+
+fn last_log_row() -> Option<(String, String, serde_json::Value)> {
+    brain_db()
+        .query_row(
+            "SELECT client, tool, summary FROM curated_agent_log ORDER BY id DESC LIMIT 1",
+            [],
+            |r| {
+                let s: String = r.get(2)?;
+                Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&s).unwrap()))
+            },
+        )
+        .ok()
+}
+
+fn log_count() -> i64 {
+    brain_db()
+        .query_row("SELECT COUNT(*) FROM curated_agent_log", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn match_delivery_writes_row_with_ids_and_target_kind_only() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let cases: [(Vec<&str>, &str); 4] = [
+            (vec!["--", "secret query words"], "message"),
+            (vec!["--path=/tmp/secret_path.rs"], "path"),
+            (vec!["--command=git secret-cmd"], "command"),
+            (vec!["--pattern=secret-pat"], "pattern"),
+        ];
+        for (i, (extra, kind)) in cases.iter().enumerate() {
+            let mut args = vec!["wisdom", "match", "--json"];
+            // The message goes after `--`; activity flags go before it.
+            args.extend(extra.iter().copied());
+            let out = run_ct(&args);
+            assert_eq!(out.status.code(), Some(0), "{kind}");
+            let v = json_of(&out);
+            assert!(!entry_ids(&v).is_empty(), "{kind}: stub gate should hit");
+            assert_eq!(log_count(), i as i64 + 1, "{kind}");
+            let (client, tool, sum) = last_log_row().unwrap();
+            assert_eq!((client.as_str(), tool.as_str()), ("ct-cli", "wisdom_match"));
+            assert_eq!(sum["surface"], "match");
+            assert_eq!(sum["target"], *kind);
+            assert_eq!(sum["ids"], serde_json::json!(entry_ids(&v)));
+            assert!(sum["corrections"].is_array());
+            let text = sum.to_string();
+            assert!(!text.contains("secret"), "{kind}: {text}");
+        }
+    });
+}
+
+#[test]
+fn match_zero_hits_writes_no_row() {
+    with_seeded_brain(|| {
+        let out = run_ct(&["wisdom", "match", "--json", "--", "anything"]);
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(log_count(), 0);
+    });
+}
+
+#[test]
+fn match_stdout_and_exit_identical_with_log_off() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let args = ["wisdom", "match", "--json", "--", "how do I deploy"];
+        let on = run_ct(&args);
+        let off = run_ct_with_env(&args, [("CURATED_DELIVERY_LOG", "0")]);
+        assert_eq!(on.stdout, off.stdout);
+        assert_eq!(on.status.code(), off.status.code());
+        assert_eq!(log_count(), 1);
+    });
+}
+
+#[test]
+fn match_fail_open_when_log_table_dropped() {
+    with_seeded_brain(|| {
+        seed_fact("fact_a");
+        let args = ["wisdom", "match", "--json", "--", "how do I deploy"];
+        let before = run_ct(&args);
+        brain_db().execute_batch("DROP TABLE curated_agent_log").unwrap();
+        let after = run_ct(&args);
+        assert_eq!(after.status.code(), Some(0));
+        assert_eq!(before.stdout, after.stdout);
+        assert!(String::from_utf8_lossy(&after.stderr)
+            .contains("wisdom_delivery_log_skipped\tno_table"));
     });
 }

@@ -910,7 +910,8 @@ pub fn print_two_stage_audit(o: &wm::TwoStageOutcome) {
     );
 }
 
-/// Relevance-gated, read-only wisdom match (spec 2026-10-06-issue265).
+/// Relevance-gated wisdom match (spec 2026-10-06-issue265). Writes no facts;
+/// appends one best-effort audit row to `curated_agent_log` when it delivers.
 /// Exit 0 on success including zero matches and an uncalibrated gate;
 /// every error propagates (exit 1). Never returns EXIT_NO_RESULTS.
 pub fn wisdom_match_cmd(
@@ -921,7 +922,9 @@ pub fn wisdom_match_cmd(
     json_mode: bool,
     stage_mode: WisdomStageMode,
     path: Option<&str>,
+    target_kind: &str,
 ) -> Result<i32> {
+    let started = std::time::Instant::now();
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
     // Active Verification Prompting root (issue #344 OQ1): the same vault the
@@ -1071,7 +1074,15 @@ pub fn wisdom_match_cmd(
                     print_two_stage_audit(&run.outcome);
                     print_gate_decision(read_scheme, &run.result);
                     print_wisdom_match(&run.result, json_mode);
-                    emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &run.result);
+                    finish_match_delivery(
+                        vault_root.as_deref(),
+                        conn,
+                        text,
+                        &run.result,
+                        started,
+                        &brain.paths.db_path,
+                        target_kind,
+                    );
                     return Ok(0);
                 }
                 // Post-embed degradation (rev-8/9/10 M1): the attempt's
@@ -1091,7 +1102,15 @@ pub fn wisdom_match_cmd(
                     json_mode,
                     bindings,
                 )?;
-                emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &fallback_result);
+                finish_match_delivery(
+                    vault_root.as_deref(),
+                    conn,
+                    text,
+                    &fallback_result,
+                    started,
+                    &brain.paths.db_path,
+                    target_kind,
+                );
                 return Ok(0);
             }
             // Cell != 4 (uncalibrated / degraded BEFORE any embed): fall
@@ -1173,8 +1192,55 @@ pub fn wisdom_match_cmd(
         json_mode,
         bindings,
     )?;
-    emit_wisdom_unverified(vault_root.as_deref(), &conn, text, &message_result);
+    finish_match_delivery(
+        vault_root.as_deref(),
+        conn,
+        text,
+        &message_result,
+        started,
+        &brain.paths.db_path,
+        target_kind,
+    );
     Ok(0)
+}
+
+/// The shared tail of every `wisdom_match_cmd` exit, in the order the spec
+/// requires: `emit_wisdom_unverified` (needs the connection), flush stdout
+/// (CTI reads it only at exit), drop the connection, then the best-effort
+/// delivery row. Takes the connection by value so it cannot be used after.
+fn finish_match_delivery(
+    vault_root: Option<&std::path::Path>,
+    conn: Connection,
+    query: &str,
+    result: &wm::WisdomMatch,
+    started: std::time::Instant,
+    db_path: &std::path::Path,
+    target_kind: &str,
+) {
+    emit_wisdom_unverified(vault_root, &conn, query, result);
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    drop(conn);
+    let ids: Vec<String> = result.entries.iter().map(|e| e.id.clone()).collect();
+    let corrections: Vec<String> = result
+        .corrections
+        .iter()
+        .take(crate::delivery_log::MAX_IDS)
+        .map(|c| c.id.clone())
+        .collect();
+    crate::delivery_log::record_delivery_since(
+        started,
+        db_path,
+        "wisdom_match",
+        None,
+        crate::delivery_log::summary(
+            "match",
+            &ids,
+            vec![
+                ("target", json!(target_kind)),
+                ("corrections", json!(corrections)),
+            ],
+        ),
+    );
 }
 
 /// `ct wisdom brief` (spec 2026-11-28-wisdom-brief 3.1, 3.6): the standing

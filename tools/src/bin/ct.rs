@@ -432,7 +432,8 @@ enum WisdomCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Relevance-gated, read-only match of wisdom facts against a message
+    /// Relevance-gated match of wisdom facts (writes no facts; appends a
+    /// best-effort audit row when it delivers) against a message
     /// OR an activity target (issues #265 + #282; consumer: CTI live
     /// delivery). The message goes after `--`; an activity target goes in
     /// `--path=`/`--command=`/`--pattern=` (exactly one of the four — the
@@ -908,6 +909,15 @@ fn run(cmd: Cmd) -> Result<i32> {
                 // the SCOPED resolver consumes `--path=` verbatim, so the
                 // activity-kind match borrows it and the call hands the
                 // owned value over afterwards.
+                let target_kind = if path.is_some() {
+                    "path"
+                } else if command.is_some() {
+                    "command"
+                } else if pattern.is_some() {
+                    "pattern"
+                } else {
+                    "message"
+                };
                 let (kind, target) = if let Some(t) = path.as_deref() {
                     (tauri_app_lib::wisdom_match::QueryKind::Activity, t.to_owned())
                 } else if let Some(t) = command {
@@ -920,7 +930,16 @@ fn run(cmd: Cmd) -> Result<i32> {
                         text.join(" "),
                     )
                 };
-                cli_common::wisdom_match_cmd(&target, kind, max, &exclude, json, mode, path.as_deref())
+                cli_common::wisdom_match_cmd(
+                    &target,
+                    kind,
+                    max,
+                    &exclude,
+                    json,
+                    mode,
+                    path.as_deref(),
+                    target_kind,
+                )
             }
             WisdomCmd::Brief {
                 json,
