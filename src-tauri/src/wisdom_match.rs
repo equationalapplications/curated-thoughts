@@ -1892,6 +1892,9 @@ fn resolve_head(
     Ok(None) // depth exceeded
 }
 
+/// `(title, body, source_type, okf_type)` as `load_item` reads them.
+type LoadedItemRow = (Option<String>, Option<String>, Option<String>, Option<String>);
+
 fn load_item(conn: &Connection, id: &str, has_okf_type: bool) -> Result<Option<WisdomItem>> {
     // `okf_type` is selected only when the shape has it (probed once by the
     // caller's `Temporal`; no per-correction PRAGMA).
@@ -1900,7 +1903,7 @@ fn load_item(conn: &Connection, id: &str, has_okf_type: bool) -> Result<Option<W
         "SELECT title, body, source_type, {kind_col} FROM llm_wiki_entries
          WHERE id = ?1 AND deleted_at IS NULL"
     );
-    let row: Option<(Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+    let row: Option<LoadedItemRow> = conn
         .query_row(&sql, params![id], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })
