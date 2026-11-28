@@ -140,6 +140,7 @@ fn export_from_parsed(bundle: &tauri_app_lib::okf::bundle_read::ParsedBundle) ->
                     summary: ev.summary.clone(),
                     related_entry_id: ev.related_entry_id.clone(),
                     date: ev.date.clone(),
+                    forgotten_at: ev.forgotten_at,
                 })
                 .collect(),
         })

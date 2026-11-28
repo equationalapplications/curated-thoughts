@@ -394,6 +394,14 @@ pub fn apply_llm_wiki_v18_v19_partial_indexes(conn: &rusqlite::Connection) -> ru
                 "CREATE INDEX IF NOT EXISTS llm_wiki_events_related_forgotten_idx ON llm_wiki_events(related_entry_id) WHERE forgotten_at IS NOT NULL AND related_entry_id IS NOT NULL",
                 [],
             )?;
+            // Issue #401: the survival guard's live half (`le.forgotten_at IS NULL`)
+            // has no serving index — the forgotten idx's rows are all forgotten rows,
+            // so its WHERE clause cannot satisfy IS NULL. Both-column guard mirrors
+            // the arm's probe guard (forgotten_entry_arm).
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS llm_wiki_events_related_live_idx ON llm_wiki_events(related_entry_id) WHERE forgotten_at IS NULL AND related_entry_id IS NOT NULL",
+                [],
+            )?;
         }
     }
     Ok(())

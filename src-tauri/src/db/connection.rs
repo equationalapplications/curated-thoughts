@@ -8191,6 +8191,7 @@ mod tests {
         ("index", "llm_wiki_entries_deleted_idx"),
         ("index", "llm_wiki_events_forgotten_idx"),
         ("index", "llm_wiki_events_related_forgotten_idx"),
+        ("index", "llm_wiki_events_related_live_idx"),
         ("trigger", "llm_wiki_vector_removals_resurrect"),
     ];
 
@@ -8208,14 +8209,103 @@ mod tests {
         };
         let (_tmp, conn) = engine9_migrated_fixture();
         assert_eq!(idx_count(&conn), 1, "v19 shape carries the index");
-        conn.execute_batch(
-            "DROP INDEX llm_wiki_events_related_forgotten_idx;
-             DROP INDEX llm_wiki_events_forgotten_idx;
-             ALTER TABLE llm_wiki_events DROP COLUMN forgotten_at;",
+        crate::db::test_support::drop_forgotten_column(&conn);
+        crate::db::okf_ddl::apply_llm_wiki_v18_v19_partial_indexes(&conn).unwrap();
+        assert_eq!(idx_count(&conn), 0, "pre-v19 shape must not get the index");
+    }
+
+    /// #401: the survival guard's LIVE half (`forgotten_at IS NULL`) is served
+    /// by its own partial index, gated on both columns like the forgotten idx.
+    #[test]
+    fn related_live_idx_is_guarded_on_both_columns() {
+        let idx_count = |c: &Connection| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='llm_wiki_events_related_live_idx'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let (_tmp, conn) = engine9_migrated_fixture();
+        assert_eq!(idx_count(&conn), 1, "v19 shape carries the index");
+        // r1-B3 + r5 minor 4: ONE source of truth for the drop order — the
+        // shared helper (drops all three indexes, then the column; SQLite
+        // refuses ALTER TABLE … DROP COLUMN while a partial index's WHERE
+        // clause uses it).
+        crate::db::test_support::drop_forgotten_column(&conn);
+        assert_eq!(idx_count(&conn), 0, "pre-v19 shape carries no index");
+        crate::db::okf_ddl::apply_llm_wiki_v18_v19_partial_indexes(&conn).unwrap();
+        assert_eq!(idx_count(&conn), 0, "pre-v19 shape must not get the index");
+    }
+
+    /// T3 r1 MINOR 1: the live index's guard has TWO column halves. Dropping
+    /// `forgotten_at` is covered above via the shared helper; this arm drops
+    /// `related_entry_id` and asserts the re-apply creates NEITHER
+    /// `related_entry_id`-serving index (both are nested inside the
+    /// `related_entry_id` guard in `apply_llm_wiki_v18_v19_partial_indexes`).
+    #[test]
+    fn related_live_idx_requires_related_entry_id_column() {
+        let idx_count = |name: &str, c: &Connection| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let (_tmp, conn) = engine9_migrated_fixture();
+        conn.execute("DROP INDEX IF EXISTS llm_wiki_events_related_live_idx", [])
+            .unwrap();
+        conn.execute(
+            "DROP INDEX IF EXISTS llm_wiki_events_related_forgotten_idx",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "ALTER TABLE llm_wiki_events DROP COLUMN related_entry_id",
+            [],
         )
         .unwrap();
         crate::db::okf_ddl::apply_llm_wiki_v18_v19_partial_indexes(&conn).unwrap();
-        assert_eq!(idx_count(&conn), 0, "pre-v19 shape must not get the index");
+        assert_eq!(
+            idx_count("llm_wiki_events_related_live_idx", &conn),
+            0,
+            "no related_entry_id column → live index must not be created"
+        );
+        assert_eq!(
+            idx_count("llm_wiki_events_related_forgotten_idx", &conn),
+            0,
+            "no related_entry_id column → forgotten-related index must not be created"
+        );
+    }
+
+    /// Spec test-plan item 5 (T3 r1 MINOR 2): EXPLAIN QUERY PLAN on the
+    /// survival guard's LIVE half must be served by
+    /// `llm_wiki_events_related_live_idx`, so a future change to the arm SQL
+    /// (it interpolates the SHARED `FORGOTTEN_ENTRY_ARM_SQL` constant, T3 r2
+    /// MINOR 2) or to the DDL that loses the index fails a test instead of
+    /// silently regressing to a SCAN.
+    #[test]
+    fn eqp_live_subquery_uses_related_live_idx() {
+        let (_tmp, conn) = engine9_migrated_fixture();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM llm_wiki_entries e \
+             WHERE 1=1{}",
+            crate::wisdom_match::FORGOTTEN_ENTRY_ARM_SQL
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let mut saw_live_idx = false;
+        let mut rows = stmt.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            let detail: String = row.get(3).unwrap();
+            if detail.contains("llm_wiki_events_related_live_idx") {
+                saw_live_idx = true;
+            }
+        }
+        assert!(
+            saw_live_idx,
+            "the arm's live subquery must be served by llm_wiki_events_related_live_idx"
+        );
     }
 
     /// A fresh ROOTED file brain through CT's real open path.

@@ -30,40 +30,83 @@ pub fn build_log_md(entries: &[OkfLogEntry]) -> String {
     out
 }
 
+/// The ONE id-charset predicate (T4 r1 m6): non-empty, and only
+/// `[A-Za-z0-9._-]`. Shared by BOTH writer paths and the parser so the
+/// grammar cannot drift between write and read.
+fn is_valid_event_id(event_id: &str) -> bool {
+    !event_id.is_empty()
+        && event_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
 pub fn append_event_id_comment(text: &str, event_id: &str) -> String {
-    if event_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-    {
+    // Same non-empty guard as `append_event_id_comment_forgotten`: an empty
+    // id must never mint a junk `<!-- id:  -->` comment (T1.5 r2 MINOR 2).
+    if is_valid_event_id(event_id) {
         format!("{text} <!-- id: {event_id} -->")
     } else {
         text.to_string()
     }
 }
 
-pub fn parse_event_id_comment(text: &str) -> (String, Option<String>) {
+/// Appends the event id comment to `text`, optionally recording the
+/// `forgotten:` timestamp key. The id-validation guard applies on BOTH paths.
+pub fn append_event_id_comment_forgotten(
+    text: &str,
+    event_id: &str,
+    forgotten_at: Option<i64>,
+) -> String {
+    let valid = is_valid_event_id(event_id);
+    match (valid, forgotten_at) {
+        (true, Some(ms)) if ms >= 0 => format!("{text} <!-- id: {event_id} forgotten:{ms} -->"),
+        (true, _) => append_event_id_comment(text, event_id),
+        (false, _) => text.to_string(),
+    }
+}
+
+/// Parses the trailing event id comment from `text`.
+///
+/// Returns `(stripped_text, event_id, forgotten_at)`.
+///
+/// Compared to the previous behavior, every well-formed line the old parser
+/// accepted parses identically. Three edge behaviors changed (all
+/// improvements): an empty id (`<!-- id: -->`) and a bare `note id:` prefix
+/// now yield `None` (previously `Some("")`, which would insert `id = ''`);
+/// a trailing junk token (`<!-- id: evt_x junk -->`) now yields
+/// `Some("evt_x")` (previously the whole comment was rejected).
+pub fn parse_event_id_comment(text: &str) -> (String, Option<String>, Option<i64>) {
     let trimmed = text.trim_end();
     let Some(id_pos) = trimmed.rfind("<!--") else {
-        return (text.to_string(), None);
+        return (text.to_string(), None, None);
     };
     let suffix = &trimmed[id_pos..];
     if !suffix.contains("id:") || !suffix.contains("-->") {
-        return (text.to_string(), None);
+        return (text.to_string(), None, None);
     }
     let inner = suffix
         .trim_start_matches("<!--")
         .trim_end_matches("-->")
         .trim();
-    let event_id = inner.strip_prefix("id:").map(str::trim).unwrap_or("");
-    let stripped = trimmed[..id_pos].trim_end().to_string();
-    if event_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-    {
-        (stripped, Some(event_id.to_string()))
-    } else {
-        (stripped, None)
+    let mut event_id: Option<String> = None;
+    let mut forgotten_at: Option<i64> = None;
+    if let Some(rest) = inner.strip_prefix("id:") {
+        let rest = rest.trim();
+        let (id_tok, tail) = match rest.split_once(char::is_whitespace) {
+            Some((a, b)) => (a, b),
+            None => (rest, ""),
+        };
+        if is_valid_event_id(id_tok) {
+            event_id = Some(id_tok.to_string());
+            for tok in tail.split_whitespace() {
+                if let Some(v) = tok.strip_prefix("forgotten:") {
+                    forgotten_at = v.parse::<i64>().ok().filter(|ms| *ms >= 0);
+                }
+            }
+        }
     }
+    let stripped = trimmed[..id_pos].trim_end().to_string();
+    (stripped, event_id, forgotten_at)
 }
 
 pub fn parse_log_md(content: &str) -> Vec<OkfLogEntry> {
@@ -88,4 +131,73 @@ pub fn parse_log_md(content: &str) -> Vec<OkfLogEntry> {
     }
 
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_writes_forgotten_key_when_present() {
+        let t = append_event_id_comment_forgotten("(note) hi", "evt_x", Some(1732713600000));
+        assert_eq!(t, "(note) hi <!-- id: evt_x forgotten:1732713600000 -->");
+    }
+
+    #[test]
+    fn append_delegates_to_id_only_when_absent() {
+        let t = append_event_id_comment_forgotten("(note) hi", "evt_x", None);
+        assert_eq!(t, "(note) hi <!-- id: evt_x -->");
+    }
+
+    #[test]
+    fn append_invalid_id_writes_no_comment_even_with_forgotten() {
+        // r1 minor 3: the id-validation guard applies on BOTH paths.
+        let t = append_event_id_comment_forgotten("(note) hi", "bad id!", Some(1000));
+        assert_eq!(t, "(note) hi");
+    }
+
+    #[test]
+    fn parse_reads_forgotten_from_trailing_comment_only() {
+        // `forgotten:` in the summary must NOT be parsed (owner note 1).
+        let (text, id, forgotten) = parse_event_id_comment(
+            "(note) forgotten:999 <!-- id: evt_x forgotten:1732713600000 -->",
+        );
+        assert_eq!(text, "(note) forgotten:999");
+        assert_eq!(id.as_deref(), Some("evt_x"));
+        assert_eq!(forgotten, Some(1732713600000));
+    }
+
+    #[test]
+    fn parse_id_only_line_yields_none_and_identical_text() {
+        let line = "(action) did a thing <!-- id: evt_9 -->";
+        let (text, id, forgotten) = parse_event_id_comment(line);
+        assert_eq!(text, "(action) did a thing");
+        assert_eq!(id.as_deref(), Some("evt_9"));
+        assert_eq!(forgotten, None);
+    }
+
+    #[test]
+    fn parse_non_numeric_or_negative_forgotten_parses_as_absent() {
+        // r1 minor 2: "-5".parse::<i64>() succeeds — filter negatives out to
+        // match the writer's ms >= 0 guard.
+        for bad in ["notanumber", "-5"] {
+            let line = format!("(note) hi <!-- id: evt_x forgotten:{bad} -->");
+            let (text, id, forgotten) = parse_event_id_comment(&line);
+            assert_eq!(id.as_deref(), Some("evt_x"));
+            assert_eq!(forgotten, None);
+            assert_eq!(text, "(note) hi");
+        }
+    }
+
+    #[test]
+    fn append_negative_forgotten_writes_id_only_comment() {
+        // T1.5 r3 MINOR characterization: the writer's `ms >= 0` guard makes a
+        // negative tombstone export as a live id-only line. This state is
+        // unreachable via engine writes (`forget()` stamps current epoch-ms)
+        // and bundle imports (the parser filters negatives), so the guard
+        // matches the parser's contract rather than dropping data in practice.
+        // Pinned here so a future writer-side change is a deliberate one.
+        let t = append_event_id_comment_forgotten("(note) hi", "evt_x", Some(-5));
+        assert_eq!(t, "(note) hi <!-- id: evt_x -->");
+    }
 }

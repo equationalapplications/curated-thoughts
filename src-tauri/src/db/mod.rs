@@ -41,6 +41,8 @@ pub mod wisdom;
 mod breaker_tests;
 #[cfg(test)]
 mod switch_pin_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use connection::AppDb;
 pub use queries::*;
