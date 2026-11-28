@@ -307,5 +307,7 @@ nearest-neighbor search (ANN) can wait until about 100,000.
      embeddings are only for unit tests.
 
    *Owner ruling 2026-11-27: a compliance or eligibility fix whose matcher SQL stays byte-identical may waive the LongMemEval, abstention and paraphrase runs by owner ruling, recorded in the spec and PR body; the no-superseded, exactly-once and byte-identical tests still apply.*
+
+   *Owner ruling 2026-11-27: `ct wisdom brief`, a query-less session-start surface, is gated by fixture tests (drop order, budget, determinism, no superseded fact) and a scratch-brain p95 <= 250 ms at 10,000 facts instead of LongMemEval, abstention and paraphrase runs, which measure query matching.*
 5. **Never touch the live brain** outside the app. Tests use scratch
    profiles.
