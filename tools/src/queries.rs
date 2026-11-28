@@ -193,7 +193,7 @@ pub fn rank_wiki_entries_at(
     limit_wiki: usize,
     now_ms: i64,
 ) -> Result<Vec<serde_json::Value>> {
-    use tauri_app_lib::wisdom_match::{confidence_ordinal, recall_item, RecallItemInput};
+    use tauri_app_lib::wisdom_match::{confidence_ordinal, okf_type_text, recall_item, RecallItemInput};
 
     // Keep terms of any length >= 2; short technical terms ("sql", "rag")
     // are often the most meaningful.
@@ -244,7 +244,7 @@ pub fn rank_wiki_entries_at(
                 row.get::<_, Option<rusqlite::types::Value>>(6)?, // updated_at
                 row.get::<_, Option<String>>(7)?,                 // source_type
                 row.get::<_, Option<String>>(8)?,                 // okf_verified (TEXT json)
-                row.get::<_, Option<String>>(9)?,                 // okf_type
+                okf_type_text(row.get::<_, Option<rusqlite::types::Value>>(9)?), // okf_type (TEXT only)
             ))
         };
         // `:now` is bound only when an arm references it (rusqlite rejects an

@@ -160,10 +160,15 @@ fn confidence_ordinal_orders_confirmed_before_inferred() {
 #[test]
 fn ties_break_by_id() {
     with_seeded_brain(|| {
-        for id in ["c", "a", "b"] {
-            seed_fact(id); // identical overlap, confidence and updated_at
+        // >= 8 rows identical on overlap/confidence/updated_at, inserted in a
+        // scrambled id order: an accidental HashMap-order pass is negligible.
+        for id in ["h", "c", "f", "a", "j", "d", "i", "b", "g", "e"] {
+            seed_fact(id);
         }
-        assert_eq!(ids_at(&brain_db()), vec!["a", "b", "c"]);
+        assert_eq!(
+            ids_at(&brain_db()),
+            vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+        );
     });
 }
 
@@ -206,6 +211,25 @@ fn degraded(missing: &[&str]) -> Connection {
         [],
     )
     .unwrap();
+    // Where the shape still has the columns, add a superseded and an expired
+    // row: the arm that exists must keep filtering while the missing arm is
+    // tolerated.
+    if !missing.contains(&"superseded_by") && !missing.contains(&"superseded_at") {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, confidence, updated_at, superseded_by, superseded_at)
+             VALUES ('sup', 'ent', 'Title', 'Body text', 'inferred', 100, 'd1', 500)",
+            [],
+        )
+        .unwrap();
+    }
+    if !missing.contains(&"valid_to") {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, confidence, updated_at, valid_to)
+             VALUES ('exp', 'ent', 'Title', 'Body text', 'inferred', 100, 500)",
+            [],
+        )
+        .unwrap();
+    }
     conn
 }
 
@@ -214,6 +238,10 @@ fn degraded_shapes_still_return_rows_without_sql_errors() {
     let shapes: &[&[&str]] = &[
         &[],
         &["superseded_by", "superseded_at"],
+        // Half-migrated supersession (V24 adds columns one ALTER at a time):
+        // the arm needs both, so it is omitted and recall still succeeds.
+        &["superseded_at"],
+        &["superseded_by"],
         &["valid_to"],
         &["superseded_by", "superseded_at", "valid_to", "forgotten_at"],
         &["forgotten_at"],
@@ -231,4 +259,23 @@ fn degraded_shapes_still_return_rows_without_sql_errors() {
         assert_eq!(hits.len(), 1, "shape missing {missing:?}");
         assert_eq!(hits[0]["id"], "d1");
     }
+}
+
+/// Pinned fail-closed behavior: no `source_type` column but the events table
+/// has `forgotten_at` + `related_entry_id` makes the forgotten arm reference a
+/// missing column. Unreachable via real migrations; recall must error.
+#[test]
+fn forgotten_arm_without_source_type_fails_closed() {
+    let conn = degraded(&["source_type"]);
+    assert!(rank_wiki_entries_at(&conn, "Body", 5, NOW).is_err());
+}
+
+#[test]
+fn blob_okf_type_row_is_still_returned_without_kind() {
+    let conn = degraded(&[]);
+    conn.execute("UPDATE llm_wiki_entries SET okf_type = x'0102' WHERE id = 'd1'", [])
+        .unwrap();
+    let hits = rank_wiki_entries_at(&conn, "Body", 5, NOW).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].get("kind").is_none());
 }

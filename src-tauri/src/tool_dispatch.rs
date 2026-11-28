@@ -486,7 +486,7 @@ pub(crate) fn rank_wiki_entries_at(
                 row.get::<_, Option<String>>(6)?,                 // source_type (TEXT)
                 row.get::<_, Option<String>>(7)?,                 // okf_verified (TEXT json)
                 row.get::<_, Option<rusqlite::types::Value>>(8)?, // updated_at
-                row.get::<_, Option<String>>(9)?,                 // okf_type (TEXT)
+                crate::wisdom_match::okf_type_text(row.get::<_, Option<rusqlite::types::Value>>(9)?), // okf_type (TEXT only)
             ))
         };
         // `:now` is bound only when an arm references it (rusqlite rejects an
@@ -2305,10 +2305,51 @@ mod curated_memory_tests {
     #[test]
     fn ties_break_by_id() {
         let conn = crate::db::connection::open_in_memory().unwrap();
-        for id in ["c", "a", "b"] {
+        for id in ["h", "c", "f", "a", "j", "d", "i", "b", "g", "e"] {
             recall_seed(&conn, id, "inferred", None, 100);
         }
-        assert_eq!(recall_ids(&conn, 1_000), vec!["a", "b", "c"]);
+        assert_eq!(
+            recall_ids(&conn, 1_000),
+            vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+        );
+    }
+
+    /// Clock-unit pin: the 3-arg wrapper uses the REAL clock (epoch ms). A
+    /// past `superseded_at` (now - 60s) is excluded and a future one
+    /// (now + 60s) still served; a seconds-vs-ms slip would flip the past row.
+    #[test]
+    fn recall_real_clock_is_epoch_ms() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        recall_seed(&conn, "past", "inferred", None, 100);
+        recall_seed(&conn, "future", "inferred", None, 100);
+        let now = crate::wisdom_deposit::now_ms();
+        conn.execute(
+            "UPDATE llm_wiki_entries SET superseded_by='x', superseded_at=?1 WHERE id='past'",
+            [now - 60_000],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE llm_wiki_entries SET superseded_by='x', superseded_at=?1 WHERE id='future'",
+            [now + 60_000],
+        )
+        .unwrap();
+        let ids: Vec<String> = rank_wiki_entries(&conn, "zebra", 10)
+            .unwrap()
+            .iter()
+            .map(|h| h["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(ids, vec!["future"]);
+    }
+
+    #[test]
+    fn recall_blob_okf_type_row_survives_without_kind() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        recall_seed(&conn, "blobby", "inferred", None, 100);
+        conn.execute("UPDATE llm_wiki_entries SET okf_type = x'0102' WHERE id='blobby'", [])
+            .unwrap();
+        let hits = rank_wiki_entries_at(&conn, "zebra", 10, 1_000).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].get("kind").is_none());
     }
 
     /// Task 7 (spec rev-4 M4): `confidence` ranks by an ORDINAL

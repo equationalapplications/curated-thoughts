@@ -165,27 +165,41 @@ fn recall_json_shape_is_pinned() {
 }
 
 /// Mandatory benchmark gate (spec 6): no superseded fact is ever served,
-/// end to end through the real `ct recall` binary.
+/// end to end through the real `ct recall` binary. Uses the REAL clock (epoch
+/// ms) so a seconds-vs-ms unit slip is caught: a past value now-60s must be
+/// excluded and a future value now+60s must still be served.
 #[test]
 fn recall_never_serves_a_superseded_fact_end_to_end() {
     with_seeded_brain(|| {
         seed_fact("old");
         seed_fact("new");
+        seed_fact("soon");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
         brain_db()
             .execute(
-                "UPDATE llm_wiki_entries SET superseded_by = 'new', superseded_at = 500 WHERE id = 'old'",
-                [],
+                "UPDATE llm_wiki_entries SET superseded_by = 'new', superseded_at = ?1 WHERE id = 'old'",
+                [now_ms - 60_000],
+            )
+            .unwrap();
+        brain_db()
+            .execute(
+                "UPDATE llm_wiki_entries SET superseded_by = 'new', superseded_at = ?1 WHERE id = 'soon'",
+                [now_ms + 60_000],
             )
             .unwrap();
         let out = run_ct(&["recall", "--json", "Body"]);
         assert!(out.status.success());
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        let ids: Vec<&str> = v["wiki"]
+        let mut ids: Vec<&str> = v["wiki"]
             .as_array()
             .unwrap()
             .iter()
             .map(|w| w["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, vec!["new"]);
+        ids.sort();
+        assert_eq!(ids, vec!["new", "soon"]);
     });
 }

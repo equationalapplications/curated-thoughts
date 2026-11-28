@@ -316,6 +316,7 @@ pub fn confidence_ordinal(confidence: Option<&str>) -> i64 {
 }
 
 /// Inputs for [`recall_item`]: one wiki row as both recall copies read it.
+#[derive(Debug)]
 pub struct RecallItemInput<'a> {
     pub id: &'a str,
     pub entity_id: Option<&'a str>,
@@ -396,6 +397,14 @@ pub(crate) has_valid_to: bool,
     scheme: Option<Scheme>,
 }
 
+impl Temporal {
+    /// Whether any temporal arm references `:now` (bind it only then:
+    /// rusqlite rejects an unused named parameter).
+    pub(crate) fn needs_now(&self) -> bool {
+        self.has_superseded_by || self.has_valid_to
+    }
+}
+
 /// Column probes ONLY — no scheme resolution. [`temporal_columns`] resolves
 /// the reader scheme next to the column probes so scheme-derived call paths
 /// share ONE resolution; the forgotten arm's TEXT is shape-conditional only
@@ -417,7 +426,10 @@ pub(crate) fn temporal_columns_shape_only(conn: &Connection) -> Result<Temporal>
 /// recall column flags ([`entry_recall_arms`]).
 fn temporal_from_snapshot(cols: &[String], event_cols: &[String]) -> Temporal {
     Temporal {
-        has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
+        // Both columns: the arm reads `superseded_by` AND `superseded_at`
+        // (V24 adds them one ALTER at a time; a half-migrated brain omits it).
+        has_superseded_by: cols.iter().any(|c| c == "superseded_by")
+            && cols.iter().any(|c| c == "superseded_at"),
         has_valid_to: cols.iter().any(|c| c == "valid_to"),
         has_area: cols.iter().any(|c| c == "area"),
         has_okf_type: cols.iter().any(|c| c == "okf_type"),
@@ -434,6 +446,7 @@ fn temporal_from_snapshot(cols: &[String], event_cols: &[String]) -> Temporal {
 /// `:now` (bind it only then: rusqlite rejects an unused named parameter), and
 /// the column-presence flags the recall SELECT needs, all from ONE column
 /// snapshot.
+#[derive(Debug)]
 pub struct RecallArms {
     pub sql: String,
     pub needs_now: bool,
@@ -451,20 +464,43 @@ pub struct RecallArms {
 /// `id` is an error here: a failed probe fails closed instead of degrading to
 /// "no columns".
 pub fn entry_recall_arms(conn: &Connection) -> Result<RecallArms> {
-    let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
+    let cols = strict_columns(conn, "llm_wiki_entries")?;
     anyhow::ensure!(
         cols.iter().any(|c| c == "id"),
         "entry_recall_arms: llm_wiki_entries column probe returned no `id` column"
     );
-    let event_cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")?;
+    let event_cols = strict_columns(conn, "llm_wiki_events")?;
     let t = temporal_from_snapshot(&cols, &event_cols);
     Ok(RecallArms {
         sql: temporal_arms_sql(&t),
-        needs_now: t.has_superseded_by || t.has_valid_to,
+        needs_now: t.needs_now(),
         has_source_type: cols.iter().any(|c| c == "source_type"),
-        has_okf_type: cols.iter().any(|c| c == "okf_type"),
+        has_okf_type: t.has_okf_type,
         has_okf_verified: cols.iter().any(|c| c == "okf_verified"),
     })
+}
+
+/// Column probe that fails closed: unlike `existing_columns` (which swallows
+/// row errors, reading them as "column absent"), a row error propagates.
+fn strict_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    anyhow::ensure!(
+        table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "strict_columns: bad table name"
+    );
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(cols)
+}
+
+/// Reads an `okf_type` cell: only TEXT counts; NULL/BLOB/numeric read as
+/// absent (so a wrongly typed cell never drops the row).
+pub fn okf_type_text(v: Option<rusqlite::types::Value>) -> Option<String> {
+    match v {
+        Some(rusqlite::types::Value::Text(t)) => Some(t),
+        _ => None,
+    }
 }
 
 /// Column probes plus the call's ONE scheme resolution. `declared` is a
@@ -847,7 +883,7 @@ pub(crate) fn eligible_entry_ids(
     let where_sql = entry_eligibility_where(t);
     let sql = format!("SELECT e.id FROM llm_wiki_entries e WHERE {where_sql}");
     let mut stmt = conn.prepare(&sql)?;
-    let rows = if t.has_superseded_by || t.has_valid_to {
+    let rows = if t.needs_now() {
         // Only the temporal arms reference :now — on a shape with neither
         // column, binding an unused named param is a rusqlite error.
         stmt.query_map(rusqlite::named_params! { ":now": now_ms }, |r| {
@@ -901,7 +937,10 @@ fn gated_entries(
     // so the index math below (`6 + has_area`) stays valid and degraded shapes
     // keep today's SQL.
     let sql = if temporal.has_okf_type {
-        sql.replacen(" FROM llm_wiki_entries e", ", e.okf_type FROM llm_wiki_entries e", 1)
+        let projected =
+            sql.replacen(" FROM llm_wiki_entries e", ", e.okf_type FROM llm_wiki_entries e", 1);
+        debug_assert!(projected.contains("e.okf_type"), "okf_type projection not applied");
+        projected
     } else {
         sql
     };
@@ -939,7 +978,9 @@ fn gated_entries(
             None
         };
         let okf_type = if temporal.has_okf_type {
-            r.get(6 + temporal.has_area as usize)?
+            okf_type_text(r.get::<_, Option<rusqlite::types::Value>>(
+                6 + temporal.has_area as usize,
+            )?)
         } else {
             None
         };
@@ -958,7 +999,7 @@ fn gated_entries(
     // a bare `?` bound in one branch only is a runtime parameter-count error
     // on the SCOPED call, invisible to every byte pin (tier-3 r5 M1).
     let mut named_params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
-    if temporal.has_superseded_by || temporal.has_valid_to {
+    if temporal.needs_now() {
         named_params.push((":now", &now_ms));
     }
     if let Some(bp) = &band_params {
@@ -1905,7 +1946,12 @@ fn load_item(conn: &Connection, id: &str, has_okf_type: bool) -> Result<Option<W
     );
     let row: Option<LoadedItemRow> = conn
         .query_row(&sql, params![id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                okf_type_text(r.get::<_, Option<rusqlite::types::Value>>(3)?),
+            ))
         })
         .optional()?;
     Ok(row.and_then(|(title, body, source_type, okf_type)| {
@@ -4338,6 +4384,19 @@ mod tests {
     }
 
     #[test]
+    fn half_migrated_superseded_by_without_superseded_at_omits_the_arm() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT, superseded_by TEXT);
+             CREATE TABLE llm_wiki_events (id TEXT);",
+        )
+        .unwrap();
+        let a = entry_recall_arms(&c).unwrap();
+        assert_eq!(a.sql, "");
+        assert!(!a.needs_now);
+    }
+
+    #[test]
     fn entry_recall_arms_errs_without_id_column() {
         // A failed/empty probe must fail closed, not degrade to "no columns".
         let conn = Connection::open_in_memory().unwrap();
@@ -4472,6 +4531,30 @@ mod tests {
             assert_eq!(e.kind, None, "{}", e.id);
             assert!(!serde_json::to_string(e).unwrap().contains("\"kind\""));
         }
+    }
+
+    #[test]
+    fn blob_okf_type_row_still_matches_without_kind() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "b", "ent", &Q);
+        conn.execute("UPDATE llm_wiki_entries SET okf_type = x'0102' WHERE id = 'b'", [])
+            .unwrap();
+        let m = run(&conn, Some(0.5), 5, &[]);
+        assert_eq!(ids(&m.entries), vec!["b"]);
+        assert_eq!(m.entries[0].kind, None);
+    }
+
+    #[test]
+    fn blob_okf_type_correction_head_loads_without_kind() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "old", "ent", &Q);
+        seed(&conn, "new", "ent", &Q);
+        supersede(&conn, "old", "new");
+        conn.execute("UPDATE llm_wiki_entries SET okf_type = x'0102' WHERE id = 'new'", [])
+            .unwrap();
+        let m = run(&conn, Some(0.5), 5, &["old"]);
+        assert_eq!(ids(&m.corrections), vec!["new"]);
+        assert_eq!(m.corrections[0].kind, None);
     }
 
     #[test]
