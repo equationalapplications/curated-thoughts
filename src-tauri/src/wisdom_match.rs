@@ -321,7 +321,14 @@ pub(crate) has_valid_to: bool,
 pub(crate) fn temporal_columns_shape_only(conn: &Connection) -> Result<Temporal> {
     let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
     let event_cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")?;
-    Ok(Temporal {
+    Ok(temporal_from_snapshot(&cols, &event_cols))
+}
+
+/// Builds the shape-only [`Temporal`] (no scheme) from already-probed column
+/// lists, so one `existing_columns` snapshot can feed both the arms and the
+/// recall column flags ([`entry_recall_arms`]).
+fn temporal_from_snapshot(cols: &[String], event_cols: &[String]) -> Temporal {
+    Temporal {
         has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
         has_valid_to: cols.iter().any(|c| c == "valid_to"),
         has_area: cols.iter().any(|c| c == "area"),
@@ -330,6 +337,44 @@ pub(crate) fn temporal_columns_shape_only(conn: &Connection) -> Result<Temporal>
         has_forgotten_at: event_cols.iter().any(|c| c == "forgotten_at")
             && event_cols.iter().any(|c| c == "related_entry_id"),
         scheme: None,
+    }
+}
+
+/// What a recall copy needs from the shared eligibility predicate: the arm SQL
+/// (starts with ` AND`; empty on fully degraded shapes), whether it references
+/// `:now` (bind it only then: rusqlite rejects an unused named parameter), and
+/// the column-presence flags the recall SELECT needs, all from ONE column
+/// snapshot.
+pub struct RecallArms {
+    pub sql: String,
+    pub needs_now: bool,
+    pub has_source_type: bool,
+    pub has_okf_type: bool,
+    pub has_okf_verified: bool,
+}
+
+/// Public, connection-taking export of [`temporal_arms_sql`] for crates that
+/// cannot see `pub(crate)` items (the tools crate), in the style of
+/// [`entry_not_forgotten_arm`]. Recall's eligibility is `deleted_at IS NULL`
+/// plus these arms; it omits the live gate's embedding/scheme arms. Probes
+/// shape-only (a corrupt `wisdom_active_scheme` must not fail a read that uses
+/// no embeddings). `existing_columns` swallows row errors, so a probe lacking
+/// `id` is an error here: a failed probe fails closed instead of degrading to
+/// "no columns".
+pub fn entry_recall_arms(conn: &Connection) -> Result<RecallArms> {
+    let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
+    anyhow::ensure!(
+        cols.iter().any(|c| c == "id"),
+        "entry_recall_arms: llm_wiki_entries column probe returned no `id` column"
+    );
+    let event_cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")?;
+    let t = temporal_from_snapshot(&cols, &event_cols);
+    Ok(RecallArms {
+        sql: temporal_arms_sql(&t),
+        needs_now: t.has_superseded_by || t.has_valid_to,
+        has_source_type: cols.iter().any(|c| c == "source_type"),
+        has_okf_type: cols.iter().any(|c| c == "okf_type"),
+        has_okf_verified: cols.iter().any(|c| c == "okf_verified"),
     })
 }
 
@@ -4137,5 +4182,60 @@ mod tests {
                 "shape {name}"
             );
         }
+    }
+
+    #[test]
+    fn entry_recall_arms_probe_shapes() {
+        // Full shape: all three arms, flags all present.
+        let conn = open_in_memory().unwrap();
+        let a = entry_recall_arms(&conn).unwrap();
+        assert!(a.needs_now);
+        assert!(a.has_source_type && a.has_okf_type && a.has_okf_verified);
+        assert!(a.sql.starts_with(
+            " AND (e.superseded_by IS NULL OR e.superseded_at > :now) \
+             AND (e.valid_to IS NULL OR e.valid_to > :now) AND (e.source_type = 'user_stated'"
+        ));
+        let t = temporal_columns_shape_only(&conn).unwrap();
+        assert_eq!(a.sql, temporal_arms_sql(&t));
+
+        // Degraded: no superseded_by/superseded_at/valid_to, no events table
+        // columns, no okf columns -> empty SQL, no `:now`, flags false except
+        // the one column present.
+        let d = Connection::open_in_memory().unwrap();
+        d.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT, source_type TEXT);
+             CREATE TABLE llm_wiki_events (id TEXT);",
+        )
+        .unwrap();
+        let a = entry_recall_arms(&d).unwrap();
+        assert_eq!(a.sql, "");
+        assert!(!a.needs_now);
+        assert!(a.has_source_type);
+        assert!(!a.has_okf_type && !a.has_okf_verified);
+
+        // Superseded only: needs_now, only that arm.
+        let s1 = Connection::open_in_memory().unwrap();
+        s1.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT, superseded_by TEXT, superseded_at INTEGER);
+             CREATE TABLE llm_wiki_events (id TEXT);",
+        )
+        .unwrap();
+        let a = entry_recall_arms(&s1).unwrap();
+        assert_eq!(
+            a.sql,
+            " AND (e.superseded_by IS NULL OR e.superseded_at > :now)"
+        );
+        assert!(a.needs_now);
+        assert!(!a.has_source_type);
+    }
+
+    #[test]
+    fn entry_recall_arms_errs_without_id_column() {
+        // A failed/empty probe must fail closed, not degrade to "no columns".
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(entry_recall_arms(&conn).is_err());
+        conn.execute_batch("CREATE TABLE llm_wiki_entries (entity_id TEXT);")
+            .unwrap();
+        assert!(entry_recall_arms(&conn).is_err());
     }
 }
