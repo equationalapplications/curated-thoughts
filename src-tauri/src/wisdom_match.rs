@@ -276,6 +276,86 @@ pub fn provenance_for(source_type: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The statement kinds CT surfaces as `kind`: the engine's manifest node types
+/// stored in `okf_type` (no separate column; engine-9x-adoption spec).
+pub const KIND_VOCAB: &[&str] = &["rule", "decision", "lesson", "trap"];
+
+/// `okf_type` -> `kind`: verbatim when in [`KIND_VOCAB`], else `None` (NULL,
+/// the legacy `fact`, `handoff`, `session_recap`, unknown slugs, wrong case).
+pub fn kind_for(okf_type: Option<&str>) -> Option<String> {
+    okf_type
+        .filter(|s| KIND_VOCAB.contains(s))
+        .map(str::to_string)
+}
+
+/// Brief ordering tier for a `kind` (PR-2 consumer): rule/trap 0, decision 1,
+/// lesson 2, anything else (incl. none) 3.
+pub fn kind_tier(okf_type: Option<&str>) -> u8 {
+    match kind_for(okf_type).as_deref() {
+        Some("rule") | Some("trap") => 0,
+        Some("decision") => 1,
+        Some("lesson") => 2,
+        _ => 3,
+    }
+}
+
+/// THE confidence ordinal both recall copies rank by (spec 3.4, owner ruling
+/// OQ-B): `confirmed`, `certain`, `verified` = 3; `inferred` = 2; anything
+/// else (incl. `tentative`, NULL) = 0.
+pub fn confidence_ordinal(confidence: Option<&str>) -> i64 {
+    match confidence {
+        Some("confirmed") | Some("certain") | Some("verified") => 3,
+        Some("inferred") => 2,
+        _ => 0,
+    }
+}
+
+/// Inputs for [`recall_item`]: one wiki row as both recall copies read it.
+pub struct RecallItemInput<'a> {
+    pub id: &'a str,
+    pub entity_id: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub text: Option<&'a str>,
+    pub source_ref: Option<&'a str>,
+    pub confidence: Option<&'a str>,
+    /// Stored `source_type` (filtered through [`provenance_for`]).
+    pub source_type: Option<&'a str>,
+    /// Stored `okf_verified` JSON list (feeds the `verified` label).
+    pub okf_verified: Option<&'a str>,
+    /// Stored `okf_type` (filtered through [`kind_for`]).
+    pub okf_type: Option<&'a str>,
+}
+
+/// The ONE builder of a recall wiki item, shared by the app and CLI/sidecar
+/// copies. Always carries `id, entity_id, title, text, source_ref,
+/// confidence`; adds `source_type` (vocabulary-filtered), `verified` (confirmed
+/// facts only) and `kind` only when present. Infallible: a missing or
+/// malformed label degrades to an absent key.
+pub fn recall_item(input: RecallItemInput) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "id": input.id,
+        "entity_id": input.entity_id,
+        "title": input.title,
+        "text": input.text,
+        "source_ref": input.source_ref,
+        "confidence": input.confidence,
+    });
+    if let Some(label) = provenance_for(input.source_type) {
+        v["source_type"] = serde_json::json!(label);
+    }
+    if let Some(verified) =
+        crate::wiki_graph::verified_label(input.confidence, input.okf_verified)
+    {
+        if let Ok(verified) = serde_json::to_value(verified) {
+            v["verified"] = verified;
+        }
+    }
+    if let Some(kind) = kind_for(input.okf_type) {
+        v["kind"] = serde_json::json!(kind);
+    }
+    v
+}
+
 /// First `MAX_TEXT_CHARS` chars of `text`, cut on a char boundary.
 pub fn truncate_text(text: &str) -> &str {
     match text.char_indices().nth(MAX_TEXT_CHARS) {
@@ -4237,5 +4317,93 @@ mod tests {
         conn.execute_batch("CREATE TABLE llm_wiki_entries (entity_id TEXT);")
             .unwrap();
         assert!(entry_recall_arms(&conn).is_err());
+    }
+
+    #[test]
+    fn kind_for_normalizes() {
+        for k in ["rule", "decision", "lesson", "trap"] {
+            assert_eq!(kind_for(Some(k)).as_deref(), Some(k));
+        }
+        for bad in [None, Some("fact"), Some("handoff"), Some("session_recap"), Some("Rule"), Some(""), Some("zebra")] {
+            assert_eq!(kind_for(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn kind_tier_orders_kinds() {
+        assert_eq!(kind_tier(Some("rule")), 0);
+        assert_eq!(kind_tier(Some("trap")), 0);
+        assert_eq!(kind_tier(Some("decision")), 1);
+        assert_eq!(kind_tier(Some("lesson")), 2);
+        for other in [None, Some("fact"), Some("Rule"), Some("zebra")] {
+            assert_eq!(kind_tier(other), 3);
+        }
+    }
+
+    #[test]
+    fn confidence_ordinal_table() {
+        // Spec 3.4 / OQ-B: confirmed, certain, verified = 3; inferred = 2;
+        // everything else 0.
+        assert_eq!(confidence_ordinal(Some("confirmed")), 3);
+        assert_eq!(confidence_ordinal(Some("certain")), 3);
+        assert_eq!(confidence_ordinal(Some("verified")), 3);
+        assert_eq!(confidence_ordinal(Some("inferred")), 2);
+        assert_eq!(confidence_ordinal(Some("tentative")), 0);
+        assert_eq!(confidence_ordinal(Some("zebra")), 0);
+        assert_eq!(confidence_ordinal(None), 0);
+    }
+
+    fn base_input() -> RecallItemInput<'static> {
+        RecallItemInput {
+            id: "w1",
+            entity_id: Some("e1"),
+            title: Some("T"),
+            text: Some("B"),
+            source_ref: None,
+            confidence: Some("inferred"),
+            source_type: None,
+            okf_verified: None,
+            okf_type: None,
+        }
+    }
+
+    #[test]
+    fn recall_item_fields() {
+        // Minimal item: the six base keys only (absent labels = absent keys).
+        let v = recall_item(base_input());
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            ["confidence", "entity_id", "id", "source_ref", "text", "title"]
+        );
+        assert!(v["source_ref"].is_null());
+
+        // Provenance in vocabulary is emitted; out-of-vocabulary omitted.
+        let v = recall_item(RecallItemInput { source_type: Some("user_stated"), ..base_input() });
+        assert_eq!(v["source_type"], "user_stated");
+        let v = recall_item(RecallItemInput { source_type: Some("bogus"), ..base_input() });
+        assert!(v.get("source_type").is_none());
+
+        // verified: confirmed facts only.
+        let list = r#"[{"by":"human:t","at":"2026-11-27T00:00:00Z"}]"#;
+        let v = recall_item(RecallItemInput {
+            confidence: Some("confirmed"),
+            okf_verified: Some(list),
+            ..base_input()
+        });
+        assert_eq!(v["verified"]["by"], "human:t");
+        assert_eq!(v["verified"]["at"], "2026-11-27T00:00:00Z");
+        let v = recall_item(RecallItemInput { okf_verified: Some(list), ..base_input() });
+        assert!(v.get("verified").is_none(), "inferred never carries verified");
+
+        // kind: vocabulary only.
+        let v = recall_item(RecallItemInput { okf_type: Some("rule"), ..base_input() });
+        assert_eq!(v["kind"], "rule");
+        for bad in ["fact", "Rule", "zebra"] {
+            let v = recall_item(RecallItemInput { okf_type: Some(bad), ..base_input() });
+            assert!(v.get("kind").is_none(), "{bad}");
+        }
     }
 }
