@@ -4053,4 +4053,68 @@ mod tests {
     fn message_v1_stub_floor_exists_deviation_guard() {
         assert!(gate_floor(TS_KEY).is_some());
     }
+    /// Golden-pin shapes for `entry_eligibility_where` (recall-eligibility
+    /// Task 1). One helper builds every `Temporal` so the pin and the
+    /// `temporal_arms_sql` suffix test share the same shape table.
+    fn pin_shapes() -> Vec<(&'static str, Temporal)> {
+        let t = |sup: bool, vt: bool, fg: bool, scheme: Option<Scheme>| Temporal {
+            has_superseded_by: sup,
+            has_valid_to: vt,
+            has_area: false,
+            has_forgotten_at: fg,
+            scheme,
+        };
+        vec![
+            ("all", t(true, true, true, None)),
+            ("no_superseded", t(false, true, true, None)),
+            ("no_valid_to", t(true, false, true, None)),
+            ("neither", t(false, false, true, None)),
+            ("no_forgotten", t(true, true, false, None)),
+            ("bare", t(false, false, false, None)),
+            ("scheme_instr1", t(true, true, true, Some(Scheme::Instr1))),
+        ]
+    }
+
+    /// Goldens captured from the UNMODIFIED function before the
+    /// `temporal_arms_sql` refactor (recall-eligibility Task 1).
+    const PINNED_ELIGIBILITY_WHERE: &[(&str, &str)] = &[
+        (
+            "all",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND (e.superseded_by IS NULL OR e.superseded_at > :now) AND (e.valid_to IS NULL OR e.valid_to > :now) AND (e.source_type = 'user_stated' OR e.id = e.entity_id OR e.id GLOB 'tier_*' OR e.entity_id GLOB 'tier_*' OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) OR EXISTS (SELECT 1 FROM llm_wiki_events le WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))",
+        ),
+        (
+            "no_superseded",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND (e.valid_to IS NULL OR e.valid_to > :now) AND (e.source_type = 'user_stated' OR e.id = e.entity_id OR e.id GLOB 'tier_*' OR e.entity_id GLOB 'tier_*' OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) OR EXISTS (SELECT 1 FROM llm_wiki_events le WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))",
+        ),
+        (
+            "no_valid_to",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND (e.superseded_by IS NULL OR e.superseded_at > :now) AND (e.source_type = 'user_stated' OR e.id = e.entity_id OR e.id GLOB 'tier_*' OR e.entity_id GLOB 'tier_*' OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) OR EXISTS (SELECT 1 FROM llm_wiki_events le WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))",
+        ),
+        (
+            "neither",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND (e.source_type = 'user_stated' OR e.id = e.entity_id OR e.id GLOB 'tier_*' OR e.entity_id GLOB 'tier_*' OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) OR EXISTS (SELECT 1 FROM llm_wiki_events le WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))",
+        ),
+        (
+            "no_forgotten",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND (e.superseded_by IS NULL OR e.superseded_at > :now) AND (e.valid_to IS NULL OR e.valid_to > :now)",
+        ),
+        (
+            "bare",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL",
+        ),
+        (
+            "scheme_instr1",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND embed_scheme = 'instr1' AND (e.superseded_by IS NULL OR e.superseded_at > :now) AND (e.valid_to IS NULL OR e.valid_to > :now) AND (e.source_type = 'user_stated' OR e.id = e.entity_id OR e.id GLOB 'tier_*' OR e.entity_id GLOB 'tier_*' OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) OR EXISTS (SELECT 1 FROM llm_wiki_events le WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))",
+        ),
+    ];
+
+    #[test]
+    fn entry_eligibility_where_sql_is_byte_pinned() {
+        let shapes = pin_shapes();
+        assert_eq!(shapes.len(), PINNED_ELIGIBILITY_WHERE.len());
+        for ((name, t), (gname, golden)) in shapes.iter().zip(PINNED_ELIGIBILITY_WHERE) {
+            assert_eq!(name, gname);
+            assert_eq!(entry_eligibility_where(t), *golden, "shape {name}");
+        }
+    }
 }
