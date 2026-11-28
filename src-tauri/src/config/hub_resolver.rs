@@ -516,6 +516,19 @@ pub fn resolve_brief_scope(
             diagnostics,
         };
     }
+    // Spec 3.2 precedence: `no_prefix` wins over `unresolved`. A path under no
+    // checkout is `no_prefix` even when the config also has a collision, which
+    // `resolve_repo_step` (shared with `resolve_scoped`, whose behavior must
+    // not change) would report first.
+    let canonical_path = super::canonicalize_lenient(path);
+    if matches!(longest_prefix_match(cfg, &canonical_path), PrefixMatch::None) {
+        return BriefScope {
+            repo_group: None,
+            org_group,
+            reason: Some("no_prefix"),
+            diagnostics,
+        };
+    }
     match resolve_repo_step(conn, cfg, path) {
         RepoStep::NoPrefix => BriefScope {
             repo_group: None,

@@ -849,4 +849,30 @@ fn brief_scope_reason_precedence() {
     let cfg2 = cfg_one(&root, "dead-hub");
     let s = resolve_brief_scope(&conn, Some(&cfg2), &root.join("f.rs").to_string_lossy());
     assert_eq!(s.reason, Some("unresolved"));
+    // no_prefix beats unresolved: a config collision, but the path is under
+    // no checkout.
+    let tmp = TempDir::new().unwrap();
+    let r1 = tmp.path().join("repo1");
+    let r2 = tmp.path().join("repo2");
+    std::fs::create_dir_all(&r1).unwrap();
+    std::fs::create_dir_all(&r2).unwrap();
+    let conn2 = db();
+    for id in ["key-1", "key-2", "survivor", "org-1"] {
+        add_entity(&conn2, id);
+    }
+    add_redirect(&conn2, "key-1", "survivor");
+    add_redirect(&conn2, "key-2", "survivor");
+    let cfg3 = WisdomConfig {
+        areas_paths: vec![
+            ("key-1".to_string(), r1.join(".ct-areas.yaml")),
+            ("key-2".to_string(), r2.join(".ct-areas.yaml")),
+        ],
+        org_entity_id: Some("org-1".to_string()),
+    };
+    let s = resolve_brief_scope(&conn2, Some(&cfg3), &tmp.path().join("elsewhere").to_string_lossy());
+    assert_eq!(s.reason, Some("no_prefix"));
+    assert_eq!(sorted(&s.org_group), vec!["org-1".to_string()]);
+    // ...and under a checkout the same config is still `unresolved`.
+    let s = resolve_brief_scope(&conn2, Some(&cfg3), &r1.to_string_lossy());
+    assert_eq!(s.reason, Some("unresolved"));
 }
