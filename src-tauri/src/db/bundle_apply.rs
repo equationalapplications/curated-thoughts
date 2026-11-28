@@ -763,8 +763,9 @@ pub fn apply_import(
                         // Tombstone wins on conflict (spec r1-M3): only a live target
                         // row is tombstoned; a target row already forgotten is never
                         // un-forgotten by an incoming live event. The reconciled dup
-                        // counts ONLY as events_skipped — the tombstone is
-                        // intentionally silent in ImportResult (r3 minor 6).
+                        // counts ONLY as events_skipped — a SUCCESSFUL tombstone is
+                        // intentionally silent in ImportResult (r3 minor 6); a
+                        // REFUSED one warns (T4 r6 m1/m4).
                         // Scoped to the import's entity CLUSTER (T1.5 r1 MAJOR +
                         // CodeRabbit CR-1): a colliding id may belong to another
                         // entity's row — bundle content must never mutate it —
@@ -786,13 +787,14 @@ pub fn apply_import(
                         // Polarity is refuse-on-foreign-only (r5): NULL and
                         // task-related ids pass (the guard joins entries only;
                         // refusing them would resurrect task-linked dups —
-                        // exactly what #398 fixes), and a dangling id passes
-                        // as an accepted residual (only legacy rows can carry
-                        // one; new inserts drop dangling linkage).
-                        // related_entry_id is an ENTRY id, so the ownership
-                        // check resolves it through llm_wiki_entries (T4 r4
-                        // verification: comparing it to entity ids directly
-                        // never matches).
+                        // exactly what #398 fixes). A DANGLING id also passes
+                        // as an accepted residual (r6 m3: dangling rows arise
+                        // from legacy imports OR from a later hard-delete of
+                        // the referenced entry — the trade-off is recorded in
+                        // the spec Errata). related_entry_id is an ENTRY id,
+                        // so the ownership check resolves it through
+                        // llm_wiki_entries (T4 r4 verification: comparing it
+                        // to entity ids directly never matches).
                         let sql = format!(
                             "UPDATE llm_wiki_events SET forgotten_at = ?1 \
                              WHERE id = ?2 AND forgotten_at IS NULL \
@@ -807,24 +809,48 @@ pub fn apply_import(
                         params.extend(cluster.iter().map(|c| c as &dyn rusqlite::ToSql));
                         params.extend(cluster.iter().map(|c| c as &dyn rusqlite::ToSql));
                         let tombstoned = tx.execute(&sql, params.as_slice())?;
-                        // T4 r5 m1: a refused tombstone (0 rows, row still live
-                        // with non-NULL linkage) must not be fully silent —
-                        // the source's forget is not propagating.
+                        // T4 r5 m1 + r6 m1: a refused tombstone must not be
+                        // fully silent — the source's forget is not
+                        // propagating. The UPDATE has TWO refusal causes and
+                        // the warning names the right one (r6 m1): the row is
+                        // owned outside the cluster, or its linkage resolves
+                        // to a foreign-owned entry.
                         if tombstoned == 0 {
-                            let row: Option<(Option<i64>, Option<String>)> = tx
+                            let row: Option<(Option<i64>, Option<String>, String)> = tx
                                 .query_row(
-                                    "SELECT forgotten_at, related_entry_id \
+                                    "SELECT forgotten_at, related_entry_id, entity_id \
                                      FROM llm_wiki_events WHERE id = ?1",
                                     [&id],
-                                    |r| Ok((r.get(0)?, r.get(1)?)),
+                                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                                 )
                                 .optional()?;
-                            if let Some((None, Some(rid))) = row {
-                                result.warnings.push(format!(
-                                    "event {id}: dup tombstone refused — related entry {rid} \
-                                     is owned outside the import's entity cluster; the source's \
-                                     forget is NOT propagated to this row"
-                                ));
+                            if let Some((None, related_entry, owner)) = row {
+                                let owned_outside =
+                                    !entity_cluster(
+                                        &mut entity_cluster_cache,
+                                        &tx,
+                                        &target_entity_id,
+                                    )?
+                                    .iter()
+                                    .any(|c| c == &owner);
+                                let detail = if owned_outside {
+                                    "the row is owned by an entity outside the import's \
+                                     entity cluster"
+                                        .to_string()
+                                } else if let Some(rid) = &related_entry {
+                                    format!(
+                                        "related entry {rid} is owned outside the import's \
+                                         entity cluster"
+                                    )
+                                } else {
+                                    "the row is already forgotten or unresolvable".to_string()
+                                };
+                                if owned_outside || related_entry.is_some() {
+                                    result.warnings.push(format!(
+                                        "event {id}: dup tombstone refused — {detail}; \
+                                         the source's forget is NOT propagated to this row"
+                                    ));
+                                }
                             }
                         }
                     }
@@ -2994,6 +3020,15 @@ mod tests {
             legacy_forgotten, None,
             "the dup tombstone must refuse a row whose linkage names a foreign entry"
         );
+        // T4 r6 m2: the refusal must be observable — an import warning names
+        // the refused event.
+        assert!(
+            result3
+                .warnings
+                .iter()
+                .any(|w| w.contains("evt_legacy") && w.contains("dup tombstone refused")),
+            "the refused dup tombstone must surface as an import warning"
+        );
         assert_eq!(
             visible(&conn),
             1,
@@ -3120,6 +3155,16 @@ mod tests {
             related.as_deref(),
             Some("task_t"),
             "task linkage is kept through the dup reconciliation"
+        );
+        // T4 r6 m2 (negative): applied tombstones stay silent — the
+        // "intentionally silent" ImportResult contract (r3 minor 6) holds for
+        // them.
+        assert!(
+            !result2
+                .warnings
+                .iter()
+                .any(|w| w.contains("dup tombstone refused")),
+            "an APPLIED tombstone must not emit a refusal warning"
         );
     }
 

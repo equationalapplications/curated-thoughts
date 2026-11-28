@@ -271,20 +271,27 @@ QUERY PLAN
   + T4 r1 M1: widened to the CLUSTER via `entities::cluster_ids` so
   merged-loser-owned rows reconcile). T4 r2–r4 additionally gate the
   LINKAGE on every fresh INSERT — live and forgotten, on EVERY shape
-  including pre-v19 (whose imports therefore drop foreign linkage and
-  emit warnings, not "insert as today"): bundle content cannot change
-  the visibility of an entry it does not own, in either direction (a
-  forgotten event with foreign linkage would HIDE that entry; a live
-  one would RESURRECT a locally-forgotten one). The refused tombstone
-  itself stays verbatim; only the linkage is dropped, with an import
-  warning (the loss is permanent). Task-related related ids are kept
+  including pre-v19 (whose
+  imports therefore drop foreign linkage and emit warnings, not
+  "insert as today"): bundle content cannot change the visibility of
+  an entry it does not own, in either direction (a forgotten event
+  with foreign linkage would HIDE that entry; a live one would
+  RESURRECT a locally-forgotten one). The INSERTED tombstone stays
+  verbatim; only the linkage is dropped, with an import warning (the
+  loss is permanent). Task-related related ids are kept
   by the insert gate (the guard joins entries only; task ids are a
   distinct namespace), and the dup tombstone keeps the same polarity:
   it refuses ONLY rows whose linkage resolves to an entry owned
   outside the cluster (T4 r5 M1 — refusing task/dangling ids would
-  resurrect those dups, the exact #398 failure). Accepted residual: a
-  pre-gate row with a DANGLING linkage passes the dup tombstone; new
-  inserts drop dangling linkage, so nothing mints such rows anymore.
+  resurrect those dups, the exact #398 failure). A refused dup
+  tombstone emits an `ImportResult` warning naming the event (T4 r6);
+  an applied one stays silent. Accepted residual: a row with a
+  DANGLING linkage — whether from a legacy import or orphaned by a
+  later hard-delete of the referenced entry — passes the dup
+  tombstone, so a foreign entity re-using that id later could be
+  hidden; new inserts drop dangling linkage, so nothing mints such
+  rows anymore, and the narrowness is why this is accepted rather than
+  refused.
   Known trade-off: if the referenced entry arrives in a LATER import,
   the earlier tombstone no longer hides it (verbatim linkage would
   have) — accepted, same reason. This narrows "apply verbatim" for
