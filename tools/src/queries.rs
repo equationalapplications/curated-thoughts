@@ -1177,6 +1177,72 @@ pub fn wisdom_match_cmd(
     Ok(0)
 }
 
+/// `ct wisdom brief` (spec 2026-11-28-wisdom-brief 3.1, 3.6): the standing
+/// statements for a project plus the covered-topics index. No query, no
+/// embedding profile, no network. Exit 0 on success including "nothing to
+/// say"; every error propagates (exit 1). `repo_path` is never printed.
+pub fn wisdom_brief_cmd(json_mode: bool, repo_path: &str, max_chars: usize) -> Result<i32> {
+    use tauri_app_lib::wisdom_brief as wb;
+    anyhow::ensure!(
+        (600..=8000).contains(&max_chars),
+        "--max-chars must be between 600 and 8000"
+    );
+    let brain = resolve()?;
+    let conn = open_ro(&brain)?;
+    conn.busy_timeout(std::time::Duration::from_secs(1))?;
+    let cfg = match tauri_app_lib::config::BrainConfig::load_lenient(&brain.paths) {
+        Ok(report) => {
+            for d in &report.diagnostics {
+                print_brief_diagnostic(d);
+            }
+            report.config.wisdom
+        }
+        Err(e) => {
+            print_brief_diagnostic(&format!("brain config load failed: {e}"));
+            None
+        }
+    };
+    let abs = tauri_app_lib::config::canonicalize_lenient(repo_path);
+    let scope = tauri_app_lib::config::hub_resolver::resolve_brief_scope(&conn, cfg.as_ref(), &abs);
+    for d in &scope.diagnostics {
+        print_brief_diagnostic(d);
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let brief = wb::build_brief_at(&conn, &scope, &wb::BriefOpts { max_chars }, now_ms)?;
+    if json_mode {
+        print_json(&brief);
+    } else {
+        print_brief_human(&brief);
+    }
+    Ok(0)
+}
+
+/// `wisdom_brief_diagnostic\t<text>` on stderr (the `wisdom_scoped_diagnostic`
+/// house form). Callers pass entity ids and reasons, never the repo path.
+fn print_brief_diagnostic(text: &str) {
+    eprintln!("wisdom_brief_diagnostic\t{text}");
+}
+
+fn print_brief_human(b: &tauri_app_lib::wisdom_brief::Brief) {
+    println!("scope: {}", b.scope);
+    if let Some(r) = b.scope_reason {
+        println!("scope_reason: {r}");
+    }
+    for s in &b.statements {
+        let band = s["band"].as_str().unwrap_or("");
+        let title = s["title"].as_str().unwrap_or("");
+        let text = s["text"].as_str().unwrap_or("");
+        let id = s["id"].as_str().unwrap_or("");
+        println!("[{band}] {title} ({id})\n  {text}");
+    }
+    if !b.index.text.is_empty() {
+        println!("{}", b.index.text);
+    }
+}
+
 /// Active Verification Prompting from the `ct wisdom match` surface (issue
 /// #344 OQ1, owner ruling: the prompt IS wired in). One prompt per delivered
 /// non-human fact — entries and corrections (the exactly-once skip set keeps

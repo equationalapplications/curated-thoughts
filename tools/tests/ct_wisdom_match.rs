@@ -6,29 +6,13 @@
 
 mod common;
 
-use common::{run_ct, with_seeded_brain};
-use rusqlite::params;
+use common::{
+    run_ct, seed_entity, seed_fact, with_scoped_brain, with_seeded_brain,
+};
 
 fn brain_db() -> rusqlite::Connection {
     let dir = std::env::var("CURATED_BRAIN_DIR").expect("with_seeded_brain sets it");
     rusqlite::Connection::open(std::path::Path::new(&dir).join("brain.db")).unwrap()
-}
-
-fn seed_fact(id: &str) {
-    let mut v = [0f32; 8];
-    v[0] = 1.0;
-    let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
-    brain_db()
-        .execute(
-            "INSERT INTO llm_wiki_entries (
-                id, entity_id, title, body, tags, confidence, source_type,
-                source_hash, source_ref, created_at, updated_at, last_accessed_at,
-                access_count, deleted_at, embedding_blob, embedding
-             ) VALUES (?1, 'ent_t', ?2, ?3, '[]', 'inferred', 'librarian_inferred',
-                       NULL, NULL, 100, 100, NULL, 0, NULL, ?4, NULL)",
-            params![id, format!("Title {id}"), format!("Body {id}"), blob],
-        )
-        .unwrap();
 }
 
 fn json_of(out: &std::process::Output) -> serde_json::Value {
@@ -552,98 +536,6 @@ fn entry_ids(v: &serde_json::Value) -> Vec<String> {
         .iter()
         .map(|e| e["id"].as_str().unwrap().to_string())
         .collect()
-}
-
-fn seeded_fact_with_entity(id: &str, entity_id: &str, area: Option<&str>) {
-    let mut v = [0f32; 8];
-    v[0] = 1.0;
-    let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
-    brain_db()
-        .execute(
-            "INSERT INTO llm_wiki_entries (
-                id, entity_id, area, title, body, tags, confidence, source_type,
-                source_hash, source_ref, created_at, updated_at, last_accessed_at,
-                access_count, deleted_at, embedding_blob, embedding
-             ) VALUES (?1, ?2, ?3, ?4, ?5, '[]', 'inferred', 'librarian_inferred',
-                       NULL, NULL, 100, 100, NULL, 0, NULL, ?6, NULL)",
-            params![
-                id,
-                entity_id,
-                area,
-                format!("Title {id}"),
-                format!("Body {id}"),
-                blob
-            ],
-        )
-        .unwrap();
-}
-
-fn seed_entity(id: &str) {
-    brain_db()
-        .execute(
-            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
-             VALUES (?1, ?1, 'repo', '', 100, 100)",
-            params![id],
-        )
-        .unwrap();
-}
-
-/// The scoped fixture: a real checkout dir with `.ct-areas.yaml`
-/// (`auth: ["src/auth/**"]`), live `hub-1` + `other-1` entities, facts in
-/// the auth area / whole-repo / foreign repo — and the brain's config.json
-/// rewritten with the `wisdom` block pointing at the areas file.
-/// `org` chooses the configured `org_entity_id` (live `org-1`, a dead id,
-/// or absent → no org band configured).
-fn with_scoped_brain<F: FnOnce(&std::path::Path)>(org: Option<&str>, f: F) {
-    with_seeded_brain(|| {
-        let brain_dir = std::env::var("CURATED_BRAIN_DIR").unwrap();
-        // tempdir(): the fixture checkout drops with the closure (m1 — no
-        // `ct-scoped-fixture-*` leakage under the system temp dir).
-        let checkout_tmp = tempfile::tempdir().unwrap();
-        let checkout = checkout_tmp.path();
-        std::fs::create_dir_all(checkout.join("src/auth")).unwrap();
-        std::fs::create_dir_all(checkout.join("docs")).unwrap();
-        std::fs::write(
-            checkout.join(".ct-areas.yaml"),
-            "areas:\n  auth:\n    - \"src/auth/**\"\n",
-        )
-        .unwrap();
-        seed_entity("hub-1");
-        seed_entity("other-1");
-        if org == Some("org-1") {
-            seed_entity("org-1");
-        }
-        seeded_fact_with_entity("fact_area", "hub-1", Some("auth"));
-        seeded_fact_with_entity("fact_repo", "hub-1", None);
-        seeded_fact_with_entity("fact_foreign", "other-1", None);
-        let areas_file = checkout.join(".ct-areas.yaml");
-        // json!-built config (m2): entity-id keys are literals, paths are
-        // VALUES — no display()-splicing quoting/backslash hazards.
-        let mut areas_paths = serde_json::Map::new();
-        areas_paths.insert(
-            "hub-1".to_string(),
-            serde_json::Value::String(areas_file.display().to_string()),
-        );
-        let mut wisdom = serde_json::Map::new();
-        wisdom.insert(
-            "areas_paths".to_string(),
-            serde_json::Value::Object(areas_paths),
-        );
-        if let Some(id) = org {
-            wisdom.insert(
-                "org_entity_id".to_string(),
-                serde_json::Value::String(id.to_string()),
-            );
-        }
-        let config =
-            serde_json::json!({ "wisdom": serde_json::Value::Object(wisdom) }).to_string();
-        std::fs::write(
-            std::path::Path::new(&brain_dir).join("config.json"),
-            config,
-        )
-        .unwrap();
-        f(checkout);
-    });
 }
 
 /// The §9.3 SCOPED hit: a `--path=` under the configured checkout matching a

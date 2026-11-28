@@ -478,6 +478,19 @@ enum WisdomCmd {
         #[arg(last = true, group = "activity_target")]
         text: Vec<String>,
     },
+    /// The standing statements for a project (repo hub + company hub) plus a
+    /// covered-topics index. No query, no embedding. Read-only on facts.
+    Brief {
+        #[arg(long)]
+        json: bool,
+        /// Checkout this brief is for. Relative paths are resolved against
+        /// the current directory. Never printed.
+        #[arg(long = "repo-path", default_value = ".")]
+        repo_path: String,
+        /// Output budget in UTF-16 units (600..=8000).
+        #[arg(long = "max-chars", default_value_t = 2200)]
+        max_chars: usize,
+    },
     /// Embed-scheme administration (issue #265 cutover): status / sweep / activate.
     Scheme {
         #[command(subcommand)]
@@ -909,6 +922,11 @@ fn run(cmd: Cmd) -> Result<i32> {
                 };
                 cli_common::wisdom_match_cmd(&target, kind, max, &exclude, json, mode, path.as_deref())
             }
+            WisdomCmd::Brief {
+                json,
+                repo_path,
+                max_chars,
+            } => cli_common::wisdom_brief_cmd(json, &repo_path, max_chars),
             WisdomCmd::Scheme { cmd } => match cmd {
                 SchemeCmd::Status { json } => cli_common::wisdom_scheme_status_cmd(json),
                 SchemeCmd::Sweep { max_batches, json } => {
