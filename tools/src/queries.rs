@@ -446,21 +446,15 @@ pub fn resolve_symbol(conn: &Connection, symbol: &str) -> Result<Option<(i64, St
 // subcommands.
 // ---------------------------------------------------------------------------
 
-/// Shared plumbing for search/code/recall: resolve brain, load the embed
-/// profile, embed + rank via recall_chunks, dedupe, and render.
-///
-/// Returns `Some((conn, chunks))` when there is at least one ranked chunk to
-/// render; `None` for both the empty-query short-circuit and the no-results
-/// case. The connection is returned so the wiki ranking leg in `recall_cmd`
-/// can reuse it instead of reopening the database.
-fn run_query(
+/// Resolve brain, load the embed profile, embed + rank via recall_chunks and
+/// dedupe. Always hands back the read-only connection (even with zero chunks)
+/// so `recall_cmd`'s wiki leg can reuse it and still run when the chunk leg is
+/// empty. The caller must have rejected a blank query.
+fn run_query_conn(
     query: &str,
     k: usize,
     ast_only: bool,
-) -> Result<Option<(rusqlite::Connection, Vec<ScoredChunk>)>> {
-    if query.trim().is_empty() {
-        return Ok(None);
-    }
+) -> Result<(rusqlite::Connection, Vec<ScoredChunk>)> {
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
     let config_path = brain.paths.config_path.clone();
@@ -473,6 +467,24 @@ fn run_query(
         clamp_limit(k),
         ast_only,
     )?);
+    Ok((conn, chunks))
+}
+
+/// Shared plumbing for search/code: [`run_query_conn`] plus the exit-2
+/// short-circuits.
+///
+/// Returns `Some((conn, chunks))` when there is at least one ranked chunk to
+/// render; `None` for both the empty-query short-circuit and the no-results
+/// case.
+fn run_query(
+    query: &str,
+    k: usize,
+    ast_only: bool,
+) -> Result<Option<(rusqlite::Connection, Vec<ScoredChunk>)>> {
+    if query.trim().is_empty() {
+        return Ok(None);
+    }
+    let (conn, chunks) = run_query_conn(query, k, ast_only)?;
     Ok(if chunks.is_empty() {
         None
     } else {
@@ -490,13 +502,19 @@ pub fn code_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
 }
 
 /// `ct recall`: chunk results plus the wiki ranking leg.
+///
+/// Both legs always run. Exit 0 when EITHER has hits (`results` is `[]` when
+/// only wiki hits exist); exit 2 only when BOTH are empty. A blank query exits
+/// 2 before anything runs.
 pub fn recall_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
-    // None means no chunk results (exit 2). The connection is returned so the
-    // wiki ranking leg reuses it instead of reopening the database.
-    let Some((conn, chunks)) = run_query(query, k, false)? else {
+    if query.trim().is_empty() {
         return Ok(EXIT_NO_RESULTS);
-    };
+    }
+    let (conn, chunks) = run_query_conn(query, k, false)?;
     let wiki = rank_wiki_entries(&conn, query, 5)?;
+    if chunks.is_empty() && wiki.is_empty() {
+        return Ok(EXIT_NO_RESULTS);
+    }
     if json_mode {
         print_json(&json!({
             "results": chunks,
