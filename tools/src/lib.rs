@@ -1,5 +1,6 @@
 pub mod cli_common;
 pub mod cmds;
+pub mod delivery_log;
 pub mod drift;
 pub mod graph_reanchor;
 pub mod lock;
