@@ -147,6 +147,11 @@ pub struct WisdomItem {
     /// The area name for area-band items only; absent otherwise (§10.2).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub area: Option<String>,
+    /// Statement kind (`rule|decision|lesson|trap`, from `okf_type` via
+    /// [`kind_for`]); absent for everything else, so untyped facts serialize
+    /// byte-identically to before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -276,6 +281,87 @@ pub fn provenance_for(source_type: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The statement kinds CT surfaces as `kind`: the engine's manifest node types
+/// stored in `okf_type` (no separate column; engine-9x-adoption spec).
+pub const KIND_VOCAB: &[&str] = &["rule", "decision", "lesson", "trap"];
+
+/// `okf_type` -> `kind`: verbatim when in [`KIND_VOCAB`], else `None` (NULL,
+/// the legacy `fact`, `handoff`, `session_recap`, unknown slugs, wrong case).
+pub fn kind_for(okf_type: Option<&str>) -> Option<String> {
+    okf_type
+        .filter(|s| KIND_VOCAB.contains(s))
+        .map(str::to_string)
+}
+
+/// Brief ordering tier for a `kind` (PR-2 consumer): rule/trap 0, decision 1,
+/// lesson 2, anything else (incl. none) 3.
+pub fn kind_tier(okf_type: Option<&str>) -> u8 {
+    match kind_for(okf_type).as_deref() {
+        Some("rule") | Some("trap") => 0,
+        Some("decision") => 1,
+        Some("lesson") => 2,
+        _ => 3,
+    }
+}
+
+/// THE confidence ordinal both recall copies rank by (spec 3.4, owner ruling
+/// OQ-B): `confirmed`, `certain`, `verified` = 3; `inferred` = 2; anything
+/// else (incl. `tentative`, NULL) = 0.
+pub fn confidence_ordinal(confidence: Option<&str>) -> i64 {
+    match confidence {
+        Some("confirmed") | Some("certain") | Some("verified") => 3,
+        Some("inferred") => 2,
+        _ => 0,
+    }
+}
+
+/// Inputs for [`recall_item`]: one wiki row as both recall copies read it.
+#[derive(Debug)]
+pub struct RecallItemInput<'a> {
+    pub id: &'a str,
+    pub entity_id: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub text: Option<&'a str>,
+    pub source_ref: Option<&'a str>,
+    pub confidence: Option<&'a str>,
+    /// Stored `source_type` (filtered through [`provenance_for`]).
+    pub source_type: Option<&'a str>,
+    /// Stored `okf_verified` JSON list (feeds the `verified` label).
+    pub okf_verified: Option<&'a str>,
+    /// Stored `okf_type` (filtered through [`kind_for`]).
+    pub okf_type: Option<&'a str>,
+}
+
+/// The ONE builder of a recall wiki item, shared by the app and CLI/sidecar
+/// copies. Always carries `id, entity_id, title, text, source_ref,
+/// confidence`; adds `source_type` (vocabulary-filtered), `verified` (confirmed
+/// facts only) and `kind` only when present. Infallible: a missing or
+/// malformed label degrades to an absent key.
+pub fn recall_item(input: RecallItemInput) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "id": input.id,
+        "entity_id": input.entity_id,
+        "title": input.title,
+        "text": input.text,
+        "source_ref": input.source_ref,
+        "confidence": input.confidence,
+    });
+    if let Some(label) = provenance_for(input.source_type) {
+        v["source_type"] = serde_json::json!(label);
+    }
+    if let Some(verified) =
+        crate::wiki_graph::verified_label(input.confidence, input.okf_verified)
+    {
+        if let Ok(verified) = serde_json::to_value(verified) {
+            v["verified"] = verified;
+        }
+    }
+    if let Some(kind) = kind_for(input.okf_type) {
+        v["kind"] = serde_json::json!(kind);
+    }
+    v
+}
+
 /// First `MAX_TEXT_CHARS` chars of `text`, cut on a char boundary.
 pub fn truncate_text(text: &str) -> &str {
     match text.char_indices().nth(MAX_TEXT_CHARS) {
@@ -297,6 +383,9 @@ pub(crate) has_valid_to: bool,
     /// `e.area` ONLY when this holds — pre-V30 degraded shapes keep today's
     /// column list exactly.
     pub(crate) has_area: bool,
+    /// `okf_type` column present (the statement-kind store). The gated SELECT
+    /// and `load_item` read it ONLY when this holds, like `has_area`.
+    pub(crate) has_okf_type: bool,
     /// Events-table `forgotten_at` AND `related_entry_id` columns present
     /// (engine v19; issue #378 D2) — the arm references both.
     pub(crate) has_forgotten_at: bool,
@@ -306,6 +395,14 @@ pub(crate) has_valid_to: bool,
     /// row filter, and — on the production path — the query prefix) shares
     /// one resolution.
     scheme: Option<Scheme>,
+}
+
+impl Temporal {
+    /// Whether any temporal arm references `:now` (bind it only then:
+    /// rusqlite rejects an unused named parameter).
+    pub(crate) fn needs_now(&self) -> bool {
+        self.has_superseded_by || self.has_valid_to
+    }
 }
 
 /// Column probes ONLY — no scheme resolution. [`temporal_columns`] resolves
@@ -321,16 +418,89 @@ pub(crate) has_valid_to: bool,
 pub(crate) fn temporal_columns_shape_only(conn: &Connection) -> Result<Temporal> {
     let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
     let event_cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")?;
-    Ok(Temporal {
-        has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
+    Ok(temporal_from_snapshot(&cols, &event_cols))
+}
+
+/// Builds the shape-only [`Temporal`] (no scheme) from already-probed column
+/// lists, so one `existing_columns` snapshot can feed both the arms and the
+/// recall column flags ([`entry_recall_arms`]).
+fn temporal_from_snapshot(cols: &[String], event_cols: &[String]) -> Temporal {
+    Temporal {
+        // Both columns: the arm reads `superseded_by` AND `superseded_at`
+        // (V24 adds them one ALTER at a time; a half-migrated brain omits it).
+        has_superseded_by: cols.iter().any(|c| c == "superseded_by")
+            && cols.iter().any(|c| c == "superseded_at"),
         has_valid_to: cols.iter().any(|c| c == "valid_to"),
         has_area: cols.iter().any(|c| c == "area"),
+        has_okf_type: cols.iter().any(|c| c == "okf_type"),
         // Both columns: the arm's subqueries reference `related_entry_id`
         // (same guard as the okf_ddl index).
         has_forgotten_at: event_cols.iter().any(|c| c == "forgotten_at")
             && event_cols.iter().any(|c| c == "related_entry_id"),
         scheme: None,
+    }
+}
+
+/// What a recall copy needs from the shared eligibility predicate: the arm SQL
+/// (starts with ` AND`; empty on fully degraded shapes), whether it references
+/// `:now` (bind it only then: rusqlite rejects an unused named parameter), and
+/// the column-presence flags the recall SELECT needs, all from ONE column
+/// snapshot.
+#[derive(Debug)]
+pub struct RecallArms {
+    pub sql: String,
+    pub needs_now: bool,
+    pub has_source_type: bool,
+    pub has_okf_type: bool,
+    pub has_okf_verified: bool,
+}
+
+/// Public, connection-taking export of [`temporal_arms_sql`] for crates that
+/// cannot see `pub(crate)` items (the tools crate), in the style of
+/// [`entry_not_forgotten_arm`]. Recall's eligibility is `deleted_at IS NULL`
+/// plus these arms; it omits the live gate's embedding/scheme arms. Probes
+/// shape-only (a corrupt `wisdom_active_scheme` must not fail a read that uses
+/// no embeddings). `existing_columns` swallows row errors, so a probe lacking
+/// `id` is an error here: a failed probe fails closed instead of degrading to
+/// "no columns".
+pub fn entry_recall_arms(conn: &Connection) -> Result<RecallArms> {
+    let cols = strict_columns(conn, "llm_wiki_entries")?;
+    anyhow::ensure!(
+        cols.iter().any(|c| c == "id"),
+        "entry_recall_arms: llm_wiki_entries column probe returned no `id` column"
+    );
+    let event_cols = strict_columns(conn, "llm_wiki_events")?;
+    let t = temporal_from_snapshot(&cols, &event_cols);
+    Ok(RecallArms {
+        sql: temporal_arms_sql(&t),
+        needs_now: t.needs_now(),
+        has_source_type: cols.iter().any(|c| c == "source_type"),
+        has_okf_type: t.has_okf_type,
+        has_okf_verified: cols.iter().any(|c| c == "okf_verified"),
     })
+}
+
+/// Column probe that fails closed: unlike `existing_columns` (which swallows
+/// row errors, reading them as "column absent"), a row error propagates.
+fn strict_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    anyhow::ensure!(
+        table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "strict_columns: bad table name"
+    );
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(cols)
+}
+
+/// Reads an `okf_type` cell: only TEXT counts; NULL/BLOB/numeric read as
+/// absent (so a wrongly typed cell never drops the row).
+pub fn okf_type_text(v: Option<rusqlite::types::Value>) -> Option<String> {
+    match v {
+        Some(rusqlite::types::Value::Text(t)) => Some(t),
+        _ => None,
+    }
 }
 
 /// Column probes plus the call's ONE scheme resolution. `declared` is a
@@ -346,14 +516,8 @@ pub(crate) fn temporal_columns(conn: &Connection, declared: Option<Scheme>) -> R
     let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
     let event_cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")?;
     Ok(Temporal {
-        has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
-        has_valid_to: cols.iter().any(|c| c == "valid_to"),
-        has_area: cols.iter().any(|c| c == "area"),
-        // Both columns: the arm's subqueries reference `related_entry_id`
-        // (same guard as the okf_ddl index).
-        has_forgotten_at: event_cols.iter().any(|c| c == "forgotten_at")
-            && event_cols.iter().any(|c| c == "related_entry_id"),
         scheme,
+        ..temporal_from_snapshot(&cols, &event_cols)
     })
 }
 
@@ -506,6 +670,7 @@ type CandidateRow = (
     Option<String>,
     Option<Vec<u8>>,
     Option<String>,
+    Option<String>,
 );
 
 /// The SCOPED delivery bindings (spec §9.2): the repo group (survivor +
@@ -620,6 +785,17 @@ pub(crate) fn entry_eligibility_where(t: &Temporal) -> String {
     // future stay eligible" — and v1's behavior (superseded rows never
     // surface once the supersession has taken effect) pin the OPPOSITE
     // comparison: eligible iff no supersession is in effect yet.
+    sql.push_str(&temporal_arms_sql(t));
+    sql
+}
+
+/// The three temporal arms of the eligibility predicate, in order: superseded,
+/// valid_to, forgotten (via [`forgotten_entry_arm`]). Each is shape-conditional
+/// (degraded pre-migration tables drop only that arm). Shared by
+/// [`entry_eligibility_where`] and the recall copies ([`entry_recall_arms`]) so
+/// the arm text lives once. Aliases `e.` for `llm_wiki_entries`; binds `:now`.
+pub(crate) fn temporal_arms_sql(t: &Temporal) -> String {
+    let mut sql = String::new();
     if t.has_superseded_by {
         sql.push_str(" AND (e.superseded_by IS NULL OR e.superseded_at > :now)");
     }
@@ -725,7 +901,7 @@ pub(crate) fn eligible_entry_ids(
     let where_sql = entry_eligibility_where(t);
     let sql = format!("SELECT e.id FROM llm_wiki_entries e WHERE {where_sql}");
     let mut stmt = conn.prepare(&sql)?;
-    let rows = if t.has_superseded_by || t.has_valid_to {
+    let rows = if t.needs_now() {
         // Only the temporal arms reference :now — on a shape with neither
         // column, binding an unused named param is a rusqlite error.
         stmt.query_map(rusqlite::named_params! { ":now": now_ms }, |r| {
@@ -775,6 +951,17 @@ fn gated_entries(
     } else {
         sql
     };
+    // Statement kind (`okf_type`): appended LAST, only when the column exists,
+    // so the index math below (`6 + has_area`) stays valid and degraded shapes
+    // keep today's SQL.
+    let sql = if temporal.has_okf_type {
+        let projected =
+            sql.replacen(" FROM llm_wiki_entries e", ", e.okf_type FROM llm_wiki_entries e", 1);
+        debug_assert!(projected.contains("e.okf_type"), "okf_type projection not applied");
+        projected
+    } else {
+        sql
+    };
     let mut sql = format!("{sql}{}", entry_eligibility_where(temporal));
     if let Some(ids) = id_filter {
         if ids.is_empty() {
@@ -808,6 +995,13 @@ fn gated_entries(
         } else {
             None
         };
+        let okf_type = if temporal.has_okf_type {
+            okf_type_text(r.get::<_, Option<rusqlite::types::Value>>(
+                6 + temporal.has_area as usize,
+            )?)
+        } else {
+            None
+        };
         Ok((
             r.get(0)?,
             r.get(1)?,
@@ -816,13 +1010,14 @@ fn gated_entries(
             r.get(4)?,
             r.get(5)?,
             area,
+            okf_type,
         ))
     };
     // The named `:band_N` bindings must be bound in BOTH execute branches:
     // a bare `?` bound in one branch only is a runtime parameter-count error
     // on the SCOPED call, invisible to every byte pin (tier-3 r5 M1).
     let mut named_params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
-    if temporal.has_superseded_by || temporal.has_valid_to {
+    if temporal.needs_now() {
         named_params.push((":now", &now_ms));
     }
     if let Some(bp) = &band_params {
@@ -852,7 +1047,7 @@ fn gated_entries(
         )
     });
     for row in rows {
-        let (id, entity_id, title, body, source_type, blob, row_area) = match row {
+        let (id, entity_id, title, body, source_type, blob, row_area, okf_type) = match row {
             Ok(row) => row,
             Err(e) => {
                 // One malformed row never fails the call (rank_wiki_entries rule).
@@ -920,6 +1115,7 @@ fn gated_entries(
                 provenance: provenance_for(source_type.as_deref()),
                 band,
                 area: area_out,
+                kind: kind_for(okf_type.as_deref()),
             },
         ));
     }
@@ -1690,7 +1886,7 @@ fn find_corrections(
             out[i].supersedes.push(old.clone());
             continue;
         }
-        let Some(mut item) = load_item(conn, &head)? else {
+        let Some(mut item) = load_item(conn, &head, temporal.has_okf_type)? else {
             continue;
         };
         item.supersedes.push(old.clone());
@@ -1755,16 +1951,28 @@ fn resolve_head(
     Ok(None) // depth exceeded
 }
 
-fn load_item(conn: &Connection, id: &str) -> Result<Option<WisdomItem>> {
-    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
-        .query_row(
-            "SELECT title, body, source_type FROM llm_wiki_entries
-             WHERE id = ?1 AND deleted_at IS NULL",
-            params![id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
+/// `(title, body, source_type, okf_type)` as `load_item` reads them.
+type LoadedItemRow = (Option<String>, Option<String>, Option<String>, Option<String>);
+
+fn load_item(conn: &Connection, id: &str, has_okf_type: bool) -> Result<Option<WisdomItem>> {
+    // `okf_type` is selected only when the shape has it (probed once by the
+    // caller's `Temporal`; no per-correction PRAGMA).
+    let kind_col = if has_okf_type { "okf_type" } else { "NULL" };
+    let sql = format!(
+        "SELECT title, body, source_type, {kind_col} FROM llm_wiki_entries
+         WHERE id = ?1 AND deleted_at IS NULL"
+    );
+    let row: Option<LoadedItemRow> = conn
+        .query_row(&sql, params![id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                okf_type_text(r.get::<_, Option<rusqlite::types::Value>>(3)?),
+            ))
+        })
         .optional()?;
-    Ok(row.and_then(|(title, body, source_type)| {
+    Ok(row.and_then(|(title, body, source_type, okf_type)| {
         Some(WisdomItem {
             id: id.to_string(),
             title: title?,
@@ -1774,6 +1982,7 @@ fn load_item(conn: &Connection, id: &str) -> Result<Option<WisdomItem>> {
             provenance: provenance_for(source_type.as_deref()),
             band: None,
             area: None,
+            kind: kind_for(okf_type.as_deref()),
         })
     }))
 }
@@ -4061,5 +4270,337 @@ mod tests {
     #[test]
     fn message_v1_stub_floor_exists_deviation_guard() {
         assert!(gate_floor(TS_KEY).is_some());
+    }
+    /// Golden-pin shapes for `entry_eligibility_where` (recall-eligibility
+    /// Task 1). One helper builds every `Temporal` so the pin and the
+    /// `temporal_arms_sql` suffix test share the same shape table.
+    fn pin_shapes() -> Vec<(&'static str, Temporal)> {
+        let t = |sup: bool, vt: bool, fg: bool, scheme: Option<Scheme>| Temporal {
+            has_superseded_by: sup,
+            has_valid_to: vt,
+            has_area: false,
+            has_okf_type: false,
+            has_forgotten_at: fg,
+            scheme,
+        };
+        vec![
+            ("all", t(true, true, true, None)),
+            ("no_superseded", t(false, true, true, None)),
+            ("no_valid_to", t(true, false, true, None)),
+            ("neither", t(false, false, true, None)),
+            ("no_forgotten", t(true, true, false, None)),
+            ("bare", t(false, false, false, None)),
+            ("scheme_instr1", t(true, true, true, Some(Scheme::Instr1))),
+        ]
+    }
+
+    /// Goldens captured from the UNMODIFIED function before the
+    /// `temporal_arms_sql` refactor (recall-eligibility Task 1).
+    const PINNED_ELIGIBILITY_WHERE: &[(&str, &str)] = &[
+        (
+            "all",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND (e.superseded_by IS NULL OR e.superseded_at > :now) AND (e.valid_to IS NULL OR e.valid_to > :now) AND (e.source_type = 'user_stated' OR e.id = e.entity_id OR e.id GLOB 'tier_*' OR e.entity_id GLOB 'tier_*' OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) OR EXISTS (SELECT 1 FROM llm_wiki_events le WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))",
+        ),
+        (
+            "no_superseded",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND (e.valid_to IS NULL OR e.valid_to > :now) AND (e.source_type = 'user_stated' OR e.id = e.entity_id OR e.id GLOB 'tier_*' OR e.entity_id GLOB 'tier_*' OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) OR EXISTS (SELECT 1 FROM llm_wiki_events le WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))",
+        ),
+        (
+            "no_valid_to",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND (e.superseded_by IS NULL OR e.superseded_at > :now) AND (e.source_type = 'user_stated' OR e.id = e.entity_id OR e.id GLOB 'tier_*' OR e.entity_id GLOB 'tier_*' OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) OR EXISTS (SELECT 1 FROM llm_wiki_events le WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))",
+        ),
+        (
+            "neither",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND (e.source_type = 'user_stated' OR e.id = e.entity_id OR e.id GLOB 'tier_*' OR e.entity_id GLOB 'tier_*' OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) OR EXISTS (SELECT 1 FROM llm_wiki_events le WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))",
+        ),
+        (
+            "no_forgotten",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND (e.superseded_by IS NULL OR e.superseded_at > :now) AND (e.valid_to IS NULL OR e.valid_to > :now)",
+        ),
+        (
+            "bare",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL",
+        ),
+        (
+            "scheme_instr1",
+            "e.deleted_at IS NULL AND e.title IS NOT NULL AND e.body IS NOT NULL AND e.embedding_blob IS NOT NULL AND embed_scheme = 'instr1' AND (e.superseded_by IS NULL OR e.superseded_at > :now) AND (e.valid_to IS NULL OR e.valid_to > :now) AND (e.source_type = 'user_stated' OR e.id = e.entity_id OR e.id GLOB 'tier_*' OR e.entity_id GLOB 'tier_*' OR NOT EXISTS (SELECT 1 FROM llm_wiki_events fe WHERE fe.related_entry_id = e.id AND fe.forgotten_at IS NOT NULL) OR EXISTS (SELECT 1 FROM llm_wiki_events le WHERE le.related_entry_id = e.id AND le.forgotten_at IS NULL))",
+        ),
+    ];
+
+    #[test]
+    fn entry_eligibility_where_sql_is_byte_pinned() {
+        let shapes = pin_shapes();
+        assert_eq!(shapes.len(), PINNED_ELIGIBILITY_WHERE.len());
+        for ((name, t), (gname, golden)) in shapes.iter().zip(PINNED_ELIGIBILITY_WHERE) {
+            assert_eq!(name, gname);
+            assert_eq!(entry_eligibility_where(t), *golden, "shape {name}");
+        }
+    }
+
+    #[test]
+    fn temporal_arms_sql_is_the_suffix_of_the_eligibility_where() {
+        for (name, t) in pin_shapes() {
+            assert!(
+                entry_eligibility_where(&t).ends_with(&temporal_arms_sql(&t)),
+                "shape {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn entry_recall_arms_probe_shapes() {
+        // Full shape: all three arms, flags all present.
+        let conn = open_in_memory().unwrap();
+        let a = entry_recall_arms(&conn).unwrap();
+        assert!(a.needs_now);
+        assert!(a.has_source_type && a.has_okf_type && a.has_okf_verified);
+        assert!(a.sql.starts_with(
+            " AND (e.superseded_by IS NULL OR e.superseded_at > :now) \
+             AND (e.valid_to IS NULL OR e.valid_to > :now) AND (e.source_type = 'user_stated'"
+        ));
+        let t = temporal_columns_shape_only(&conn).unwrap();
+        assert_eq!(a.sql, temporal_arms_sql(&t));
+
+        // Degraded: no superseded_by/superseded_at/valid_to, no events table
+        // columns, no okf columns -> empty SQL, no `:now`, flags false except
+        // the one column present.
+        let d = Connection::open_in_memory().unwrap();
+        d.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT, source_type TEXT);
+             CREATE TABLE llm_wiki_events (id TEXT);",
+        )
+        .unwrap();
+        let a = entry_recall_arms(&d).unwrap();
+        assert_eq!(a.sql, "");
+        assert!(!a.needs_now);
+        assert!(a.has_source_type);
+        assert!(!a.has_okf_type && !a.has_okf_verified);
+
+        // Superseded only: needs_now, only that arm.
+        let s1 = Connection::open_in_memory().unwrap();
+        s1.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT, superseded_by TEXT, superseded_at INTEGER);
+             CREATE TABLE llm_wiki_events (id TEXT);",
+        )
+        .unwrap();
+        let a = entry_recall_arms(&s1).unwrap();
+        assert_eq!(
+            a.sql,
+            " AND (e.superseded_by IS NULL OR e.superseded_at > :now)"
+        );
+        assert!(a.needs_now);
+        assert!(!a.has_source_type);
+    }
+
+    #[test]
+    fn half_migrated_superseded_by_without_superseded_at_omits_the_arm() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT, superseded_by TEXT);
+             CREATE TABLE llm_wiki_events (id TEXT);",
+        )
+        .unwrap();
+        let a = entry_recall_arms(&c).unwrap();
+        assert_eq!(a.sql, "");
+        assert!(!a.needs_now);
+    }
+
+    #[test]
+    fn entry_recall_arms_errs_without_id_column() {
+        // A failed/empty probe must fail closed, not degrade to "no columns".
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(entry_recall_arms(&conn).is_err());
+        conn.execute_batch("CREATE TABLE llm_wiki_entries (entity_id TEXT);")
+            .unwrap();
+        assert!(entry_recall_arms(&conn).is_err());
+    }
+
+    #[test]
+    fn kind_for_normalizes() {
+        for k in ["rule", "decision", "lesson", "trap"] {
+            assert_eq!(kind_for(Some(k)).as_deref(), Some(k));
+        }
+        for bad in [None, Some("fact"), Some("handoff"), Some("session_recap"), Some("Rule"), Some(""), Some("zebra")] {
+            assert_eq!(kind_for(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn kind_tier_orders_kinds() {
+        assert_eq!(kind_tier(Some("rule")), 0);
+        assert_eq!(kind_tier(Some("trap")), 0);
+        assert_eq!(kind_tier(Some("decision")), 1);
+        assert_eq!(kind_tier(Some("lesson")), 2);
+        for other in [None, Some("fact"), Some("Rule"), Some("zebra")] {
+            assert_eq!(kind_tier(other), 3);
+        }
+    }
+
+    #[test]
+    fn confidence_ordinal_table() {
+        // Spec 3.4 / OQ-B: confirmed, certain, verified = 3; inferred = 2;
+        // everything else 0.
+        assert_eq!(confidence_ordinal(Some("confirmed")), 3);
+        assert_eq!(confidence_ordinal(Some("certain")), 3);
+        assert_eq!(confidence_ordinal(Some("verified")), 3);
+        assert_eq!(confidence_ordinal(Some("inferred")), 2);
+        assert_eq!(confidence_ordinal(Some("tentative")), 0);
+        assert_eq!(confidence_ordinal(Some("zebra")), 0);
+        assert_eq!(confidence_ordinal(None), 0);
+    }
+
+    fn base_input() -> RecallItemInput<'static> {
+        RecallItemInput {
+            id: "w1",
+            entity_id: Some("e1"),
+            title: Some("T"),
+            text: Some("B"),
+            source_ref: None,
+            confidence: Some("inferred"),
+            source_type: None,
+            okf_verified: None,
+            okf_type: None,
+        }
+    }
+
+    #[test]
+    fn recall_item_fields() {
+        // Minimal item: the six base keys only (absent labels = absent keys).
+        let v = recall_item(base_input());
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            ["confidence", "entity_id", "id", "source_ref", "text", "title"]
+        );
+        assert!(v["source_ref"].is_null());
+
+        // Provenance in vocabulary is emitted; out-of-vocabulary omitted.
+        let v = recall_item(RecallItemInput { source_type: Some("user_stated"), ..base_input() });
+        assert_eq!(v["source_type"], "user_stated");
+        let v = recall_item(RecallItemInput { source_type: Some("bogus"), ..base_input() });
+        assert!(v.get("source_type").is_none());
+
+        // verified: confirmed facts only.
+        let list = r#"[{"by":"human:t","at":"2026-11-27T00:00:00Z"}]"#;
+        let v = recall_item(RecallItemInput {
+            confidence: Some("confirmed"),
+            okf_verified: Some(list),
+            ..base_input()
+        });
+        assert_eq!(v["verified"]["by"], "human:t");
+        assert_eq!(v["verified"]["at"], "2026-11-27T00:00:00Z");
+        let v = recall_item(RecallItemInput { okf_verified: Some(list), ..base_input() });
+        assert!(v.get("verified").is_none(), "inferred never carries verified");
+
+        // kind: vocabulary only.
+        let v = recall_item(RecallItemInput { okf_type: Some("rule"), ..base_input() });
+        assert_eq!(v["kind"], "rule");
+        for bad in ["fact", "Rule", "zebra"] {
+            let v = recall_item(RecallItemInput { okf_type: Some(bad), ..base_input() });
+            assert!(v.get("kind").is_none(), "{bad}");
+        }
+    }
+
+    fn set_okf_type(conn: &Connection, id: &str, okf_type: Option<&str>) {
+        conn.execute(
+            "UPDATE llm_wiki_entries SET okf_type = ?2 WHERE id = ?1",
+            params![id, okf_type],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn wisdom_item_kind_rule_serializes() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "typed", "ent", &Q);
+        set_okf_type(&conn, "typed", Some("rule"));
+        let m = run(&conn, Some(0.5), 5, &[]);
+        assert_eq!(m.entries[0].kind.as_deref(), Some("rule"));
+        let json = serde_json::to_string(&m.entries[0]).unwrap();
+        assert!(json.contains(r#""kind":"rule""#), "{json}");
+    }
+
+    #[test]
+    fn wisdom_item_kind_absent_for_null_fact_unknown() {
+        let conn = open_in_memory().unwrap();
+        for (id, t) in [
+            ("n", None),
+            ("f", Some("fact")),
+            ("u", Some("zebra")),
+            ("c", Some("Rule")),
+        ] {
+            seed(&conn, id, "ent", &Q);
+            set_okf_type(&conn, id, t);
+        }
+        let m = run(&conn, Some(0.5), 10, &[]);
+        assert_eq!(m.entries.len(), 4);
+        for e in &m.entries {
+            assert_eq!(e.kind, None, "{}", e.id);
+            assert!(!serde_json::to_string(e).unwrap().contains("\"kind\""));
+        }
+    }
+
+    #[test]
+    fn blob_okf_type_row_still_matches_without_kind() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "b", "ent", &Q);
+        conn.execute("UPDATE llm_wiki_entries SET okf_type = x'0102' WHERE id = 'b'", [])
+            .unwrap();
+        let m = run(&conn, Some(0.5), 5, &[]);
+        assert_eq!(ids(&m.entries), vec!["b"]);
+        assert_eq!(m.entries[0].kind, None);
+    }
+
+    #[test]
+    fn blob_okf_type_correction_head_loads_without_kind() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "old", "ent", &Q);
+        seed(&conn, "new", "ent", &Q);
+        supersede(&conn, "old", "new");
+        conn.execute("UPDATE llm_wiki_entries SET okf_type = x'0102' WHERE id = 'new'", [])
+            .unwrap();
+        let m = run(&conn, Some(0.5), 5, &["old"]);
+        assert_eq!(ids(&m.corrections), vec!["new"]);
+        assert_eq!(m.corrections[0].kind, None);
+    }
+
+    #[test]
+    fn correction_item_carries_kind() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "old", "ent", &Q);
+        seed(&conn, "new", "ent", &Q);
+        supersede(&conn, "old", "new");
+        set_okf_type(&conn, "new", Some("decision"));
+        let m = run(&conn, Some(0.5), 5, &["old"]);
+        assert_eq!(ids(&m.corrections), vec!["new"]);
+        assert_eq!(m.corrections[0].kind.as_deref(), Some("decision"));
+        // A legacy `fact` head carries no kind.
+        set_okf_type(&conn, "new", Some("fact"));
+        let m = run(&conn, Some(0.5), 5, &["old"]);
+        assert_eq!(m.corrections[0].kind, None);
+    }
+
+    #[test]
+    fn degraded_shape_without_okf_type_still_matches() {
+        // Pre-migration table: no okf_type (and no temporal/area columns).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_wiki_entries (
+                id TEXT PRIMARY KEY, entity_id TEXT, title TEXT, body TEXT,
+                source_type TEXT, embedding_blob BLOB, deleted_at INTEGER);
+             CREATE TABLE llm_wiki_events (id TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, source_type, embedding_blob)
+             VALUES ('d1', 'ent', 'T', 'B', 'librarian_inferred', ?1)",
+            params![blob(&Q)],
+        )
+        .unwrap();
+        let m = run(&conn, Some(0.5), 5, &[]);
+        assert_eq!(ids(&m.entries), vec!["d1"]);
+        assert_eq!(m.entries[0].kind, None);
     }
 }

@@ -724,8 +724,13 @@ mod tests {
             "all rows must be returned despite mixed types"
         );
         let ids: Vec<&str> = ranked.iter().map(|v| v["id"].as_str().unwrap()).collect();
-        // Ordered desc by NUMERIC updated_at (not lexicographic); ties broken
-        // by confidence ('certain' first), NULL ranks as 0.
+        // Order is (overlap desc, confidence ordinal desc, NUMERIC updated_at
+        // desc, id asc), derived from the spec 3.4 table (confirmed, certain,
+        // verified = 3; inferred = 2; other = 0). All three rows match the one
+        // term once, so overlap ties. `middle` is `verified` -> ordinal 3, so
+        // it leads regardless of its unparseable updated_at (coerces to 0).
+        // `newest` and `unknown` are both `inferred` (2); the tie falls to
+        // updated_at: 1756000000 beats NULL (0). Final: middle, newest, unknown.
         assert_eq!(ids, vec!["middle", "newest", "unknown"]);
     }
 }

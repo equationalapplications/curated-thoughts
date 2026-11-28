@@ -171,13 +171,30 @@ pub fn coerce_updated_at(value: Option<rusqlite::types::Value>) -> i64 {
 /// has no embeddings populated yet, so rank entries by title/body keyword
 /// overlap with the query terms (BM25-lite); when the table is empty this leg
 /// returns [] without error. Candidates are aggregated across all query terms,
-/// ranked by term overlap then confidence/updated_at, and truncated to
-/// limit_wiki only at the end.
+/// ranked by (term overlap desc, shared confidence ordinal desc, `updated_at`
+/// desc, `id` asc) and truncated to limit_wiki only at the end.
+///
+/// Eligibility is `deleted_at IS NULL` plus the shared temporal arms
+/// (`entry_recall_arms`: not superseded, not expired, not forgotten); items are
+/// built by the shared `recall_item` (provenance, verified, kind labels).
 pub fn rank_wiki_entries(
     conn: &Connection,
     query: &str,
     limit_wiki: usize,
 ) -> Result<Vec<serde_json::Value>> {
+    rank_wiki_entries_at(conn, query, limit_wiki, crate::cmds::now_ms())
+}
+
+/// Clock-injectable core of [`rank_wiki_entries`]: `now_ms` (epoch ms) drives
+/// the superseded/valid_to arms so tests control it.
+pub fn rank_wiki_entries_at(
+    conn: &Connection,
+    query: &str,
+    limit_wiki: usize,
+    now_ms: i64,
+) -> Result<Vec<serde_json::Value>> {
+    use tauri_app_lib::wisdom_match::{confidence_ordinal, okf_type_text, recall_item, RecallItemInput};
+
     // Keep terms of any length >= 2; short technical terms ("sql", "rag")
     // are often the most meaningful.
     let terms: Vec<String> = query
@@ -189,21 +206,34 @@ pub fn rank_wiki_entries(
         return Ok(Vec::new());
     }
 
-    // Issue #378 ruling #1: shared forgotten arm (aliases `e.`), fail-closed.
-    let forgotten_arm = tauri_app_lib::wisdom_match::entry_not_forgotten_arm(conn)?;
+    // One shared, fail-closed probe: arm SQL + which optional columns exist.
+    // The brain may be a pre-migration shape (the CLI opens read-only without
+    // migrating), so an absent column is selected as NULL, never referenced.
+    let arms = tauri_app_lib::wisdom_match::entry_recall_arms(conn)?;
+    let col = |present: bool, name: &str| {
+        if present {
+            format!("e.{name}")
+        } else {
+            format!("NULL AS {name}")
+        }
+    };
     let mut stmt = conn.prepare(&format!(
         "SELECT e.id, e.entity_id, e.title, e.body, e.source_ref, e.confidence,
-                e.updated_at
+                e.updated_at, {source_type}, {okf_verified}, {okf_type}
          FROM llm_wiki_entries e
-         WHERE e.deleted_at IS NULL{forgotten_arm}
-           AND (e.title LIKE '%' || ?1 || '%'
-                OR e.body LIKE '%' || ?1 || '%')"
+         WHERE e.deleted_at IS NULL{arms}
+           AND (e.title LIKE '%' || :term || '%'
+                OR e.body LIKE '%' || :term || '%')",
+        source_type = col(arms.has_source_type, "source_type"),
+        okf_verified = col(arms.has_okf_verified, "okf_verified"),
+        okf_type = col(arms.has_okf_type, "okf_type"),
+        arms = arms.sql,
     ))?;
-    // id -> (overlap_count, json_value, confidence_rank, updated_at)
+    // id -> (overlap_count, json_value, confidence_ordinal, updated_at)
     use std::collections::HashMap;
-    let mut candidates: HashMap<String, (usize, serde_json::Value, String, i64)> = HashMap::new();
+    let mut candidates: HashMap<String, (usize, serde_json::Value, i64, i64)> = HashMap::new();
     for term in &terms {
-        let rows = stmt.query_map(rusqlite::params![term], |row| {
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok((
                 row.get::<_, String>(0)?,                         // id (TEXT PK)
                 row.get::<_, Option<String>>(1)?,                 // entity_id
@@ -212,12 +242,25 @@ pub fn rank_wiki_entries(
                 row.get::<_, Option<String>>(4)?,                 // source_ref
                 row.get::<_, Option<String>>(5)?,                 // confidence (TEXT)
                 row.get::<_, Option<rusqlite::types::Value>>(6)?, // updated_at
+                row.get::<_, Option<String>>(7)?,                 // source_type
+                row.get::<_, Option<String>>(8)?,                 // okf_verified (TEXT json)
+                okf_type_text(row.get::<_, Option<rusqlite::types::Value>>(9)?), // okf_type (TEXT only)
             ))
-        })?;
+        };
+        // `:now` is bound only when an arm references it (rusqlite rejects an
+        // unused named parameter).
+        let rows = if arms.needs_now {
+            stmt.query_map(
+                rusqlite::named_params! {":term": term, ":now": now_ms},
+                map_row,
+            )?
+        } else {
+            stmt.query_map(rusqlite::named_params! {":term": term}, map_row)?
+        };
         for row in rows {
             // A single malformed row must never abort the whole tool call:
             // log it and skip.
-            let (id, entity_id, title, text, source_ref, confidence, updated_at_raw) = match row {
+            let (id, entity_id, title, text, source_ref, confidence, updated_at_raw, source_type, okf_verified, okf_type) = match row {
                 Ok(row) => row,
                 Err(e) => {
                     eprintln!("curated-thoughts-mcp: skipping unreadable wiki row: {e}");
@@ -226,17 +269,18 @@ pub fn rank_wiki_entries(
             };
             let updated_at = coerce_updated_at(updated_at_raw);
             let entry = candidates.entry(id.clone()).or_insert_with(|| {
-                let v = serde_json::json!({
-                    "id": id,
-                    "entity_id": entity_id,
-                    "title": title,
-                    "text": text,
-                    "source_ref": source_ref,
-                    "confidence": confidence,
+                let v = recall_item(RecallItemInput {
+                    id: &id,
+                    entity_id: entity_id.as_deref(),
+                    title: title.as_deref(),
+                    text: text.as_deref(),
+                    source_ref: source_ref.as_deref(),
+                    confidence: confidence.as_deref(),
+                    source_type: source_type.as_deref(),
+                    okf_verified: okf_verified.as_deref(),
+                    okf_type: okf_type.as_deref(),
                 });
-                // Higher confidence string sorts later; rank key is
-                // inverted for descending sort convenience.
-                (0, v, confidence.clone().unwrap_or_default(), updated_at)
+                (0, v, confidence_ordinal(confidence.as_deref()), updated_at)
             });
             entry.0 += 1; // one overlap point per matching term
         }
@@ -245,8 +289,9 @@ pub fn rank_wiki_entries(
     ranked.sort_by(|a, b| {
         b.1 .0
             .cmp(&a.1 .0) // term overlap desc
-            .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence desc
+            .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence ordinal desc
             .then_with(|| b.1 .3.cmp(&a.1 .3)) // updated_at desc (numeric)
+            .then_with(|| a.0.cmp(&b.0)) // id asc (deterministic, OQ-C)
     });
     Ok(ranked
         .into_iter()
@@ -401,21 +446,15 @@ pub fn resolve_symbol(conn: &Connection, symbol: &str) -> Result<Option<(i64, St
 // subcommands.
 // ---------------------------------------------------------------------------
 
-/// Shared plumbing for search/code/recall: resolve brain, load the embed
-/// profile, embed + rank via recall_chunks, dedupe, and render.
-///
-/// Returns `Some((conn, chunks))` when there is at least one ranked chunk to
-/// render; `None` for both the empty-query short-circuit and the no-results
-/// case. The connection is returned so the wiki ranking leg in `recall_cmd`
-/// can reuse it instead of reopening the database.
-fn run_query(
+/// Resolve brain, load the embed profile, embed + rank via recall_chunks and
+/// dedupe. Always hands back the read-only connection (even with zero chunks)
+/// so `recall_cmd`'s wiki leg can reuse it and still run when the chunk leg is
+/// empty. The caller must have rejected a blank query.
+fn run_query_conn(
     query: &str,
     k: usize,
     ast_only: bool,
-) -> Result<Option<(rusqlite::Connection, Vec<ScoredChunk>)>> {
-    if query.trim().is_empty() {
-        return Ok(None);
-    }
+) -> Result<(rusqlite::Connection, Vec<ScoredChunk>)> {
     let brain = resolve()?;
     let conn = open_ro(&brain)?;
     let config_path = brain.paths.config_path.clone();
@@ -428,6 +467,24 @@ fn run_query(
         clamp_limit(k),
         ast_only,
     )?);
+    Ok((conn, chunks))
+}
+
+/// Shared plumbing for search/code: [`run_query_conn`] plus the exit-2
+/// short-circuits.
+///
+/// Returns `Some((conn, chunks))` when there is at least one ranked chunk to
+/// render; `None` for both the empty-query short-circuit and the no-results
+/// case.
+fn run_query(
+    query: &str,
+    k: usize,
+    ast_only: bool,
+) -> Result<Option<(rusqlite::Connection, Vec<ScoredChunk>)>> {
+    if query.trim().is_empty() {
+        return Ok(None);
+    }
+    let (conn, chunks) = run_query_conn(query, k, ast_only)?;
     Ok(if chunks.is_empty() {
         None
     } else {
@@ -445,13 +502,19 @@ pub fn code_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
 }
 
 /// `ct recall`: chunk results plus the wiki ranking leg.
+///
+/// Both legs always run. Exit 0 when EITHER has hits (`results` is `[]` when
+/// only wiki hits exist); exit 2 only when BOTH are empty. A blank query exits
+/// 2 before anything runs.
 pub fn recall_cmd(query: &str, k: usize, json_mode: bool) -> Result<i32> {
-    // None means no chunk results (exit 2). The connection is returned so the
-    // wiki ranking leg reuses it instead of reopening the database.
-    let Some((conn, chunks)) = run_query(query, k, false)? else {
+    if query.trim().is_empty() {
         return Ok(EXIT_NO_RESULTS);
-    };
+    }
+    let (conn, chunks) = run_query_conn(query, k, false)?;
     let wiki = rank_wiki_entries(&conn, query, 5)?;
+    if chunks.is_empty() && wiki.is_empty() {
+        return Ok(EXIT_NO_RESULTS);
+    }
     if json_mode {
         print_json(&json!({
             "results": chunks,
