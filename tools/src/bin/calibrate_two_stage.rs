@@ -1252,6 +1252,8 @@ pub fn score_entries(
                 provenance: provenance_for(source_type.as_deref()),
                 band: None,
                 area: None,
+                // The calibration harness never reads `okf_type`.
+                kind: None,
             },
         ));
     }

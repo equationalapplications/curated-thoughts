@@ -147,6 +147,11 @@ pub struct WisdomItem {
     /// The area name for area-band items only; absent otherwise (§10.2).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub area: Option<String>,
+    /// Statement kind (`rule|decision|lesson|trap`, from `okf_type` via
+    /// [`kind_for`]); absent for everything else, so untyped facts serialize
+    /// byte-identically to before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -377,6 +382,9 @@ pub(crate) has_valid_to: bool,
     /// `e.area` ONLY when this holds — pre-V30 degraded shapes keep today's
     /// column list exactly.
     pub(crate) has_area: bool,
+    /// `okf_type` column present (the statement-kind store). The gated SELECT
+    /// and `load_item` read it ONLY when this holds, like `has_area`.
+    pub(crate) has_okf_type: bool,
     /// Events-table `forgotten_at` AND `related_entry_id` columns present
     /// (engine v19; issue #378 D2) — the arm references both.
     pub(crate) has_forgotten_at: bool,
@@ -412,6 +420,7 @@ fn temporal_from_snapshot(cols: &[String], event_cols: &[String]) -> Temporal {
         has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
         has_valid_to: cols.iter().any(|c| c == "valid_to"),
         has_area: cols.iter().any(|c| c == "area"),
+        has_okf_type: cols.iter().any(|c| c == "okf_type"),
         // Both columns: the arm's subqueries reference `related_entry_id`
         // (same guard as the okf_ddl index).
         has_forgotten_at: event_cols.iter().any(|c| c == "forgotten_at")
@@ -471,14 +480,8 @@ pub(crate) fn temporal_columns(conn: &Connection, declared: Option<Scheme>) -> R
     let cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_entries")?;
     let event_cols = crate::db::ddl_compat::existing_columns(conn, "llm_wiki_events")?;
     Ok(Temporal {
-        has_superseded_by: cols.iter().any(|c| c == "superseded_by"),
-        has_valid_to: cols.iter().any(|c| c == "valid_to"),
-        has_area: cols.iter().any(|c| c == "area"),
-        // Both columns: the arm's subqueries reference `related_entry_id`
-        // (same guard as the okf_ddl index).
-        has_forgotten_at: event_cols.iter().any(|c| c == "forgotten_at")
-            && event_cols.iter().any(|c| c == "related_entry_id"),
         scheme,
+        ..temporal_from_snapshot(&cols, &event_cols)
     })
 }
 
@@ -630,6 +633,7 @@ type CandidateRow = (
     Option<String>,
     Option<String>,
     Option<Vec<u8>>,
+    Option<String>,
     Option<String>,
 );
 
@@ -893,6 +897,14 @@ fn gated_entries(
     } else {
         sql
     };
+    // Statement kind (`okf_type`): appended LAST, only when the column exists,
+    // so the index math below (`6 + has_area`) stays valid and degraded shapes
+    // keep today's SQL.
+    let sql = if temporal.has_okf_type {
+        sql.replacen(" FROM llm_wiki_entries e", ", e.okf_type FROM llm_wiki_entries e", 1)
+    } else {
+        sql
+    };
     let mut sql = format!("{sql}{}", entry_eligibility_where(temporal));
     if let Some(ids) = id_filter {
         if ids.is_empty() {
@@ -926,6 +938,11 @@ fn gated_entries(
         } else {
             None
         };
+        let okf_type = if temporal.has_okf_type {
+            r.get(6 + temporal.has_area as usize)?
+        } else {
+            None
+        };
         Ok((
             r.get(0)?,
             r.get(1)?,
@@ -934,6 +951,7 @@ fn gated_entries(
             r.get(4)?,
             r.get(5)?,
             area,
+            okf_type,
         ))
     };
     // The named `:band_N` bindings must be bound in BOTH execute branches:
@@ -970,7 +988,7 @@ fn gated_entries(
         )
     });
     for row in rows {
-        let (id, entity_id, title, body, source_type, blob, row_area) = match row {
+        let (id, entity_id, title, body, source_type, blob, row_area, okf_type) = match row {
             Ok(row) => row,
             Err(e) => {
                 // One malformed row never fails the call (rank_wiki_entries rule).
@@ -1038,6 +1056,7 @@ fn gated_entries(
                 provenance: provenance_for(source_type.as_deref()),
                 band,
                 area: area_out,
+                kind: kind_for(okf_type.as_deref()),
             },
         ));
     }
@@ -1808,7 +1827,7 @@ fn find_corrections(
             out[i].supersedes.push(old.clone());
             continue;
         }
-        let Some(mut item) = load_item(conn, &head)? else {
+        let Some(mut item) = load_item(conn, &head, temporal.has_okf_type)? else {
             continue;
         };
         item.supersedes.push(old.clone());
@@ -1873,16 +1892,20 @@ fn resolve_head(
     Ok(None) // depth exceeded
 }
 
-fn load_item(conn: &Connection, id: &str) -> Result<Option<WisdomItem>> {
-    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
-        .query_row(
-            "SELECT title, body, source_type FROM llm_wiki_entries
-             WHERE id = ?1 AND deleted_at IS NULL",
-            params![id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
+fn load_item(conn: &Connection, id: &str, has_okf_type: bool) -> Result<Option<WisdomItem>> {
+    // `okf_type` is selected only when the shape has it (probed once by the
+    // caller's `Temporal`; no per-correction PRAGMA).
+    let kind_col = if has_okf_type { "okf_type" } else { "NULL" };
+    let sql = format!(
+        "SELECT title, body, source_type, {kind_col} FROM llm_wiki_entries
+         WHERE id = ?1 AND deleted_at IS NULL"
+    );
+    let row: Option<(Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(&sql, params![id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
         .optional()?;
-    Ok(row.and_then(|(title, body, source_type)| {
+    Ok(row.and_then(|(title, body, source_type, okf_type)| {
         Some(WisdomItem {
             id: id.to_string(),
             title: title?,
@@ -1892,6 +1915,7 @@ fn load_item(conn: &Connection, id: &str) -> Result<Option<WisdomItem>> {
             provenance: provenance_for(source_type.as_deref()),
             band: None,
             area: None,
+            kind: kind_for(okf_type.as_deref()),
         })
     }))
 }
@@ -4197,6 +4221,7 @@ mod tests {
             has_superseded_by: sup,
             has_valid_to: vt,
             has_area: false,
+            has_okf_type: false,
             has_forgotten_at: fg,
             scheme,
         };
@@ -4405,5 +4430,82 @@ mod tests {
             let v = recall_item(RecallItemInput { okf_type: Some(bad), ..base_input() });
             assert!(v.get("kind").is_none(), "{bad}");
         }
+    }
+
+    fn set_okf_type(conn: &Connection, id: &str, okf_type: Option<&str>) {
+        conn.execute(
+            "UPDATE llm_wiki_entries SET okf_type = ?2 WHERE id = ?1",
+            params![id, okf_type],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn wisdom_item_kind_rule_serializes() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "typed", "ent", &Q);
+        set_okf_type(&conn, "typed", Some("rule"));
+        let m = run(&conn, Some(0.5), 5, &[]);
+        assert_eq!(m.entries[0].kind.as_deref(), Some("rule"));
+        let json = serde_json::to_string(&m.entries[0]).unwrap();
+        assert!(json.contains(r#""kind":"rule""#), "{json}");
+    }
+
+    #[test]
+    fn wisdom_item_kind_absent_for_null_fact_unknown() {
+        let conn = open_in_memory().unwrap();
+        for (id, t) in [
+            ("n", None),
+            ("f", Some("fact")),
+            ("u", Some("zebra")),
+            ("c", Some("Rule")),
+        ] {
+            seed(&conn, id, "ent", &Q);
+            set_okf_type(&conn, id, t);
+        }
+        let m = run(&conn, Some(0.5), 10, &[]);
+        assert_eq!(m.entries.len(), 4);
+        for e in &m.entries {
+            assert_eq!(e.kind, None, "{}", e.id);
+            assert!(!serde_json::to_string(e).unwrap().contains("\"kind\""));
+        }
+    }
+
+    #[test]
+    fn correction_item_carries_kind() {
+        let conn = open_in_memory().unwrap();
+        seed(&conn, "old", "ent", &Q);
+        seed(&conn, "new", "ent", &Q);
+        supersede(&conn, "old", "new");
+        set_okf_type(&conn, "new", Some("decision"));
+        let m = run(&conn, Some(0.5), 5, &["old"]);
+        assert_eq!(ids(&m.corrections), vec!["new"]);
+        assert_eq!(m.corrections[0].kind.as_deref(), Some("decision"));
+        // A legacy `fact` head carries no kind.
+        set_okf_type(&conn, "new", Some("fact"));
+        let m = run(&conn, Some(0.5), 5, &["old"]);
+        assert_eq!(m.corrections[0].kind, None);
+    }
+
+    #[test]
+    fn degraded_shape_without_okf_type_still_matches() {
+        // Pre-migration table: no okf_type (and no temporal/area columns).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_wiki_entries (
+                id TEXT PRIMARY KEY, entity_id TEXT, title TEXT, body TEXT,
+                source_type TEXT, embedding_blob BLOB, deleted_at INTEGER);
+             CREATE TABLE llm_wiki_events (id TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (id, entity_id, title, body, source_type, embedding_blob)
+             VALUES ('d1', 'ent', 'T', 'B', 'librarian_inferred', ?1)",
+            params![blob(&Q)],
+        )
+        .unwrap();
+        let m = run(&conn, Some(0.5), 5, &[]);
+        assert_eq!(ids(&m.entries), vec!["d1"]);
+        assert_eq!(m.entries[0].kind, None);
     }
 }

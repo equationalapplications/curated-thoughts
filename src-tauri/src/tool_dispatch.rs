@@ -2410,6 +2410,44 @@ mod curated_memory_tests {
         );
     }
 
+    /// Second byte pin (spec 3.3): same fixture as
+    /// `message_mode_output_byte_identical` but with `okf_type = 'rule'`. The
+    /// ONLY difference is the additive `"kind":"rule"` key, which follows
+    /// `provenance` (struct order: `kind` after `area`, unscoped items carry
+    /// neither `band` nor `area`).
+    #[test]
+    fn message_mode_typed_fact_adds_only_kind() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        let mut v = [0f32; 8];
+        v[0] = 1.0;
+        let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at, embedding_blob, okf_type
+             ) VALUES ('mm1', 'ent_t', 'Message mode fact',
+                   'Stable body for the byte pin.', '[]', 'inferred',
+                   'librarian_inferred', 100, 100, ?1, 'rule')",
+            rusqlite::params![blob],
+        )
+        .unwrap();
+        let out = crate::wisdom_match::wisdom_match_with_floor(
+            &conn,
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "message-mode-pin",
+            crate::embed_scheme::Scheme::Raw,
+            Some(0.5),
+            5,
+            &[],
+            1_761_050_400_000,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&out).unwrap(),
+            "{\"schema\":1,\"gate\":\"semantic-v1:message-mode-pin\",\"entries\":[{\"id\":\"mm1\",\"title\":\"Message mode fact\",\"text\":\"Stable body for the byte pin.\",\"score\":1.0,\"supersedes\":[],\"provenance\":\"librarian_inferred\",\"kind\":\"rule\"}],\"corrections\":[]}",
+        );
+    }
+
     /// ToolDispatchContext over the shared file fixture. The embed stub env
     /// (CURATED_EMBED_STUB=constant8) keeps `embed_batch` deterministic and
     /// network-free; `Local` profile is the repo default.
