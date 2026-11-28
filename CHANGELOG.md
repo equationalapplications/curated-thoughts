@@ -1,3 +1,18 @@
+## [3.20.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.19.0...v3.20.0) (2026-11-28)
+
+### Features
+
+* **wisdom:** additive kind field on items and corrections ([78127ce](https://github.com/equationalapplications/curated-thoughts/commit/78127ce0c6169eb270dc0b6249e42cd31d6b4ad1))
+* **wisdom:** entry_recall_arms shared recall eligibility ([e8995e5](https://github.com/equationalapplications/curated-thoughts/commit/e8995e5c802eae5558cab1f5d751d48638b65191))
+* **wisdom:** kind vocabulary and shared recall item builder ([ef77929](https://github.com/equationalapplications/curated-thoughts/commit/ef77929c5c834ff9f87252c479e73e409205455a))
+
+### Bug Fixes
+
+* **recall:** app recall skips superseded/expired facts, adds kind ([dfe2442](https://github.com/equationalapplications/curated-thoughts/commit/dfe244230db7bf21c20bf585bce450447432f0e8))
+* **recall:** ct/sidecar recall skips superseded/expired facts, adds provenance, kind, ordinal ([1460c9b](https://github.com/equationalapplications/curated-thoughts/commit/1460c9b3a484f81d6a154cc7d80d7b06b368fbb4))
+* **recall:** half-migrated supersession shape, strict probes, okf_type robustness, tests, cleanups ([57797a5](https://github.com/equationalapplications/curated-thoughts/commit/57797a58d663a7b9a095a123be86316ed135777c))
+* **recall:** wiki leg runs when the chunk leg is empty ([e26eb3e](https://github.com/equationalapplications/curated-thoughts/commit/e26eb3e84f69e38758511bcbcf9dbde6fae03426))
+
 ## [3.19.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.18.0...v3.19.0) (2026-11-28)
 
 ### Features
