@@ -1183,6 +1183,7 @@ pub fn wisdom_match_cmd(
 /// say"; every error propagates (exit 1). `repo_path` is never printed.
 pub fn wisdom_brief_cmd(json_mode: bool, repo_path: &str, max_chars: usize) -> Result<i32> {
     use tauri_app_lib::wisdom_brief as wb;
+    let started = std::time::Instant::now();
     anyhow::ensure!(
         (600..=8000).contains(&max_chars),
         "--max-chars must be between 600 and 8000"
@@ -1217,6 +1218,28 @@ pub fn wisdom_brief_cmd(json_mode: bool, repo_path: &str, max_chars: usize) -> R
     } else {
         print_brief_human(&brief);
     }
+    // CTI reads stdout only at exit, so the log write is on the critical
+    // path: flush first, drop the read connection (a rollback-journal brain
+    // would block our own writer), then log. Never changes output or exit.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    drop(conn);
+    let ids: Vec<String> = brief
+        .statements
+        .iter()
+        .filter_map(|s| s["id"].as_str().map(str::to_string))
+        .collect();
+    let hub = scope
+        .repo_group
+        .as_ref()
+        .and_then(|g| g.first())
+        .or_else(|| scope.org_group.as_ref().and_then(|g| g.first()));
+    crate::delivery_log::record_delivery_since(
+        started,
+        &brain.paths.db_path,
+        "wisdom_brief",
+        hub.map(String::as_str),
+        crate::delivery_log::summary("brief", &ids, Vec::new()),
+    );
     Ok(0)
 }
 

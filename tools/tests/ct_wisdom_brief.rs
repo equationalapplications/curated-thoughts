@@ -226,3 +226,78 @@ fn load_lenient_diagnostics_never_contain_repo_path() {
         assert!(!String::from_utf8_lossy(&out.stdout).contains(needle));
     });
 }
+
+// ---- delivery log (Task 8) ------------------------------------------------
+
+fn log_rows() -> Vec<(String, String, Option<String>, String)> {
+    let c = brain_db();
+    let mut s = c
+        .prepare("SELECT client, tool, entity_id, summary FROM curated_agent_log ORDER BY id")
+        .unwrap();
+    s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+#[test]
+fn brief_writes_one_delivery_row_with_ids() {
+    with_scoped_brain(Some("org-1"), |c| {
+        let v = json_of(&brief(c));
+        let rows = log_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "ct-cli");
+        assert_eq!(rows[0].1, "wisdom_brief");
+        assert_eq!(rows[0].2.as_deref(), Some("hub-1"));
+        let s: serde_json::Value = serde_json::from_str(&rows[0].3).unwrap();
+        assert_eq!(s["surface"], "brief");
+        assert_eq!(s["ids"], serde_json::json!(ids(&v)));
+        assert!(!rows[0].3.contains(c.to_str().unwrap()));
+    });
+}
+
+#[test]
+fn brief_empty_writes_no_row() {
+    with_seeded_brain(|| {
+        json_of(&run_ct(&["wisdom", "brief", "--json"]));
+        assert!(log_rows().is_empty());
+    });
+}
+
+#[test]
+fn brief_output_identical_with_log_on_and_off() {
+    with_scoped_brain(Some("org-1"), |c| {
+        let p = c.to_str().unwrap();
+        let args = ["wisdom", "brief", "--json", "--repo-path", p];
+        let on = run_ct(&args);
+        let off = common::run_ct_with_env(&args, [("CURATED_DELIVERY_LOG", "0")]);
+        assert_eq!(on.stdout, off.stdout);
+        assert_eq!(on.status.code(), off.status.code());
+        assert_eq!(log_rows().len(), 1, "only the log-on call wrote a row");
+    });
+}
+
+#[test]
+fn brief_two_runs_identical_after_log_rows_exist() {
+    with_scoped_brain(Some("org-1"), |c| {
+        let a = brief(c);
+        let b = brief(c);
+        let d = brief(c);
+        assert_eq!(a.stdout, b.stdout);
+        assert_eq!(b.stdout, d.stdout);
+        assert_eq!(log_rows().len(), 3);
+    });
+}
+
+#[test]
+fn brief_fail_open_when_log_table_dropped() {
+    with_scoped_brain(Some("org-1"), |c| {
+        let before = brief(c);
+        brain_db().execute_batch("DROP TABLE curated_agent_log").unwrap();
+        let after = brief(c);
+        assert_eq!(after.status.code(), Some(0));
+        assert_eq!(before.stdout, after.stdout);
+        let err = String::from_utf8_lossy(&after.stderr);
+        assert!(err.contains("wisdom_delivery_log_skipped\tno_table"), "{err}");
+    });
+}
