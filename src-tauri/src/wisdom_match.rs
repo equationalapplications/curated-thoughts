@@ -620,6 +620,17 @@ pub(crate) fn entry_eligibility_where(t: &Temporal) -> String {
     // future stay eligible" — and v1's behavior (superseded rows never
     // surface once the supersession has taken effect) pin the OPPOSITE
     // comparison: eligible iff no supersession is in effect yet.
+    sql.push_str(&temporal_arms_sql(t));
+    sql
+}
+
+/// The three temporal arms of the eligibility predicate, in order: superseded,
+/// valid_to, forgotten (via [`forgotten_entry_arm`]). Each is shape-conditional
+/// (degraded pre-migration tables drop only that arm). Shared by
+/// [`entry_eligibility_where`] and the recall copies ([`entry_recall_arms`]) so
+/// the arm text lives once. Aliases `e.` for `llm_wiki_entries`; binds `:now`.
+pub(crate) fn temporal_arms_sql(t: &Temporal) -> String {
+    let mut sql = String::new();
     if t.has_superseded_by {
         sql.push_str(" AND (e.superseded_by IS NULL OR e.superseded_at > :now)");
     }
@@ -4115,6 +4126,16 @@ mod tests {
         for ((name, t), (gname, golden)) in shapes.iter().zip(PINNED_ELIGIBILITY_WHERE) {
             assert_eq!(name, gname);
             assert_eq!(entry_eligibility_where(t), *golden, "shape {name}");
+        }
+    }
+
+    #[test]
+    fn temporal_arms_sql_is_the_suffix_of_the_eligibility_where() {
+        for (name, t) in pin_shapes() {
+            assert!(
+                entry_eligibility_where(&t).ends_with(&temporal_arms_sql(&t)),
+                "shape {name}"
+            );
         }
     }
 }
