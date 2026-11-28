@@ -2,7 +2,14 @@
 //! 2026-11-28-wisdom-brief). Pure ordering and fitting live here, with no
 //! database; the database read and the covered-topics index sit beside them.
 
+use crate::config::hub_resolver::BriefScope;
+use crate::wisdom_match::{
+    band_predicate_where, entry_recall_arms, kind_tier, okf_type_text, recall_item, valid_fact_id,
+    BandBindings, RecallItemInput,
+};
+use rusqlite::{types::Value as SqlValue, Connection};
 use serde_json::Value;
+use std::collections::HashSet;
 
 pub const BRIEF_SCHEMA_VERSION: u32 = 1;
 
@@ -288,6 +295,271 @@ pub fn build_index(input: &IndexInput, cap: usize) -> (Index, ShedLevel) {
     }
     let level = ShedLevel { stage: 4, areas_kept: 0 };
     (render_index_at(level, input), level)
+}
+
+// ---- the brief over a database (spec 3.2-3.6) ---------------------------
+
+#[derive(Debug, Clone, Copy)]
+pub struct BriefOpts {
+    pub max_chars: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Budget {
+    pub max_chars: usize,
+    pub used_chars: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ByTier {
+    pub rule_trap: usize,
+    pub decision: usize,
+    pub lesson: usize,
+    pub untyped: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OmittedOut {
+    pub statements: usize,
+    pub oversize: usize,
+    pub by_tier: ByTier,
+}
+
+impl From<&Omitted> for OmittedOut {
+    fn from(o: &Omitted) -> Self {
+        OmittedOut {
+            statements: o.statements,
+            oversize: o.oversize,
+            by_tier: ByTier {
+                rule_trap: o.rule_trap,
+                decision: o.decision,
+                lesson: o.lesson,
+                untyped: o.untyped,
+            },
+        }
+    }
+}
+
+/// The brief. Field order is the JSON key order (spec 3.6).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Brief {
+    pub schema: u32,
+    pub scope: &'static str,
+    pub scope_reason: Option<&'static str>,
+    pub budget: Budget,
+    pub statements: Vec<Value>,
+    pub index: Index,
+    pub omitted: OmittedOut,
+}
+
+fn hub_name(conn: &Connection, id: Option<&String>) -> Option<String> {
+    let id = id?;
+    conn.query_row(
+        "SELECT name FROM live_entities WHERE id = ?1",
+        [id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// Build the brief for a resolved scope. `entry_recall_arms` errors propagate
+/// (fail closed). `now_ms` drives the superseded/valid_to arms.
+pub fn build_brief_at(
+    conn: &Connection,
+    scope: &BriefScope,
+    opts: &BriefOpts,
+    now_ms: i64,
+) -> anyhow::Result<Brief> {
+    let arms = entry_recall_arms(conn)?;
+    // Repo mode uses the repo group as the repo arm; org-only passes the org
+    // group in the repo slot and labels every row Org.
+    let (repo_mode, primary, secondary): (bool, Option<&Vec<String>>, Option<&Vec<String>>) =
+        match (&scope.repo_group, &scope.org_group) {
+            (Some(r), o) => (true, Some(r), o.as_ref()),
+            (None, Some(o)) => (false, Some(o), None),
+            (None, None) => (false, None, None),
+        };
+    let scope_name = match (&scope.repo_group, &scope.org_group) {
+        (Some(_), Some(_)) => "repo+org",
+        (Some(_), None) => "repo",
+        (None, Some(_)) => "org",
+        (None, None) => "none",
+    };
+    let Some(primary) = primary else {
+        let input = IndexInput { repo: None, org: None, areas: Vec::new() };
+        let (idx, _) = build_index(&input, 0);
+        return Ok(Brief {
+            schema: BRIEF_SCHEMA_VERSION,
+            scope: scope_name,
+            scope_reason: scope.reason,
+            budget: Budget { max_chars: opts.max_chars, used_chars: 0 },
+            statements: Vec::new(),
+            index: idx,
+            omitted: OmittedOut::from(&Omitted::default()),
+        });
+    };
+
+    let bindings = BandBindings {
+        repo_group: primary.as_slice(),
+        org_group: secondary.map(|g| g.as_slice()),
+        area: None,
+    };
+    let (band_sql, band_params) = band_predicate_where(&bindings, arms.has_area);
+    let col = |present: bool, name: &str| {
+        if present { format!("e.{name}") } else { format!("NULL AS {name}") }
+    };
+    let sql = format!(
+        "SELECT e.id, e.entity_id, e.title, e.body, e.source_ref, e.confidence, {st}, {ov}, {ot}, e.created_at \
+         FROM llm_wiki_entries e WHERE e.deleted_at IS NULL{arms}{band}",
+        st = col(arms.has_source_type, "source_type"),
+        ov = col(arms.has_okf_verified, "okf_verified"),
+        ot = col(arms.has_okf_type, "okf_type"),
+        arms = arms.sql,
+        band = band_sql,
+    );
+    let mut named: Vec<(String, SqlValue)> = band_params;
+    if arms.needs_now {
+        named.push((":now".to_string(), SqlValue::Integer(now_ms)));
+    }
+    let refs: Vec<(&str, &dyn rusqlite::ToSql)> = named
+        .iter()
+        .map(|(k, v)| (k.as_str(), v as &dyn rusqlite::ToSql))
+        .collect();
+    let repo_ids: HashSet<&str> = if repo_mode {
+        primary.iter().map(String::as_str).collect()
+    } else {
+        HashSet::new()
+    };
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(refs.as_slice())?;
+    let mut cands: Vec<Candidate> = Vec::new();
+    let (mut n_repo, mut n_org) = (0usize, 0usize);
+    while let Some(r) = rows.next()? {
+        let id: String = r.get(0)?;
+        let entity_id: Option<String> = r.get(1)?;
+        let title: Option<String> = r.get(2)?;
+        let text: Option<String> = r.get(3)?;
+        if !valid_fact_id(&id)
+            || (title.as_deref().unwrap_or("").is_empty() && text.as_deref().unwrap_or("").is_empty())
+        {
+            continue;
+        }
+        let source_ref: Option<String> = r.get(4)?;
+        let confidence: Option<String> = r.get(5)?;
+        let source_type: Option<String> = r.get(6)?;
+        let okf_verified: Option<String> = r.get(7)?;
+        let okf_type = okf_type_text(r.get::<_, Option<SqlValue>>(8)?);
+        let created_at = coerce_created_at(r.get::<_, Option<SqlValue>>(9)?);
+        let band = match entity_id.as_deref() {
+            Some(e) if repo_ids.contains(e) => Band::Repo,
+            _ => Band::Org,
+        };
+        match band {
+            Band::Repo => n_repo += 1,
+            Band::Org => n_org += 1,
+        }
+        let mut item = recall_item(RecallItemInput {
+            id: &id,
+            entity_id: entity_id.as_deref(),
+            title: title.as_deref(),
+            text: text.as_deref(),
+            source_ref: source_ref.as_deref(),
+            confidence: confidence.as_deref(),
+            source_type: source_type.as_deref(),
+            okf_verified: okf_verified.as_deref(),
+            okf_type: okf_type.as_deref(),
+        });
+        item["band"] = serde_json::json!(band.as_str());
+        let cost = item_cost(
+            title.as_deref().unwrap_or(""),
+            text.as_deref().unwrap_or(""),
+            &id,
+        );
+        cands.push(Candidate {
+            id,
+            band,
+            tier: kind_tier(okf_type.as_deref()),
+            created_at,
+            item,
+            cost,
+        });
+    }
+    drop(rows);
+    drop(stmt);
+    order(&mut cands);
+
+    // Area counts: repo merge group only, same eligibility.
+    let mut areas: Vec<(String, usize)> = Vec::new();
+    if repo_mode && arms.has_area {
+        let repo_group = primary;
+        let ins: Vec<String> = (0..repo_group.len()).map(|i| format!(":repo{i}")).collect();
+        let asql = format!(
+            "SELECT e.area, COUNT(*) FROM llm_wiki_entries e WHERE e.deleted_at IS NULL{arms} \
+             AND e.entity_id IN ({ins}) AND e.area IS NOT NULL GROUP BY e.area",
+            arms = arms.sql,
+            ins = ins.join(", "),
+        );
+        let mut anamed: Vec<(String, SqlValue)> = repo_group
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (format!(":repo{i}"), SqlValue::Text(id.clone())))
+            .collect();
+        if arms.needs_now {
+            anamed.push((":now".to_string(), SqlValue::Integer(now_ms)));
+        }
+        let arefs: Vec<(&str, &dyn rusqlite::ToSql)> = anamed
+            .iter()
+            .map(|(k, v)| (k.as_str(), v as &dyn rusqlite::ToSql))
+            .collect();
+        let mut astmt = conn.prepare(&asql)?;
+        let mut arows = astmt.query(arefs.as_slice())?;
+        while let Some(r) = arows.next()? {
+            let name: String = r.get(0)?;
+            let c: i64 = r.get(1)?;
+            areas.push((name, c.max(0) as usize));
+        }
+    }
+
+    let repo_present = repo_mode;
+    let org_present = if repo_mode { secondary.is_some() } else { true };
+    let mut input = IndexInput {
+        repo: repo_present.then(|| BandInfo {
+            name: hub_name(conn, primary.first()),
+            count: n_repo,
+            shown: n_repo,
+        }),
+        org: org_present.then(|| BandInfo {
+            name: if repo_mode { hub_name(conn, secondary.and_then(|g| g.first())) } else { hub_name(conn, primary.first()) },
+            count: n_org,
+            shown: n_org,
+        }),
+        areas,
+    };
+    let cap = index_cap(opts.max_chars);
+    let (reserve_idx, level) = build_index(&input, cap);
+    let budget = statement_budget(opts.max_chars, index_cost(&reserve_idx));
+    let (kept, omitted) = fit(cands, budget);
+    let shown_repo = kept.iter().filter(|c| c.band == Band::Repo).count();
+    let shown_org = kept.len() - shown_repo;
+    if let Some(b) = input.repo.as_mut() {
+        b.shown = shown_repo;
+    }
+    if let Some(b) = input.org.as_mut() {
+        b.shown = shown_org;
+    }
+    let index = render_index_at(level, &input);
+    let used: usize = kept.iter().map(|c| c.cost).sum::<usize>() + index_cost(&index);
+    Ok(Brief {
+        schema: BRIEF_SCHEMA_VERSION,
+        scope: scope_name,
+        scope_reason: scope.reason,
+        budget: Budget { max_chars: opts.max_chars, used_chars: used },
+        statements: kept.into_iter().map(|c| c.item).collect(),
+        index,
+        omitted: OmittedOut::from(&omitted),
+    })
 }
 
 #[cfg(test)]
@@ -577,5 +849,253 @@ mod tests {
         assert_eq!(lc.stage, 4);
         assert_eq!(c.text, "");
         assert_eq!(index_cost(&c), 0);
+    }
+
+    // ---- build_brief_at against a database -------------------------------
+
+    use crate::db::connection::open_in_memory;
+
+    const NOW: i64 = 1_000_000;
+
+    fn entity(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO curated_entities (id, name, entity_type, summary, created_at, updated_at)
+             VALUES (?1, ?1, 'concept', 's', 1, 1)",
+            [id],
+        )
+        .unwrap();
+    }
+
+    fn fact(
+        conn: &Connection,
+        id: &str,
+        ent: &str,
+        okf: Option<&str>,
+        created: i64,
+        area: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries
+               (id, entity_id, title, body, created_at, updated_at, okf_type, area)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+            rusqlite::params![id, ent, format!("T {id}"), format!("body {id}"), created, okf, area],
+        )
+        .unwrap();
+    }
+
+    fn scope(repo: &[&str], org: &[&str]) -> BriefScope {
+        let v = |g: &[&str]| (!g.is_empty()).then(|| g.iter().map(|s| s.to_string()).collect());
+        BriefScope { repo_group: v(repo), org_group: v(org), reason: None, diagnostics: vec![] }
+    }
+
+    fn brief(conn: &Connection, sc: &BriefScope, max: usize) -> Brief {
+        build_brief_at(conn, sc, &BriefOpts { max_chars: max }, NOW).unwrap()
+    }
+
+    fn st_ids(b: &Brief) -> Vec<String> {
+        b.statements.iter().map(|v| v["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    fn base() -> Connection {
+        let conn = open_in_memory().unwrap();
+        for e in ["hub", "org", "other"] {
+            entity(&conn, e);
+        }
+        conn
+    }
+
+    #[test]
+    fn superseded_expired_forgotten_deleted_never_listed() {
+        let conn = base();
+        fact(&conn, "live", "hub", None, 10, None);
+        for id in ["sup", "exp", "forg", "del"] {
+            fact(&conn, id, "hub", None, 10, None);
+        }
+        conn.execute("UPDATE llm_wiki_entries SET superseded_by='live', superseded_at=1 WHERE id='sup'", []).unwrap();
+        conn.execute("UPDATE llm_wiki_entries SET valid_to=1 WHERE id='exp'", []).unwrap();
+        conn.execute("UPDATE llm_wiki_entries SET deleted_at=1 WHERE id='del'", []).unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_events (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('ev', 'hub', 'synthesized', 's', 'forg', 1, 5)",
+            [],
+        )
+        .unwrap();
+        let b = brief(&conn, &scope(&["hub"], &[]), 2200);
+        assert_eq!(st_ids(&b), vec!["live"]);
+    }
+
+    #[test]
+    fn area_facts_not_listed_but_counted() {
+        let conn = base();
+        fact(&conn, "a", "hub", None, 10, None);
+        fact(&conn, "ar1", "hub", None, 10, Some("auth"));
+        fact(&conn, "ar2", "hub", None, 11, Some("auth"));
+        fact(&conn, "ar3", "hub", None, 12, Some("deploy"));
+        let b = brief(&conn, &scope(&["hub"], &[]), 2200);
+        assert_eq!(st_ids(&b), vec!["a"]);
+        let names: Vec<(String, usize)> = b.index.areas.iter().map(|a| (a.name.clone(), a.count)).collect();
+        assert_eq!(names, vec![("auth".to_string(), 2), ("deploy".to_string(), 1)]);
+        assert!(b.index.text.contains("auth (2)"));
+    }
+
+    #[test]
+    fn foreign_hub_excluded() {
+        let conn = base();
+        fact(&conn, "mine", "hub", None, 10, None);
+        fact(&conn, "theirs", "other", None, 10, None);
+        let b = brief(&conn, &scope(&["hub"], &["org"]), 2200);
+        assert_eq!(st_ids(&b), vec!["mine"]);
+    }
+
+    #[test]
+    fn merged_loser_entity_included() {
+        let conn = base();
+        fact(&conn, "m", "hub", None, 10, None);
+        fact(&conn, "l", "hub-old", None, 9, None);
+        let b = brief(&conn, &scope(&["hub", "hub-old"], &[]), 2200);
+        assert_eq!(st_ids(&b), vec!["m", "l"]);
+    }
+
+    #[test]
+    fn org_only_when_no_repo() {
+        let conn = base();
+        fact(&conn, "r", "hub", None, 10, None);
+        fact(&conn, "o", "org", None, 10, None);
+        let b = brief(&conn, &scope(&[], &["org"]), 2200);
+        assert_eq!(st_ids(&b), vec!["o"]);
+        assert_eq!(b.statements[0]["band"], "org");
+        assert_eq!(b.scope, "org");
+        let none = brief(&conn, &scope(&[], &[]), 2200);
+        assert!(none.statements.is_empty());
+        assert_eq!(none.index.text, "");
+        assert_eq!(none.scope, "none");
+    }
+
+    #[test]
+    fn repo_wins_when_org_hub_merged_into_repo_hub() {
+        let conn = base();
+        fact(&conn, "x", "hub", None, 10, None);
+        fact(&conn, "y", "org", None, 11, None);
+        // Org hub merged into repo hub: both groups carry the same ids.
+        let sc = scope(&["hub", "org"], &["hub", "org"]);
+        let b = brief(&conn, &sc, 2200);
+        assert_eq!(st_ids(&b).len(), 2);
+        assert!(b.statements.iter().all(|s| s["band"] == "repo"));
+        assert_eq!((b.index.counts.repo, b.index.counts.org), (2, 0));
+    }
+
+    #[test]
+    fn typed_facts_outrank_untyped_when_budget_tight() {
+        let conn = base();
+        fact(&conn, "untyped-new", "hub", None, 100, None);
+        fact(&conn, "rule-old", "hub", Some("rule"), 1, None);
+        fact(&conn, "lesson-old", "hub", Some("lesson"), 2, None);
+        let one = item_cost("T rule-old", "body rule-old", "rule-old");
+        // Budget for exactly one statement plus the index reserve.
+        let probe = brief(&conn, &scope(&["hub"], &[]), 2200);
+        let reserve = index_cost(&probe.index);
+        let max = (one + reserve + 5).max(600);
+        let sc = scope(&["hub"], &[]);
+        // Use a tighter max only when 600 permits one; else assert order.
+        let b = brief(&conn, &sc, max);
+        assert_eq!(st_ids(&b)[0], "rule-old");
+        assert_eq!(st_ids(&probe), vec!["rule-old", "lesson-old", "untyped-new"]);
+    }
+
+    #[test]
+    fn statement_fields_present() {
+        let conn = base();
+        fact(&conn, "k1", "hub", Some("trap"), 10, None);
+        conn.execute("UPDATE llm_wiki_entries SET source_type='user_stated' WHERE id='k1'", []).unwrap();
+        fact(&conn, "bare", "org", None, 9, None);
+        let b = brief(&conn, &scope(&["hub"], &["org"]), 2200);
+        let s0 = &b.statements[0];
+        for k in ["id", "entity_id", "title", "text", "source_ref", "confidence", "source_type", "kind", "band"] {
+            assert!(s0.get(k).is_some(), "missing {k}");
+        }
+        assert_eq!(s0["kind"], "trap");
+        assert_eq!(s0["band"], "repo");
+        let s1 = &b.statements[1];
+        assert!(s1.get("kind").is_none());
+        assert_eq!(s1["band"], "org");
+        assert!(valid_fact_id(s1["id"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn ids_unique() {
+        let conn = base();
+        for i in 0..20 {
+            fact(&conn, &format!("f{i}"), if i % 2 == 0 { "hub" } else { "org" }, None, i, None);
+        }
+        let b = brief(&conn, &scope(&["hub"], &["org"]), 8000);
+        let ids = st_ids(&b);
+        let set: HashSet<_> = ids.iter().collect();
+        assert_eq!(set.len(), ids.len());
+        assert_eq!(ids.len(), 20);
+    }
+
+    #[test]
+    fn two_runs_byte_identical() {
+        let conn = base();
+        for i in 0..15 {
+            fact(&conn, &format!("f{i}"), "hub", if i % 3 == 0 { Some("rule") } else { None }, i % 4, None);
+        }
+        let sc = scope(&["hub"], &["org"]);
+        let a = serde_json::to_string(&brief(&conn, &sc, 700)).unwrap();
+        let b = serde_json::to_string(&brief(&conn, &sc, 700)).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pre_area_column_shape_degrades() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_wiki_entries (id TEXT, entity_id TEXT, title TEXT, body TEXT,
+               source_ref TEXT, confidence TEXT, created_at INTEGER, deleted_at INTEGER);
+             CREATE TABLE llm_wiki_events (id TEXT);
+             CREATE TABLE curated_entities (id TEXT, name TEXT);
+             INSERT INTO llm_wiki_entries VALUES ('a','hub','t','b',NULL,'inferred',5,NULL);
+             INSERT INTO llm_wiki_entries VALUES ('z','other','t','b',NULL,'inferred',5,NULL);",
+        )
+        .unwrap();
+        let b = brief(&conn, &scope(&["hub"], &[]), 2200);
+        assert_eq!(st_ids(&b), vec!["a"]);
+        assert!(b.index.areas.is_empty());
+    }
+
+    #[test]
+    fn invalid_id_skipped() {
+        let conn = base();
+        fact(&conn, "ok-1", "hub", None, 10, None);
+        fact(&conn, "bad id!", "hub", None, 10, None);
+        let b = brief(&conn, &scope(&["hub"], &[]), 2200);
+        assert_eq!(st_ids(&b), vec!["ok-1"]);
+    }
+
+    #[test]
+    fn omitted_by_tier_sums_to_statements_incl_oversize() {
+        let conn = base();
+        for i in 0..6 {
+            fact(&conn, &format!("u{i}"), "hub", None, i, None);
+        }
+        fact(&conn, "r1", "hub", Some("rule"), 1, None);
+        conn.execute("UPDATE llm_wiki_entries SET body = ?1 WHERE id='r1'", ["x".repeat(3000)]).unwrap();
+        let b = brief(&conn, &scope(&["hub"], &[]), 700);
+        let o = &b.omitted;
+        assert_eq!(o.oversize, 1);
+        assert!(o.statements >= 1);
+        let t = &o.by_tier;
+        assert_eq!(t.rule_trap + t.decision + t.lesson + t.untyped, o.statements);
+        assert!(b.budget.used_chars <= 700);
+    }
+
+    #[test]
+    fn untyped_repo_and_org_interleave_by_created_at() {
+        let conn = base();
+        fact(&conn, "r-old", "hub", None, 1, None);
+        fact(&conn, "o-new", "org", None, 9, None);
+        fact(&conn, "r-mid", "hub", None, 5, None);
+        let b = brief(&conn, &scope(&["hub"], &["org"]), 2200);
+        assert_eq!(st_ids(&b), vec!["o-new", "r-mid", "r-old"]);
     }
 }
