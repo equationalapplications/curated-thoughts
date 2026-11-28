@@ -187,7 +187,8 @@ pub struct IndexInput {
 pub struct ShedLevel {
     /// 0 full, 1 no hub names, 2 no area clause, 3 no hint, 4 empty.
     stage: u8,
-    /// Areas listed (stage 0 only; stage 1 keeps the same value).
+    /// Areas listed. Stage 0 walks it down from the cap to 0 (0 renders only
+    /// `... +n more`); every later stage carries 0.
     areas_kept: usize,
 }
 
@@ -196,9 +197,14 @@ fn cut(s: &str) -> String {
 }
 
 fn sorted_areas(input: &IndexInput) -> Vec<(String, usize)> {
-    let mut a: Vec<(String, usize)> = input.areas.iter().map(|(n, c)| (cut(n), *c)).collect();
-    a.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
-    a
+    // Sort and dedupe on the FULL name; cut to 40 chars for display only.
+    let mut full: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (n, c) in &input.areas {
+        *full.entry(n.as_str()).or_insert(0) += c;
+    }
+    let mut a: Vec<(&str, usize)> = full.into_iter().collect();
+    a.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(y.0)));
+    a.into_iter().map(|(n, c)| (cut(n), c)).collect()
 }
 
 /// Index cost in the budget: text plus the `\n\n` separator, 0 when empty.
@@ -371,7 +377,40 @@ pub fn build_brief_at(
     opts: &BriefOpts,
     now_ms: i64,
 ) -> anyhow::Result<Brief> {
+    // ONE read snapshot for the statement scan, the area scan and the hub
+    // names, so the brief is internally consistent. The transaction ends
+    // (rolls back; nothing was written) before this returns, so the caller
+    // can drop its connection before any delivery-log write.
+    let tx = conn.unchecked_transaction()?;
+    let brief = build_brief_in(&tx, scope, opts, now_ms);
+    drop(tx);
+    brief
+}
+
+/// A TEXT cell, or `None` for NULL, BLOB, integer or real (like
+/// `okf_type_text`): a wrongly typed cell never fails the brief.
+fn text_cell(v: Option<SqlValue>) -> Option<String> {
+    match v {
+        Some(SqlValue::Text(t)) => Some(t),
+        _ => None,
+    }
+}
+
+/// The validity rule shared by the statement scan and the area scan: a
+/// deliverable row has a valid `ct-fact` id and a non-blank title or body.
+fn deliverable(id: Option<&str>, title: Option<&str>, body: Option<&str>) -> bool {
+    id.is_some_and(valid_fact_id)
+        && !(title.unwrap_or("").trim().is_empty() && body.unwrap_or("").trim().is_empty())
+}
+
+fn build_brief_in(
+    conn: &Connection,
+    scope: &BriefScope,
+    opts: &BriefOpts,
+    now_ms: i64,
+) -> anyhow::Result<Brief> {
     let arms = entry_recall_arms(conn)?;
+    let mut skipped_rows = 0usize;
     // Repo mode uses the repo group as the repo arm; org-only passes the org
     // group in the repo slot and labels every row Org.
     let (repo_mode, primary, secondary): (bool, Option<&Vec<String>>, Option<&Vec<String>>) =
@@ -437,19 +476,19 @@ pub fn build_brief_at(
     let mut cands: Vec<Candidate> = Vec::new();
     let (mut n_repo, mut n_org) = (0usize, 0usize);
     while let Some(r) = rows.next()? {
-        let id: String = r.get(0)?;
-        let entity_id: Option<String> = r.get(1)?;
-        let title: Option<String> = r.get(2)?;
-        let text: Option<String> = r.get(3)?;
-        if !valid_fact_id(&id)
-            || (title.as_deref().unwrap_or("").is_empty() && text.as_deref().unwrap_or("").is_empty())
-        {
+        let id = text_cell(r.get::<_, Option<SqlValue>>(0)?);
+        let entity_id = text_cell(r.get::<_, Option<SqlValue>>(1)?);
+        let title = text_cell(r.get::<_, Option<SqlValue>>(2)?);
+        let text = text_cell(r.get::<_, Option<SqlValue>>(3)?);
+        if !deliverable(id.as_deref(), title.as_deref(), text.as_deref()) {
+            skipped_rows += 1;
             continue;
         }
-        let source_ref: Option<String> = r.get(4)?;
-        let confidence: Option<String> = r.get(5)?;
-        let source_type: Option<String> = r.get(6)?;
-        let okf_verified: Option<String> = r.get(7)?;
+        let Some(id) = id else { continue };
+        let source_ref = text_cell(r.get::<_, Option<SqlValue>>(4)?);
+        let confidence = text_cell(r.get::<_, Option<SqlValue>>(5)?);
+        let source_type = text_cell(r.get::<_, Option<SqlValue>>(6)?);
+        let okf_verified = text_cell(r.get::<_, Option<SqlValue>>(7)?);
         let okf_type = okf_type_text(r.get::<_, Option<SqlValue>>(8)?);
         let created_at = coerce_created_at(r.get::<_, Option<SqlValue>>(9)?);
         let band = match entity_id.as_deref() {
@@ -490,14 +529,15 @@ pub fn build_brief_at(
     drop(stmt);
     order(&mut cands);
 
-    // Area counts: repo merge group only, same eligibility.
-    let mut areas: Vec<(String, usize)> = Vec::new();
+    // Area counts: repo merge group only, same eligibility, counted from the
+    // rows with the SAME validity filters as the statement scan.
+    let mut area_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     if repo_mode && arms.has_area {
         let repo_group = primary;
         let ins: Vec<String> = (0..repo_group.len()).map(|i| format!(":repo{i}")).collect();
         let asql = format!(
-            "SELECT e.area, COUNT(*) FROM llm_wiki_entries e WHERE e.deleted_at IS NULL{arms} \
-             AND e.entity_id IN ({ins}) AND e.area IS NOT NULL GROUP BY e.area",
+            "SELECT e.id, e.title, e.body, e.area FROM llm_wiki_entries e WHERE e.deleted_at IS NULL{arms} \
+             AND e.entity_id IN ({ins}) AND e.area IS NOT NULL ORDER BY e.area, e.id",
             arms = arms.sql,
             ins = ins.join(", "),
         );
@@ -516,14 +556,32 @@ pub fn build_brief_at(
         let mut astmt = conn.prepare(&asql)?;
         let mut arows = astmt.query(arefs.as_slice())?;
         while let Some(r) = arows.next()? {
-            let name: String = r.get(0)?;
-            let c: i64 = r.get(1)?;
-            areas.push((name, c.max(0) as usize));
+            let id = text_cell(r.get::<_, Option<SqlValue>>(0)?);
+            let title = text_cell(r.get::<_, Option<SqlValue>>(1)?);
+            let body = text_cell(r.get::<_, Option<SqlValue>>(2)?);
+            let area = text_cell(r.get::<_, Option<SqlValue>>(3)?);
+            match area {
+                Some(a) if !a.is_empty() && deliverable(id.as_deref(), title.as_deref(), body.as_deref()) => {
+                    *area_counts.entry(a).or_insert(0) += 1;
+                }
+                _ => skipped_rows += 1,
+            }
         }
+    }
+    let areas: Vec<(String, usize)> = area_counts.into_iter().collect();
+    if skipped_rows > 0 {
+        // One line, no content and no paths.
+        eprintln!("wisdom_brief_diagnostic\tskipped {skipped_rows} malformed row(s)");
     }
 
     let repo_present = repo_mode;
-    let org_present = if repo_mode { secondary.is_some() } else { true };
+    // An org hub merged into the repo hub adds no org line: its group is a
+    // subset of the repo group and every row is labelled repo.
+    let org_present = if repo_mode {
+        secondary.is_some_and(|o| !o.iter().all(|id| repo_ids.contains(id.as_str())))
+    } else {
+        true
+    };
     let mut input = IndexInput {
         repo: repo_present.then(|| BandInfo {
             name: hub_name(conn, primary.first()),
@@ -989,16 +1047,17 @@ mod tests {
         fact(&conn, "untyped-new", "hub", None, 100, None);
         fact(&conn, "rule-old", "hub", Some("rule"), 1, None);
         fact(&conn, "lesson-old", "hub", Some("lesson"), 2, None);
-        let one = item_cost("T rule-old", "body rule-old", "rule-old");
-        // Budget for exactly one statement plus the index reserve.
-        let probe = brief(&conn, &scope(&["hub"], &[]), 2200);
-        let reserve = index_cost(&probe.index);
-        let max = (one + reserve + 5).max(600);
+        // ~300-char bodies: at max 600 exactly one statement fits.
+        conn.execute("UPDATE llm_wiki_entries SET body = ?1", ["b".repeat(300)]).unwrap();
         let sc = scope(&["hub"], &[]);
-        // Use a tighter max only when 600 permits one; else assert order.
-        let b = brief(&conn, &sc, max);
-        assert_eq!(st_ids(&b)[0], "rule-old");
-        assert_eq!(st_ids(&probe), vec!["rule-old", "lesson-old", "untyped-new"]);
+        let b = brief(&conn, &sc, 600);
+        assert_eq!(st_ids(&b), vec!["rule-old"]);
+        assert_eq!(b.omitted.statements, 2);
+        let t = &b.omitted.by_tier;
+        assert_eq!((t.rule_trap, t.decision, t.lesson, t.untyped), (0, 0, 1, 1));
+        assert!(b.budget.used_chars <= 600);
+        let roomy = brief(&conn, &sc, 2200);
+        assert_eq!(st_ids(&roomy), vec!["rule-old", "lesson-old", "untyped-new"]);
     }
 
     #[test]
@@ -1096,5 +1155,73 @@ mod tests {
         fact(&conn, "r-mid", "hub", None, 5, None);
         let b = brief(&conn, &scope(&["hub"], &["org"]), 2200);
         assert_eq!(st_ids(&b), vec!["o-new", "r-mid", "r-old"]);
+    }
+
+    #[test]
+    fn kind_tier_of_none_is_untyped_tier() {
+        assert_eq!(kind_tier(None), UNTYPED_TIER);
+    }
+
+    #[test]
+    fn malformed_rows_never_fail_the_brief() {
+        let conn = base();
+        fact(&conn, "good", "hub", None, 10, None);
+        fact(&conn, "blob-body", "hub", None, 9, None);
+        fact(&conn, "blank", "hub", None, 8, None);
+        fact(&conn, "text-ts", "hub", None, 7, None);
+        fact(&conn, "int-title", "hub", None, 6, None);
+        conn.execute("UPDATE llm_wiki_entries SET body = x'00ff80', title = x'01' WHERE id='blob-body'", []).unwrap();
+        conn.execute("UPDATE llm_wiki_entries SET title = '  ', body = ' \n ' WHERE id='blank'", []).unwrap();
+        conn.execute("UPDATE llm_wiki_entries SET created_at = 'not-a-number' WHERE id='text-ts'", []).unwrap();
+        conn.execute("UPDATE llm_wiki_entries SET source_ref = x'00' WHERE id='int-title'", []).unwrap();
+        let b = build_brief_at(&conn, &scope(&["hub"], &[]), &BriefOpts { max_chars: 2200 }, NOW).unwrap();
+        let mut got = st_ids(&b);
+        got.sort();
+        // int-title keeps its TEXT body; text-ts keeps its row (sorts oldest).
+        assert_eq!(got, vec!["good", "int-title", "text-ts"]);
+        assert_eq!(*st_ids(&b).last().unwrap(), "text-ts");
+        let it = b.statements.iter().find(|s| s["id"] == "int-title").unwrap();
+        assert!(it["source_ref"].is_null(), "BLOB source_ref reads as absent");
+    }
+
+    #[test]
+    fn area_counts_use_the_same_validity_filters() {
+        let conn = base();
+        fact(&conn, "ok1", "hub", None, 1, Some("auth"));
+        fact(&conn, "bad id", "hub", None, 1, Some("auth"));
+        fact(&conn, "blank", "hub", None, 1, Some("auth"));
+        fact(&conn, "emptyarea", "hub", None, 1, Some(""));
+        fact(&conn, "blobarea", "hub", None, 1, None);
+        conn.execute("UPDATE llm_wiki_entries SET title='', body='' WHERE id='blank'", []).unwrap();
+        conn.execute("UPDATE llm_wiki_entries SET area = x'6162' WHERE id='blobarea'", []).unwrap();
+        let b = brief(&conn, &scope(&["hub"], &[]), 2200);
+        let areas: Vec<(String, usize)> = b.index.areas.iter().map(|a| (a.name.clone(), a.count)).collect();
+        assert_eq!(areas, vec![("auth".to_string(), 1)]);
+    }
+
+    #[test]
+    fn area_names_sort_on_full_name_and_cut_for_display() {
+        let long_a = format!("{}a", "x".repeat(45));
+        let long_b = format!("{}b", "x".repeat(45));
+        let mk = |order: &[&str]| IndexInput {
+            repo: Some(BandInfo { name: None, count: 1, shown: 1 }),
+            org: None,
+            areas: order.iter().map(|n| (n.to_string(), 2)).collect(),
+        };
+        let (i1, _) = build_index(&mk(&[&long_a, &long_b]), 1000);
+        let (i2, _) = build_index(&mk(&[&long_b, &long_a]), 1000);
+        assert_eq!(i1, i2, "input order must not matter");
+        assert_eq!(i1.areas.len(), 2, "full names are distinct");
+        assert!(i1.areas.iter().all(|a| a.name.chars().count() == 40));
+    }
+
+    #[test]
+    fn org_subset_of_repo_group_omits_the_org_line() {
+        let conn = base();
+        fact(&conn, "x", "hub", None, 10, None);
+        let sc = scope(&["hub", "org"], &["org"]);
+        let b = brief(&conn, &sc, 2200);
+        assert!(b.index.text.starts_with("Covered: repo hub (1 statements, 1 shown)."), "{}", b.index.text);
+        assert!(!b.index.text.contains("org "), "{}", b.index.text);
     }
 }
