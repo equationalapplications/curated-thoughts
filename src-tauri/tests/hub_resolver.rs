@@ -666,3 +666,187 @@ fn whitespace_only_area_name_is_a_parse_error() {
         .expect_err("whitespace-only area name must be a parse error");
     assert!(format!("{err:#}").contains("empty"));
 }
+
+// ---- resolve_brief_scope (spec 2026-11-28-wisdom-brief 3.2) ---------------
+
+use tauri_app_lib::config::hub_resolver::resolve_brief_scope;
+
+fn sorted(g: &Option<Vec<String>>) -> Vec<String> {
+    let mut v = g.clone().expect("group present");
+    v.sort();
+    v
+}
+
+fn brief_fixture() -> (TempDir, std::path::PathBuf, Connection) {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let conn = db();
+    (tmp, root, conn)
+}
+
+#[test]
+fn brief_scope_bound_repo_and_org() {
+    let (_t, root, conn) = brief_fixture();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "org-1");
+    let cfg = cfg_one(&root, "hub-a");
+    let s = resolve_brief_scope(&conn, Some(&cfg), &root.join("src").join("x.rs").to_string_lossy());
+    assert_eq!(sorted(&s.repo_group), vec!["hub-a".to_string()]);
+    assert_eq!(sorted(&s.org_group), vec!["org-1".to_string()]);
+    assert_eq!(s.reason, None);
+    assert!(s.diagnostics.is_empty());
+}
+
+#[test]
+fn brief_scope_no_prefix_gives_org_only() {
+    let (t, root, conn) = brief_fixture();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "org-1");
+    let cfg = cfg_one(&root, "hub-a");
+    let s = resolve_brief_scope(&conn, Some(&cfg), &t.path().join("elsewhere").to_string_lossy());
+    assert_eq!(s.repo_group, None);
+    assert_eq!(sorted(&s.org_group), vec!["org-1".to_string()]);
+    assert_eq!(s.reason, Some("no_prefix"));
+}
+
+#[test]
+fn brief_scope_no_prefix_no_org_is_none() {
+    let (t, root, conn) = brief_fixture();
+    add_entity(&conn, "hub-a");
+    let cfg = WisdomConfig {
+        org_entity_id: None,
+        ..cfg_one(&root, "hub-a")
+    };
+    let s = resolve_brief_scope(&conn, Some(&cfg), &t.path().join("elsewhere").to_string_lossy());
+    assert_eq!((s.repo_group, s.org_group), (None, None));
+    assert_eq!(s.reason, Some("no_prefix"));
+}
+
+#[test]
+fn brief_scope_unconfigured() {
+    let (_t, root, conn) = brief_fixture();
+    add_entity(&conn, "org-1");
+    let s = resolve_brief_scope(&conn, None, &root.to_string_lossy());
+    assert_eq!((s.repo_group.clone(), s.org_group.clone()), (None, None));
+    assert_eq!(s.reason, Some("unconfigured"));
+    // Config with an org but no areas_paths: org still served.
+    let cfg = WisdomConfig {
+        areas_paths: vec![],
+        org_entity_id: Some("org-1".to_string()),
+    };
+    let s = resolve_brief_scope(&conn, Some(&cfg), &root.to_string_lossy());
+    assert_eq!(s.repo_group, None);
+    assert_eq!(sorted(&s.org_group), vec!["org-1".to_string()]);
+    assert_eq!(s.reason, Some("unconfigured"));
+}
+
+#[test]
+fn brief_scope_unresolved_collision_gives_org_only() {
+    let tmp = TempDir::new().unwrap();
+    let r1 = tmp.path().join("repo1");
+    let r2 = tmp.path().join("repo2");
+    std::fs::create_dir_all(&r1).unwrap();
+    std::fs::create_dir_all(&r2).unwrap();
+    let conn = db();
+    for id in ["key-1", "key-2", "survivor", "org-1"] {
+        add_entity(&conn, id);
+    }
+    add_redirect(&conn, "key-1", "survivor");
+    add_redirect(&conn, "key-2", "survivor");
+    let cfg = WisdomConfig {
+        areas_paths: vec![
+            ("key-1".to_string(), r1.join(".ct-areas.yaml")),
+            ("key-2".to_string(), r2.join(".ct-areas.yaml")),
+        ],
+        org_entity_id: Some("org-1".to_string()),
+    };
+    let s = resolve_brief_scope(&conn, Some(&cfg), &r1.to_string_lossy());
+    assert_eq!(s.repo_group, None);
+    assert_eq!(sorted(&s.org_group), vec!["org-1".to_string()]);
+    assert_eq!(s.reason, Some("unresolved"));
+    assert!(s.diagnostics.iter().any(|d| d.contains("collision")), "{:?}", s.diagnostics);
+    // Diagnostics hold ids, never the checkout path.
+    let root_str = tmp.path().to_string_lossy().into_owned();
+    assert!(s.diagnostics.iter().all(|d| !d.contains(&root_str)), "{:?}", s.diagnostics);
+}
+
+#[test]
+fn brief_scope_org_unresolvable_sets_reason() {
+    let (_t, root, conn) = brief_fixture();
+    add_entity(&conn, "hub-a");
+    let cfg = cfg_one(&root, "hub-a"); // org-1 not a live entity
+    let s = resolve_brief_scope(&conn, Some(&cfg), &root.join("f.rs").to_string_lossy());
+    assert_eq!(sorted(&s.repo_group), vec!["hub-a".to_string()]);
+    assert_eq!(s.org_group, None);
+    assert_eq!(s.reason, Some("org_unresolved"));
+    assert!(s.diagnostics.iter().any(|d| d.contains("org-1")));
+}
+
+#[test]
+fn brief_scope_ignores_unusable_areas_file() {
+    let (_t, root, conn) = brief_fixture();
+    add_entity(&conn, "hub-a");
+    add_entity(&conn, "org-1");
+    write_areas_file(&root, "{{ this is not yaml");
+    let cfg = cfg_one(&root, "hub-a");
+    let s = resolve_brief_scope(&conn, Some(&cfg), &root.join("f.rs").to_string_lossy());
+    assert_eq!(sorted(&s.repo_group), vec!["hub-a".to_string()]);
+    assert_eq!(s.reason, None);
+}
+
+#[test]
+fn brief_scope_group_includes_merged_losers() {
+    let (_t, root, conn) = brief_fixture();
+    for id in ["hub-a", "hub-b", "org-1"] {
+        add_entity(&conn, id);
+    }
+    add_redirect(&conn, "hub-a", "hub-b");
+    let cfg = cfg_one(&root, "hub-a");
+    let s = resolve_brief_scope(&conn, Some(&cfg), &root.join("f.rs").to_string_lossy());
+    assert_eq!(
+        sorted(&s.repo_group),
+        vec!["hub-a".to_string(), "hub-b".to_string()]
+    );
+}
+
+#[test]
+fn brief_scope_repo_wins_when_ids_in_both_groups() {
+    // The resolver reports both groups as they are; "repo wins" labelling is
+    // applied by the brief builder. Here the org hub was merged into the repo
+    // hub, so both groups hold the same ids.
+    let (_t, root, conn) = brief_fixture();
+    for id in ["hub-a", "org-1"] {
+        add_entity(&conn, id);
+    }
+    add_redirect(&conn, "org-1", "hub-a");
+    let cfg = cfg_one(&root, "hub-a");
+    let s = resolve_brief_scope(&conn, Some(&cfg), &root.join("f.rs").to_string_lossy());
+    assert_eq!(sorted(&s.repo_group), sorted(&s.org_group));
+    assert_eq!(
+        sorted(&s.repo_group),
+        vec!["hub-a".to_string(), "org-1".to_string()]
+    );
+    assert_eq!(s.reason, None);
+}
+
+#[test]
+fn brief_scope_reason_precedence() {
+    // unconfigured beats org_unresolved.
+    let (t, root, conn) = brief_fixture();
+    add_entity(&conn, "hub-a");
+    let none_cfg = WisdomConfig {
+        areas_paths: vec![],
+        org_entity_id: Some("org-missing".to_string()),
+    };
+    let s = resolve_brief_scope(&conn, Some(&none_cfg), &root.to_string_lossy());
+    assert_eq!(s.reason, Some("unconfigured"));
+    // no_prefix beats org_unresolved.
+    let cfg = cfg_one(&root, "hub-a"); // org-1 missing
+    let s = resolve_brief_scope(&conn, Some(&cfg), &t.path().join("x").to_string_lossy());
+    assert_eq!(s.reason, Some("no_prefix"));
+    // unresolved beats org_unresolved: dead hub.
+    let cfg2 = cfg_one(&root, "dead-hub");
+    let s = resolve_brief_scope(&conn, Some(&cfg2), &root.join("f.rs").to_string_lossy());
+    assert_eq!(s.reason, Some("unresolved"));
+}

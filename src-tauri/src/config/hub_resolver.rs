@@ -382,34 +382,13 @@ pub fn resolve_scoped(
     if cfg.areas_paths.is_empty() {
         return ScopedResolution::NoPrefix;
     }
-    // §3.3: a same-survivor collision fails the WHOLE block closed.
-    let survivors = configured_survivors(conn, cfg);
-    if let Some(reason) = detect_collision(&survivors) {
-        return ScopedResolution::Unresolved(reason);
-    }
-    let canonical_path = super::canonicalize_lenient(resolved_path);
-    let hub_id = match longest_prefix_match(cfg, &canonical_path) {
-        PrefixMatch::None => return ScopedResolution::NoPrefix,
-        PrefixMatch::Tie(a, b) => {
-            return ScopedResolution::Unresolved(format!(
-                "unresolved: symlink/canonical tie between configured keys {a} and {b} (identical canonical checkout root)"
-            ));
-        }
-        PrefixMatch::Hub(id) => id,
-    };
-    let hub_survivor = match live_survivor(conn, &hub_id) {
-        Ok(s) => s,
-        Err(reason) => return ScopedResolution::Unresolved(reason),
-    };
-    let repo_group = match crate::db::entities::cluster_ids(conn, &hub_survivor) {
-        Ok(group) => group,
-        Err(e) => {
-            return ScopedResolution::Unresolved(format!(
-                "hub {hub_id} merge group unavailable: {e:#}"
-            ));
-        }
+    let (hub_id, repo_group) = match resolve_repo_step(conn, cfg, resolved_path) {
+        RepoStep::NoPrefix => return ScopedResolution::NoPrefix,
+        RepoStep::Unresolved(reason) => return ScopedResolution::Unresolved(reason),
+        RepoStep::Hub { hub_id, group } => (hub_id, group),
     };
 
+    let canonical_path = super::canonicalize_lenient(resolved_path);
     // Area: globset match on the path RELATIVE to the checkout root (§3.2).
     let areas_path = cfg
         .areas_paths
@@ -428,9 +407,59 @@ pub fn resolve_scoped(
         None => None,
     };
 
-    // Org band: resolve the configured org hub to its survivor, live-check,
-    // then expand; unresolvable → arm omitted + diagnostic line.
-    let (org_group, diagnostics) = match cfg.org_entity_id.as_deref() {
+    // Org band (shared with the brief).
+    let (org_group, diagnostics) = org_group_for(conn, cfg);
+
+    ScopedResolution::Bound(ScopedMatch {
+        repo_group,
+        org_group,
+        area,
+        diagnostics,
+    })
+}
+
+/// Outcome of the repo-resolution steps shared by [`resolve_scoped`] and
+/// [`resolve_brief_scope`].
+enum RepoStep {
+    NoPrefix,
+    Unresolved(String),
+    Hub { hub_id: String, group: Vec<String> },
+}
+
+/// The repo-resolution steps, ONE copy: configured survivors, same-survivor
+/// collision, longest-prefix match, live survivor, merge group
+/// (`cluster_ids`). Reason strings are the ones `resolve_scoped` always
+/// produced. The caller guarantees `cfg.areas_paths` is non-empty.
+fn resolve_repo_step(conn: &Connection, cfg: &WisdomConfig, resolved_path: &str) -> RepoStep {
+    // §3.3: a same-survivor collision fails the WHOLE block closed.
+    let survivors = configured_survivors(conn, cfg);
+    if let Some(reason) = detect_collision(&survivors) {
+        return RepoStep::Unresolved(reason);
+    }
+    let canonical_path = super::canonicalize_lenient(resolved_path);
+    let hub_id = match longest_prefix_match(cfg, &canonical_path) {
+        PrefixMatch::None => return RepoStep::NoPrefix,
+        PrefixMatch::Tie(a, b) => {
+            return RepoStep::Unresolved(format!(
+                "unresolved: symlink/canonical tie between configured keys {a} and {b} (identical canonical checkout root)"
+            ));
+        }
+        PrefixMatch::Hub(id) => id,
+    };
+    let hub_survivor = match live_survivor(conn, &hub_id) {
+        Ok(s) => s,
+        Err(reason) => return RepoStep::Unresolved(reason),
+    };
+    match crate::db::entities::cluster_ids(conn, &hub_survivor) {
+        Ok(group) => RepoStep::Hub { hub_id, group },
+        Err(e) => RepoStep::Unresolved(format!("hub {hub_id} merge group unavailable: {e:#}")),
+    }
+}
+
+/// Org band: resolve the configured org hub to its survivor, live-check,
+/// then expand; unresolvable gives no group plus a diagnostic line.
+fn org_group_for(conn: &Connection, cfg: &WisdomConfig) -> (Option<Vec<String>>, Vec<String>) {
+    match cfg.org_entity_id.as_deref() {
         None => (None, Vec::new()),
         Some(org_id) => match live_survivor(conn, org_id) {
             Ok(sur) => match crate::db::entities::cluster_ids(conn, &sur) {
@@ -445,14 +474,71 @@ pub fn resolve_scoped(
                 vec![format!("org hub {org_id} unresolvable; org band omitted")],
             ),
         },
-    };
+    }
+}
 
-    ScopedResolution::Bound(ScopedMatch {
-        repo_group,
-        org_group,
-        area,
-        diagnostics,
-    })
+/// Scope for `ct wisdom brief`: the repo and org merge groups, never the whole
+/// brain. Unlike [`resolve_scoped`] it keeps the org band on `NoPrefix` and
+/// `Unresolved`, and never reads the areas file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefScope {
+    pub repo_group: Option<Vec<String>>,
+    pub org_group: Option<Vec<String>>,
+    /// `unconfigured`, `no_prefix`, `unresolved`, `org_unresolved`, or `None`.
+    pub reason: Option<&'static str>,
+    /// Long reasons (entity ids, never paths) for stderr.
+    pub diagnostics: Vec<String>,
+}
+
+/// Brief scope resolution (spec 2026-11-28-wisdom-brief 3.2). Reason
+/// precedence, first match wins: `unconfigured`, `no_prefix`, `unresolved`,
+/// `org_unresolved`. NEVER calls `match_area`.
+pub fn resolve_brief_scope(
+    conn: &Connection,
+    cfg: Option<&WisdomConfig>,
+    path: &str,
+) -> BriefScope {
+    let Some(cfg) = cfg else {
+        return BriefScope {
+            repo_group: None,
+            org_group: None,
+            reason: Some("unconfigured"),
+            diagnostics: Vec::new(),
+        };
+    };
+    let (org_group, mut diagnostics) = org_group_for(conn, cfg);
+    let org_failed = cfg.org_entity_id.is_some() && org_group.is_none();
+    if cfg.areas_paths.is_empty() {
+        return BriefScope {
+            repo_group: None,
+            org_group,
+            reason: Some("unconfigured"),
+            diagnostics,
+        };
+    }
+    match resolve_repo_step(conn, cfg, path) {
+        RepoStep::NoPrefix => BriefScope {
+            repo_group: None,
+            org_group,
+            reason: Some("no_prefix"),
+            diagnostics,
+        },
+        RepoStep::Unresolved(reason) => {
+            diagnostics.insert(0, reason);
+            BriefScope {
+                repo_group: None,
+                org_group,
+                reason: Some("unresolved"),
+                diagnostics,
+            }
+        }
+        RepoStep::Hub { group, .. } => BriefScope {
+            repo_group: Some(group),
+            org_group,
+            reason: if org_failed { Some("org_unresolved") } else { None },
+            diagnostics,
+        },
+    }
 }
 
 /// First area (in file order, §3.2) whose GlobSet matches the path
