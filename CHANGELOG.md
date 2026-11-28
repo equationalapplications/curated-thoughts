@@ -1,3 +1,31 @@
+## [3.19.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.18.0...v3.19.0) (2026-11-28)
+
+### Features
+
+* **bundle:** export carries forgotten_at in ExportEvent + log-line grammar ([#398](https://github.com/equationalapplications/curated-thoughts/issues/398)) ([d756e37](https://github.com/equationalapplications/curated-thoughts/commit/d756e37d4b0d8c0cd2de3d802a247a6062b223f4))
+* **bundle:** import applies forgotten_at verbatim, reconciles dups ([#398](https://github.com/equationalapplications/curated-thoughts/issues/398)) ([61decb9](https://github.com/equationalapplications/curated-thoughts/commit/61decb9147a96f18824cc45581520e2a8546ef5e))
+* **bundle:** ParsedEvent carries forgotten_at from the id comment ([#398](https://github.com/equationalapplications/curated-thoughts/issues/398)) ([ef0b457](https://github.com/equationalapplications/curated-thoughts/commit/ef0b457e27d1404a1e23f41bc3e1690d34e09024))
+* **okf:** forgotten: key in the event-line id comment grammar ([#398](https://github.com/equationalapplications/curated-thoughts/issues/398)) ([b6a9972](https://github.com/equationalapplications/curated-thoughts/commit/b6a99725229348b61a6c1c284cd6a7ecb2f621e5))
+
+### Bug Fixes
+
+* **bundle:** drop unused mut in round-trip test — CI clippy (test profile) finding ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([acddb9f](https://github.com/equationalapplications/curated-thoughts/commit/acddb9f253eeb4e905ab3421b52f7cb66cae6896))
+* **bundle:** dup tombstone polarity is refuse-foreign-only — task/dangling ids pass (T4 r5 M1); r5 minor folds ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([1cf2ff1](https://github.com/equationalapplications/curated-thoughts/commit/1cf2ff1268e3a97567a485dbace419ff70416984)), closes [#398](https://github.com/equationalapplications/curated-thoughts/issues/398)
+* **bundle:** dup tombstone refuses foreign-linked rows; gate unconditional on all shapes (T4 r4 M1); r4 minor folds ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([561c4ec](https://github.com/equationalapplications/curated-thoughts/commit/561c4ecedb75d009590b63b976680878304b5477))
+* **bundle:** dup tombstone scoped to the import's entity CLUSTER — merged-loser rows reconcile (CodeRabbit CR-1); fix spec cargo command order (CR-2) ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([7012351](https://github.com/equationalapplications/curated-thoughts/commit/701235158fc77523d94686eae5f5ba795f99dace))
+* **bundle:** forgotten fresh-INSERT tombstone cluster-gated (T4 r1 M1); folds m2/m4/m5/m6/m1-spec-errata ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([33ff08e](https://github.com/equationalapplications/curated-thoughts/commit/33ff08eff54f89b209d54eeb8637a7dc7c5b0a07))
+* **bundle:** forgotten-event linkage kept only within the import cluster — tombstone kept verbatim, linkage dropped when unprovable (T4 r2 M1/M2); folds m2/m3/m4 ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([8b454ec](https://github.com/equationalapplications/curated-thoughts/commit/8b454ecfda155674f5b8c20138c2a5c88d9511d3))
+* **bundle:** linkage gate covers EVERY fresh insert — live inserts can no longer flip foreign entry visibility either direction (T4 r3 M1/M2); folds m1-m4, m6 ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([8257a3a](https://github.com/equationalapplications/curated-thoughts/commit/8257a3a45cfa9f3aacabaec7ac673961e64093c8))
+* **bundle:** refusal warning names the right cause; refusal observable + residual wording corrected (T4 r6 m1-m4) ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([aef24c1](https://github.com/equationalapplications/curated-thoughts/commit/aef24c183d670eaa8ad673a3a0075e2960986887))
+* **bundle:** scope dup tombstone to the importing entity — T1.5 r1 MAJOR; cross-entity id collision test ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([db3c935](https://github.com/equationalapplications/curated-thoughts/commit/db3c935e8c5894fb41ce535c3630c52863a919cc))
+* **bundle:** T1.5 r2 minors — legacy append empty-id guard, parametrized test SQL, Replace-mode forgotten_at coverage test ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([766bfa2](https://github.com/equationalapplications/curated-thoughts/commit/766bfa2f8c5482f7817a2cf1c44f1f9a38608c9d))
+* **traversal:** allow clippy::too_many_arguments on fetch_neighbors — gate param pushed it to 8 ([#402](https://github.com/equationalapplications/curated-thoughts/issues/402)) ([d5d43c4](https://github.com/equationalapplications/curated-thoughts/commit/d5d43c49d7d70e0654d53014e91fea77056ab77e))
+
+### Performance Improvements
+
+* **gate:** live-half partial index llm_wiki_events_related_live_idx + parity allowlist ([#401](https://github.com/equationalapplications/curated-thoughts/issues/401)) ([55ad9af](https://github.com/equationalapplications/curated-thoughts/commit/55ad9afc41c0e7f57fc0227a5ea25e7db9ae553d))
+* **traversal:** gate arms resolved once per walk in both public entries ([#400](https://github.com/equationalapplications/curated-thoughts/issues/400), closes [#399](https://github.com/equationalapplications/curated-thoughts/issues/399)) ([d020f15](https://github.com/equationalapplications/curated-thoughts/commit/d020f15c911cb589c55df29ad372c6328a3fc201))
+
 ## [3.18.0](https://github.com/equationalapplications/curated-thoughts/compare/v3.17.2...v3.18.0) (2026-11-27)
 
 ### Features
