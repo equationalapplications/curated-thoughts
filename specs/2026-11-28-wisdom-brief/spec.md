@@ -1,7 +1,7 @@
 # `wisdom-brief`: `ct wisdom brief`, the standing statements for a project (PR-2)
 
 **Date:** 2026-11-28
-**Status:** Reviewed (rev 3; Fable design review + delta re-review APPROVE WITH NITS, folded; owner rulings §8). Implementation in progress.
+**Status:** Implemented (2026-11-28). Fable design review + delta re-review + code review (APPROVE WITH MINORS, folded) + /code-review; owner rulings §8. Perf: p95 137 ms at 10,000 fixture facts.
 **Rev 3 (2026-11-27):** folds Fable delta re-review (APPROVE WITH NITS): `ITEM_OVERHEAD` 80, Tier 4 wording, nits.
 **Rev 2 (2026-11-27):** folds Fable design review (REQUEST CHANGES: M1-M6, minors, nits) and owner rulings OD-1..OD-4, OR-1..OR-5.
 **Base:** branch `feat/wisdom-brief`, stacked on PR-1 (`feat/recall-eligibility-provenance`, PR #404, tip `79fd00cd`). Every cite below was read on disk on this branch. Cites into CTI are to `curated-thoughts-integrations` as of today.
@@ -153,6 +153,7 @@ The CTI consumer PR; follow-up CT lanes (deposit `kind:`); logging `ct recall` o
 - Exactly-once: the ledger is CTI's (CTI rule 1). CT's part is that every id appears once in a brief (test 5).
 - LongMemEval hit rate, abstention precision, 200-prompt paraphrase: they score query relevance and the embedding gate. The brief has no query, no embedding and no floor, so they do not apply. The 2026-11-27 owner waiver (INTENT step 4) does not apply either: it covers compliance/eligibility fixes with byte-identical matcher SQL, and this is a new injection surface.
 - Ruled gates (OD-2): (a) the fixture tests above (drop order incl. OR-1, budget, determinism and byte-identical re-run, no superseded fact); (b) a scratch-brain run (never the live brain; synthetic hubs, 50 / 1,000 / 10,000 facts, mixed kinds and areas, some superseded/expired/forgotten) with a perf gate p95 wall time <= 250 ms at 10,000 facts, plus output never over the cap, determinism over 20 runs and zero superseded ids. Results go in the PR body. The ruling is recorded in INTENT.md "How changes are made" step 4 as one dated owner-ruling line (plan task 11).
+- Measured (2026-11-28; scratch brains with fixture facts and no embeddings; debug `ct` build, delivery log off, 20 runs each): 50 facts p95 27 ms; 1,000 facts p95 34 ms; 10,000 facts p50 130 ms, p95 137 ms (gate <= 250 ms). Output byte-identical across the 20 runs at every size, `used_chars` <= 2200, and zero superseded, expired or forgotten ids.
 
 Review rungs: per the 2026-11-27 owner ruling (INTENT step 3), Fable design + code review and /code-review, recorded here and in the PR body.
 
