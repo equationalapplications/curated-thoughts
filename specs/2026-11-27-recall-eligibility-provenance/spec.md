@@ -1,7 +1,7 @@
 # `recall-eligibility-provenance`: `ct recall` stops serving superseded facts and labels what it serves (PR-1)
 
 **Date:** 2026-11-27
-**Status:** Draft
+**Status:** Reviewed (Fable design review APPROVE WITH NITS folded, rev 2; owner rulings OQ-A..OQ-D, rev 3, 2026-11-27). Implementation in progress on this branch.
 **Review record:** Rev 2 (2026-11-27): folds Fable design review (APPROVE WITH NITS; M1-M4, m1-m8, nits). The owner waived the GLM review rung (2026-11-27); the two reviews are Fable (design + code) and /code-review.
 **Base:** origin/main 3.18.0 (`fc715239`). Every cite below was read on disk at that commit.
 
