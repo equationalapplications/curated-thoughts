@@ -87,36 +87,45 @@ fn enabled() -> bool {
     std::env::var("CURATED_DELIVERY_LOG").map_or(true, |v| v != "0")
 }
 
-/// Append one delivery row. Never creates `db_path`, never panics, never
-/// errors: at most one `wisdom_delivery_log_skipped\t<class>` stderr line.
-pub fn record_delivery(db_path: &Path, tool: &str, entity_id: Option<&str>, summary: Value) {
-    if !enabled() || !delivered_something(&summary) {
-        return;
+/// The fallible core: `Ok(())` when a row was written or nothing needed
+/// writing, `Err(class)` with a class from [`ERROR_CLASSES`] otherwise.
+fn try_record(
+    db_path: &Path,
+    tool: &str,
+    entity_id: Option<&str>,
+    summary: &Value,
+) -> Result<(), &'static str> {
+    if !enabled() || !delivered_something(summary) {
+        return Ok(());
     }
     // READ_WRITE without CREATE: a missing db is an error, not a new file.
-    let conn = match Connection::open_with_flags(
+    let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(e) => return skipped(classify_sqlite(&e)),
-    };
-    if let Err(e) = conn.busy_timeout(Duration::from_millis(100)) {
-        return skipped(classify_sqlite(&e));
-    }
+    )
+    .map_err(|e| classify_sqlite(&e))?;
+    conn.busy_timeout(Duration::from_millis(100))
+        .map_err(|e| classify_sqlite(&e))?;
     // Pragmas are best-effort tuning; a failure here is not a delivery error.
     let _ = conn.pragma_update(None, "wal_autocheckpoint", 0);
     let _ = conn.pragma_update(None, "synchronous", "NORMAL");
     let text = summary.to_string();
-    if let Err(e) = tauri_app_lib::db::commit::log_agent_access_checked_with_summary(
+    tauri_app_lib::db::commit::log_agent_access_checked_with_summary(
         &conn,
         CLIENT,
         tool,
         entity_id,
         "read",
         Some(&text),
-    ) {
-        skipped(classify_message(&format!("{e:#}")));
+    )
+    .map_err(|e| classify_message(&format!("{e:#}")))
+}
+
+/// Append one delivery row. Never creates `db_path`, never panics, never
+/// errors: at most one `wisdom_delivery_log_skipped\t<class>` stderr line.
+pub fn record_delivery(db_path: &Path, tool: &str, entity_id: Option<&str>, summary: Value) {
+    if let Err(class) = try_record(db_path, tool, entity_id, &summary) {
+        skipped(class);
     }
 }
 
@@ -215,8 +224,20 @@ mod tests {
             let d = TempDir::new().unwrap();
             let p = d.path().join("brain.db");
             Connection::open(&p).unwrap().execute_batch("CREATE TABLE x (a)").unwrap();
-            record_delivery(&p, "wisdom_brief", None, summary("brief", &ids(1), vec![]));
-            assert_eq!(classify_message("audit log insert failed for t: no such table: curated_agent_log"), "no_table");
+            let r = try_record(&p, "wisdom_brief", None, &summary("brief", &ids(1), vec![]));
+            assert_eq!(r, Err("no_table"));
+            // The log never creates its table or any other file.
+            let c = Connection::open(&p).unwrap();
+            let tables: Vec<String> = c
+                .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            assert_eq!(tables, vec!["x".to_string()]);
+            let files = std::fs::read_dir(d.path()).unwrap().count();
+            assert!(files <= 3, "only the db and its journal files: {files}");
         });
     }
 
@@ -244,6 +265,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn readonly_file_fails_open() {
         temp_env::with_var("CURATED_DELIVERY_LOG", None::<&str>, || {
@@ -252,8 +274,14 @@ mod tests {
             // Fold the WAL in so a read-only open needs no -shm write.
             Connection::open(&p).unwrap().pragma_update(None, "journal_mode", "DELETE").unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o444)).unwrap();
-            record_delivery(&p, "wisdom_brief", None, summary("brief", &ids(1), vec![]));
+            // Root ignores file modes: skip when we can still open it for write.
+            if std::fs::OpenOptions::new().write(true).open(&p).is_ok() {
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+                return;
+            }
+            let r = try_record(&p, "wisdom_brief", None, &summary("brief", &ids(1), vec![]));
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(r, Err("readonly"));
             assert!(rows(&p).is_empty());
         });
     }

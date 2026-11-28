@@ -299,5 +299,8 @@ fn brief_fail_open_when_log_table_dropped() {
         assert_eq!(before.stdout, after.stdout);
         let err = String::from_utf8_lossy(&after.stderr);
         assert!(err.contains("wisdom_delivery_log_skipped\tno_table"), "{err}");
+        let brain_dir = std::env::var("CURATED_BRAIN_DIR").unwrap();
+        assert!(!err.contains(&brain_dir), "stderr leaks the brain dir: {err}");
+        assert!(!err.contains("brain.db"), "stderr leaks the db name: {err}");
     });
 }
