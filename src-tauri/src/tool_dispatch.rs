@@ -424,17 +424,31 @@ pub(crate) fn coerce_updated_at(value: Option<rusqlite::types::Value>) -> i64 {
     }
 }
 
-/// Wisdom layer keyword ranking (ported verbatim from tools/src/queries.rs).
+/// Wisdom layer keyword ranking (ported from tools/src/queries.rs).
 ///
-/// Term-overlap scoring over live (`deleted_at IS NULL`) `llm_wiki_entries`:
-/// each matching term adds one overlap point; ties break by confidence
-/// ordinal (confirmed=3 > inferred=2 > unknown=0, desc) then numeric
-/// `updated_at` (desc). Doubles as the keyword fallback
-/// when no query embedding is available.
+/// Term-overlap scoring over live `llm_wiki_entries` eligible for recall:
+/// `deleted_at IS NULL` plus the shared temporal arms
+/// ([`crate::wisdom_match::entry_recall_arms`]: not superseded, not expired,
+/// not forgotten). Each matching term adds one overlap point; order is
+/// (overlap desc, [`confidence_ordinal`](crate::wisdom_match::confidence_ordinal)
+/// desc, numeric `updated_at` desc, `id` asc). The final `id` key makes the
+/// order a pure function of the rows (owner ruling OQ-C). Doubles as the
+/// keyword fallback when no query embedding is available.
 pub(crate) fn rank_wiki_entries(
     conn: &Connection,
     query: &str,
     limit_wiki: usize,
+) -> Result<Vec<Value>> {
+    rank_wiki_entries_at(conn, query, limit_wiki, crate::wisdom_deposit::now_ms())
+}
+
+/// Clock-injectable core of [`rank_wiki_entries`]: `now_ms` (epoch ms) drives
+/// the superseded/valid_to arms so tests control it.
+pub(crate) fn rank_wiki_entries_at(
+    conn: &Connection,
+    query: &str,
+    limit_wiki: usize,
+    now_ms: i64,
 ) -> Result<Vec<Value>> {
     // Keep terms of any length >= 2; short technical terms ("sql", "rag")
     // are often the most meaningful.
@@ -447,22 +461,21 @@ pub(crate) fn rank_wiki_entries(
         return Ok(Vec::new());
     }
 
-    let arm = crate::wisdom_match::forgotten_entry_arm(
-        &crate::wisdom_match::temporal_columns_shape_only(conn)?,
-    );
+    let arms = crate::wisdom_match::entry_recall_arms(conn)?;
     let mut stmt = conn.prepare(&format!(
         "SELECT e.id, e.entity_id, e.title, e.body, e.source_ref, e.confidence, e.source_type,
-                e.okf_verified, e.updated_at
+                e.okf_verified, e.updated_at, e.okf_type
          FROM llm_wiki_entries e
          WHERE e.deleted_at IS NULL
-           AND (e.title LIKE '%' || ?1 || '%'
-                OR e.body LIKE '%' || ?1 || '%'){arm}"
+           AND (e.title LIKE '%' || :term || '%'
+                OR e.body LIKE '%' || :term || '%'){arms}",
+        arms = arms.sql
     ))?;
     // id -> (overlap_count, json_value, confidence_ordinal, updated_at)
     use std::collections::HashMap;
     let mut candidates: HashMap<String, (usize, Value, i64, i64)> = HashMap::new();
     for term in &terms {
-        let rows = stmt.query_map(rusqlite::params![term], |row| {
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok((
                 row.get::<_, String>(0)?,                         // id (TEXT PK)
                 row.get::<_, Option<String>>(1)?,                 // entity_id
@@ -473,12 +486,23 @@ pub(crate) fn rank_wiki_entries(
                 row.get::<_, Option<String>>(6)?,                 // source_type (TEXT)
                 row.get::<_, Option<String>>(7)?,                 // okf_verified (TEXT json)
                 row.get::<_, Option<rusqlite::types::Value>>(8)?, // updated_at
+                row.get::<_, Option<String>>(9)?,                 // okf_type (TEXT)
             ))
-        })?;
+        };
+        // `:now` is bound only when an arm references it (rusqlite rejects an
+        // unused named parameter).
+        let rows = if arms.needs_now {
+            stmt.query_map(
+                rusqlite::named_params! {":term": term, ":now": now_ms},
+                map_row,
+            )?
+        } else {
+            stmt.query_map(rusqlite::named_params! {":term": term}, map_row)?
+        };
         for row in rows {
             // A single malformed row must never abort the whole tool call:
             // log it and skip.
-            let (id, entity_id, title, text, source_ref, confidence, stored_source_type, okf_verified, updated_at_raw) = match row {
+            let (id, entity_id, title, text, source_ref, confidence, stored_source_type, okf_verified, updated_at_raw, okf_type) = match row {
                 Ok(row) => row,
                 Err(e) => {
                     eprintln!("curated-thoughts-mcp: skipping unreadable wiki row: {e}");
@@ -487,40 +511,20 @@ pub(crate) fn rank_wiki_entries(
             };
             let updated_at = coerce_updated_at(updated_at_raw);
             let entry = candidates.entry(id.clone()).or_insert_with(|| {
-                let mut v = serde_json::json!({
-                    "id": id,
-                    "entity_id": entity_id,
-                    "title": title,
-                    "text": text,
-                    "source_ref": source_ref,
-                    "confidence": confidence,
+                // Additive per-hit labels (spec §5 D6): provenance, verified
+                // and kind are built by the shared item helper (infallible).
+                let v = crate::wisdom_match::recall_item(crate::wisdom_match::RecallItemInput {
+                    id: &id,
+                    entity_id: entity_id.as_deref(),
+                    title: title.as_deref(),
+                    text: text.as_deref(),
+                    source_ref: source_ref.as_deref(),
+                    confidence: confidence.as_deref(),
+                    source_type: stored_source_type.as_deref(),
+                    okf_verified: okf_verified.as_deref(),
+                    okf_type: okf_type.as_deref(),
                 });
-                // Additive per-hit labels (spec §5 D6): vocabulary-filtered
-                // `source_type` via `provenance_for`, plus `verified {by, at}`
-                // for CONFIRMED facts only. `None` degrades to an absent key
-                // (infallible — controller note 5).
-                if let Some(label) =
-                    crate::wisdom_match::provenance_for(stored_source_type.as_deref())
-                {
-                    v["source_type"] = serde_json::json!(label);
-                }
-                if let Some(verified) = crate::wiki_graph::verified_label(
-                    confidence.as_deref(),
-                    okf_verified.as_deref(),
-                ) {
-                    if let Ok(verified) = serde_json::to_value(verified) {
-                        v["verified"] = verified;
-                    }
-                }
-                // Confidence ORDINAL (spec rev-4 M4): `confirmed`=3 >
-                // `inferred`=2 > unknown=0. The previous plain-string rank key
-                // sorted `confirmed` BELOW `inferred`, which D7's confidence
-                // write would have baked into the permanent recall order.
-                let ordinal = match confidence.as_deref() {
-                    Some("confirmed") => 3,
-                    Some("inferred") => 2,
-                    _ => 0,
-                };
+                let ordinal = crate::wisdom_match::confidence_ordinal(confidence.as_deref());
                 (0, v, ordinal, updated_at)
             });
             entry.0 += 1; // one overlap point per matching term
@@ -530,8 +534,9 @@ pub(crate) fn rank_wiki_entries(
     ranked.sort_by(|a, b| {
         b.1 .0
             .cmp(&a.1 .0) // term overlap desc
-            .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence desc
+            .then_with(|| b.1 .2.cmp(&a.1 .2)) // confidence ordinal desc
             .then_with(|| b.1 .3.cmp(&a.1 .3)) // updated_at desc (numeric)
+            .then_with(|| a.0.cmp(&b.0)) // id asc (deterministic, OQ-C)
     });
     Ok(ranked
         .into_iter()
@@ -2161,6 +2166,149 @@ mod curated_memory_tests {
         let hits = rank_wiki_entries(&conn, "vault documents", 5).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["id"], "w1");
+    }
+
+    /// Recall-eligibility fixture: a full-shape (`open_in_memory`) brain with
+    /// one matching row per call. `okf_type`/`confidence`/`updated_at` vary.
+    fn recall_seed(
+        conn: &Connection,
+        id: &str,
+        confidence: &str,
+        okf_type: Option<&str>,
+        updated_at: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO llm_wiki_entries (
+                id, entity_id, title, body, tags, confidence, source_type,
+                created_at, updated_at, okf_type
+             ) VALUES (?1, 'ent', ?2, 'zebra body', '[]', ?3,
+                       'librarian_inferred', 100, ?4, ?5)",
+            rusqlite::params![id, format!("zebra {id}"), confidence, updated_at, okf_type],
+        )
+        .unwrap();
+    }
+
+    fn recall_ids(conn: &Connection, now: i64) -> Vec<String> {
+        rank_wiki_entries_at(conn, "zebra", 10, now)
+            .unwrap()
+            .iter()
+            .map(|h| h["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn recall_excludes_superseded() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        recall_seed(&conn, "live", "inferred", None, 100);
+        recall_seed(&conn, "old", "inferred", None, 100);
+        recall_seed(&conn, "nullat", "inferred", None, 100);
+        // superseded_at <= now: excluded.
+        conn.execute(
+            "UPDATE llm_wiki_entries SET superseded_by='live', superseded_at=500 WHERE id='old'",
+            [],
+        )
+        .unwrap();
+        // superseded_by set, superseded_at NULL: excluded (NULL > :now is NULL).
+        conn.execute(
+            "UPDATE llm_wiki_entries SET superseded_by='live' WHERE id='nullat'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(recall_ids(&conn, 1_000), vec!["live"]);
+    }
+
+    #[test]
+    fn recall_future_superseded_at_still_included() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        recall_seed(&conn, "soon", "inferred", None, 100);
+        conn.execute(
+            "UPDATE llm_wiki_entries SET superseded_by='x', superseded_at=5000 WHERE id='soon'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(recall_ids(&conn, 1_000), vec!["soon"]);
+    }
+
+    #[test]
+    fn recall_excludes_expired_valid_to() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        recall_seed(&conn, "expired", "inferred", None, 100);
+        conn.execute("UPDATE llm_wiki_entries SET valid_to=500 WHERE id='expired'", [])
+            .unwrap();
+        assert!(recall_ids(&conn, 1_000).is_empty());
+    }
+
+    #[test]
+    fn recall_future_valid_to_included() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        recall_seed(&conn, "fresh", "inferred", None, 100);
+        conn.execute("UPDATE llm_wiki_entries SET valid_to=5000 WHERE id='fresh'", [])
+            .unwrap();
+        assert_eq!(recall_ids(&conn, 1_000), vec!["fresh"]);
+    }
+
+    #[test]
+    fn recall_excludes_forgotten_and_deleted() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        recall_seed(&conn, "kept", "inferred", None, 100);
+        recall_seed(&conn, "gone", "inferred", None, 100);
+        recall_seed(&conn, "deleted", "inferred", None, 100);
+        conn.execute("UPDATE llm_wiki_entries SET deleted_at=1 WHERE id='deleted'", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO llm_wiki_events
+               (id, entity_id, event_type, summary, related_entry_id, created_at, forgotten_at)
+             VALUES ('ev', 'ent', 'synthesized', 's', 'gone', 100, 200)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(recall_ids(&conn, 1_000), vec!["kept"]);
+    }
+
+    #[test]
+    fn recall_item_carries_kind() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        recall_seed(&conn, "typed", "inferred", Some("rule"), 300);
+        recall_seed(&conn, "legacy", "inferred", Some("fact"), 200);
+        recall_seed(&conn, "plain", "inferred", None, 100);
+        let hits = rank_wiki_entries_at(&conn, "zebra", 10, 1_000).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0]["id"], "typed");
+        assert_eq!(hits[0]["kind"], "rule");
+        assert!(hits[1].get("kind").is_none(), "legacy `fact` omitted");
+        assert!(hits[2].get("kind").is_none(), "NULL okf_type omitted");
+    }
+
+    /// Spec 3.4 / OQ-B: the app copy now shares `confidence_ordinal`, so
+    /// `certain` and `verified` (previously 0) rank with `confirmed` (3) above
+    /// `inferred` (2) above `tentative` (0). Distinct `updated_at` values run
+    /// the OPPOSITE way (older = higher ordinal) so only the ordinal can
+    /// produce this order.
+    #[test]
+    fn recall_ranks_certain_and_verified_with_confirmed() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        recall_seed(&conn, "tent", "tentative", None, 500);
+        recall_seed(&conn, "inf", "inferred", None, 400);
+        recall_seed(&conn, "cer", "certain", None, 300);
+        recall_seed(&conn, "ver", "verified", None, 200);
+        recall_seed(&conn, "con", "confirmed", None, 100);
+        // Ordinal 3 group by updated_at desc (cer 300, ver 200, con 100),
+        // then inferred, then tentative.
+        assert_eq!(
+            recall_ids(&conn, 1_000),
+            vec!["cer", "ver", "con", "inf", "tent"]
+        );
+    }
+
+    /// OQ-C: three rows identical on overlap, ordinal and `updated_at`,
+    /// inserted out of id order, come back id ascending.
+    #[test]
+    fn ties_break_by_id() {
+        let conn = crate::db::connection::open_in_memory().unwrap();
+        for id in ["c", "a", "b"] {
+            recall_seed(&conn, id, "inferred", None, 100);
+        }
+        assert_eq!(recall_ids(&conn, 1_000), vec!["a", "b", "c"]);
     }
 
     /// Task 7 (spec rev-4 M4): `confidence` ranks by an ORDINAL
