@@ -1,7 +1,8 @@
 # `wisdom-brief`: `ct wisdom brief`, the standing statements for a project (PR-2)
 
 **Date:** 2026-11-28
-**Status:** Reviewed (rev 2, pending Fable delta re-review)
+**Status:** Reviewed (rev 3; Fable design review + delta re-review APPROVE WITH NITS, folded; owner rulings §8). Implementation in progress.
+**Rev 3 (2026-11-27):** folds Fable delta re-review (APPROVE WITH NITS): `ITEM_OVERHEAD` 80, Tier 4 wording, nits.
 **Rev 2 (2026-11-27):** folds Fable design review (REQUEST CHANGES: M1-M6, minors, nits) and owner rulings OD-1..OD-4, OR-1..OR-5.
 **Base:** branch `feat/wisdom-brief`, stacked on PR-1 (`feat/recall-eligibility-provenance`, PR #404, tip `79fd00cd`). Every cite below was read on disk on this branch. Cites into CTI are to `curated-thoughts-integrations` as of today.
 
@@ -29,7 +30,7 @@ CT already knows which facts are standing for a project: the facts attached to t
 `ct wisdom brief [--json] [--repo-path <path>] [--max-chars <n>]` in `WisdomCmd` (`tools/src/bin/ct.rs:381`, dispatch `:829`). Read-only on facts. `--help` exits 0 on a CT that has it; an older CT rejects the unknown subcommand (non-zero), which is the CTI probe.
 
 - `--repo-path` follows the existing deposit flag of the same name (`ct.rs:399-400`: "Relative paths are resolved against the current directory"). Default `.`. It is resolved by the existing `canonicalize_lenient` (`src-tauri/src/config/mod.rs:1279`, relative resolved against cwd). The later CTI PR spawns `ct` with cwd = project root (today it spawns with cwd = `~`, `ct_wisdom.py:254`) and passes nothing or `.`, so no home path leaves the machine (CTI rule 9). CT never prints the `--repo-path` value: not in JSON, not in stderr, not in `load_lenient` diagnostics (a test runs a brain whose config fails to load and greps stderr for the path). Config-derived strings CT does not control (a hub path inside a TOML parse error) are not claimed covered; the test pins the `--repo-path` value only.
-- `--max-chars` default 2200, accepted range 600..=8000 (else exit 1, usage error). The lower bound is 600, not 400, because at 400 the index cap is 100 chars while the fixed hint alone is about 63 and the shortest repo line about 102 (Fable M2); at 600 the cap is 150 and the shortest form fits. The shed ladder in 3.5 still ends in an empty index (cost 0) as a defensive floor. See 3.4.
+- `--max-chars` default 2200, accepted range 600..=8000 (else exit 1, usage error). The lower bound is 600, not 400, because at 400 the index cap is 100 chars while the fixed hint alone is about 63 and the shortest repo line with its hint about 102 (worst case about 137, still within the 150 cap) (Fable M2); at 600 the cap is 150 and the shortest form fits. The shed ladder in 3.5 still ends in an empty index (cost 0) as a defensive floor. See 3.4.
 - No `--exclude`, no query text, no embedding profile load (so no `CURATED_EMBED_STUB`, no network).
 
 ### 3.2 Which hubs (question 1)
@@ -51,17 +52,17 @@ Ruled (OD-4): org-only, never empty and never unscoped. When no repo hub is conf
 
 ### 3.3 What counts as a statement (question 4)
 
-A statement is an eligible live fact whose `entity_id` is in the repo or org merge group and whose `area IS NULL` (the band predicate's repo and org arms with no area, `wisdom_match.rs:698-760`, reused as is by passing `BandBindings { area: None, .. }`; org-only mode passes the org group as `repo_group` and labels every row `org` in Rust). Typed and untyped facts both count. Ruled: no draft filter. The live gate and PR-1 recall have no lifecycle arm (PR-1 spec 7.1), INTENT rule 10 says every live fact is recallable, and only the confirmation queue requires `lifecycle_status = 'stable'` (`db/queue.rs:315`). A fresh brain (all wiki entries were wiped) has almost only untyped facts, and new facts get no `okf_type` until the later deposit `kind:` lane, so for now most statements land in Tier 4 and are ordered by scope then newest; the tier machinery is already in place for typed facts. Rows with an id that fails `valid_fact_id` (`wisdom_match.rs:269`) or with empty title and body are skipped (CTI drops them anyway, `ct_wisdom.py:273`).
+A statement is an eligible live fact whose `entity_id` is in the repo or org merge group and whose `area IS NULL` (the band predicate's repo and org arms with no area, `wisdom_match.rs:698-760`, reused as is by passing `BandBindings { area: None, .. }`; org-only mode passes the org group as `repo_group` and labels every row `org` in Rust). Typed and untyped facts both count. Ruled: no draft filter. The live gate and PR-1 recall have no lifecycle arm (PR-1 spec 7.1), INTENT rule 10 says every live fact is recallable, and only the confirmation queue requires `lifecycle_status = 'stable'` (`db/queue.rs:315`). A fresh brain (all wiki entries were wiped) has almost only untyped facts, and new facts get no `okf_type` until the later deposit `kind:` lane, so for now most statements land in Tier 4 and are ordered newest-first across repo and company (OR-1); the tier machinery is already in place for typed facts. Rows with an id that fails `valid_fact_id` (`wisdom_match.rs:269`) or with empty title and body are skipped (CTI drops them anyway, `ct_wisdom.py:273`).
 
 On a pre-V30 brain with no `area` column everything is area-less (same degrade as `band_predicate_where`'s `has_area = false`). PR-1's `RecallArms` has no `has_area`; add the field (its only constructor is `wisdom_match.rs:474`).
 
 ### 3.4 Order, budget, drop rule (question 2)
 
-Order: `kind_tier` asc; then for Tiers 1-3 scope (repo 0, org 1); then `created_at` desc; then `id` asc. For Tier 4 (untyped) scope is NOT a key: repo and org interleave newest-first (OR-1). `created_at` is coerced like `coerce_updated_at` (`tool_dispatch.rs:419`): a TEXT or malformed cell must never drop the row (it sorts as 0, oldest) (the id tie-break, PR-1 OQ-C, makes bytes a pure function of the rows). `created_at` rather than `updated_at`: it does not move when a fact is touched. Output order is this order. Provenance and confidence are labels only and never enter the order (INTENT Out of scope: no quiet ranking by origin).
+Order: `kind_tier` asc; then for Tiers 1-3 scope (repo 0, org 1); then `created_at` desc; then `id` asc. For Tier 4 (untyped) scope is NOT a key: repo and org interleave newest-first (OR-1). `created_at` is coerced like `coerce_updated_at` (`tool_dispatch.rs:419`): a TEXT or malformed cell never drops the row; it sorts as 0, oldest. The `id` tie-break (PR-1 OQ-C) makes the bytes a pure function of the rows. `created_at` is used rather than `updated_at` because it does not move when a fact is touched. Output order is this order. Provenance and confidence are labels only and never enter the order (INTENT Out of scope: no quiet ranking by origin).
 
 Budget is defined over a canonical rendering CT documents, because CT cannot see each host's markup:
 
-- Statement cost = `utf16(title) + utf16(text) + utf16(id) + ITEM_OVERHEAD`, where `utf16(s) = s.encode_utf16().count()`, to match TypeScript `.length` on the TS hosts (Python `len` differs only for astral chars; UTF-16 is the conservative of the two). `ITEM_OVERHEAD = 60` is a documented contract with CTI. It is 25 chars of markup plus 35 for CTI's provenance label; CTI does not render `kind`/`verified` labels today. If CTI starts rendering them, the constant must grow (80) in a CT release CTI pins. Kept at 60 now: the labels are not rendered, and 2200 leaves about 260 chars of slack. That covers the CTI claude-code/hermes render: `**title** <!-- ct-fact:ID -->\ntext` plus the `\n\n` separator is 25 chars of markup (`ct_wisdom.py:343-352`; marker format `ct_ledger.py:32-33`), and 35 more chars for CTI's provenance label (CTI rule 5).
+- Statement cost = `utf16(title) + utf16(text) + utf16(id) + ITEM_OVERHEAD`, where `utf16(s) = s.encode_utf16().count()`, to match TypeScript `.length` on the TS hosts (Python `len` differs only for astral chars; UTF-16 is the conservative of the two). `ITEM_OVERHEAD = 80` is a documented contract with CTI: "CTI per-item markup plus labels <= 80 UTF-16 units + id". Derivation (CTI `ct_wisdom_live.py:265-272`, `**%s** %s (provenance: %s)`, plus the `ct_wisdom.py:343-352` render and `ct_ledger.py:32-33` marker): markup 25 + ` (provenance: X)` with the longest X at 33 + the kind label in its worst form ` (kind: decision)` at 17 = 75, leaving 5 spare. If CTI also renders `verified`, raise the constant to 90 in a CT release CTI pins. The 2200 default still leaves slack for sanitizing growth and label variance.
 - Index cost = `utf16(index.text) + 2`, and exactly 0 when `index.text` is empty (no separator is rendered).
 - Default 2200: Hermes allows 2500 chars at session start (`ct_wisdom.py:62`, CTI rule 6); CTI's heading is 37 chars plus 2 (`:316`), so a full brief renders to about 2240, leaving about 260 for sanitizing growth and label variance. CTI keeps its own hard cap as a backstop; its truncate-the-first-overflow branch (`:353-362`) should never fire on a brief.
 - Index reserve (no circularity, Fable M1): the index text contains `<k> shown`, which depends on the fit. Algorithm: (1) build the index once with `k := n` (all statements shown) under cap `min(400, max_chars / 4)`; this fixes the shed level and the reserve; (2) fit statements into `max_chars - index_cost`; (3) re-render the index at that SAME shed level with the real `k` and never re-shed. A real `k` is never wider than `n`, so the final text is never longer than the reserve (a test crosses a digit boundary: n=10, k=9). Statements can never push the index out.
@@ -79,7 +80,7 @@ Built from the same eligible rows; no graph traversal (INTENT Out of scope; merg
 
 Not included: "top entities by fact count". Facts attach to the hub (merge group), so that list would be one or two names; listing related entities needs edges, which is out of scope.
 
-`index.text` is the pre-rendered line CTI appends verbatim: `Covered: repo <name> (<n> statements, <k> shown); org <name> (<n>, <k> shown). Areas not listed, surfaced when you work on their files: <a> (<c>), ... +<m> more. More on demand: ct wisdom match --path=<file>, or wiki_context.` Over the cap it sheds areas from the tail, then hub names, then the area clause, then the hint, then the whole index (empty text, cost 0). At `max_chars >= 600` the cap is at least 150 and the shortest form (repo line without hint, about 102 chars) always fits, pinned by a test. Empty (`""`) when there are no statements and no areas.
+`index.text` is the pre-rendered line CTI appends verbatim: `Covered: repo <name> (<n> statements, <k> shown); org <name> (<n>, <k> shown). Areas not listed, surfaced when you work on their files: <a> (<c>), ... +<m> more. More on demand: ct wisdom match --path=<file>, or wiki_context.` Over the cap it sheds areas from the tail, then hub names, then the area clause, then the hint, then the whole index (empty text, cost 0). At `max_chars >= 600` the cap is at least 150 and the shortest form (the repo line with its hint, about 102 chars; worst case about 137) always fits, pinned by a test. Empty (`""`) when there are no statements and no areas.
 
 ### 3.6 Output, exit codes, diagnostics, performance (question 5)
 
@@ -126,7 +127,7 @@ Writing:
 - Rule 8: scoped to the matched repo hub and the org hub; no unscoped fallback.
 - Rule 10: unconfirmed facts are included and labeled (`source_type`, `verified`).
 - Rule 7: no hubs, or nothing eligible, yields an empty brief rather than filler.
-- Out of scope: no graph traversal; no ranking by origin (order is kind, scope, recency; drops are disclosed in `omitted`).
+- Out of scope: no graph traversal; no ranking by origin (order is kind, then scope for Tiers 1-3, then recency; drops are disclosed in `omitted`).
 
 ## 5. Out of scope
 
@@ -167,7 +168,7 @@ Review rungs: per the 2026-11-27 owner ruling (INTENT step 3), Fable design + co
 
 ## 9. Resolved review questions
 
-- Overhead and the 2200 default fit all four CTI hosts once cost is counted in UTF-16 units. `ITEM_OVERHEAD = 60` is a documented contract (3.4).
+- Overhead and the 2200 default fit all four CTI hosts once cost is counted in UTF-16 units. `ITEM_OVERHEAD = 80` is a documented contract (3.4).
 - No draft filter (3.3). "Newest" is `created_at` (3.4).
 - No host label in delivery rows now; later, a validated slug in `summary`, not the client column.
 - `source_ref` and `entity_id` stay in `statements[]` (reuse of `recall_item`).
@@ -185,7 +186,7 @@ Review rungs: per the 2026-11-27 owner ruling (INTENT step 3), Fable design + co
 ## 11. Files touched
 
 - `src-tauri/src/wisdom_brief.rs` (new), `src-tauri/src/lib.rs` (`pub mod wisdom_brief`), `src-tauri/src/wisdom_match.rs` (`RecallArms.has_area`), `src-tauri/src/config/hub_resolver.rs` (`org_group_for`, shared repo-step helper, `resolve_brief_scope`), `src-tauri/src/db/events.rs` (timeline excludes delivery tools).
-- `tools/src/delivery_log.rs` (new), `tools/src/lib.rs`, `tools/src/queries.rs` (`wisdom_brief_cmd`, log call in the `print_wisdom_match` path), `tools/src/bin/ct.rs` (subcommand, help text).
+- `tools/src/delivery_log.rs` (new), `tools/src/lib.rs`, `tools/src/queries.rs` (`wisdom_brief_cmd`, log calls at the `wisdom_match_cmd` exits), `tools/src/bin/ct.rs` (subcommand, help text).
 - Tests: `src-tauri/tests/hub_resolver.rs` (`brief_scope_*`), `tools/tests/ct_wisdom_brief.rs` (new), `tools/tests/ct_wisdom_match.rs` (log + byte pin), `tools/tests/common/mod.rs` (`with_scoped_brain` and seed helpers moved from `ct_wisdom_match.rs`), a timeline test in `src-tauri`, unit tests in the new modules.
 - `INTENT.md`: one appended owner-ruling line in "How changes are made" step 4 (OD-2).
 - `specs/2026-11-28-wisdom-brief/`. NOT touched: the live brain.
